@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,10 +14,7 @@ import (
 )
 
 const (
-	// Пока ограничиваем helper только рабочими репозиториями пользователя.
 	allowedRoot = "/home/michael/work/git"
-
-	socketPath = "/run/user/1000/docker-helper.sock"
 )
 
 var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`)
@@ -30,58 +25,7 @@ type buildRequest struct {
 	Image      string `json:"image"`
 }
 
-type runRequest struct {
-	Image   string   `json:"image"`
-        Entrypoint string   `json:"entrypoint,omitempty"`
-	Command []string `json:"command,omitempty"`
-}
-
-type response struct {
-	OK       bool   `json:"ok"`
-	Message  string `json:"message,omitempty"`
-	Output   string `json:"output,omitempty"`
-	Duration string `json:"duration,omitempty"`
-}
-
-func main() {
-	if err := os.RemoveAll(socketPath); err != nil {
-		log.Fatal(err)
-	}
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := os.Chmod(socketPath, 0600); err != nil {
-		log.Fatal(err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /build", handleBuild)
-	mux.HandleFunc("GET /health", handleHealth)
-        mux.HandleFunc("POST /run", handleRun)
-
-	server := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	log.Printf("docker-helper listening on %s", socketPath)
-
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
-	}
-}
-
-func handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, response{
-		OK:      true,
-		Message: "docker-helper is running",
-	})
-}
-
-func handleBuild(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	var req buildRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
@@ -201,79 +145,3 @@ func isInside(parent, child string) bool {
 	return relative != ".." &&
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
-
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, response{
-		OK:      false,
-		Message: message,
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value response) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		log.Printf("failed to encode response: %v", err)
-	}
-}
-
-func handleRun(w http.ResponseWriter, r *http.Request) {
-	var req runRequest
-
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
-		return
-	}
-
-	if req.Image == "" {
-		writeError(w, http.StatusBadRequest, "image is required")
-		return
-	}
-
-	if !imagePattern.MatchString(req.Image) {
-		writeError(w, http.StatusBadRequest, "invalid image name or tag")
-		return
-	}
-
-	started := time.Now()
-
-	args := []string{
-		"run",
-		"--rm",
-	}
-
-        if req.Entrypoint != "" {
-		args = append(args, "--entrypoint", req.Entrypoint)
-	}
-
-	args = append(args, req.Image)
-	args = append(args, req.Command...)
-
-	cmd := exec.Command("docker", args...)
-
-	output, err := cmd.CombinedOutput()
-
-	duration := time.Since(started).Round(time.Millisecond).String()
-
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{
-			OK:       false,
-			Message:  fmt.Sprintf("docker run failed: %v", err),
-			Output:   string(output),
-			Duration: duration,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, response{
-		OK:       true,
-		Message:  "container finished successfully",
-		Output:   string(output),
-		Duration: duration,
-	})
-}
-
