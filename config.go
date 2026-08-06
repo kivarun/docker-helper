@@ -20,6 +20,11 @@ type Config struct {
 	AdminTokenPath string
 }
 
+type fileConfig struct {
+	AllowedRoot string `json:"allowed_root"`
+	SessionTTL  string `json:"session_ttl"`
+}
+
 func getConfigPath() string {
 	if p := os.Getenv("DOCKER_HELPER_CONFIG"); p != "" {
 		return p
@@ -79,13 +84,15 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("cannot read config: %w", err)
 	}
 
-	var cfg struct {
-		AllowedRoot string        `json:"allowed_root"`
-		SessionTTL  time.Duration `json:"session_ttl"`
+	var fc fileConfig
+
+	if err := json.Unmarshal(data, &fc); err != nil {
+		return nil, fmt.Errorf("cannot parse config: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("cannot parse config: %w", err)
+	ttl, err := time.ParseDuration(fc.SessionTTL)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse session_ttl %q: %w", fc.SessionTTL, err)
 	}
 
 	runtimeDir, err := getRuntimeDir()
@@ -100,8 +107,8 @@ func loadConfig() (*Config, error) {
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
 	return &Config{
-		AllowedRoot:    cfg.AllowedRoot,
-		SessionTTL:     cfg.SessionTTL,
+		AllowedRoot:    fc.AllowedRoot,
+		SessionTTL:     ttl,
 		SocketPath:     filepath.Join(runtimeDir, "docker-helper.sock"),
 		StateDir:       stateDir,
 		DatabasePath:   filepath.Join(stateDir, "docker-helper.db"),
@@ -132,9 +139,9 @@ func runInit() error {
 	configPath := getConfigPath()
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		defaultConfig := map[string]interface{}{
-			"allowed_root": "/home/michael/work/git",
-			"session_ttl":  "12h",
+		defaultConfig := fileConfig{
+			AllowedRoot: "/home/michael/work/git",
+			SessionTTL:  "12h",
 		}
 
 		data, err := json.MarshalIndent(defaultConfig, "", "  ")
