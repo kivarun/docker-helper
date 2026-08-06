@@ -13,10 +13,6 @@ import (
 	"time"
 )
 
-const (
-	allowedRoot = "/home/michael/work/git"
-)
-
 var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`)
 
 type buildRequest struct {
@@ -36,7 +32,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contextPath, dockerfilePath, err := validateBuildRequest(req)
+	contextPath, dockerfilePath, err := validateBuildRequest(a.Config.AllowedRoot, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -75,7 +71,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func validateBuildRequest(req buildRequest) (string, string, error) {
+func validateBuildRequest(allowedRoot string, req buildRequest) (string, string, error) {
 	if req.Context == "" || req.Dockerfile == "" || req.Image == "" {
 		return "", "", errors.New("context, dockerfile and image are required")
 	}

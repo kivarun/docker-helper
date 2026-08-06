@@ -2,30 +2,66 @@ package main
 
 import (
 	"errors"
-	"log"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"time"
 )
 
-const socketPath = "/run/user/1000/docker-helper.sock"
+const version = "0.1.0"
 
-func main() {
-	if err := os.RemoveAll(socketPath); err != nil {
-		log.Fatal(err)
-	}
+func printHelp() {
+	fmt.Println("Usage: docker-helper <command>")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  serve    Start the HTTP server")
+	fmt.Println("  init     Initialize configuration and admin token")
+	fmt.Println("  version  Print version")
+	fmt.Println("  help     Show this help message")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  -h, --help  Show this help message")
+}
 
-	listener, err := net.Listen("unix", socketPath)
+func runServe() error {
+	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatal(err)
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "error: configuration not found")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
+			fmt.Fprintln(os.Stderr, "  docker-helper init")
+			return err
+		}
+		return err
 	}
 
-	if err := os.Chmod(socketPath, 0600); err != nil {
-		log.Fatal(err)
+	if _, err := os.Stat(cfg.AdminTokenPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "error: admin token not found")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
+			fmt.Fprintln(os.Stderr, "  docker-helper init")
+			return err
+		}
+		return err
 	}
 
-	app := &App{}
+	if err := os.RemoveAll(cfg.SocketPath); err != nil {
+		return fmt.Errorf("cannot remove old socket: %w", err)
+	}
+
+	listener, err := net.Listen("unix", cfg.SocketPath)
+	if err != nil {
+		return fmt.Errorf("cannot listen on %s: %w", cfg.SocketPath, err)
+	}
+
+	if err := os.Chmod(cfg.SocketPath, 0600); err != nil {
+		return fmt.Errorf("cannot set socket permissions: %w", err)
+	}
+
+	app := &App{Config: cfg}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /build", app.handleBuild)
@@ -37,9 +73,47 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("docker-helper listening on %s", socketPath)
+	fmt.Printf("docker-helper listening on %s\n", cfg.SocketPath)
 
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
+		return err
+	}
+
+	return nil
+}
+
+func main() {
+	args := os.Args[1:]
+
+	if len(args) == 0 {
+		printHelp()
+		os.Exit(0)
+	}
+
+	switch args[0] {
+	case "serve":
+		if err := runServe(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+	case "init":
+		if err := runInit(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+	case "version":
+		fmt.Println(version)
+
+	case "help", "-h", "--help":
+		printHelp()
+
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown command %q\n", args[0])
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run the following for usage information:")
+		fmt.Fprintln(os.Stderr, "  docker-helper help")
+		os.Exit(1)
 	}
 }

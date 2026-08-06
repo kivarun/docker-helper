@@ -1,3 +1,5 @@
 package main
 
-type App struct{}
+type App struct {
+	Config *Config
+}

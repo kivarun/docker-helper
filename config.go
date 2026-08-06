@@ -1,0 +1,182 @@
+package main
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+type Config struct {
+	AllowedRoot    string
+	SessionTTL     time.Duration
+	SocketPath     string
+	StateDir       string
+	DatabasePath   string
+	AdminTokenPath string
+}
+
+func getConfigPath() string {
+	if p := os.Getenv("DOCKER_HELPER_CONFIG"); p != "" {
+		return p
+	}
+
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		xdgConfig = filepath.Join(home, ".config")
+	}
+
+	return filepath.Join(xdgConfig, "docker-helper", "config.json")
+}
+
+func getConfigDir() string {
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		xdgConfig = filepath.Join(home, ".config")
+	}
+
+	return filepath.Join(xdgConfig, "docker-helper")
+}
+
+func getRuntimeDir() (string, error) {
+	dir := os.Getenv("XDG_RUNTIME_DIR")
+	if dir == "" {
+		return "", errors.New("XDG_RUNTIME_DIR is not set, cannot determine runtime directory")
+	}
+	return dir, nil
+}
+
+func getStateDir() string {
+	xdgState := os.Getenv("XDG_STATE_HOME")
+	if xdgState == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		xdgState = filepath.Join(home, ".local", "state")
+	}
+
+	return filepath.Join(xdgState, "docker-helper")
+}
+
+func loadConfig() (*Config, error) {
+	configPath := getConfigPath()
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read config: %w", err)
+	}
+
+	var cfg struct {
+		AllowedRoot string        `json:"allowed_root"`
+		SessionTTL  time.Duration `json:"session_ttl"`
+	}
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+
+	runtimeDir, err := getRuntimeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	stateDir := getStateDir()
+
+	configDir := getConfigDir()
+
+	adminTokenPath := filepath.Join(configDir, "admin.token")
+
+	return &Config{
+		AllowedRoot:    cfg.AllowedRoot,
+		SessionTTL:     cfg.SessionTTL,
+		SocketPath:     filepath.Join(runtimeDir, "docker-helper.sock"),
+		StateDir:       stateDir,
+		DatabasePath:   filepath.Join(stateDir, "docker-helper.db"),
+		AdminTokenPath: adminTokenPath,
+	}, nil
+}
+
+func generateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("cannot generate random bytes: %w", err)
+	}
+	return "dht_" + hex.EncodeToString(b), nil
+}
+
+func runInit() error {
+	configDir := getConfigDir()
+	stateDir := getStateDir()
+
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return fmt.Errorf("cannot create config directory: %w", err)
+	}
+
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		return fmt.Errorf("cannot create state directory: %w", err)
+	}
+
+	configPath := getConfigPath()
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		defaultConfig := map[string]interface{}{
+			"allowed_root": "/home/michael/work/git",
+			"session_ttl":  "12h",
+		}
+
+		data, err := json.MarshalIndent(defaultConfig, "", "  ")
+		if err != nil {
+			return fmt.Errorf("cannot marshal config: %w", err)
+		}
+		data = append(data, '\n')
+
+		if err := os.WriteFile(configPath, data, 0600); err != nil {
+			return fmt.Errorf("cannot write config: %w", err)
+		}
+	}
+
+	adminTokenPath := filepath.Join(configDir, "admin.token")
+
+	if _, err := os.Stat(adminTokenPath); err == nil {
+		fmt.Fprintln(os.Stderr, "admin.token already exists at:")
+		fmt.Fprintln(os.Stderr, adminTokenPath)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Will not overwrite. Use a future token rotation command to replace it.")
+		return errors.New("admin.token already exists")
+	}
+
+	token, err := generateToken()
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(adminTokenPath, []byte(token+"\n"), 0600); err != nil {
+		return fmt.Errorf("cannot write admin token: %w", err)
+	}
+
+	fmt.Println("Docker Helper initialized successfully.")
+	fmt.Println()
+	fmt.Println("Admin token:")
+	fmt.Println(token)
+	fmt.Println()
+	fmt.Println("Stored at:")
+	fmt.Println(adminTokenPath)
+	fmt.Println()
+	fmt.Println("Configuration:")
+	fmt.Println(configPath)
+
+	return nil
+}
