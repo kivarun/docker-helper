@@ -21,7 +21,17 @@ type buildRequest struct {
 	Image      string `json:"image"`
 }
 
+func defaultBuildCommand(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	return cmd.CombinedOutput()
+}
+
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
+	session, ok := a.requireSession(w, r)
+	if !ok {
+		return
+	}
+
 	var req buildRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
@@ -32,25 +42,30 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contextPath, dockerfilePath, err := validateBuildRequest(a.Config.AllowedRoot, req)
+	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeErrorWithCode(w, http.StatusBadRequest, "invalid_build_context", err.Error())
 		return
 	}
 
 	started := time.Now()
 
-	cmd := exec.Command(
-		"docker", "build",
+	args := []string{
+		"build",
 		"--pull",
 		"--provenance=false",
 		"--sbom=false",
 		"--file", dockerfilePath,
 		"--tag", req.Image,
 		contextPath,
-	)
+	}
 
-	output, err := cmd.CombinedOutput()
+	buildCmd := a.BuildCommand
+	if buildCmd == nil {
+		buildCmd = defaultBuildCommand
+	}
+
+	output, err := buildCmd("docker", args...)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -71,7 +86,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func validateBuildRequest(allowedRoot string, req buildRequest) (string, string, error) {
+func validateBuildRequest(workspace string, req buildRequest) (string, string, error) {
 	if req.Context == "" || req.Dockerfile == "" || req.Image == "" {
 		return "", "", errors.New("context, dockerfile and image are required")
 	}
@@ -84,23 +99,28 @@ func validateBuildRequest(allowedRoot string, req buildRequest) (string, string,
 		return "", "", errors.New("invalid image name or tag")
 	}
 
-	rootPath, err := filepath.EvalSymlinks(allowedRoot)
-	if err != nil {
-		return "", "", fmt.Errorf("cannot resolve allowed root: %w", err)
+	var contextPath string
+
+	if filepath.IsAbs(req.Context) {
+		var err error
+		contextPath, err = filepath.Abs(req.Context)
+		if err != nil {
+			return "", "", fmt.Errorf("cannot resolve context: %w", err)
+		}
+	} else {
+		contextPath = filepath.Join(workspace, req.Context)
 	}
 
-	contextPath, err := filepath.Abs(req.Context)
+	contextPath, err := filepath.EvalSymlinks(contextPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", fmt.Errorf("context does not exist: %s", req.Context)
+		}
 		return "", "", fmt.Errorf("cannot resolve context: %w", err)
 	}
 
-	contextPath, err = filepath.EvalSymlinks(contextPath)
-	if err != nil {
-		return "", "", fmt.Errorf("cannot resolve context: %w", err)
-	}
-
-	if !isInside(rootPath, contextPath) {
-		return "", "", fmt.Errorf("context must be inside %s", rootPath)
+	if !isInside(workspace, contextPath) {
+		return "", "", fmt.Errorf("context must be inside workspace: %s", req.Context)
 	}
 
 	info, err := os.Stat(contextPath)

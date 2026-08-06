@@ -10,4 +10,5 @@ type App struct {
 	DB             *sql.DB
 	AdminTokenHash [sha256.Size]byte
 	RunCommand     func(string, ...string) ([]byte, error)
+	BuildCommand   func(string, ...string) ([]byte, error)
 }
