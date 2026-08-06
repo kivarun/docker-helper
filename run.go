@@ -14,7 +14,16 @@ type runRequest struct {
 	Command    []string `json:"command,omitempty"`
 }
 
+func defaultRunCommand(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	return cmd.CombinedOutput()
+}
+
 func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireSession(w, r); !ok {
+		return
+	}
+
 	var req runRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
@@ -49,9 +58,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	args = append(args, req.Image)
 	args = append(args, req.Command...)
 
-	cmd := exec.Command("docker", args...)
+	runCmd := a.RunCommand
+	if runCmd == nil {
+		runCmd = defaultRunCommand
+	}
 
-	output, err := cmd.CombinedOutput()
+	output, err := runCmd("docker", args...)
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 

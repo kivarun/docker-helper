@@ -79,6 +79,43 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, bool) {
+	auth := r.Header.Get("Authorization")
+	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(w, http.StatusUnauthorized, response{
+			OK:      false,
+			Code:    "unauthorized",
+			Message: "Valid session authentication required.",
+		})
+		return nil, false
+	}
+
+	token := strings.TrimPrefix(auth, "Bearer ")
+	if token == "" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(w, http.StatusUnauthorized, response{
+			OK:      false,
+			Code:    "unauthorized",
+			Message: "Valid session authentication required.",
+		})
+		return nil, false
+	}
+
+	session, err := a.findSessionByToken(token)
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(w, http.StatusUnauthorized, response{
+			OK:      false,
+			Code:    "unauthorized",
+			Message: "Valid session authentication required.",
+		})
+		return nil, false
+	}
+
+	return session, true
+}
+
 func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, response{
 		OK:      true,
