@@ -127,10 +127,6 @@ func (a *App) listSessions() ([]Session, error) {
 			return nil, fmt.Errorf("cannot scan session: %w", err)
 		}
 
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("row error: %w", err)
-		}
-
 		s.CreatedAt = time.Unix(createdAt, 0)
 		s.ExpiresAt = time.Unix(expiresAt, 0)
 
@@ -143,7 +139,7 @@ func (a *App) listSessions() ([]Session, error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows iteration error: %w", err)
+		return nil, fmt.Errorf("iterate sessions: %w", err)
 	}
 
 	return sessions, nil
