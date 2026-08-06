@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -283,7 +285,7 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
 	}
 
-	expectedOrder := []string{"run", "--rm", "--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
+	expectedOrder := []string{"run", "--rm", "--security-opt", "label=disable", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
 	if len(capturedArgs) != len(expectedOrder) {
 		t.Fatalf("expected %d args, got %d: %v", len(expectedOrder), len(capturedArgs), capturedArgs)
 	}

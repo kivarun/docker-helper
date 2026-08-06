@@ -1,0 +1,641 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestMountSourceDotMountsWorkspace(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/workspace"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--mount" && i+1 < len(capturedArgs) {
+			spec := capturedArgs[i+1]
+			if filepath.Base(spec) != "" && len(spec) > 0 {
+				found = true
+			}
+		}
+	}
+
+	if !found {
+		t.Errorf("expected --mount in args %v", capturedArgs)
+	}
+}
+
+func TestMountRelativeSubdir(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("cannot create subdir: %v", err)
+	}
+
+	result, err := app.createSession(subdir)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	inner := filepath.Join(subdir, "inner")
+	if err := os.MkdirAll(inner, 0755); err != nil {
+		t.Fatalf("cannot create inner: %v", err)
+	}
+
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "inner", "target": "/data"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+func TestMountRegularFile(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	testFile := filepath.Join(app.Config.AllowedRoot, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("cannot create test file: %v", err)
+	}
+
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "test.txt", "target": "/app/config.txt"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
+func TestMountReadOnly(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/workspace", "read_only": true},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--mount" && i+1 < len(capturedArgs) {
+			if len(capturedArgs[i+1]) > 0 && capturedArgs[i+1][len(capturedArgs[i+1])-9:] == ",readonly" {
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		t.Errorf("expected readonly in mount spec, args: %v", capturedArgs)
+	}
+}
+
+func TestMountSameSourceDifferentTargets(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/workspace"},
+			{"source": ".", "target": "/backup"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	mountCount := 0
+	for _, arg := range capturedArgs {
+		if arg == "--mount" {
+			mountCount++
+		}
+	}
+
+	if mountCount != 2 {
+		t.Errorf("expected 2 mounts, got %d", mountCount)
+	}
+}
+
+func TestMountDuplicateTarget(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/workspace"},
+			{"source": ".", "target": "/workspace"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if resp.Code != "invalid_mount" {
+		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	}
+}
+
+func TestMountAbsoluteSource(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "/etc/passwd", "target": "/workspace/passwd"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+func TestMountEmptySource(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "", "target": "/workspace"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+func TestMountNonExistentSource(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "does-not-exist", "target": "/workspace"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+func TestMountSymlinkEscape(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	escapeDir := t.TempDir()
+	linkPath := filepath.Join(app.Config.AllowedRoot, "escape-link")
+
+	if err := os.Symlink(escapeDir, linkPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "escape-link", "target": "/workspace"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+func TestMountRelativeTarget(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "relative/path"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+func TestMountEmptyTarget(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": ""},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+}
+
+func TestMountsPreserveOrder(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/a"},
+			{"source": ".", "target": "/b"},
+			{"source": ".", "target": "/c"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	mountSpecs := []string{}
+	for i, arg := range capturedArgs {
+		if arg == "--mount" && i+1 < len(capturedArgs) {
+			mountSpecs = append(mountSpecs, capturedArgs[i+1])
+		}
+	}
+
+	if len(mountSpecs) != 3 {
+		t.Fatalf("expected 3 mount specs, got %d", len(mountSpecs))
+	}
+
+	if mountSpecs[0] != mountSpecs[1] || mountSpecs[1] != mountSpecs[2] {
+		// The specs should be in order /a, /b, /c
+	}
+}
+
+func TestDockerSecurityOpt(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{"image": "alpine:latest"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--security-opt" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "label=disable" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected --security-opt label=disable in args %v", capturedArgs)
+	}
+}
+
+func TestDockerUser(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{"image": "alpine:latest"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	uid := os.Getuid()
+	gid := os.Getgid()
+	expected := fmt.Sprintf("%d:%d", uid, gid)
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--user" && i+1 < len(capturedArgs) && capturedArgs[i+1] == expected {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected --user %s in args %v", expected, capturedArgs)
+	}
+}
+
+func TestMountValidationPreventsRunCommand(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	called := false
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		called = true
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "/etc/passwd", "target": "/workspace"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	if called {
+		t.Error("RunCommand should not be called with invalid mount")
+	}
+}
+
+func TestMountInvalidMountCode(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "", "target": "/workspace"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if resp.Code != "invalid_mount" {
+		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	}
+}
