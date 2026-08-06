@@ -99,10 +99,15 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 		return "", "", errors.New("invalid image name or tag")
 	}
 
+	var err error
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return "", "", fmt.Errorf("cannot resolve workspace: %w", err)
+	}
+
 	var contextPath string
 
 	if filepath.IsAbs(req.Context) {
-		var err error
 		contextPath, err = filepath.Abs(req.Context)
 		if err != nil {
 			return "", "", fmt.Errorf("cannot resolve context: %w", err)
@@ -111,7 +116,7 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 		contextPath = filepath.Join(workspace, req.Context)
 	}
 
-	contextPath, err := filepath.EvalSymlinks(contextPath)
+	contextPath, err = filepath.EvalSymlinks(contextPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", "", fmt.Errorf("context does not exist: %s", req.Context)

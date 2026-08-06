@@ -373,6 +373,51 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 	}
 }
 
+func TestBuildWorkspaceIsSymlink(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	realDir := filepath.Join(app.Config.AllowedRoot, "real-dir")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("cannot create real dir: %v", err)
+	}
+
+	linkDir := filepath.Join(app.Config.AllowedRoot, "link-dir")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(realDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	result, err := app.createSession(linkDir)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]string{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+}
+
 func TestBuildDockerfileInsideContext(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
