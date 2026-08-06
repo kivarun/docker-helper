@@ -1,0 +1,311 @@
+diff --git a/main.go b/main.go
+index a3e9bd2..037e91c 100644
+--- a/main.go
++++ b/main.go
+@@ -80,6 +80,9 @@ func runServe() error {
+ 	mux.HandleFunc("POST /build", app.handleBuild)
+ 	mux.HandleFunc("GET /health", app.handleHealth)
+ 	mux.HandleFunc("POST /run", app.handleRun)
++	mux.HandleFunc("POST /sessions", app.handleCreateSession)
++	mux.HandleFunc("GET /sessions", app.handleListSessions)
++	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+ 
+ 	server := &http.Server{
+ 		Handler:           mux,
+diff --git a/response.go b/response.go
+index 9cb793a..58c66a3 100644
+--- a/response.go
++++ b/response.go
+@@ -22,6 +22,15 @@ func writeJSON(w http.ResponseWriter, status int, value response) {
+ 	}
+ }
+ 
++func writeJSONRaw(w http.ResponseWriter, status int, value interface{}) {
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(status)
++
++	if err := json.NewEncoder(w).Encode(value); err != nil {
++		log.Printf("failed to encode response: %v", err)
++	}
++}
++
+ func writeError(w http.ResponseWriter, status int, message string) {
+ 	writeJSON(w, status, response{
+ 		OK:      false,
+diff --git a/sessions.go b/sessions.go
+new file mode 100644
+index 0000000..22d6b31
+--- /dev/null
++++ b/sessions.go
+@@ -0,0 +1,103 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"strings"
++	"time"
++)
++
++type sessionRequest struct {
++	Workspace string `json:"workspace"`
++}
++
++type sessionJSON struct {
++	ID        string `json:"id"`
++	Workspace string `json:"workspace"`
++	CreatedAt string `json:"created_at"`
++	ExpiresAt string `json:"expires_at"`
++}
++
++type createSessionResponse struct {
++	OK      bool        `json:"ok"`
++	Session sessionJSON `json:"session"`
++	Token   string      `json:"token"`
++}
++
++type listSessionsResponse struct {
++	OK       bool          `json:"ok"`
++	Sessions []sessionJSON `json:"sessions"`
++}
++
++func sessionToJSON(s Session) sessionJSON {
++	return sessionJSON{
++		ID:        s.ID,
++		Workspace: s.Workspace,
++		CreatedAt: s.CreatedAt.Format(time.RFC3339),
++		ExpiresAt: s.ExpiresAt.Format(time.RFC3339),
++	}
++}
++
++func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
++	var req sessionRequest
++
++	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
++	decoder.DisallowUnknownFields()
++
++	if err := decoder.Decode(&req); err != nil {
++		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
++		return
++	}
++
++	result, err := a.createSession(req.Workspace)
++	if err != nil {
++		writeError(w, http.StatusBadRequest, err.Error())
++		return
++	}
++
++	writeJSONRaw(w, http.StatusCreated, createSessionResponse{
++		OK:      true,
++		Session: sessionToJSON(result.Session),
++		Token:   result.Token,
++	})
++}
++
++func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
++	sessions, err := a.listSessions()
++	if err != nil {
++		writeError(w, http.StatusInternalServerError, err.Error())
++		return
++	}
++
++	resp := listSessionsResponse{
++		OK:       true,
++		Sessions: make([]sessionJSON, 0, len(sessions)),
++	}
++
++	for _, s := range sessions {
++		resp.Sessions = append(resp.Sessions, sessionToJSON(s))
++	}
++
++	writeJSONRaw(w, http.StatusOK, resp)
++}
++
++func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
++	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
++	if id == "" {
++		writeError(w, http.StatusBadRequest, "session id is required")
++		return
++	}
++
++	deleted, err := a.deleteSession(id)
++	if err != nil {
++		writeError(w, http.StatusInternalServerError, err.Error())
++		return
++	}
++
++	if !deleted {
++		writeError(w, http.StatusNotFound, "session not found")
++		return
++	}
++
++	w.WriteHeader(http.StatusNoContent)
++}
+diff --git a/sessions_test.go b/sessions_test.go
+new file mode 100644
+index 0000000..222b6f1
+--- /dev/null
++++ b/sessions_test.go
+@@ -0,0 +1,162 @@
++package main
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++)
++
++func newTestAppWithDB(t *testing.T) *App {
++	t.Helper()
++	app := newTestApp(t)
++	return app
++}
++
++func TestHTTPCreateSession(t *testing.T) {
++	app := newTestAppWithDB(t)
++
++	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusCreated {
++		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
++	}
++
++	var resp createSessionResponse
++	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
++		t.Fatalf("cannot decode response: %v", err)
++	}
++
++	if !resp.OK {
++		t.Error("expected ok to be true")
++	}
++	if resp.Session.ID == "" {
++		t.Error("session ID should not be empty")
++	}
++	if resp.Token == "" {
++		t.Error("token should not be empty")
++	}
++}
++
++func TestHTTPCreateSessionInvalidJSON(t *testing.T) {
++	app := newTestAppWithDB(t)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("invalid")))
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusBadRequest {
++		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
++	}
++}
++
++func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
++	app := newTestAppWithDB(t)
++
++	reqBody := map[string]string{}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusBadRequest {
++		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
++	}
++}
++
++func TestHTTPListSessions(t *testing.T) {
++	app := newTestAppWithDB(t)
++
++	_, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
++	w := httptest.NewRecorder()
++
++	app.handleListSessions(w, req)
++
++	if w.Code != http.StatusOK {
++		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
++	}
++
++	var resp listSessionsResponse
++	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
++		t.Fatalf("cannot decode response: %v", err)
++	}
++
++	if !resp.OK {
++		t.Error("expected ok to be true")
++	}
++	if len(resp.Sessions) != 1 {
++		t.Errorf("expected 1 session, got %d", len(resp.Sessions))
++	}
++}
++
++func TestHTTPDeleteSession(t *testing.T) {
++	app := newTestAppWithDB(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
++	w := httptest.NewRecorder()
++
++	app.handleDeleteSession(w, req)
++
++	if w.Code != http.StatusNoContent {
++		t.Errorf("expected status %d, got %d", http.StatusNoContent, w.Code)
++	}
++}
++
++func TestHTTPDeleteSessionNotFound(t *testing.T) {
++	app := newTestAppWithDB(t)
++
++	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
++	w := httptest.NewRecorder()
++
++	app.handleDeleteSession(w, req)
++
++	if w.Code != http.StatusNotFound {
++		t.Errorf("expected status %d, got %d", http.StatusNotFound, w.Code)
++	}
++}
++
++func TestHTTPCreateSessionRFC3339(t *testing.T) {
++	app := newTestAppWithDB(t)
++
++	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	var resp createSessionResponse
++	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
++		t.Fatalf("cannot decode response: %v", err)
++	}
++
++	if _, err := time.Parse(time.RFC3339, resp.Session.CreatedAt); err != nil {
++		t.Errorf("created_at is not RFC3339: %v", err)
++	}
++
++	if _, err := time.Parse(time.RFC3339, resp.Session.ExpiresAt); err != nil {
++		t.Errorf("expires_at is not RFC3339: %v", err)
++	}
++}

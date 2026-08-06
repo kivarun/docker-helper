@@ -80,6 +80,9 @@ func runServe() error {
 	mux.HandleFunc("POST /build", app.handleBuild)
 	mux.HandleFunc("GET /health", app.handleHealth)
 	mux.HandleFunc("POST /run", app.handleRun)
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("GET /sessions", app.handleListSessions)
+	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
 
 	server := &http.Server{
 		Handler:           mux,
