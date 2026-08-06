@@ -1,0 +1,405 @@
+diff --git a/environment_test.go b/environment_test.go
+new file mode 100644
+index 0000000..8bed436
+--- /dev/null
++++ b/environment_test.go
+@@ -0,0 +1,317 @@
++package main
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func TestRunEnvironmentSingleVar(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	var capturedArgs []string
++	app.RunCommand = func(name string, args ...string) ([]byte, error) {
++		capturedArgs = args
++		return []byte("ok"), nil
++	}
++
++	reqBody := map[string]any{
++		"image": "alpine:latest",
++		"environment": map[string]string{
++			"KEY": "value",
++		},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusOK {
++		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
++	}
++
++	found := false
++	for i, arg := range capturedArgs {
++		if arg == "--env" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "KEY=value" {
++			found = true
++			break
++		}
++	}
++
++	if !found {
++		t.Errorf("expected --env KEY=value in args %v", capturedArgs)
++	}
++}
++
++func TestRunEnvironmentMultipleVars(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	var capturedArgs []string
++	app.RunCommand = func(name string, args ...string) ([]byte, error) {
++		capturedArgs = args
++		return []byte("ok"), nil
++	}
++
++	reqBody := map[string]any{
++		"image": "alpine:latest",
++		"environment": map[string]string{
++			"A": "1",
++			"B": "2",
++		},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusOK {
++		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
++	}
++
++	envCount := 0
++	for _, arg := range capturedArgs {
++		if arg == "--env" {
++			envCount++
++		}
++	}
++
++	if envCount != 2 {
++		t.Errorf("expected 2 --env flags, got %d", envCount)
++	}
++}
++
++func TestRunEnvironmentEmptyValue(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	var capturedArgs []string
++	app.RunCommand = func(name string, args ...string) ([]byte, error) {
++		capturedArgs = args
++		return []byte("ok"), nil
++	}
++
++	reqBody := map[string]any{
++		"image": "alpine:latest",
++		"environment": map[string]string{
++			"FLAG": "",
++		},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusOK {
++		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
++	}
++
++	found := false
++	for i, arg := range capturedArgs {
++		if arg == "--env" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "FLAG=" {
++			found = true
++			break
++		}
++	}
++
++	if !found {
++		t.Errorf("expected --env FLAG= in args %v", capturedArgs)
++	}
++}
++
++func TestRunEnvironmentInvalidName(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	reqBody := map[string]any{
++		"image": "alpine:latest",
++		"environment": map[string]string{
++			"INVALID-NAME": "value",
++		},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusBadRequest {
++		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
++	}
++}
++
++func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	reqBody := map[string]any{
++		"image": "alpine:latest",
++		"environment": map[string]string{
++			"1NAME": "value",
++		},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusBadRequest {
++		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
++	}
++}
++
++func TestRunEnvironmentNameWithSpace(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	reqBody := map[string]any{
++		"image": "alpine:latest",
++		"environment": map[string]string{
++			"NAME WITH SPACE": "value",
++		},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusBadRequest {
++		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
++	}
++}
++
++func TestRunEnvironmentNameWithDash(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	reqBody := map[string]any{
++		"image": "alpine:latest",
++		"environment": map[string]string{
++			"NAME-DASH": "value",
++		},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusBadRequest {
++		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
++	}
++}
++
++func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	var capturedArgs []string
++	app.RunCommand = func(name string, args ...string) ([]byte, error) {
++		capturedArgs = args
++		return []byte("ok"), nil
++	}
++
++	reqBody := map[string]any{
++		"image":       "alpine:latest",
++		"entrypoint":  "/bin/sh",
++		"command":     []string{"-c", "echo hello"},
++		"environment": map[string]string{"KEY": "value"},
++	}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer "+result.Token)
++	w := httptest.NewRecorder()
++
++	app.handleRun(w, req)
++
++	if w.Code != http.StatusOK {
++		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
++	}
++
++	expectedOrder := []string{"run", "--rm", "--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
++	if len(capturedArgs) != len(expectedOrder) {
++		t.Fatalf("expected %d args, got %d: %v", len(expectedOrder), len(capturedArgs), capturedArgs)
++	}
++
++	for i, expected := range expectedOrder {
++		if capturedArgs[i] != expected {
++			t.Errorf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])
++		}
++	}
++}
++
++func TestMaskEnvValueEmpty(t *testing.T) {
++	result := maskEnvValue("FLAG", "")
++	if result != `FLAG="" (length=0)` {
++		t.Errorf("expected FLAG=\"\" (length=0), got %q", result)
++	}
++}
++
++func TestMaskEnvValueSingleChar(t *testing.T) {
++	result := maskEnvValue("KEY", "a")
++	if result != "KEY=a*** (length=1)" {
++		t.Errorf("expected KEY=a*** (length=1), got %q", result)
++	}
++}
++
++func TestMaskEnvValueLong(t *testing.T) {
++	result := maskEnvValue("LLM_KEY", "secret123")
++	if result != "LLM_KEY=s*** (length=9)" {
++		t.Errorf("expected LLM_KEY=s*** (length=9), got %q", result)
++	}
++}
+diff --git a/run.go b/run.go
+index cb4239f..50537d6 100644
+--- a/run.go
++++ b/run.go
+@@ -3,15 +3,21 @@ package main
+ import (
+ 	"encoding/json"
+ 	"fmt"
++	"log"
+ 	"net/http"
+ 	"os/exec"
++	"regexp"
++	"sort"
+ 	"time"
+ )
+ 
++var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
++
+ type runRequest struct {
+-	Image      string   `json:"image"`
+-	Entrypoint string   `json:"entrypoint,omitempty"`
+-	Command    []string `json:"command,omitempty"`
++	Image       string            `json:"image"`
++	Entrypoint  string            `json:"entrypoint,omitempty"`
++	Command     []string          `json:"command,omitempty"`
++	Environment map[string]string `json:"environment,omitempty"`
+ }
+ 
+ func defaultRunCommand(name string, args ...string) ([]byte, error) {
+@@ -19,6 +25,15 @@ func defaultRunCommand(name string, args ...string) ([]byte, error) {
+ 	return cmd.CombinedOutput()
+ }
+ 
++func maskEnvValue(name, value string) string {
++	runes := []rune(value)
++	if len(runes) == 0 {
++		return fmt.Sprintf("%s=\"\" (length=0)", name)
++	}
++	masked := string(runes[0]) + "***"
++	return fmt.Sprintf("%s=%s (length=%d)", name, masked, len(runes))
++}
++
+ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
+ 	if _, ok := a.requireSession(w, r); !ok {
+ 		return
+@@ -44,6 +59,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
++	for name := range req.Environment {
++		if !envNamePattern.MatchString(name) {
++			writeError(w, http.StatusBadRequest, "invalid environment variable name: "+name)
++			return
++		}
++	}
++
++	for name, value := range req.Environment {
++		log.Printf("env: %s", maskEnvValue(name, value))
++	}
++
+ 	started := time.Now()
+ 
+ 	args := []string{
+@@ -55,6 +81,18 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
+ 		args = append(args, "--entrypoint", req.Entrypoint)
+ 	}
+ 
++	if len(req.Environment) > 0 {
++		names := make([]string, 0, len(req.Environment))
++		for name := range req.Environment {
++			names = append(names, name)
++		}
++		sort.Strings(names)
++
++		for _, name := range names {
++			args = append(args, "--env", name+"="+req.Environment[name])
++		}
++	}
++
+ 	args = append(args, req.Image)
+ 	args = append(args, req.Command...)
+ 

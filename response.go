@@ -42,37 +42,52 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	})
 }
 
-func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+func parseBearerToken(r *http.Request) (string, bool) {
 	auth := r.Header.Get("Authorization")
-	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeJSON(w, http.StatusUnauthorized, response{
-			OK:      false,
-			Code:    "unauthorized",
-			Message: "Administrative authentication required.",
-		})
-		return false
+	if auth == "" {
+		return "", false
 	}
 
-	token := strings.TrimPrefix(auth, "Bearer ")
-	if token == "" {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeJSON(w, http.StatusUnauthorized, response{
-			OK:      false,
-			Code:    "unauthorized",
-			Message: "Administrative authentication required.",
-		})
+	if len(auth) < 8 || auth[:7] != "Bearer " {
+		return "", false
+	}
+
+	token := auth[7:]
+	if token == "" || strings.ContainsRune(token, ' ') || strings.ContainsRune(token, '\t') {
+		return "", false
+	}
+
+	return token, true
+}
+
+func writeUnauthorizedAdmin(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeJSON(w, http.StatusUnauthorized, response{
+		OK:      false,
+		Code:    "unauthorized",
+		Message: "Administrative authentication required.",
+	})
+}
+
+func writeUnauthorizedSession(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeJSON(w, http.StatusUnauthorized, response{
+		OK:      false,
+		Code:    "unauthorized",
+		Message: "Valid session authentication required.",
+	})
+}
+
+func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	token, ok := parseBearerToken(r)
+	if !ok {
+		writeUnauthorizedAdmin(w)
 		return false
 	}
 
 	tokenHash := sha256.Sum256([]byte(token))
 	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) != 1 {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeJSON(w, http.StatusUnauthorized, response{
-			OK:      false,
-			Code:    "unauthorized",
-			Message: "Administrative authentication required.",
-		})
+		writeUnauthorizedAdmin(w)
 		return false
 	}
 
@@ -80,36 +95,15 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, bool) {
-	auth := r.Header.Get("Authorization")
-	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeJSON(w, http.StatusUnauthorized, response{
-			OK:      false,
-			Code:    "unauthorized",
-			Message: "Valid session authentication required.",
-		})
-		return nil, false
-	}
-
-	token := strings.TrimPrefix(auth, "Bearer ")
-	if token == "" {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeJSON(w, http.StatusUnauthorized, response{
-			OK:      false,
-			Code:    "unauthorized",
-			Message: "Valid session authentication required.",
-		})
+	token, ok := parseBearerToken(r)
+	if !ok {
+		writeUnauthorizedSession(w)
 		return nil, false
 	}
 
 	session, err := a.findSessionByToken(token)
 	if err != nil {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeJSON(w, http.StatusUnauthorized, response{
-			OK:      false,
-			Code:    "unauthorized",
-			Message: "Valid session authentication required.",
-		})
+		writeUnauthorizedSession(w)
 		return nil, false
 	}
 
