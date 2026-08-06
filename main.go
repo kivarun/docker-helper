@@ -48,6 +48,16 @@ func runServe() error {
 		return err
 	}
 
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		return err
+	}
+
 	if err := os.RemoveAll(cfg.SocketPath); err != nil {
 		return fmt.Errorf("cannot remove old socket: %w", err)
 	}
@@ -61,7 +71,10 @@ func runServe() error {
 		return fmt.Errorf("cannot set socket permissions: %w", err)
 	}
 
-	app := &App{Config: cfg}
+	app := &App{
+		Config: cfg,
+		DB:     db,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /build", app.handleBuild)
