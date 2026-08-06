@@ -1,8 +1,12 @@
 package main
 
-import "database/sql"
+import (
+	"crypto/sha256"
+	"database/sql"
+)
 
 type App struct {
-	Config *Config
-	DB     *sql.DB
+	Config         *Config
+	DB             *sql.DB
+	AdminTokenHash [sha256.Size]byte
 }

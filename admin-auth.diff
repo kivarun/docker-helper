@@ -1,0 +1,542 @@
+diff --git a/admin_auth_test.go b/admin_auth_test.go
+new file mode 100644
+index 0000000..1156425
+--- /dev/null
++++ b/admin_auth_test.go
+@@ -0,0 +1,199 @@
++package main
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++const testAdminToken = "dht_test_admin_token"
++
++func newTestAppWithAuth(t *testing.T) *App {
++	t.Helper()
++	app := newTestApp(t)
++	hash := sha256.Sum256([]byte(testAdminToken))
++	app.AdminTokenHash = hash
++	return app
++}
++
++func withAuth(r *http.Request) {
++	r.Header.Set("Authorization", "Bearer "+testAdminToken)
++}
++
++func TestAdminAuthValidTokenCreateSession(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	withAuth(req)
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusCreated {
++		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
++	}
++}
++
++func TestAdminAuthValidTokenListSessions(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
++	withAuth(req)
++	w := httptest.NewRecorder()
++
++	app.handleListSessions(w, req)
++
++	if w.Code != http.StatusOK {
++		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
++	}
++}
++
++func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	result, err := app.createSession(app.Config.AllowedRoot)
++	if err != nil {
++		t.Fatalf("createSession() error: %v", err)
++	}
++
++	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
++	withAuth(req)
++	w := httptest.NewRecorder()
++
++	app.handleDeleteSession(w, req)
++
++	if w.Code != http.StatusNoContent {
++		t.Errorf("expected status %d, got %d", http.StatusNoContent, w.Code)
++	}
++}
++
++func TestAdminAuthMissingAuthorization(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusUnauthorized {
++		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
++	}
++}
++
++func TestAdminAuthWrongScheme(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
++	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusUnauthorized {
++		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
++	}
++}
++
++func TestAdminAuthEmptyBearer(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
++	req.Header.Set("Authorization", "Bearer ")
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusUnauthorized {
++		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
++	}
++}
++
++func TestAdminAuthInvalidToken(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
++	req.Header.Set("Authorization", "Bearer dht_wrong_token")
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusUnauthorized {
++		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
++	}
++}
++
++func TestAdminAuthResponseContainsCode(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	var resp response
++	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
++		t.Fatalf("cannot decode response: %v", err)
++	}
++
++	if resp.Code != "unauthorized" {
++		t.Errorf("expected code 'unauthorized', got %q", resp.Code)
++	}
++}
++
++func TestAdminAuthResponseContainsWWWAuthenticate(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Header().Get("WWW-Authenticate") != "Bearer" {
++		t.Errorf("expected WWW-Authenticate: Bearer, got %q", w.Header().Get("WWW-Authenticate"))
++	}
++}
++
++func TestAdminAuthHealthPublic(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	req := httptest.NewRequest(http.MethodGet, "/health", nil)
++	w := httptest.NewRecorder()
++
++	app.handleHealth(w, req)
++
++	if w.Code != http.StatusOK {
++		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
++	}
++}
++
++func TestAdminAuthInvalidTokenDoesNotCreateSession(t *testing.T) {
++	app := newTestAppWithAuth(t)
++
++	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
++	body, _ := json.Marshal(reqBody)
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	req.Header.Set("Authorization", "Bearer dht_wrong_token")
++	w := httptest.NewRecorder()
++
++	app.handleCreateSession(w, req)
++
++	if w.Code != http.StatusUnauthorized {
++		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
++	}
++
++	sessions, err := app.listSessions()
++	if err != nil {
++		t.Fatalf("listSessions() error: %v", err)
++	}
++
++	if len(sessions) != 0 {
++		t.Errorf("expected 0 sessions, got %d", len(sessions))
++	}
++}
+diff --git a/app.go b/app.go
+index d8f9fca..df39721 100644
+--- a/app.go
++++ b/app.go
+@@ -1,8 +1,12 @@
+ package main
+ 
+-import "database/sql"
++import (
++	"crypto/sha256"
++	"database/sql"
++)
+ 
+ type App struct {
+-	Config *Config
+-	DB     *sql.DB
++	Config         *Config
++	DB             *sql.DB
++	AdminTokenHash [sha256.Size]byte
+ }
+diff --git a/main.go b/main.go
+index 037e91c..947d220 100644
+--- a/main.go
++++ b/main.go
+@@ -1,11 +1,13 @@
+ package main
+ 
+ import (
++	"crypto/sha256"
+ 	"errors"
+ 	"fmt"
+ 	"net"
+ 	"net/http"
+ 	"os"
++	"strings"
+ 	"time"
+ )
+ 
+@@ -24,22 +26,41 @@ func printHelp() {
+ 	fmt.Println("  -h, --help  Show this help message")
+ }
+ 
+-func runServe() error {
+-	cfg, err := loadConfig()
++func loadAdminToken(path string) ([sha256.Size]byte, error) {
++	data, err := os.ReadFile(path)
+ 	if err != nil {
+ 		if errors.Is(err, os.ErrNotExist) {
+-			fmt.Fprintln(os.Stderr, "error: configuration not found")
++			fmt.Fprintln(os.Stderr, "error: admin token not found")
+ 			fmt.Fprintln(os.Stderr, "")
+ 			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
+ 			fmt.Fprintln(os.Stderr, "  docker-helper init")
+-			return err
++			return [sha256.Size]byte{}, err
+ 		}
+-		return err
++		fmt.Fprintln(os.Stderr, "error: cannot read admin token")
++		fmt.Fprintln(os.Stderr, "")
++		fmt.Fprintln(os.Stderr, "Run the following to initialize:")
++		fmt.Fprintln(os.Stderr, "  docker-helper init")
++		return [sha256.Size]byte{}, err
+ 	}
+ 
+-	if _, err := os.Stat(cfg.AdminTokenPath); err != nil {
++	token := strings.TrimSpace(string(data))
++	if token == "" {
++		fmt.Fprintln(os.Stderr, "error: admin token is empty")
++		fmt.Fprintln(os.Stderr, "")
++		fmt.Fprintln(os.Stderr, "Run the following to initialize:")
++		fmt.Fprintln(os.Stderr, "  docker-helper init")
++		return [sha256.Size]byte{}, errors.New("admin token is empty")
++	}
++
++	hash := sha256.Sum256([]byte(token))
++	return hash, nil
++}
++
++func runServe() error {
++	cfg, err := loadConfig()
++	if err != nil {
+ 		if errors.Is(err, os.ErrNotExist) {
+-			fmt.Fprintln(os.Stderr, "error: admin token not found")
++			fmt.Fprintln(os.Stderr, "error: configuration not found")
+ 			fmt.Fprintln(os.Stderr, "")
+ 			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
+ 			fmt.Fprintln(os.Stderr, "  docker-helper init")
+@@ -48,6 +69,11 @@ func runServe() error {
+ 		return err
+ 	}
+ 
++	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
++	if err != nil {
++		return err
++	}
++
+ 	db, err := openDatabase(cfg.DatabasePath)
+ 	if err != nil {
+ 		return err
+@@ -72,8 +98,9 @@ func runServe() error {
+ 	}
+ 
+ 	app := &App{
+-		Config: cfg,
+-		DB:     db,
++		Config:         cfg,
++		DB:             db,
++		AdminTokenHash: adminHash,
+ 	}
+ 
+ 	mux := http.NewServeMux()
+diff --git a/response.go b/response.go
+index 58c66a3..5be0db5 100644
+--- a/response.go
++++ b/response.go
+@@ -1,13 +1,17 @@
+ package main
+ 
+ import (
++	"crypto/sha256"
++	"crypto/subtle"
+ 	"encoding/json"
+ 	"log"
+ 	"net/http"
++	"strings"
+ )
+ 
+ type response struct {
+ 	OK       bool   `json:"ok"`
++	Code     string `json:"code,omitempty"`
+ 	Message  string `json:"message,omitempty"`
+ 	Output   string `json:"output,omitempty"`
+ 	Duration string `json:"duration,omitempty"`
+@@ -22,7 +26,7 @@ func writeJSON(w http.ResponseWriter, status int, value response) {
+ 	}
+ }
+ 
+-func writeJSONRaw(w http.ResponseWriter, status int, value interface{}) {
++func writeJSONRaw(w http.ResponseWriter, status int, value any) {
+ 	w.Header().Set("Content-Type", "application/json")
+ 	w.WriteHeader(status)
+ 
+@@ -38,6 +42,43 @@ func writeError(w http.ResponseWriter, status int, message string) {
+ 	})
+ }
+ 
++func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
++	auth := r.Header.Get("Authorization")
++	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
++		w.Header().Set("WWW-Authenticate", "Bearer")
++		writeJSON(w, http.StatusUnauthorized, response{
++			OK:      false,
++			Code:    "unauthorized",
++			Message: "Administrative authentication required.",
++		})
++		return false
++	}
++
++	token := strings.TrimPrefix(auth, "Bearer ")
++	if token == "" {
++		w.Header().Set("WWW-Authenticate", "Bearer")
++		writeJSON(w, http.StatusUnauthorized, response{
++			OK:      false,
++			Code:    "unauthorized",
++			Message: "Administrative authentication required.",
++		})
++		return false
++	}
++
++	tokenHash := sha256.Sum256([]byte(token))
++	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) != 1 {
++		w.Header().Set("WWW-Authenticate", "Bearer")
++		writeJSON(w, http.StatusUnauthorized, response{
++			OK:      false,
++			Code:    "unauthorized",
++			Message: "Administrative authentication required.",
++		})
++		return false
++	}
++
++	return true
++}
++
+ func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
+ 	writeJSON(w, http.StatusOK, response{
+ 		OK:      true,
+diff --git a/sessions.go b/sessions.go
+index 22d6b31..4c08277 100644
+--- a/sessions.go
++++ b/sessions.go
+@@ -39,6 +39,10 @@ func sessionToJSON(s Session) sessionJSON {
+ }
+ 
+ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
++	if !a.requireAdmin(w, r) {
++		return
++	}
++
+ 	var req sessionRequest
+ 
+ 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
+@@ -63,6 +67,10 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
++	if !a.requireAdmin(w, r) {
++		return
++	}
++
+ 	sessions, err := a.listSessions()
+ 	if err != nil {
+ 		writeError(w, http.StatusInternalServerError, err.Error())
+@@ -82,6 +90,10 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
++	if !a.requireAdmin(w, r) {
++		return
++	}
++
+ 	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
+ 	if id == "" {
+ 		writeError(w, http.StatusBadRequest, "session id is required")
+diff --git a/sessions_test.go b/sessions_test.go
+index 222b6f1..3afab69 100644
+--- a/sessions_test.go
++++ b/sessions_test.go
+@@ -9,19 +9,14 @@ import (
+ 	"time"
+ )
+ 
+-func newTestAppWithDB(t *testing.T) *App {
+-	t.Helper()
+-	app := newTestApp(t)
+-	return app
+-}
+-
+ func TestHTTPCreateSession(t *testing.T) {
+-	app := newTestAppWithDB(t)
++	app := newTestAppWithAuth(t)
+ 
+ 	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+ 	body, _ := json.Marshal(reqBody)
+ 
+ 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	withAuth(req)
+ 	w := httptest.NewRecorder()
+ 
+ 	app.handleCreateSession(w, req)
+@@ -47,9 +42,10 @@ func TestHTTPCreateSession(t *testing.T) {
+ }
+ 
+ func TestHTTPCreateSessionInvalidJSON(t *testing.T) {
+-	app := newTestAppWithDB(t)
++	app := newTestAppWithAuth(t)
+ 
+ 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("invalid")))
++	withAuth(req)
+ 	w := httptest.NewRecorder()
+ 
+ 	app.handleCreateSession(w, req)
+@@ -60,12 +56,13 @@ func TestHTTPCreateSessionInvalidJSON(t *testing.T) {
+ }
+ 
+ func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
+-	app := newTestAppWithDB(t)
++	app := newTestAppWithAuth(t)
+ 
+ 	reqBody := map[string]string{}
+ 	body, _ := json.Marshal(reqBody)
+ 
+ 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	withAuth(req)
+ 	w := httptest.NewRecorder()
+ 
+ 	app.handleCreateSession(w, req)
+@@ -76,7 +73,7 @@ func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
+ }
+ 
+ func TestHTTPListSessions(t *testing.T) {
+-	app := newTestAppWithDB(t)
++	app := newTestAppWithAuth(t)
+ 
+ 	_, err := app.createSession(app.Config.AllowedRoot)
+ 	if err != nil {
+@@ -84,6 +81,7 @@ func TestHTTPListSessions(t *testing.T) {
+ 	}
+ 
+ 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
++	withAuth(req)
+ 	w := httptest.NewRecorder()
+ 
+ 	app.handleListSessions(w, req)
+@@ -106,7 +104,7 @@ func TestHTTPListSessions(t *testing.T) {
+ }
+ 
+ func TestHTTPDeleteSession(t *testing.T) {
+-	app := newTestAppWithDB(t)
++	app := newTestAppWithAuth(t)
+ 
+ 	result, err := app.createSession(app.Config.AllowedRoot)
+ 	if err != nil {
+@@ -114,6 +112,7 @@ func TestHTTPDeleteSession(t *testing.T) {
+ 	}
+ 
+ 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
++	withAuth(req)
+ 	w := httptest.NewRecorder()
+ 
+ 	app.handleDeleteSession(w, req)
+@@ -124,9 +123,10 @@ func TestHTTPDeleteSession(t *testing.T) {
+ }
+ 
+ func TestHTTPDeleteSessionNotFound(t *testing.T) {
+-	app := newTestAppWithDB(t)
++	app := newTestAppWithAuth(t)
+ 
+ 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
++	withAuth(req)
+ 	w := httptest.NewRecorder()
+ 
+ 	app.handleDeleteSession(w, req)
+@@ -137,12 +137,13 @@ func TestHTTPDeleteSessionNotFound(t *testing.T) {
+ }
+ 
+ func TestHTTPCreateSessionRFC3339(t *testing.T) {
+-	app := newTestAppWithDB(t)
++	app := newTestAppWithAuth(t)
+ 
+ 	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+ 	body, _ := json.Marshal(reqBody)
+ 
+ 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
++	withAuth(req)
+ 	w := httptest.NewRecorder()
+ 
+ 	app.handleCreateSession(w, req)

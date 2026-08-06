@@ -9,19 +9,14 @@ import (
 	"time"
 )
 
-func newTestAppWithDB(t *testing.T) *App {
-	t.Helper()
-	app := newTestApp(t)
-	return app
-}
-
 func TestHTTPCreateSession(t *testing.T) {
-	app := newTestAppWithDB(t)
+	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAuth(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)
@@ -47,9 +42,10 @@ func TestHTTPCreateSession(t *testing.T) {
 }
 
 func TestHTTPCreateSessionInvalidJSON(t *testing.T) {
-	app := newTestAppWithDB(t)
+	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("invalid")))
+	withAuth(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)
@@ -60,12 +56,13 @@ func TestHTTPCreateSessionInvalidJSON(t *testing.T) {
 }
 
 func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
-	app := newTestAppWithDB(t)
+	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAuth(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)
@@ -76,7 +73,7 @@ func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
 }
 
 func TestHTTPListSessions(t *testing.T) {
-	app := newTestAppWithDB(t)
+	app := newTestAppWithAuth(t)
 
 	_, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -84,6 +81,7 @@ func TestHTTPListSessions(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	withAuth(req)
 	w := httptest.NewRecorder()
 
 	app.handleListSessions(w, req)
@@ -106,7 +104,7 @@ func TestHTTPListSessions(t *testing.T) {
 }
 
 func TestHTTPDeleteSession(t *testing.T) {
-	app := newTestAppWithDB(t)
+	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -114,6 +112,7 @@ func TestHTTPDeleteSession(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
+	withAuth(req)
 	w := httptest.NewRecorder()
 
 	app.handleDeleteSession(w, req)
@@ -124,9 +123,10 @@ func TestHTTPDeleteSession(t *testing.T) {
 }
 
 func TestHTTPDeleteSessionNotFound(t *testing.T) {
-	app := newTestAppWithDB(t)
+	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
+	withAuth(req)
 	w := httptest.NewRecorder()
 
 	app.handleDeleteSession(w, req)
@@ -137,12 +137,13 @@ func TestHTTPDeleteSessionNotFound(t *testing.T) {
 }
 
 func TestHTTPCreateSessionRFC3339(t *testing.T) {
-	app := newTestAppWithDB(t)
+	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAuth(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)

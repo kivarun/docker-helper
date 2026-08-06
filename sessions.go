@@ -39,6 +39,10 @@ func sessionToJSON(s Session) sessionJSON {
 }
 
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+
 	var req sessionRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
@@ -63,6 +67,10 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+
 	sessions, err := a.listSessions()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -82,6 +90,10 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAdmin(w, r) {
+		return
+	}
+
 	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "session id is required")

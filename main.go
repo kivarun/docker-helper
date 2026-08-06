@@ -1,11 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -24,6 +26,36 @@ func printHelp() {
 	fmt.Println("  -h, --help  Show this help message")
 }
 
+func loadAdminToken(path string) ([sha256.Size]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "error: admin token not found")
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
+			fmt.Fprintln(os.Stderr, "  docker-helper init")
+			return [sha256.Size]byte{}, err
+		}
+		fmt.Fprintln(os.Stderr, "error: cannot read admin token")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run the following to initialize:")
+		fmt.Fprintln(os.Stderr, "  docker-helper init")
+		return [sha256.Size]byte{}, err
+	}
+
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "error: admin token is empty")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run the following to initialize:")
+		fmt.Fprintln(os.Stderr, "  docker-helper init")
+		return [sha256.Size]byte{}, errors.New("admin token is empty")
+	}
+
+	hash := sha256.Sum256([]byte(token))
+	return hash, nil
+}
+
 func runServe() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -37,14 +69,8 @@ func runServe() error {
 		return err
 	}
 
-	if _, err := os.Stat(cfg.AdminTokenPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "error: admin token not found")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
-			fmt.Fprintln(os.Stderr, "  docker-helper init")
-			return err
-		}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
 		return err
 	}
 
@@ -72,8 +98,9 @@ func runServe() error {
 	}
 
 	app := &App{
-		Config: cfg,
-		DB:     db,
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
 	}
 
 	mux := http.NewServeMux()
