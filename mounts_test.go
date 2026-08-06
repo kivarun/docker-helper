@@ -433,6 +433,54 @@ func TestMountEmptyTarget(t *testing.T) {
 	}
 }
 
+func TestMountTargetRoot(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--mount" && i+1 < len(capturedArgs) {
+			spec := capturedArgs[i+1]
+			if len(spec) > 0 && spec[len(spec)-8:] == "target=/" {
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		t.Errorf("expected --mount with target=/ in args %v", capturedArgs)
+	}
+}
+
 func TestMountsPreserveOrder(t *testing.T) {
 	app := newTestAppWithAuth(t)
 

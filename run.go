@@ -69,7 +69,7 @@ func validateMount(mount mountRequest, workspace string) error {
 	}
 
 	cleaned := filepath.Clean(mount.Target)
-	if cleaned == "." || cleaned == ".." || filepath.IsAbs(cleaned) && cleaned == "/" {
+	if cleaned == "." || cleaned == ".." {
 		return fmt.Errorf("mount target is invalid: %s", mount.Target)
 	}
 
