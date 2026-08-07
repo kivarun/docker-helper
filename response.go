@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -82,12 +83,24 @@ func writeUnauthorizedSession(w http.ResponseWriter) {
 func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	token, ok := parseBearerToken(r)
 	if !ok {
+		writeAudit(auditRecord{
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: "admin.parse_failed",
+		})
 		writeUnauthorizedAdmin(w)
 		return false
 	}
 
 	tokenHash := sha256.Sum256([]byte(token))
 	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) != 1 {
+		writeAudit(auditRecord{
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: "admin.wrong_token",
+		})
 		writeUnauthorizedAdmin(w)
 		return false
 	}
@@ -98,12 +111,28 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, bool) {
 	token, ok := parseBearerToken(r)
 	if !ok {
+		writeAudit(auditRecord{
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: "session.parse_failed",
+		})
 		writeUnauthorizedSession(w)
 		return nil, false
 	}
 
 	session, err := a.findSessionByToken(token)
 	if err != nil {
+		resultCode := "session.not_found"
+		if !errors.Is(err, ErrSessionNotFound) {
+			resultCode = "session.database_error"
+		}
+		writeAudit(auditRecord{
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: resultCode,
+		})
 		writeUnauthorizedSession(w)
 		return nil, false
 	}

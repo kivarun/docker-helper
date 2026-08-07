@@ -10,6 +10,8 @@ import (
 type auditRecord struct {
 	Time        string       `json:"time"`
 	Event       string       `json:"event"`
+	Method      string       `json:"method,omitempty"`
+	Path        string       `json:"path,omitempty"`
 	SessionID   string       `json:"session_id,omitempty"`
 	Image       string       `json:"image,omitempty"`
 	Command     []string     `json:"command,omitempty"`

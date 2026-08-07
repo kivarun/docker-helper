@@ -1,0 +1,932 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// --- injected error for DB failure ---
+
+var errMockQueryFail = errors.New("mock_query_injection_error_for_testing")
+
+// --- failQueryDriver: wraps sqlite3 and fails QueryContext ---
+
+type failQueryDriver struct {
+	fail error
+}
+
+func (d *failQueryDriver) Open(dsn string) (driver.Conn, error) {
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
+	}
+	sqlConn, err := db.Conn(context.Background())
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	var realConn driver.Conn
+	err = sqlConn.Raw(func(v any) error {
+		realConn = v.(driver.Conn)
+		return nil
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &failQueryConn{Conn: realConn, fail: d.fail, db: db}, nil
+}
+
+type failQueryConn struct {
+	driver.Conn
+	fail error
+	db   *sql.DB
+}
+
+func (c *failQueryConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.fail != nil {
+		return nil, c.fail
+	}
+	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
+		return queryer.QueryContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func (c *failQueryConn) Close() error {
+	c.db.Close()
+	return c.Conn.Close()
+}
+
+var failQueryMu sync.Mutex
+var failQuerySeq int64
+
+func newFailQueryDB(t *testing.T, dbPath string, failErr error) *sql.DB {
+	t.Helper()
+	failQueryMu.Lock()
+	failQuerySeq++
+	seq := failQuerySeq
+	failQueryMu.Unlock()
+
+	name := fmt.Sprintf("mock_sqlite_fq_%d", seq)
+	sql.Register(name, &failQueryDriver{fail: failErr})
+
+	db, err := sql.Open(name, dbPath)
+	if err != nil {
+		t.Fatalf("newFailQueryDB: cannot open: %v", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		t.Fatalf("newFailQueryDB: ping failed: %v", err)
+	}
+	return db
+}
+
+// --- helpers ---
+
+func findAuthFailureRawLines(buf *bytes.Buffer) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		if evt, ok := m["event"].(string); ok && evt == "auth.failure" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func parseRawAudit(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("cannot parse audit JSON: %v: %s", err, raw)
+	}
+	return m
+}
+
+// validateAuthFailureRaw checks every required property on the raw audit JSON
+// for an auth.failure event.
+func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPath, expectedResult string, injectedToken, injectedErrText string) {
+	t.Helper()
+
+	m := parseRawAudit(t, raw)
+
+	// --- required fields ---
+	if m["event"] != "auth.failure" {
+		t.Errorf("event: expected 'auth.failure', got %v", m["event"])
+	}
+	if m["method"] != expectedMethod {
+		t.Errorf("method: expected %q, got %v", expectedMethod, m["method"])
+	}
+	if m["path"] != expectedPath {
+		t.Errorf("path: expected %q, got %v", expectedPath, m["path"])
+	}
+	if m["result"] != expectedResult {
+		t.Errorf("result: expected %q, got %v", expectedResult, m["result"])
+	}
+
+	// --- session_id must be absent or empty ---
+	if sid, ok := m["session_id"]; ok {
+		if sidStr, ok := sid.(string); ok && sidStr != "" {
+			t.Errorf("session_id must be empty on auth failure, got %q", sidStr)
+		}
+	}
+
+	// --- no token / authorization keys (any case) ---
+	for key := range m {
+		lower := strings.ToLower(key)
+		if lower == "token" || lower == "authorization" {
+			t.Errorf("unexpected secret key %q in audit record", key)
+		}
+	}
+
+	// --- no actual token value in raw JSON ---
+	if injectedToken != "" && strings.Contains(raw, injectedToken) {
+		t.Errorf("raw JSON contains token value %q", injectedToken)
+	}
+
+	// --- no full Authorization header value ---
+	if strings.Contains(raw, "Bearer "+injectedToken) {
+		t.Error("raw JSON contains full Authorization header value")
+	}
+	if injectedToken == "" && strings.Contains(raw, "Bearer dht_") {
+		t.Error("raw JSON contains Bearer token fragment")
+	}
+
+	// --- no injected error text ---
+	if injectedErrText != "" && strings.Contains(raw, injectedErrText) {
+		t.Errorf("raw JSON contains injected error text %q", injectedErrText)
+	}
+
+	// --- no internal error text ---
+	for _, text := range []string{
+		"session not found",
+		"ErrSessionNotFound",
+		"cannot find session",
+		"sql.ErrNoRows",
+	} {
+		if strings.Contains(raw, text) {
+			t.Errorf("raw JSON contains internal error text %q", text)
+		}
+	}
+
+	// --- no request body content ---
+	if strings.Contains(raw, "alpine:latest") {
+		t.Error("raw JSON contains request body content (image)")
+	}
+	if strings.Contains(raw, "Content-Type") {
+		t.Error("raw JSON contains request header Content-Type")
+	}
+}
+
+func assertNoAuthFailure(t *testing.T, buf *bytes.Buffer) {
+	t.Helper()
+	lines := findAuthFailureRawLines(buf)
+	if len(lines) > 0 {
+		t.Errorf("expected no auth.failure records, got %d", len(lines))
+	}
+}
+
+// ========================
+// admin.parse_failed
+// ========================
+
+func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{"workspace":"/tmp"}`)))
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "")
+}
+
+func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "")
+}
+
+func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer ")
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "")
+}
+
+// ========================
+// admin.wrong_token
+// ========================
+
+func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	const token = "dht_wrong_admin_token_xyz"
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.wrong_token", token, "")
+}
+
+func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	const token = "dht_wrong_admin_token_abc"
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleListSessions(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodGet, "/sessions", "admin.wrong_token", token, "")
+}
+
+func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	const token = "dht_wrong_admin_token_del"
+	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_123", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleDeleteSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodDelete, "/sessions/dhs_123", "admin.wrong_token", token, "")
+}
+
+// ========================
+// session.parse_failed
+// ========================
+
+func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "")
+}
+
+func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "")
+}
+
+func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer ")
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "")
+}
+
+func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.parse_failed", "", "")
+}
+
+// ========================
+// session.not_found
+// ========================
+
+func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	const token = "dht_unknown_token_abc123"
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", token, "")
+}
+
+func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	_, err = app.DB.Exec("UPDATE sessions SET expires_at = ? WHERE id = ?",
+		time.Now().Add(-time.Hour).Unix(), result.Session.ID)
+	if err != nil {
+		t.Fatalf("expire session: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", result.Token, "")
+}
+
+func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	_, err = app.DB.Exec("DELETE FROM sessions WHERE id = ?", result.Session.ID)
+	if err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", result.Token, "")
+}
+
+func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", testAdminToken, "")
+}
+
+func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	const token = "dht_unknown_build_token"
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.not_found", token, "")
+}
+
+// ========================
+// session.database_error
+// ========================
+
+func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	// Create a real session so the token is known.
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Replace DB with one that fails QueryContext.
+	dbPath := app.Config.DatabasePath
+	app.DB.Close()
+	app.DB = newFailQueryDB(t, dbPath, errMockQueryFail)
+	defer app.DB.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.database_error", result.Token, "mock_query_injection_error_for_testing")
+}
+
+func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dbPath := app.Config.DatabasePath
+	app.DB.Close()
+	app.DB = newFailQueryDB(t, dbPath, errMockQueryFail)
+	defer app.DB.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	cap.flush()
+
+	lines := findAuthFailureRawLines(cap.buffer())
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.database_error", result.Token, "mock_query_injection_error_for_testing")
+}
+
+// ========================
+// Successful auth — no auth.failure
+// ========================
+
+func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAuth(req)
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", w.Code)
+	}
+	cap.flush()
+
+	assertNoAuthFailure(t, cap.buffer())
+}
+
+func TestAuthAuditNoFailureOnValidAdminAuth_ListSessions(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	withAuth(req)
+	w := httptest.NewRecorder()
+	app.handleListSessions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	cap.flush()
+
+	assertNoAuthFailure(t, cap.buffer())
+}
+
+func TestAuthAuditNoFailureOnValidAdminAuth_DeleteSession(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
+	withAuth(req)
+	w := httptest.NewRecorder()
+	app.handleDeleteSession(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+	cap.flush()
+
+	assertNoAuthFailure(t, cap.buffer())
+}
+
+func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	cap.flush()
+
+	assertNoAuthFailure(t, cap.buffer())
+}
+
+func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Create a minimal Dockerfile in the workspace so validation passes.
+	dfPath := app.Config.AllowedRoot + "/Dockerfile"
+	if err := os.WriteFile(dfPath, []byte("FROM scratch"), 0644); err != nil {
+		t.Fatalf("cannot write Dockerfile: %v", err)
+	}
+
+	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(
+		`{"context":".","dockerfile":"Dockerfile","image":"example:test"}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	cap.flush()
+
+	assertNoAuthFailure(t, cap.buffer())
+}
+
+// ========================
+// Health — no auth, no auth.failure
+// ========================
+
+func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	app.handleHealth(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	cap.flush()
+
+	assertNoAuthFailure(t, cap.buffer())
+}
+
+// ========================
+// Admin token hash must not leak
+// ========================
+
+func TestAuthAuditAdminHashNotLeaked(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	adminHash := sha256.Sum256([]byte(testAdminToken))
+	hashHex := strings.ToLower(fmt.Sprintf("%x", adminHash[:]))
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer dht_wrong_token")
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	cap.flush()
+
+	raw := cap.buffer().String()
+	if strings.Contains(raw, hashHex) {
+		t.Error("audit output contains admin token hash")
+	}
+}
+
+// ========================
+// Raw JSON structure — comprehensive
+// ========================
+
+func TestAuthAuditRawJSONStructure_Complete(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	cap.flush()
+
+	raw := strings.TrimSpace(cap.buffer().String())
+
+	// Must be valid JSON
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatalf("not valid JSON: %v\nraw: %s", err, raw)
+	}
+
+	// Must have time
+	if m["time"] == "" {
+		t.Error("expected time field to be set")
+	}
+
+	// Must NOT have session_id with a value
+	if sid, ok := m["session_id"]; ok {
+		if sidStr, ok := sid.(string); ok && sidStr != "" {
+			t.Errorf("session_id must be empty, got %q", sidStr)
+		}
+	}
+
+	// Must NOT have token/authorization keys in any case
+	for _, key := range []string{"token", "Token", "TOKEN", "authorization", "Authorization", "AUTHORIZATION"} {
+		if _, exists := m[key]; exists {
+			t.Errorf("unexpected key %q in audit record", key)
+		}
+	}
+
+	// Must NOT contain the actual Authorization header value
+	if strings.Contains(raw, "Bearer") && strings.Contains(raw, "dht_") {
+		t.Error("audit output contains Bearer token")
+	}
+}
+
+// ========================
+// No internal error text leaks
+// ========================
+
+func TestAuthAuditNoInternalErrorText_UnknownToken(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer dht_nonexistent")
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	cap.flush()
+
+	raw := cap.buffer().String()
+
+	for _, text := range []string{
+		"session not found",
+		"ErrSessionNotFound",
+		"cannot find session",
+		"sql.ErrNoRows",
+	} {
+		if strings.Contains(raw, text) {
+			t.Errorf("audit output contains internal error text %q", text)
+		}
+	}
+}
+
+func TestAuthAuditNoInternalErrorText_DatabaseError(t *testing.T) {
+	cap := captureStderr(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dbPath := app.Config.DatabasePath
+	app.DB.Close()
+	app.DB = newFailQueryDB(t, dbPath, errMockQueryFail)
+	defer app.DB.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	cap.flush()
+
+	raw := cap.buffer().String()
+
+	for _, text := range []string{
+		"mock_query_injection_error_for_testing",
+		"session not found",
+		"ErrSessionNotFound",
+		"cannot find session",
+		"sql.ErrNoRows",
+	} {
+		if strings.Contains(raw, text) {
+			t.Errorf("audit output contains internal error text %q", text)
+		}
+	}
+}
+
+// ========================
+// Result codes are stable identifiers
+// ========================
+
+func TestAuthAuditResultCodesAreStable(t *testing.T) {
+	expectedCodes := map[string]struct{}{
+		"admin.parse_failed":     {},
+		"admin.wrong_token":      {},
+		"session.parse_failed":   {},
+		"session.not_found":      {},
+		"session.database_error": {},
+	}
+
+	for code := range expectedCodes {
+		if code == "" {
+			t.Errorf("result code must not be empty")
+		}
+		for _, r := range code {
+			if r != '_' && r != '.' && (r < 'a' || r > 'z') {
+				t.Errorf("result code %q contains unexpected character %q", code, r)
+			}
+		}
+	}
+}
