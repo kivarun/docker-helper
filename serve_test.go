@@ -447,14 +447,15 @@ func TestCallbackReturnCleansSocket(t *testing.T) {
 }
 
 // prepareListener error inside runWithLock: callback not called, lock released,
-// regular file untouched, lock file remains.
+// regular file untouched (content, size, mode), lock file remains.
 func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
 	// Place a regular file where the socket would be.
-	if err := os.WriteFile(socketPath, []byte("stub"), 0600); err != nil {
+	const stub = "stub"
+	if err := os.WriteFile(socketPath, []byte(stub), 0600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	before := mustStat(t, socketPath)
@@ -471,10 +472,17 @@ func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 		t.Error("callback must not be called on prepareListener error")
 	}
 
-	// Regular file must be untouched.
+	// Regular file must be untouched: size, mode, and content.
 	after := mustStat(t, socketPath)
 	if before.Size() != after.Size() || before.Mode() != after.Mode() {
 		t.Error("regular file must not be modified")
+	}
+	data, err := os.ReadFile(socketPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != stub {
+		t.Errorf("file content = %q, want %q", string(data), stub)
 	}
 
 	// Lock must be released.
@@ -523,11 +531,12 @@ func TestParallelStartupRace(t *testing.T) {
 	// --- Phase 1: start the holder and wait for it to enter the callback ---
 	holderStarted := make(chan struct{})
 	holderProceed := make(chan struct{})
+	holderResult := make(chan error, 1)
 	holderDone := make(chan struct{})
 
 	go func() {
 		defer close(holderDone)
-		runWithLock(lockPath, socketPath, func(net.Listener) error {
+		holderResult <- runWithLock(lockPath, socketPath, func(net.Listener) error {
 			close(holderStarted)
 			<-holderProceed
 			return nil
@@ -535,9 +544,18 @@ func TestParallelStartupRace(t *testing.T) {
 	}()
 
 	var proceedOnce sync.Once
-	t.Cleanup(func() { proceedOnce.Do(func() { close(holderProceed) }) })
+	t.Cleanup(func() {
+		proceedOnce.Do(func() { close(holderProceed) })
+		<-holderDone
+	})
 
-	<-holderStarted
+	// Wait for holder to enter callback or fail prematurely.
+	select {
+	case <-holderStarted:
+		// Holder is in the callback, holding the lock.
+	case err := <-holderResult:
+		t.Fatalf("holder runWithLock returned before callback: %v", err)
+	}
 
 	// Socket must exist while the holder is active.
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -591,9 +609,14 @@ func TestParallelStartupRace(t *testing.T) {
 		t.Error("socket should exist while holder blocks competitors")
 	}
 
-	// --- Phase 3: release the holder and wait for it to finish ---
+	// --- Phase 3: release the holder and verify result ---
 	proceedOnce.Do(func() { close(holderProceed) })
-	<-holderDone
+
+	// Read holder result exactly once (buffered channel).
+	holderErr := <-holderResult
+	if holderErr != nil {
+		t.Fatalf("holder runWithLock returned error: %v", holderErr)
+	}
 
 	// Holder must have cleaned up the socket.
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
