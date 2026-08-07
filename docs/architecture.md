@@ -357,7 +357,7 @@ Emitted after a Docker build completes (success or failure).
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
 | `result` | string | `success` or `build_error` |
-| `exit_code` | number | Docker exit code (present on error) |
+| `exit_code` | number | present when an exit code is available |
 | `duration` | string | build wall-clock time |
 
 #### session.create
@@ -380,7 +380,6 @@ Result codes:
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside `AllowedRoot` |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
-| `unknown_error` | any other error |
 
 #### session.delete
 
@@ -401,7 +400,51 @@ Result codes:
 | `invalid_session_id` | session ID is empty in the URL |
 | `not_found` | no session with the given ID |
 | `database_error` | SQLite failure during delete |
-| `unknown_error` | any other error |
+
+#### run.start
+
+Emitted before a container starts.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | container image name with tag |
+| `command` | string[] | container command with arguments (present when set) |
+| `mounts` | object[] | bind mounts (present when set) |
+| `env_keys` | string[] | environment variable names, sorted (present when set; values are never logged) |
+
+No `result` or `duration` field.
+
+Each entry in `mounts` has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source` | string | source path relative to the workspace |
+| `target` | string | absolute target path inside the container |
+| `read_only` | boolean | whether the mount is read-only |
+
+#### run.finish
+
+Emitted after a container exits.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | container image name with tag |
+| `command` | string[] | container command with arguments (present when set) |
+| `mounts` | object[] | bind mounts (present when set) |
+| `env_keys` | string[] | environment variable names, sorted (present when set) |
+| `result` | string | outcome code |
+| `exit_code` | number | container exit code (present when available) |
+| `duration` | string | container wall-clock time |
+
+Result codes:
+
+| Code | Condition |
+|------|-----------|
+| `success` | container exited with status 0 |
+| `container_exit_nonzero` | container exited with a non-zero status (not 125) |
+| `docker_error` | Docker failed to start the container, or exited with status 125 |
 
 #### auth.failure
 
@@ -428,13 +471,16 @@ Result codes:
 
 The audit log never contains:
 
-- session tokens or admin tokens (full or partial);
-- `Authorization` header values;
-- HTTP request headers other than `method` and `path`;
-- HTTP request bodies;
-- Docker build or container output;
-- environment variable values (only keys are logged);
+- the raw HTTP request body;
+- HTTP request headers;
+- `Authorization` header values and the token used for authentication;
+- environment variable values (only names appear in `env_keys`);
+- Docker build output or container stdout/stderr;
 - internal error messages or stack traces.
+
+The `command` field in `run.start`/`run.finish` records the full command
+with arguments as provided, without masking. Do not pass secrets in
+command arguments.
 
 ### Examples
 
@@ -455,6 +501,13 @@ Authorization failure:
 
 ```json
 {"time":"2026-01-15T10:31:00Z","event":"auth.failure","method":"POST","path":"/run","result":"session.not_found"}
+```
+
+Container run:
+
+```json
+{"time":"2026-01-15T10:32:00Z","event":"run.start","session_id":"dhs_0a1b2c3d4e5f","image":"alpine:3.19","command":["sh","-c","echo hello"],"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
+{"time":"2026-01-15T10:32:01Z","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","image":"alpine:3.19","command":["sh","-c","echo hello"],"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"success","duration":"1s"}
 ```
 
 ## Security considerations
