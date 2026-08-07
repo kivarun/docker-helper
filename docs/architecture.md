@@ -137,7 +137,8 @@ systemctl --user enable --now docker-helper
 
 Configuration and state directories are created by `docker-helper init`
 using standard XDG paths. Non-standard `XDG_CONFIG_HOME` and
-`XDG_STATE_HOME` are supported.
+`XDG_STATE_HOME` are supported when they are present in the systemd user
+manager environment.
 
 ### Stop and restart
 
@@ -156,7 +157,7 @@ remain.
 ### Logout
 
 - **without linger** (`loginctl enable-linger` not set): the user manager
-  and all services stop when the user logs out;
+  and all services normally stop after the last user session ends;
 - **with linger**: the user manager continues running and the service
   stays active after logout.
 
@@ -167,6 +168,7 @@ is reached (e.g. when `docker-helper init` has not been run):
 
 ```
 systemctl --user reset-failed docker-helper
+systemctl --user start docker-helper
 ```
 
 ### Hardening
@@ -177,9 +179,9 @@ Filesystem namespace directives (`ProtectSystem`, `ProtectHome`, etc.)
 are not used in the initial unit: their compatibility with docker-helper
 depends on the runtime environment and requires per-distribution testing.
 
-The process has access to the Docker socket. The systemd sandbox reduces
-direct host filesystem access but is not a security boundary if
-docker-helper itself is compromised.
+The unit does not restrict direct access to the host filesystem. The
+process-level directives only forbid specific operations. Access to the
+Docker socket means the unit does not create a full security boundary.
 
 ## Authentication
 
