@@ -198,11 +198,22 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 
 	cap.flush()
 
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
-	for _, rec := range records {
-		raw, _ := json.Marshal(rec)
-		if strings.Contains(string(raw), buildOutput) {
-			t.Fatalf("audit record contains build output!\n%s", raw)
+	rawLines := auditRawLinesBySession(cap.buffer(), result.Session.ID)
+	if len(rawLines) < 2 {
+		t.Fatalf("expected at least 2 audit lines, got %d", len(rawLines))
+	}
+
+	for _, line := range rawLines {
+		if strings.Contains(line, buildOutput) {
+			t.Fatalf("audit line contains build output!\n%s", line)
+		}
+
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("cannot parse audit line: %v", err)
+		}
+		if _, ok := m["output"]; ok {
+			t.Fatalf("audit line has output key!\n%s", line)
 		}
 	}
 }
@@ -238,11 +249,22 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 
 	cap.flush()
 
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
-	for _, rec := range records {
-		raw, _ := json.Marshal(rec)
-		if strings.Contains(string(raw), buildOutput) {
-			t.Fatalf("audit record contains build error output!\n%s", raw)
+	rawLines := auditRawLinesBySession(cap.buffer(), result.Session.ID)
+	if len(rawLines) < 2 {
+		t.Fatalf("expected at least 2 audit lines, got %d", len(rawLines))
+	}
+
+	for _, line := range rawLines {
+		if strings.Contains(line, buildOutput) {
+			t.Fatalf("audit line contains build error output!\n%s", line)
+		}
+
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("cannot parse audit line: %v", err)
+		}
+		if _, ok := m["output"]; ok {
+			t.Fatalf("audit line has output key!\n%s", line)
 		}
 	}
 }
@@ -278,17 +300,22 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	// Verify no --build-arg in captured args
-	for i, arg := range capturedArgs {
-		if arg == "--build-arg" {
-			t.Fatalf("unexpected --build-arg in args at position %d: %v", i, capturedArgs)
-		}
+	expectedArgs := []string{
+		"build",
+		"--pull",
+		"--provenance=false",
+		"--sbom=false",
+		"--file", dockerfilePath,
+		"--tag", "example:test",
+		app.Config.AllowedRoot,
 	}
 
-	// Verify expected args are present in order
-	expectedPrefix := []string{"build", "--pull", "--provenance=false", "--sbom=false", "--file"}
-	for i, exp := range expectedPrefix {
-		if i >= len(capturedArgs) || capturedArgs[i] != exp {
+	if len(capturedArgs) != len(expectedArgs) {
+		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(capturedArgs), capturedArgs)
+	}
+
+	for i, exp := range expectedArgs {
+		if capturedArgs[i] != exp {
 			t.Errorf("arg[%d]: expected %q, got %q", i, exp, capturedArgs[i])
 		}
 	}

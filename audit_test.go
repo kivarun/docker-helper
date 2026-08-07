@@ -82,6 +82,23 @@ func filterBySession(records []auditRecord, sessionID string) []auditRecord {
 	return filtered
 }
 
+func auditRawLinesBySession(buf *bytes.Buffer, sessionID string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		if sid, ok := m["session_id"].(string); ok && sid == sessionID {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 func newRunRequest(body map[string]any, token string) *http.Request {
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(data))
