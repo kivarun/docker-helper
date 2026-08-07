@@ -50,15 +50,6 @@ func defaultRunCommand(name string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-func maskEnvValue(name, value string) string {
-	runes := []rune(value)
-	if len(runes) == 0 {
-		return fmt.Sprintf("%s=\"\" (length=0)", name)
-	}
-	masked := string(runes[0]) + "***"
-	return fmt.Sprintf("%s=%s (length=%d)", name, masked, len(runes))
-}
-
 func writeErrorWithCode(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, response{
 		OK:      false,
@@ -185,6 +176,24 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		resolvedMounts = append(resolvedMounts, *resolved)
 	}
 
+	mountAudit := make([]auditMount, 0, len(req.Mounts))
+	for _, m := range req.Mounts {
+		mountAudit = append(mountAudit, auditMount{
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		})
+	}
+
+	writeAudit(auditRecord{
+		Event:     "run.start",
+		SessionID: session.ID,
+		Image:     req.Image,
+		Command:   req.Command,
+		Mounts:    mountAudit,
+		EnvKeys:   envNames,
+	})
+
 	started := time.Now()
 
 	args := []string{
@@ -222,8 +231,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 
+	var result string
+	var exitCode *int
+
 	if err != nil {
-		if exitCode := extractExitCode(err); exitCode != nil && *exitCode != 125 {
+		if ec := extractExitCode(err); ec != nil && *ec != 125 {
+			exitCode = ec
+			result = "container_exit_nonzero"
+
 			writeJSON(w, http.StatusOK, response{
 				OK:       false,
 				Code:     "container_exit_nonzero",
@@ -232,22 +247,46 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				Duration: duration,
 				ExitCode: exitCode,
 			})
-			return
-		}
+		} else if ec := extractExitCode(err); ec != nil {
+			exitCode = ec
+			result = "docker_error"
 
-		writeJSON(w, http.StatusInternalServerError, response{
-			OK:       false,
-			Message:  fmt.Sprintf("docker run failed: %v", err),
+			writeJSON(w, http.StatusInternalServerError, response{
+				OK:       false,
+				Message:  fmt.Sprintf("docker run failed: %v", err),
+				Output:   string(output),
+				Duration: duration,
+			})
+		} else {
+			result = "docker_error"
+
+			writeJSON(w, http.StatusInternalServerError, response{
+				OK:       false,
+				Message:  fmt.Sprintf("docker run failed: %v", err),
+				Output:   string(output),
+				Duration: duration,
+			})
+		}
+	} else {
+		result = "success"
+
+		writeJSON(w, http.StatusOK, response{
+			OK:       true,
+			Message:  "container finished successfully",
 			Output:   string(output),
 			Duration: duration,
 		})
-		return
 	}
 
-	writeJSON(w, http.StatusOK, response{
-		OK:       true,
-		Message:  "container finished successfully",
-		Output:   string(output),
-		Duration: duration,
+	writeAudit(auditRecord{
+		Event:     "run.finish",
+		SessionID: session.ID,
+		Image:     req.Image,
+		Command:   req.Command,
+		Mounts:    mountAudit,
+		EnvKeys:   envNames,
+		Result:    result,
+		ExitCode:  exitCode,
+		Duration:  duration,
 	})
 }
