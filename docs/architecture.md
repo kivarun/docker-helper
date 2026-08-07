@@ -307,6 +307,156 @@ Planned:
 - when running under systemd, these logs will be available in journald;
 - internal error details will not be exposed in API responses.
 
+## Audit logging
+
+docker-helper writes structured audit records to `stderr`. There is no
+configuration option to change the output destination; redirect `stderr`
+when starting the daemon to persist the log.
+
+### Format
+
+JSON Lines: one JSON object per line, UTF-8 encoded. Each line is an
+independent record.
+
+### Common fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `time` | string | UTC timestamp, RFC 3339 |
+| `event` | string | event name |
+| `result` | string | outcome code (omitted on `build.start`) |
+| `session_id` | string | session identifier (omitted on `auth.failure`) |
+| `duration` | string | wall-clock duration, e.g. `"1s"`, `"150ms"` |
+
+Additional fields depend on the event. Fields with empty or zero values
+are omitted from the JSON output.
+
+### Events
+
+#### build.start
+
+Emitted before a Docker build begins.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | target image name with tag |
+| `context` | string | build context path from the request |
+| `dockerfile` | string | Dockerfile path from the request |
+
+No `result` or `duration` field.
+
+#### build.finish
+
+Emitted after a Docker build completes (success or failure).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | target image name with tag |
+| `context` | string | build context path from the request |
+| `dockerfile` | string | Dockerfile path from the request |
+| `result` | string | `success` or `build_error` |
+| `exit_code` | number | Docker exit code (present on error) |
+| `duration` | string | build wall-clock time |
+
+#### session.create
+
+Emitted for every `POST /sessions` request after authentication.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier (present on `success` only) |
+| `workspace` | string | workspace path from the request |
+| `result` | string | outcome code |
+| `duration` | string | request wall-clock time |
+
+Result codes:
+
+| Code | Condition |
+|------|-----------|
+| `success` | session created |
+| `invalid_json` | request body is not valid JSON |
+| `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside `AllowedRoot` |
+| `database_error` | SQLite write failure |
+| `system_error` | cannot resolve `AllowedRoot` path |
+| `unknown_error` | any other error |
+
+#### session.delete
+
+Emitted for every `DELETE /sessions/{id}` request after authentication.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier from the URL |
+| `workspace` | string | workspace of the session (present when the session was found) |
+| `result` | string | outcome code |
+| `duration` | string | request wall-clock time |
+
+Result codes:
+
+| Code | Condition |
+|------|-----------|
+| `success` | session deleted |
+| `invalid_session_id` | session ID is empty in the URL |
+| `not_found` | no session with the given ID |
+| `database_error` | SQLite failure during delete |
+| `unknown_error` | any other error |
+
+#### auth.failure
+
+Emitted for every failed authorization attempt. No `session_id` is
+included because the session is not reliably established.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `method` | string | HTTP method of the request |
+| `path` | string | request path |
+| `result` | string | failure reason |
+
+Result codes:
+
+| Code | Condition |
+|------|-----------|
+| `admin.parse_failed` | `Authorization` header is missing, uses a non-Bearer scheme, or the token is empty/malformed on an admin endpoint |
+| `admin.wrong_token` | Bearer token does not match the configured admin token |
+| `session.parse_failed` | `Authorization` header is missing, uses a non-Bearer scheme, or the token is empty/malformed on a session endpoint |
+| `session.not_found` | No active session matches the token (unknown, expired, or deleted) |
+| `session.database_error` | Database error during session lookup |
+
+### What is never logged
+
+The audit log never contains:
+
+- session tokens or admin tokens (full or partial);
+- `Authorization` header values;
+- HTTP request headers other than `method` and `path`;
+- HTTP request bodies;
+- Docker build or container output;
+- environment variable values (only keys are logged);
+- internal error messages or stack traces.
+
+### Examples
+
+Successful build:
+
+```json
+{"time":"2026-01-15T10:30:00Z","event":"build.start","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile"}
+{"time":"2026-01-15T10:30:05Z","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile","result":"success","duration":"5s"}
+```
+
+Successful session creation:
+
+```json
+{"time":"2026-01-15T10:29:55Z","event":"session.create","session_id":"dhs_0a1b2c3d4e5f","workspace":"/home/user/project","result":"success","duration":"1ms"}
+```
+
+Authorization failure:
+
+```json
+{"time":"2026-01-15T10:31:00Z","event":"auth.failure","method":"POST","path":"/run","result":"session.not_found"}
+```
+
 ## Security considerations
 
 ### Path traversal
