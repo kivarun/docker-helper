@@ -125,7 +125,16 @@ func parseRawAudit(t *testing.T, raw string) map[string]any {
 
 // validateAuthFailureRaw checks every required property on the raw audit JSON
 // for an auth.failure event.
-func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPath, expectedResult string, injectedToken, injectedErrText string) {
+//
+// Parameters:
+//   - raw: the raw JSON line from stderr
+//   - expectedMethod, expectedPath, expectedResult: structural checks
+//   - injectedToken: the actual bearer token value sent in the request
+//   - injectedErrText: injected DB error text (for database_error tests)
+//   - authHeader: the full Authorization header value (e.g. "Bearer dht_xxx" or "Basic dXNlcjpwYXNz")
+//   - headerMarker: a custom header value that must not appear in audit
+//   - bodyMarker: a request-body value that must not appear in audit
+func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPath, expectedResult, injectedToken, injectedErrText, authHeader, headerMarker, bodyMarker string) {
 	t.Helper()
 
 	m := parseRawAudit(t, raw)
@@ -144,11 +153,9 @@ func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPa
 		t.Errorf("result: expected %q, got %v", expectedResult, m["result"])
 	}
 
-	// --- session_id must be absent or empty ---
-	if sid, ok := m["session_id"]; ok {
-		if sidStr, ok := sid.(string); ok && sidStr != "" {
-			t.Errorf("session_id must be empty on auth failure, got %q", sidStr)
-		}
+	// --- session_id must be completely absent ---
+	if _, exists := m["session_id"]; exists {
+		t.Error("session_id key must not be present in auth.failure audit record")
 	}
 
 	// --- no token / authorization keys (any case) ---
@@ -165,11 +172,8 @@ func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPa
 	}
 
 	// --- no full Authorization header value ---
-	if strings.Contains(raw, "Bearer "+injectedToken) {
-		t.Error("raw JSON contains full Authorization header value")
-	}
-	if injectedToken == "" && strings.Contains(raw, "Bearer dht_") {
-		t.Error("raw JSON contains Bearer token fragment")
+	if authHeader != "" && strings.Contains(raw, authHeader) {
+		t.Errorf("raw JSON contains Authorization header value %q", authHeader)
 	}
 
 	// --- no injected error text ---
@@ -196,6 +200,16 @@ func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPa
 	if strings.Contains(raw, "Content-Type") {
 		t.Error("raw JSON contains request header Content-Type")
 	}
+
+	// --- no custom header marker ---
+	if headerMarker != "" && strings.Contains(raw, headerMarker) {
+		t.Errorf("raw JSON contains custom header marker %q", headerMarker)
+	}
+
+	// --- no body marker ---
+	if bodyMarker != "" && strings.Contains(raw, bodyMarker) {
+		t.Errorf("raw JSON contains body marker %q", bodyMarker)
+	}
 }
 
 func assertNoAuthFailure(t *testing.T, buf *bytes.Buffer) {
@@ -214,7 +228,11 @@ func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 	cap := captureStderr(t)
 	app := newTestAppWithAuth(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{"workspace":"/tmp"}`)))
+	const headerMarker = "hdr_admin_parse_secret_x7k2m"
+	const bodyMarker = "body_admin_parse_secret_p9q4n"
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{"workspace":"`+bodyMarker+`"}`)))
+	req.Header.Set("X-Test-Secret", headerMarker)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -227,15 +245,17 @@ func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "", "", headerMarker, bodyMarker)
 }
 
 func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 	cap := captureStderr(t)
 	app := newTestAppWithAuth(t)
 
+	const authHeader = "Basic dXNlcjpwYXNz"
+
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
-	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -248,15 +268,17 @@ func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "", authHeader, "", "")
 }
 
 func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 	cap := captureStderr(t)
 	app := newTestAppWithAuth(t)
 
+	const authHeader = "Bearer "
+
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
-	req.Header.Set("Authorization", "Bearer ")
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -269,7 +291,7 @@ func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "", authHeader, "", "")
 }
 
 // ========================
@@ -281,8 +303,13 @@ func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_wrong_admin_token_xyz"
-	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
+	const authHeader = "Bearer " + token
+	const headerMarker = "hdr_admin_wrong_secret_a3b7c"
+	const bodyMarker = "body_admin_wrong_secret_d5e9f"
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{"workspace":"`+bodyMarker+`"}`)))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Test-Secret", headerMarker)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -295,7 +322,7 @@ func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.wrong_token", token, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.wrong_token", token, "", authHeader, headerMarker, bodyMarker)
 }
 
 func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
@@ -303,8 +330,10 @@ func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_wrong_admin_token_abc"
+	const authHeader = "Bearer " + token
+
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleListSessions(w, req)
 
@@ -317,7 +346,7 @@ func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodGet, "/sessions", "admin.wrong_token", token, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodGet, "/sessions", "admin.wrong_token", token, "", authHeader, "", "")
 }
 
 func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
@@ -325,8 +354,10 @@ func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_wrong_admin_token_del"
+	const authHeader = "Bearer " + token
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_123", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleDeleteSession(w, req)
 
@@ -339,7 +370,7 @@ func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodDelete, "/sessions/dhs_123", "admin.wrong_token", token, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodDelete, "/sessions/dhs_123", "admin.wrong_token", token, "", authHeader, "", "")
 }
 
 // ========================
@@ -350,7 +381,11 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
 	cap := captureStderr(t)
 	app := newTestAppWithAuth(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
+	const headerMarker = "hdr_session_parse_secret_g2h6j"
+	const bodyMarker = "auth_test_body_session_parse:v1"
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"`+bodyMarker+`"}`)))
+	req.Header.Set("X-Test-Secret", headerMarker)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -363,15 +398,17 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", "", headerMarker, bodyMarker)
 }
 
 func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
 	cap := captureStderr(t)
 	app := newTestAppWithAuth(t)
 
+	const authHeader = "Basic dXNlcjpwYXNz"
+
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
-	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -384,15 +421,17 @@ func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", authHeader, "", "")
 }
 
 func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
 	cap := captureStderr(t)
 	app := newTestAppWithAuth(t)
 
+	const authHeader = "Bearer "
+
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
-	req.Header.Set("Authorization", "Bearer ")
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -405,7 +444,7 @@ func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", authHeader, "", "")
 }
 
 func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
@@ -425,7 +464,7 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.parse_failed", "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.parse_failed", "", "", "", "", "")
 }
 
 // ========================
@@ -437,8 +476,13 @@ func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_unknown_token_abc123"
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
+	const authHeader = "Bearer " + token
+	const headerMarker = "hdr_session_nfound_secret_k4l8n"
+	const bodyMarker = "auth_test_body_session_nfound:v1"
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"`+bodyMarker+`"}`)))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Test-Secret", headerMarker)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -451,7 +495,7 @@ func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", token, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", token, "", authHeader, headerMarker, bodyMarker)
 }
 
 func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
@@ -469,8 +513,10 @@ func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
 		t.Fatalf("expire session: %v", err)
 	}
 
+	authHeader := "Bearer " + result.Token
+
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -483,7 +529,7 @@ func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", result.Token, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", result.Token, "", authHeader, "", "")
 }
 
 func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
@@ -500,8 +546,10 @@ func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
 		t.Fatalf("delete session: %v", err)
 	}
 
+	authHeader := "Bearer " + result.Token
+
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -514,15 +562,17 @@ func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", result.Token, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", result.Token, "", authHeader, "", "")
 }
 
 func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
 	cap := captureStderr(t)
 	app := newTestAppWithAuth(t)
 
+	const authHeader = "Bearer " + testAdminToken
+
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
-	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -535,7 +585,7 @@ func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", testAdminToken, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", testAdminToken, "", authHeader, "", "")
 }
 
 func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
@@ -543,8 +593,10 @@ func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_unknown_build_token"
+	const authHeader = "Bearer " + token
+
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
@@ -557,7 +609,7 @@ func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.not_found", token, "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.not_found", token, "", authHeader, "", "")
 }
 
 // ========================
@@ -580,8 +632,13 @@ func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 	app.DB = newFailQueryDB(t, dbPath, errMockQueryFail)
 	defer app.DB.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
+	authHeader := "Bearer " + result.Token
+	const headerMarker = "hdr_session_dberr_secret_m6n1p"
+	const bodyMarker = "auth_test_body_session_dberr:v1"
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"`+bodyMarker+`"}`)))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Test-Secret", headerMarker)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
@@ -594,7 +651,7 @@ func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.database_error", result.Token, "mock_query_injection_error_for_testing")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.database_error", result.Token, "mock_query_injection_error_for_testing", authHeader, headerMarker, bodyMarker)
 }
 
 func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
@@ -611,8 +668,10 @@ func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
 	app.DB = newFailQueryDB(t, dbPath, errMockQueryFail)
 	defer app.DB.Close()
 
+	authHeader := "Bearer " + result.Token
+
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req.Header.Set("Authorization", authHeader)
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
@@ -625,7 +684,7 @@ func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.database_error", result.Token, "mock_query_injection_error_for_testing")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.database_error", result.Token, "mock_query_injection_error_for_testing", authHeader, "", "")
 }
 
 // ========================
@@ -821,11 +880,9 @@ func TestAuthAuditRawJSONStructure_Complete(t *testing.T) {
 		t.Error("expected time field to be set")
 	}
 
-	// Must NOT have session_id with a value
-	if sid, ok := m["session_id"]; ok {
-		if sidStr, ok := sid.(string); ok && sidStr != "" {
-			t.Errorf("session_id must be empty, got %q", sidStr)
-		}
+	// session_id must be completely absent
+	if _, exists := m["session_id"]; exists {
+		t.Error("session_id key must not be present in auth.failure audit record")
 	}
 
 	// Must NOT have token/authorization keys in any case
@@ -902,31 +959,6 @@ func TestAuthAuditNoInternalErrorText_DatabaseError(t *testing.T) {
 	} {
 		if strings.Contains(raw, text) {
 			t.Errorf("audit output contains internal error text %q", text)
-		}
-	}
-}
-
-// ========================
-// Result codes are stable identifiers
-// ========================
-
-func TestAuthAuditResultCodesAreStable(t *testing.T) {
-	expectedCodes := map[string]struct{}{
-		"admin.parse_failed":     {},
-		"admin.wrong_token":      {},
-		"session.parse_failed":   {},
-		"session.not_found":      {},
-		"session.database_error": {},
-	}
-
-	for code := range expectedCodes {
-		if code == "" {
-			t.Errorf("result code must not be empty")
-		}
-		for _, r := range code {
-			if r != '_' && r != '.' && (r < 'a' || r > 'z') {
-				t.Errorf("result code %q contains unexpected character %q", code, r)
-			}
 		}
 	}
 }
