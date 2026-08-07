@@ -15,6 +15,7 @@ type Config struct {
 	AllowedRoot    string
 	SessionTTL     time.Duration
 	SocketPath     string
+	LockPath       string
 	StateDir       string
 	DatabasePath   string
 	AdminTokenPath string
@@ -114,6 +115,7 @@ func loadConfig() (*Config, error) {
 		AllowedRoot:    fc.AllowedRoot,
 		SessionTTL:     ttl,
 		SocketPath:     filepath.Join(runtimeDir, "docker-helper.sock"),
+		LockPath:       filepath.Join(runtimeDir, "docker-helper.lock"),
 		StateDir:       stateDir,
 		DatabasePath:   filepath.Join(stateDir, "docker-helper.db"),
 		AdminTokenPath: adminTokenPath,

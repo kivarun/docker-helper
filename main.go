@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -56,6 +57,79 @@ func loadAdminToken(path string) ([sha256.Size]byte, error) {
 	return hash, nil
 }
 
+// acquireLock opens the lock file and acquires an exclusive non-blocking flock.
+// Returns the open file that must stay open for the lock to remain held.
+func acquireLock(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open lock file %s: %w", path, err)
+	}
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if err == syscall.EWOULDBLOCK {
+			return nil, errors.New("another docker-helper instance is already running")
+		}
+		return nil, fmt.Errorf("cannot acquire lock: %w", err)
+	}
+
+	return f, nil
+}
+
+// prepareListener checks the socket path and creates a Unix listener.
+// The caller must hold the lock when calling this function.
+func prepareListener(socketPath string) (net.Listener, error) {
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return createListener(socketPath)
+		}
+		return nil, fmt.Errorf("cannot stat socket %s: %w", socketPath, err)
+	}
+
+	if info.Mode()&os.ModeSocket == 0 {
+		if info.IsDir() {
+			return nil, fmt.Errorf("socket path %s is a directory", socketPath)
+		}
+		return nil, fmt.Errorf("socket path %s exists and is not a socket", socketPath)
+	}
+
+	// It's a socket — check if it's live or stale.
+	if isLiveSocket(socketPath) {
+		return nil, fmt.Errorf("another docker-helper is already listening on %s", socketPath)
+	}
+
+	// Stale socket — remove and create new listener.
+	if err := os.Remove(socketPath); err != nil {
+		return nil, fmt.Errorf("cannot remove stale socket %s: %w", socketPath, err)
+	}
+
+	return createListener(socketPath)
+}
+
+func createListener(socketPath string) (net.Listener, error) {
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot listen on %s: %w", socketPath, err)
+	}
+
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("cannot set socket permissions: %w", err)
+	}
+
+	return listener, nil
+}
+
+func isLiveSocket(socketPath string) bool {
+	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 func runServe() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -69,36 +143,38 @@ func runServe() error {
 		return err
 	}
 
+	lockFile, err := acquireLock(cfg.LockPath)
+	if err != nil {
+		return err
+	}
+
 	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
 	if err != nil {
+		lockFile.Close()
 		return err
 	}
 
 	db, err := openDatabase(cfg.DatabasePath)
 	if err != nil {
+		lockFile.Close()
 		return err
 	}
 	defer db.Close()
 
 	if err := initializeDatabase(db); err != nil {
+		lockFile.Close()
 		return err
 	}
 
 	if err := cleanupExpiredSessions(db); err != nil {
+		lockFile.Close()
 		return err
 	}
 
-	if err := os.Remove(cfg.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("cannot remove old socket: %w", err)
-	}
-
-	listener, err := net.Listen("unix", cfg.SocketPath)
+	listener, err := prepareListener(cfg.SocketPath)
 	if err != nil {
-		return fmt.Errorf("cannot listen on %s: %w", cfg.SocketPath, err)
-	}
-
-	if err := os.Chmod(cfg.SocketPath, 0600); err != nil {
-		return fmt.Errorf("cannot set socket permissions: %w", err)
+		lockFile.Close()
+		return err
 	}
 
 	app := &App{
@@ -123,8 +199,14 @@ func runServe() error {
 
 	fmt.Printf("docker-helper listening on %s\n", cfg.SocketPath)
 
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	// server.Serve blocks until the server is stopped.
+	// On exit, lockFile is closed by the deferred/return path, releasing the lock.
+	serveErr := server.Serve(listener)
+
+	lockFile.Close()
+
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
 	}
 
 	return nil
