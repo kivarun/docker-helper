@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 )
 
 var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`)
+
+var ErrInternal = errors.New("internal error")
 
 type buildRequest struct {
 	Context    string `json:"context"`
@@ -38,21 +41,26 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
 	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
 	if err != nil {
-		writeErrorWithCode(w, http.StatusBadRequest, "invalid_build_context", err.Error())
+		if errors.Is(err, ErrInternal) {
+			log.Printf("build validation internal error: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
 		return
 	}
 
 	writeAudit(auditRecord{
-		Event:     "build.start",
-		SessionID: session.ID,
-		Image:     req.Image,
-		Context:   req.Context,
+		Event:      "build.start",
+		SessionID:  session.ID,
+		Image:      req.Image,
+		Context:    req.Context,
 		Dockerfile: req.Dockerfile,
 	})
 
@@ -85,7 +93,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,
-			Message:  fmt.Sprintf("docker build failed: %v", err),
+			Code:     "docker_build_failed",
+			Message:  "docker build failed",
 			Output:   string(output),
 			Duration: duration,
 		})
@@ -101,14 +110,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAudit(auditRecord{
-		Event:     "build.finish",
-		SessionID: session.ID,
-		Image:     req.Image,
-		Context:   req.Context,
+		Event:      "build.finish",
+		SessionID:  session.ID,
+		Image:      req.Image,
+		Context:    req.Context,
 		Dockerfile: req.Dockerfile,
-		Result:    result,
-		ExitCode:  exitCode,
-		Duration:  duration,
+		Result:     result,
+		ExitCode:   exitCode,
+		Duration:   duration,
 	})
 }
 
@@ -128,7 +137,7 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 	var err error
 	workspace, err = filepath.EvalSymlinks(workspace)
 	if err != nil {
-		return "", "", fmt.Errorf("cannot resolve workspace: %w", err)
+		return "", "", fmt.Errorf("cannot resolve workspace: %w: %w", err, ErrInternal)
 	}
 
 	var contextPath string

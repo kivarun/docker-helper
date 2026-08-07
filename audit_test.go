@@ -14,10 +14,10 @@ import (
 )
 
 type stderrCapture struct {
-	old *os.File
-	r   *os.File
-	w   *os.File
-	buf *bytes.Buffer
+	old  *os.File
+	r    *os.File
+	w    *os.File
+	buf  *bytes.Buffer
 	done chan struct{}
 }
 
@@ -39,10 +39,10 @@ func captureStderr(t *testing.T) *stderrCapture {
 	}()
 
 	return &stderrCapture{
-		old: old,
-		r:   r,
-		w:   w,
-		buf: buf,
+		old:  old,
+		r:    r,
+		w:    w,
+		buf:  buf,
 		done: done,
 	}
 }

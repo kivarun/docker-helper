@@ -14,9 +14,9 @@ type mockExitError struct {
 	msg  string
 }
 
-func (e *mockExitError) Error() string   { return e.msg }
-func (e *mockExitError) ExitCode() int   { return e.code }
-func (e *mockExitError) Unwrap() error   { return nil }
+func (e *mockExitError) Error() string { return e.msg }
+func (e *mockExitError) ExitCode() int { return e.code }
+func (e *mockExitError) Unwrap() error { return nil }
 
 func TestRunNonZeroExit(t *testing.T) {
 	app := newTestAppWithAuth(t)
@@ -155,8 +155,8 @@ func TestRunDockerErrorStill500(t *testing.T) {
 	if resp.OK {
 		t.Error("expected ok to be false")
 	}
-	if resp.Code != "" {
-		t.Errorf("expected no code for docker error, got %q", resp.Code)
+	if resp.Code != "docker_run_failed" {
+		t.Errorf("expected code 'docker_run_failed', got %q", resp.Code)
 	}
 	if resp.ExitCode != nil {
 		t.Errorf("expected no exit_code for docker error, got %d", *resp.ExitCode)
@@ -257,7 +257,7 @@ func TestRunNonZeroExitCode125(t *testing.T) {
 	if resp.OK {
 		t.Error("expected ok to be false")
 	}
-	if resp.Code != "" {
-		t.Errorf("expected no code for docker error 125, got %q", resp.Code)
+	if resp.Code != "docker_run_failed" {
+		t.Errorf("expected code 'docker_run_failed', got %q", resp.Code)
 	}
 }

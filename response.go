@@ -37,9 +37,10 @@ func writeJSONRaw(w http.ResponseWriter, status int, value any) {
 	}
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
+func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, response{
 		OK:      false,
+		Code:    code,
 		Message: message,
 	})
 }
@@ -133,7 +134,13 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 			Path:   r.URL.Path,
 			Result: resultCode,
 		})
-		writeUnauthorizedSession(w)
+
+		if !errors.Is(err, ErrSessionNotFound) {
+			log.Printf("session lookup error: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		} else {
+			writeUnauthorizedSession(w)
+		}
 		return nil, false
 	}
 

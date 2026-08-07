@@ -299,8 +299,8 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d", w.Code)
+	if w.Code != 500 {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 	cap.flush()
 
@@ -346,8 +346,8 @@ func TestSessionCreateAuditSystemError(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d", w.Code)
+	if w.Code != 500 {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 	cap.flush()
 

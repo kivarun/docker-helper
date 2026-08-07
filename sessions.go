@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -58,7 +59,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			Result:   "invalid_json",
 			Duration: duration,
 		})
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
@@ -73,7 +74,13 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			Result:    resultCode,
 			Duration:  duration,
 		})
-		writeError(w, http.StatusBadRequest, err.Error())
+
+		if errors.Is(err, ErrInvalidWorkspace) {
+			writeError(w, http.StatusBadRequest, "invalid_workspace", "invalid workspace")
+		} else {
+			log.Printf("session creation error: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
 		return
 	}
 
@@ -99,7 +106,8 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 	sessions, err := a.listSessions()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		log.Printf("list sessions error: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -130,7 +138,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			Result:   "invalid_session_id",
 			Duration: duration,
 		})
-		writeError(w, http.StatusBadRequest, "session id is required")
+		writeError(w, http.StatusBadRequest, "invalid_session_id", "session id is required")
 		return
 	}
 
@@ -165,9 +173,10 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeAudit(auditRec)
 
 		if errors.Is(err, ErrSessionNotFound) {
-			writeError(w, http.StatusNotFound, "session not found")
+			writeError(w, http.StatusNotFound, "session_not_found", "session not found")
 		} else {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			log.Printf("delete session error: %v", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
 	}

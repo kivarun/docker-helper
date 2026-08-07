@@ -51,14 +51,6 @@ func defaultRunCommand(name string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-func writeErrorWithCode(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, response{
-		OK:      false,
-		Code:    code,
-		Message: message,
-	})
-}
-
 func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) {
 	if mount.Source == "" {
 		return nil, fmt.Errorf("mount source is required")
@@ -135,23 +127,23 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
 	if req.Image == "" {
-		writeError(w, http.StatusBadRequest, "image is required")
+		writeError(w, http.StatusBadRequest, "invalid_image", "image is required")
 		return
 	}
 
 	if !imagePattern.MatchString(req.Image) {
-		writeError(w, http.StatusBadRequest, "invalid image name or tag")
+		writeError(w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
 		return
 	}
 
 	for name := range req.Environment {
 		if !envNamePattern.MatchString(name) {
-			writeError(w, http.StatusBadRequest, "invalid environment variable name: "+name)
+			writeError(w, http.StatusBadRequest, "invalid_environment", "invalid environment variable name")
 			return
 		}
 	}
@@ -172,12 +164,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	for _, mount := range req.Mounts {
 		resolved, err := resolveMount(mount, session.Workspace)
 		if err != nil {
-			writeErrorWithCode(w, http.StatusBadRequest, "invalid_mount", err.Error())
+			writeError(w, http.StatusBadRequest, "invalid_mount", "invalid mount")
 			return
 		}
 
 		if targetSeen[resolved.Target] {
-			writeErrorWithCode(w, http.StatusBadRequest, "invalid_mount", "duplicate mount target: "+resolved.Target)
+			writeError(w, http.StatusBadRequest, "invalid_mount", "invalid mount")
 			return
 		}
 		targetSeen[resolved.Target] = true
@@ -256,22 +248,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				Duration: duration,
 				ExitCode: exitCode,
 			})
-		} else if ec := extractExitCode(err); ec != nil {
-			exitCode = ec
-			result = "docker_error"
-
-			writeJSON(w, http.StatusInternalServerError, response{
-				OK:       false,
-				Message:  fmt.Sprintf("docker run failed: %v", err),
-				Output:   string(output),
-				Duration: duration,
-			})
 		} else {
+			exitCode = extractExitCode(err)
 			result = "docker_error"
 
 			writeJSON(w, http.StatusInternalServerError, response{
 				OK:       false,
-				Message:  fmt.Sprintf("docker run failed: %v", err),
+				Code:     "docker_run_failed",
+				Message:  "docker run failed",
 				Output:   string(output),
 				Duration: duration,
 			})

@@ -642,8 +642,8 @@ func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 	cap.flush()
 
@@ -675,8 +675,8 @@ func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 	cap.flush()
 

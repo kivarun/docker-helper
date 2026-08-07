@@ -369,7 +369,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)
 		 VALUES (?, ?, ?, ?, ?, NULL)`,
 		"dhs_expires_now", "hash2", app.Config.AllowedRoot,
-		now - 3600, now,
+		now-3600, now,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert boundary session: %v", err)

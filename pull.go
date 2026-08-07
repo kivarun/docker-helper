@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os/exec"
 	"time"
@@ -29,17 +28,17 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
 	if req.Image == "" {
-		writeError(w, http.StatusBadRequest, "image is required")
+		writeError(w, http.StatusBadRequest, "invalid_image", "image is required")
 		return
 	}
 
 	if !imagePattern.MatchString(req.Image) {
-		writeError(w, http.StatusBadRequest, "invalid image name or tag")
+		writeError(w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
 		return
 	}
 
@@ -70,7 +69,8 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,
-			Message:  fmt.Sprintf("docker pull failed: %v", err),
+			Code:     "docker_pull_failed",
+			Message:  "docker pull failed",
 			Output:   string(output),
 			Duration: duration,
 		})
