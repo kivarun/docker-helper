@@ -122,6 +122,65 @@ Expired sessions are rejected immediately by the `expires_at` check in
 `findSessionByToken`. Their database rows are physically removed the next
 time `docker-helper serve` starts.
 
+## systemd user service
+
+docker-helper can run as a systemd user service. The unit file is
+installed at `/usr/lib/systemd/user/docker-helper.service`.
+
+### Installation
+
+```
+docker-helper init
+systemctl --user daemon-reload
+systemctl --user enable --now docker-helper
+```
+
+Configuration and state directories are created by `docker-helper init`
+using standard XDG paths. Non-standard `XDG_CONFIG_HOME` and
+`XDG_STATE_HOME` are supported.
+
+### Stop and restart
+
+docker-helper does not install a signal handler and does not call
+`http.Server.Shutdown`. On stop:
+
+- helper and any child `docker` CLI processes receive SIGTERM;
+- the process terminates immediately;
+- in-flight HTTP requests are aborted with no response to the client;
+- a running Docker build or container may or may not be affected —
+  the current code does not guarantee either outcome.
+
+After `TimeoutStopSec=30s`, systemd sends SIGKILL if any processes
+remain.
+
+### Logout
+
+- **without linger** (`loginctl enable-linger` not set): the user manager
+  and all services stop when the user logs out;
+- **with linger**: the user manager continues running and the service
+  stays active after logout.
+
+### StartLimit
+
+The unit limits restarts to 3 attempts within 60 seconds. If this limit
+is reached (e.g. when `docker-helper init` has not been run):
+
+```
+systemctl --user reset-failed docker-helper
+```
+
+### Hardening
+
+The unit applies process-level hardening (`NoNewPrivileges`,
+`RestrictSUIDSGID`, `RestrictNamespaces`, `RestrictRealtime`).
+Filesystem namespace directives (`ProtectSystem`, `ProtectHome`, etc.)
+are not used in the initial unit: their compatibility with docker-helper
+depends on the runtime environment and requires per-distribution testing.
+
+The process has access to the Docker socket. The systemd sandbox reduces
+direct host filesystem access but is not a security boundary if
+docker-helper itself is compromised.
+
 ## Authentication
 
 Two token types exist.
