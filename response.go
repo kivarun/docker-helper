@@ -15,6 +15,7 @@ type response struct {
 	Message  string `json:"message,omitempty"`
 	Output   string `json:"output,omitempty"`
 	Duration string `json:"duration,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, value response) {

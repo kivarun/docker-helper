@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +15,15 @@ import (
 )
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func extractExitCode(err error) *int {
+	var exitCoder interface{ ExitCode() int }
+	if errors.As(err, &exitCoder) {
+		code := exitCoder.ExitCode()
+		return &code
+	}
+	return nil
+}
 
 type runRequest struct {
 	Image       string            `json:"image"`
@@ -213,6 +223,18 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
+		if exitCode := extractExitCode(err); exitCode != nil && *exitCode != 125 {
+			writeJSON(w, http.StatusOK, response{
+				OK:       false,
+				Code:     "container_exit_nonzero",
+				Message:  "container exited with non-zero status",
+				Output:   string(output),
+				Duration: duration,
+				ExitCode: exitCode,
+			})
+			return
+		}
+
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,
 			Message:  fmt.Sprintf("docker run failed: %v", err),
