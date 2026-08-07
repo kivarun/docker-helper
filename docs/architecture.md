@@ -425,7 +425,7 @@ Each entry in `mounts` has:
 
 #### run.finish
 
-Emitted after a container exits.
+Emitted after a container run attempt completes.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -436,7 +436,7 @@ Emitted after a container exits.
 | `env_keys` | string[] | environment variable names, sorted (present when set) |
 | `result` | string | outcome code |
 | `exit_code` | number | container exit code (present when available) |
-| `duration` | string | container wall-clock time |
+| `duration` | string | container run attempt wall-clock time |
 
 Result codes:
 
