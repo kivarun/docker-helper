@@ -60,7 +60,7 @@ func getRuntimeDir() (string, error) {
 	if dir == "" {
 		return "", errors.New("XDG_RUNTIME_DIR is not set, cannot determine runtime directory")
 	}
-	return dir, nil
+	return filepath.Join(dir, "docker-helper"), nil
 }
 
 func getStateDir() string {
@@ -98,6 +98,10 @@ func loadConfig() (*Config, error) {
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
 		return nil, err
+	}
+
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		return nil, fmt.Errorf("cannot create runtime directory: %w", err)
 	}
 
 	stateDir := getStateDir()

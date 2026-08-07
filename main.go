@@ -88,7 +88,7 @@ func runServe() error {
 		return err
 	}
 
-	if err := os.RemoveAll(cfg.SocketPath); err != nil {
+	if err := os.Remove(cfg.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("cannot remove old socket: %w", err)
 	}
 
