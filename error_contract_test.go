@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -785,7 +786,10 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			if !resp.OK && resp.Code == "" {
+			if resp.OK {
+				t.Fatalf("expected ok=false, got ok=true, status=%d", w.Code)
+			}
+			if resp.Code == "" {
 				t.Errorf("ok=false response has empty code, status=%d", w.Code)
 			}
 		})
@@ -795,9 +799,10 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 // ---------- Docker error logging ----------
 
 func TestDockerErrorLogBuild(t *testing.T) {
-	cap := captureStderr(t)
-	defer cap.flush()
-	log.SetOutput(os.Stderr)
+	buf := new(bytes.Buffer)
+	old := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(old) })
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -810,9 +815,10 @@ func TestDockerErrorLogBuild(t *testing.T) {
 		t.Fatalf("cannot write Dockerfile: %v", err)
 	}
 
-	const secretMarker = "secret_build_marker_xyz"
+	const errMarker = "test_build_error_marker_abc123"
+	const dockerOutput = "build-output-secret-xyz"
 	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(secretMarker + "\n"), &mockExitError{code: 1, msg: "exit status 1"}
+		return []byte(dockerOutput + "\n"), &mockExitError{code: 1, msg: errMarker}
 	}
 
 	reqBody, _ := json.Marshal(map[string]any{
@@ -825,38 +831,45 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	raw := cap.buffer().String()
+	raw := buf.String()
 
-	// Error is logged
-	if !containsLogMarker(raw, "docker build error") {
-		t.Errorf("expected docker build error in log, got:\n%s", raw)
+	// Error marker is logged
+	if !strings.Contains(raw, errMarker) {
+		t.Errorf("expected error marker %q in log, got:\n%s", errMarker, raw)
 	}
 	// Docker output not logged
-	if containsLogMarker(raw, secretMarker) {
+	if strings.Contains(raw, dockerOutput) {
 		t.Error("Docker output must not appear in log")
 	}
 	// Token not logged
-	if containsLogMarker(raw, result.Token) {
+	if strings.Contains(raw, result.Token) {
 		t.Error("session token must not appear in log")
 	}
 
-	// Client response unchanged
+	// Client response
 	var resp response
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", w.Code)
+	}
 	if resp.Code != "docker_build_failed" {
 		t.Errorf("expected code 'docker_build_failed', got %q", resp.Code)
 	}
-	if resp.Output != secretMarker+"\n" {
+	if resp.Message != "docker build failed" {
+		t.Errorf("unexpected message: %q", resp.Message)
+	}
+	if resp.Output != dockerOutput+"\n" {
 		t.Errorf("expected output preserved, got %q", resp.Output)
 	}
 }
 
 func TestDockerErrorLogPull(t *testing.T) {
-	cap := captureStderr(t)
-	defer cap.flush()
-	log.SetOutput(os.Stderr)
+	buf := new(bytes.Buffer)
+	old := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(old) })
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -864,9 +877,10 @@ func TestDockerErrorLogPull(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	const secretMarker = "secret_pull_marker_xyz"
+	const errMarker = "test_pull_error_marker_def456"
+	const dockerOutput = "pull-output-secret-xyz"
 	app.PullCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(secretMarker + "\n"), &mockExitError{code: 1, msg: "exit status 1"}
+		return []byte(dockerOutput + "\n"), &mockExitError{code: 1, msg: errMarker}
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
@@ -875,34 +889,45 @@ func TestDockerErrorLogPull(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handlePull(w, req)
 
-	raw := cap.buffer().String()
+	raw := buf.String()
 
-	if !containsLogMarker(raw, "docker pull error") {
-		t.Errorf("expected docker pull error in log, got:\n%s", raw)
+	// Error marker is logged
+	if !strings.Contains(raw, errMarker) {
+		t.Errorf("expected error marker %q in log, got:\n%s", errMarker, raw)
 	}
-	if containsLogMarker(raw, secretMarker) {
+	// Docker output not logged
+	if strings.Contains(raw, dockerOutput) {
 		t.Error("Docker output must not appear in log")
 	}
-	if containsLogMarker(raw, result.Token) {
+	// Token not logged
+	if strings.Contains(raw, result.Token) {
 		t.Error("session token must not appear in log")
 	}
 
+	// Client response
 	var resp response
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", w.Code)
+	}
 	if resp.Code != "docker_pull_failed" {
 		t.Errorf("expected code 'docker_pull_failed', got %q", resp.Code)
 	}
-	if resp.Output != secretMarker+"\n" {
+	if resp.Message != "docker pull failed" {
+		t.Errorf("unexpected message: %q", resp.Message)
+	}
+	if resp.Output != dockerOutput+"\n" {
 		t.Errorf("expected output preserved, got %q", resp.Output)
 	}
 }
 
 func TestDockerErrorLogRun(t *testing.T) {
-	cap := captureStderr(t)
-	defer cap.flush()
-	log.SetOutput(os.Stderr)
+	buf := new(bytes.Buffer)
+	old := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(old) })
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -910,76 +935,56 @@ func TestDockerErrorLogRun(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	const secretMarker = "secret_run_marker_xyz"
+	const errMarker = "test_run_error_marker_ghi789"
+	const dockerOutput = "run-output-secret-xyz"
+	const envValue = "env-secret-value-abc"
 	app.RunCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(secretMarker + "\n"), &mockExitError{code: 125, msg: "exit status 125"}
+		return []byte(dockerOutput + "\n"), &mockExitError{code: 125, msg: errMarker}
 	}
 
-	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
+	reqBody, _ := json.Marshal(map[string]any{
+		"image":       "alpine:latest",
+		"environment": map[string]string{"SECRET_KEY": envValue},
+	})
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	raw := cap.buffer().String()
+	raw := buf.String()
 
-	if !containsLogMarker(raw, "docker run error") {
-		t.Errorf("expected docker run error in log, got:\n%s", raw)
+	// Error marker is logged
+	if !strings.Contains(raw, errMarker) {
+		t.Errorf("expected error marker %q in log, got:\n%s", errMarker, raw)
 	}
-	if containsLogMarker(raw, secretMarker) {
+	// Docker output not logged
+	if strings.Contains(raw, dockerOutput) {
 		t.Error("Docker output must not appear in log")
 	}
-	if containsLogMarker(raw, result.Token) {
+	// Token not logged
+	if strings.Contains(raw, result.Token) {
 		t.Error("session token must not appear in log")
 	}
+	// Environment value not logged
+	if strings.Contains(raw, envValue) {
+		t.Error("environment value must not appear in log")
+	}
 
+	// Client response
 	var resp response
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", w.Code)
+	}
 	if resp.Code != "docker_run_failed" {
 		t.Errorf("expected code 'docker_run_failed', got %q", resp.Code)
 	}
-	if resp.Output != secretMarker+"\n" {
+	if resp.Message != "docker run failed" {
+		t.Errorf("unexpected message: %q", resp.Message)
+	}
+	if resp.Output != dockerOutput+"\n" {
 		t.Errorf("expected output preserved, got %q", resp.Output)
 	}
-}
-
-func containsLogMarker(raw, marker string) bool {
-	for _, line := range splitLines(raw) {
-		if len(line) == 0 {
-			continue
-		}
-		// Log lines start with a timestamp like "2026/08/07 ..."
-		if len(line) > 15 && line[4] == '/' && line[7] == '/' {
-			if containsSubstring(line, marker) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
-func containsSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
