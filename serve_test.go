@@ -96,7 +96,6 @@ func TestPrepareListenerStaleSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	// Create a stale socket by binding and closing at the syscall level.
 	f, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("cannot create socket: %v", err)
@@ -113,11 +112,14 @@ func TestPrepareListenerStaleSocket(t *testing.T) {
 		t.Fatal("stale socket should still exist on disk after Close")
 	}
 
-	listener, err := prepareListener(socketPath)
+	listener, created, err := prepareListener(socketPath)
 	if err != nil {
 		t.Fatalf("prepareListener() error: %v", err)
 	}
 	defer listener.Close()
+	if !created {
+		t.Error("should report socket created")
+	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
 		t.Fatal("new socket should exist")
@@ -134,9 +136,12 @@ func TestPrepareListenerLiveSocket(t *testing.T) {
 	}
 	defer listener.Close()
 
-	_, err = prepareListener(socketPath)
+	_, created, err := prepareListener(socketPath)
 	if err == nil {
 		t.Fatal("expected error when socket has a live listener")
+	}
+	if created {
+		t.Error("should not report socket created when live socket exists")
 	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -152,9 +157,12 @@ func TestPrepareListenerRegularFile(t *testing.T) {
 		t.Fatalf("cannot create file: %v", err)
 	}
 
-	_, err := prepareListener(socketPath)
+	_, created, err := prepareListener(socketPath)
 	if err == nil {
 		t.Fatal("expected error when socket path is a regular file")
+	}
+	if created {
+		t.Error("should not report socket created for regular file")
 	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -170,9 +178,12 @@ func TestPrepareListenerDirectory(t *testing.T) {
 		t.Fatalf("cannot create directory: %v", err)
 	}
 
-	_, err := prepareListener(socketPath)
+	_, created, err := prepareListener(socketPath)
 	if err == nil {
 		t.Fatal("expected error when socket path is a directory")
+	}
+	if created {
+		t.Error("should not report socket created for directory")
 	}
 }
 
@@ -180,11 +191,14 @@ func TestPrepareListenerNewSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	listener, err := prepareListener(socketPath)
+	listener, created, err := prepareListener(socketPath)
 	if err != nil {
 		t.Fatalf("prepareListener() error: %v", err)
 	}
 	defer listener.Close()
+	if !created {
+		t.Error("should report socket created")
+	}
 
 	info, err := os.Stat(socketPath)
 	if err != nil {
@@ -265,7 +279,6 @@ func TestCheckSocketECONNREFUSED(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	// Create a stale socket (bound but not listening).
 	f, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("cannot create socket: %v", err)
@@ -287,7 +300,6 @@ func TestCheckSocketECONNREFUSED(t *testing.T) {
 }
 
 func TestCheckSocketUnknownError(t *testing.T) {
-	// Simulate an unknown dial error by injecting a failing dial function.
 	orig := dialUnixFunc
 	defer func() { dialUnixFunc = orig }()
 
@@ -308,7 +320,6 @@ func TestPrepareListenerUnknownDialError(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	// Create a real socket file so os.Stat sees ModeSocket.
 	f, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatalf("cannot create socket: %v", err)
@@ -320,7 +331,6 @@ func TestPrepareListenerUnknownDialError(t *testing.T) {
 	}
 	syscall.Close(f)
 
-	// Inject a dial error that is not ECONNREFUSED.
 	orig := dialUnixFunc
 	defer func() { dialUnixFunc = orig }()
 
@@ -328,14 +338,256 @@ func TestPrepareListenerUnknownDialError(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected failure")}
 	}
 
-	_, err = prepareListener(socketPath)
+	_, created, err := prepareListener(socketPath)
 	if err == nil {
 		t.Fatal("expected error from prepareListener on unknown dial error")
 	}
+	if created {
+		t.Error("should not report socket created on unknown dial error")
+	}
 
-	// Socket must not be deleted.
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
 		t.Error("socket should not be deleted on unknown dial error")
+	}
+}
+
+func TestSocketDisappearsDuringCheck(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socket: %v", err)
+	}
+	sa := &syscall.SockaddrUnix{Name: socketPath}
+	if err := syscall.Bind(fd, sa); err != nil {
+		syscall.Close(fd)
+		t.Fatalf("Bind: %v", err)
+	}
+	syscall.Close(fd)
+
+	orig := dialUnixFunc
+	defer func() { dialUnixFunc = orig }()
+
+	dialUnixFunc = func(a string, timeout time.Duration) (net.Conn, error) {
+		os.Remove(socketPath)
+		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected")}
+	}
+
+	listener, created, err := prepareListener(socketPath)
+	if err != nil {
+		t.Fatalf("prepareListener: %v", err)
+	}
+	defer listener.Close()
+	if !created {
+		t.Error("should report socket created")
+	}
+}
+
+// --- Lifecycle tests using runWithLock ---
+
+// Callback error: lock released, socket removed, lock file remains.
+func TestStartupErrorReleasesLock(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	lockPath := socketPath + ".lock"
+
+	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return errors.New("simulated startup error")
+	})
+	if err == nil {
+		t.Fatal("expected error from runWithLock")
+	}
+
+	// Lock must be released.
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("lock not released after error: %v", err)
+	}
+	lockFile.Close()
+
+	// Socket must be removed.
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("socket should be removed after callback error")
+	}
+
+	// Lock file must remain.
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		t.Error("lock file should remain after callback error")
+	}
+}
+
+// Normal callback return: socket removed, lock file remains, flock released.
+func TestCallbackReturnCleansSocket(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	lockPath := socketPath + ".lock"
+
+	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runWithLock: %v", err)
+	}
+
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("socket should be removed after callback returns")
+	}
+
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		t.Error("lock file should remain")
+	}
+
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("flock not released: %v", err)
+	}
+	lockFile.Close()
+}
+
+// While first callback is blocked, second instance cannot get lock and does not delete socket.
+func TestBlockedCallbackPreventsSecondInstance(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	lockPath := socketPath + ".lock"
+
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runWithLock(lockPath, socketPath, func(net.Listener) error {
+			close(started)
+			<-proceed
+			return nil
+		})
+	}()
+
+	<-started
+
+	// Second instance must fail.
+	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("second instance should fail")
+	}
+
+	// Socket must still exist.
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Error("socket should exist while first callback is blocked")
+	}
+
+	// Release first instance and wait for it to finish.
+	close(proceed)
+	<-done
+
+	// Socket must be cleaned up.
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("socket should be removed after first instance completes")
+	}
+}
+
+// After first instance finishes, a subsequent startup is possible.
+func TestSubsequentStartupAfterShutdown(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	lockPath := socketPath + ".lock"
+
+	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("first runWithLock: %v", err)
+	}
+
+	err = runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("second runWithLock: %v", err)
+	}
+}
+
+// Parallel startup: only one succeeds, winner is held via channels, properly cleaned up.
+func TestParallelStartupRace(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	lockPath := socketPath + ".lock"
+
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socket: %v", err)
+	}
+	sa := &syscall.SockaddrUnix{Name: socketPath}
+	if err := syscall.Bind(fd, sa); err != nil {
+		syscall.Close(fd)
+		t.Fatalf("Bind: %v", err)
+	}
+	syscall.Close(fd)
+
+	const n = 10
+	ready := make(chan struct{}, n)
+	start := make(chan struct{})
+	hasLock := make(chan struct{})
+	proceed := make(chan struct{})
+	results := make(chan error, n)
+
+	for i := 0; i < n; i++ {
+		go func() {
+			ready <- struct{}{}
+			<-start
+
+			err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+				hasLock <- struct{}{}
+				<-proceed
+				return nil
+			})
+			results <- err
+		}()
+	}
+
+	// Wait for all goroutines to be ready.
+	for i := 0; i < n; i++ {
+		<-ready
+	}
+
+	// Release all goroutines simultaneously.
+	close(start)
+
+	// Wait for the winner to signal it holds the lock.
+	<-hasLock
+
+	// Socket must exist while winner holds the lock.
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Error("socket should exist while winner holds lock")
+	}
+
+	// Release the winner.
+	close(proceed)
+
+	// Collect all results.
+	var successes, failures int
+	for i := 0; i < n; i++ {
+		err := <-results
+		if err == nil {
+			successes++
+		} else {
+			failures++
+		}
+	}
+
+	if successes != 1 {
+		t.Errorf("expected exactly 1 success, got %d", successes)
+	}
+	if failures != n-1 {
+		t.Errorf("expected %d failures, got %d", n-1, failures)
+	}
+
+	// Winner cleaned up the socket.
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("socket should be removed after winner completes")
 	}
 }
 

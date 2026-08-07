@@ -111,11 +111,13 @@ func loadConfig() (*Config, error) {
 
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
+	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
+
 	return &Config{
 		AllowedRoot:    fc.AllowedRoot,
 		SessionTTL:     ttl,
-		SocketPath:     filepath.Join(runtimeDir, "docker-helper.sock"),
-		LockPath:       filepath.Join(runtimeDir, "docker-helper.lock"),
+		SocketPath:     socketPath,
+		LockPath:       socketPath + ".lock",
 		StateDir:       stateDir,
 		DatabasePath:   filepath.Join(stateDir, "docker-helper.db"),
 		AdminTokenPath: adminTokenPath,

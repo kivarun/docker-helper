@@ -78,37 +78,52 @@ func acquireLock(path string) (*os.File, error) {
 
 // prepareListener checks the socket path and creates a Unix listener.
 // The caller must hold the lock when calling this function.
-func prepareListener(socketPath string) (net.Listener, error) {
+// Returns the listener, a flag indicating whether the socket was created
+// by this call (true means the caller should clean it up on shutdown),
+// and an error if any.
+func prepareListener(socketPath string) (net.Listener, bool, error) {
 	info, err := os.Stat(socketPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return createListener(socketPath)
+			l, err := createListener(socketPath)
+			return l, err == nil, err
 		}
-		return nil, fmt.Errorf("cannot stat socket %s: %w", socketPath, err)
+		return nil, false, fmt.Errorf("cannot stat socket %s: %w", socketPath, err)
 	}
 
 	if info.Mode()&os.ModeSocket == 0 {
 		if info.IsDir() {
-			return nil, fmt.Errorf("socket path %s is a directory", socketPath)
+			return nil, false, fmt.Errorf("socket path %s is a directory", socketPath)
 		}
-		return nil, fmt.Errorf("socket path %s exists and is not a socket", socketPath)
+		return nil, false, fmt.Errorf("socket path %s exists and is not a socket", socketPath)
 	}
 
 	// It's a socket — check if it's live or stale.
 	live, err := checkSocket(socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("cannot check socket %s: %w", socketPath, err)
+		// Path may have disappeared during check — re-stat.
+		if _, statErr := os.Stat(socketPath); os.IsNotExist(statErr) {
+			l, err := createListener(socketPath)
+			return l, err == nil, err
+		}
+		return nil, false, fmt.Errorf("cannot check socket %s: %w", socketPath, err)
 	}
 	if live {
-		return nil, fmt.Errorf("another docker-helper is already listening on %s", socketPath)
+		return nil, false, fmt.Errorf("another docker-helper is already listening on %s", socketPath)
 	}
 
 	// Stale socket — remove and create new listener.
 	if err := os.Remove(socketPath); err != nil {
-		return nil, fmt.Errorf("cannot remove stale socket %s: %w", socketPath, err)
+		if os.IsNotExist(err) {
+			// Disappeared during remove — try creating.
+			l, err := createListener(socketPath)
+			return l, err == nil, err
+		}
+		return nil, false, fmt.Errorf("cannot remove stale socket %s: %w", socketPath, err)
 	}
 
-	return createListener(socketPath)
+	l, err := createListener(socketPath)
+	return l, err == nil, err
 }
 
 func createListener(socketPath string) (net.Listener, error) {
@@ -119,6 +134,7 @@ func createListener(socketPath string) (net.Listener, error) {
 
 	if err := os.Chmod(socketPath, 0600); err != nil {
 		listener.Close()
+		os.Remove(socketPath)
 		return nil, fmt.Errorf("cannot set socket permissions: %w", err)
 	}
 
@@ -149,6 +165,35 @@ func checkSocket(socketPath string) (bool, error) {
 	return true, nil
 }
 
+// runWithLock acquires the lock, prepares a listener, runs the callback,
+// and performs production cleanup: close listener → remove socket → release lock.
+// If prepareListener fails, the lock is released and the error is returned.
+// If the callback fails, the listener is closed, the socket is removed (if created),
+// and the lock is released.
+func runWithLock(lockPath, socketPath string, fn func(net.Listener) error) error {
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		return err
+	}
+
+	listener, created, err := prepareListener(socketPath)
+	if err != nil {
+		lockFile.Close()
+		return err
+	}
+
+	// Cleanup order: close listener → remove socket → release lock.
+	defer lockFile.Close()
+	defer func() {
+		if created {
+			os.Remove(socketPath)
+		}
+	}()
+	defer listener.Close()
+
+	return fn(listener)
+}
+
 func runServe() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -162,65 +207,55 @@ func runServe() error {
 		return err
 	}
 
-	lockFile, err := acquireLock(cfg.LockPath)
-	if err != nil {
-		return err
-	}
-	defer lockFile.Close()
+	return runWithLock(cfg.LockPath, cfg.SocketPath, func(listener net.Listener) error {
+		adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+		if err != nil {
+			return err
+		}
 
-	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
-	if err != nil {
-		return err
-	}
+		db, err := openDatabase(cfg.DatabasePath)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
 
-	db, err := openDatabase(cfg.DatabasePath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+		if err := initializeDatabase(db); err != nil {
+			return err
+		}
 
-	if err := initializeDatabase(db); err != nil {
-		return err
-	}
+		if err := cleanupExpiredSessions(db); err != nil {
+			return err
+		}
 
-	if err := cleanupExpiredSessions(db); err != nil {
-		return err
-	}
+		app := &App{
+			Config:         cfg,
+			DB:             db,
+			AdminTokenHash: adminHash,
+		}
 
-	listener, err := prepareListener(cfg.SocketPath)
-	if err != nil {
-		return err
-	}
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /build", app.handleBuild)
+		mux.HandleFunc("GET /health", app.handleHealth)
+		mux.HandleFunc("POST /pull", app.handlePull)
+		mux.HandleFunc("POST /run", app.handleRun)
+		mux.HandleFunc("POST /sessions", app.handleCreateSession)
+		mux.HandleFunc("GET /sessions", app.handleListSessions)
+		mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
 
-	app := &App{
-		Config:         cfg,
-		DB:             db,
-		AdminTokenHash: adminHash,
-	}
+		server := &http.Server{
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /build", app.handleBuild)
-	mux.HandleFunc("GET /health", app.handleHealth)
-	mux.HandleFunc("POST /pull", app.handlePull)
-	mux.HandleFunc("POST /run", app.handleRun)
-	mux.HandleFunc("POST /sessions", app.handleCreateSession)
-	mux.HandleFunc("GET /sessions", app.handleListSessions)
-	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+		fmt.Printf("docker-helper listening on %s\n", cfg.SocketPath)
 
-	server := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+		serveErr := server.Serve(listener)
 
-	fmt.Printf("docker-helper listening on %s\n", cfg.SocketPath)
-
-	// server.Serve blocks until the server is stopped.
-	// On exit, lockFile is closed by defer, releasing the lock.
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-
-	return nil
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			return serveErr
+		}
+		return nil
+	})
 }
 
 func main() {
