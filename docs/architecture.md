@@ -83,6 +83,7 @@ docker-helper serve
     ├── loads config.json
     ├── reads admin token, computes SHA-256 hash
     ├── opens SQLite database
+    ├── deletes expired session rows (expires_at <= now)
     └── starts HTTP server on Unix socket
     │
 POST /sessions  (admin token)
@@ -116,6 +117,10 @@ coding agent never receives it. The agent only gets a session token, which
 grants access to a single workspace and expires after the configured TTL.
 This separation ensures the agent cannot create sessions for other
 workspaces or manage sessions it does not own.
+
+Expired sessions are rejected immediately by the `expires_at` check in
+`findSessionByToken`. Their database rows are physically removed the next
+time `docker-helper serve` starts.
 
 ## Authentication
 

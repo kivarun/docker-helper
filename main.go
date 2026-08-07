@@ -84,6 +84,10 @@ func runServe() error {
 		return err
 	}
 
+	if err := cleanupExpiredSessions(db); err != nil {
+		return err
+	}
+
 	if err := os.RemoveAll(cfg.SocketPath); err != nil {
 		return fmt.Errorf("cannot remove old socket: %w", err)
 	}

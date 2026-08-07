@@ -347,3 +347,74 @@ func TestCreateSessionUniqueIDs(t *testing.T) {
 		t.Error("tokens should be unique")
 	}
 }
+
+func TestCleanupExpiredSessions(t *testing.T) {
+	app := newTestApp(t)
+
+	// Create an expired session (expires_at in the past).
+	_, err := app.DB.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, NULL)`,
+		"dhs_expired", "hash1", app.Config.AllowedRoot,
+		time.Now().Add(-2*time.Hour).Unix(),
+		time.Now().Add(-1*time.Hour).Unix(),
+	)
+	if err != nil {
+		t.Fatalf("cannot insert expired session: %v", err)
+	}
+
+	// Create a session expiring exactly now (should be cleaned up).
+	now := time.Now().Unix()
+	_, err = app.DB.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, NULL)`,
+		"dhs_expires_now", "hash2", app.Config.AllowedRoot,
+		now - 3600, now,
+	)
+	if err != nil {
+		t.Fatalf("cannot insert boundary session: %v", err)
+	}
+
+	// Create an active session (expires_at in the future).
+	_, err = app.DB.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, NULL)`,
+		"dhs_active", "hash3", app.Config.AllowedRoot,
+		now, now+3600,
+	)
+	if err != nil {
+		t.Fatalf("cannot insert active session: %v", err)
+	}
+
+	if err := cleanupExpiredSessions(app.DB); err != nil {
+		t.Fatalf("cleanupExpiredSessions() error: %v", err)
+	}
+
+	// Verify expired session is gone.
+	var count int
+	err = app.DB.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'dhs_expired'").Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot query expired: %v", err)
+	}
+	if count != 0 {
+		t.Error("expired session should be deleted")
+	}
+
+	// Verify boundary session (expires_at == now) is gone.
+	err = app.DB.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'dhs_expires_now'").Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot query boundary: %v", err)
+	}
+	if count != 0 {
+		t.Error("session with expires_at == now should be deleted")
+	}
+
+	// Verify active session remains.
+	err = app.DB.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'dhs_active'").Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot query active: %v", err)
+	}
+	if count != 1 {
+		t.Error("active session should remain")
+	}
+}

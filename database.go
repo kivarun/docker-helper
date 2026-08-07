@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -42,6 +43,17 @@ func initializeDatabase(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("cannot create sessions table: %w", err)
+	}
+
+	return nil
+}
+
+func cleanupExpiredSessions(db *sql.DB) error {
+	now := time.Now().Unix()
+
+	_, err := db.Exec("DELETE FROM sessions WHERE expires_at <= ?", now)
+	if err != nil {
+		return fmt.Errorf("cannot clean up expired sessions: %w", err)
 	}
 
 	return nil
