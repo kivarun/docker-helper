@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -445,47 +446,47 @@ func TestCallbackReturnCleansSocket(t *testing.T) {
 	lockFile.Close()
 }
 
-// While first callback is blocked, second instance cannot get lock and does not delete socket.
-func TestBlockedCallbackPreventsSecondInstance(t *testing.T) {
+// prepareListener error inside runWithLock: callback not called, lock released,
+// regular file untouched, lock file remains.
+func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	started := make(chan struct{})
-	proceed := make(chan struct{})
-	done := make(chan struct{})
+	// Place a regular file where the socket would be.
+	if err := os.WriteFile(socketPath, []byte("stub"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	before := mustStat(t, socketPath)
 
-	go func() {
-		defer close(done)
-		runWithLock(lockPath, socketPath, func(net.Listener) error {
-			close(started)
-			<-proceed
-			return nil
-		})
-	}()
-
-	<-started
-
-	// Second instance must fail.
+	called := false
 	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+		called = true
 		return nil
 	})
 	if err == nil {
-		t.Fatal("second instance should fail")
+		t.Fatal("expected error from runWithLock")
+	}
+	if called {
+		t.Error("callback must not be called on prepareListener error")
 	}
 
-	// Socket must still exist.
-	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-		t.Error("socket should exist while first callback is blocked")
+	// Regular file must be untouched.
+	after := mustStat(t, socketPath)
+	if before.Size() != after.Size() || before.Mode() != after.Mode() {
+		t.Error("regular file must not be modified")
 	}
 
-	// Release first instance and wait for it to finish.
-	close(proceed)
-	<-done
+	// Lock must be released.
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("lock not released: %v", err)
+	}
+	lockFile.Close()
 
-	// Socket must be cleaned up.
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Error("socket should be removed after first instance completes")
+	// Lock file must remain.
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		t.Error("lock file should remain")
 	}
 }
 
@@ -510,85 +511,111 @@ func TestSubsequentStartupAfterShutdown(t *testing.T) {
 	}
 }
 
-// Parallel startup: only one succeeds, winner is held via channels, properly cleaned up.
+// Parallel startup: one holder keeps the lock; competitors all fail;
+// after release the holder cleans up and a subsequent start works.
 func TestParallelStartupRace(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("Socket: %v", err)
-	}
-	sa := &syscall.SockaddrUnix{Name: socketPath}
-	if err := syscall.Bind(fd, sa); err != nil {
-		syscall.Close(fd)
-		t.Fatalf("Bind: %v", err)
-	}
-	syscall.Close(fd)
+	const competitors = 8
 
-	const n = 10
-	ready := make(chan struct{}, n)
-	start := make(chan struct{})
-	hasLock := make(chan struct{})
-	proceed := make(chan struct{})
-	results := make(chan error, n)
+	// --- Phase 1: start the holder and wait for it to enter the callback ---
+	holderStarted := make(chan struct{})
+	holderProceed := make(chan struct{})
+	holderDone := make(chan struct{})
 
-	for i := 0; i < n; i++ {
+	go func() {
+		defer close(holderDone)
+		runWithLock(lockPath, socketPath, func(net.Listener) error {
+			close(holderStarted)
+			<-holderProceed
+			return nil
+		})
+	}()
+
+	var proceedOnce sync.Once
+	t.Cleanup(func() { proceedOnce.Do(func() { close(holderProceed) }) })
+
+	<-holderStarted
+
+	// Socket must exist while the holder is active.
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Fatal("socket should exist while holder is active")
+	}
+
+	// --- Phase 2: launch competitors while holder blocks ---
+	compReady := make(chan struct{}, competitors)
+	compGo := make(chan struct{})
+	compResults := make(chan error, competitors)
+	compCallbackCalled := make(chan bool, competitors)
+
+	for i := 0; i < competitors; i++ {
 		go func() {
-			ready <- struct{}{}
-			<-start
+			compReady <- struct{}{}
+			<-compGo
 
 			err := runWithLock(lockPath, socketPath, func(net.Listener) error {
-				hasLock <- struct{}{}
-				<-proceed
+				compCallbackCalled <- true
 				return nil
 			})
-			results <- err
+			compResults <- err
 		}()
 	}
 
-	// Wait for all goroutines to be ready.
-	for i := 0; i < n; i++ {
-		<-ready
+	// Wait for all competitors to be ready (before they attempt the lock).
+	for i := 0; i < competitors; i++ {
+		<-compReady
 	}
 
-	// Release all goroutines simultaneously.
-	close(start)
+	// Release all competitors simultaneously.
+	close(compGo)
 
-	// Wait for the winner to signal it holds the lock.
-	<-hasLock
-
-	// Socket must exist while winner holds the lock.
-	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
-		t.Error("socket should exist while winner holds lock")
-	}
-
-	// Release the winner.
-	close(proceed)
-
-	// Collect all results.
-	var successes, failures int
-	for i := 0; i < n; i++ {
-		err := <-results
+	// Collect all competitor results BEFORE releasing the holder.
+	for i := 0; i < competitors; i++ {
+		err := <-compResults
 		if err == nil {
-			successes++
-		} else {
-			failures++
+			t.Errorf("competitor %d should fail, got nil", i)
 		}
 	}
 
-	if successes != 1 {
-		t.Errorf("expected exactly 1 success, got %d", successes)
-	}
-	if failures != n-1 {
-		t.Errorf("expected %d failures, got %d", n-1, failures)
+	// No competitor callback should have been called.
+	select {
+	case called := <-compCallbackCalled:
+		t.Fatalf("competitor callback must not be called (called=%v)", called)
+	default:
 	}
 
-	// Winner cleaned up the socket.
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Error("socket should be removed after winner completes")
+	// Socket must still exist (competitors must not have deleted it).
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Error("socket should exist while holder blocks competitors")
 	}
+
+	// --- Phase 3: release the holder and wait for it to finish ---
+	proceedOnce.Do(func() { close(holderProceed) })
+	<-holderDone
+
+	// Holder must have cleaned up the socket.
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("socket should be removed after holder completes")
+	}
+
+	// --- Phase 4: subsequent startup must work ---
+	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("subsequent runWithLock: %v", err)
+	}
+}
+
+func mustStat(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info
 }
 
 func fileExists(path string) bool {
