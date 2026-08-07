@@ -48,6 +48,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeAudit(auditRecord{
+		Event:     "build.start",
+		SessionID: session.ID,
+		Image:     req.Image,
+		Context:   req.Context,
+		Dockerfile: req.Dockerfile,
+	})
+
 	started := time.Now()
 
 	args := []string{
@@ -68,21 +76,39 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	output, err := buildCmd("docker", args...)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
+	var result string
+	var exitCode *int
+
 	if err != nil {
+		exitCode = extractExitCode(err)
+		result = "build_error"
+
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,
 			Message:  fmt.Sprintf("docker build failed: %v", err),
 			Output:   string(output),
 			Duration: duration,
 		})
-		return
+	} else {
+		result = "success"
+
+		writeJSON(w, http.StatusOK, response{
+			OK:       true,
+			Message:  "image built successfully",
+			Output:   string(output),
+			Duration: duration,
+		})
 	}
 
-	writeJSON(w, http.StatusOK, response{
-		OK:       true,
-		Message:  "image built successfully",
-		Output:   string(output),
-		Duration: duration,
+	writeAudit(auditRecord{
+		Event:     "build.finish",
+		SessionID: session.ID,
+		Image:     req.Image,
+		Context:   req.Context,
+		Dockerfile: req.Dockerfile,
+		Result:    result,
+		ExitCode:  exitCode,
+		Duration:  duration,
 	})
 }
 
