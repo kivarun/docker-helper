@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -241,30 +242,100 @@ func TestLockHeldDuringServe(t *testing.T) {
 	f.Close()
 }
 
-func TestIsLiveSocket(t *testing.T) {
+func TestCheckSocketLive(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
-
-	if isLiveSocket(socketPath) {
-		t.Error("non-existent socket should not be live")
-	}
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("net.Listen() error: %v", err)
 	}
+	defer listener.Close()
 
-	if !isLiveSocket(socketPath) {
-		listener.Close()
-		t.Error("listening socket should be live")
+	live, err := checkSocket(socketPath)
+	if err != nil {
+		t.Fatalf("checkSocket() error: %v", err)
+	}
+	if !live {
+		t.Error("listening socket should be detected as live")
+	}
+}
+
+func TestCheckSocketECONNREFUSED(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	// Create a stale socket (bound but not listening).
+	f, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("cannot create socket: %v", err)
+	}
+	addr := &syscall.SockaddrUnix{Name: socketPath}
+	if err := syscall.Bind(f, addr); err != nil {
+		syscall.Close(f)
+		t.Fatalf("cannot bind socket: %v", err)
+	}
+	syscall.Close(f)
+
+	live, err := checkSocket(socketPath)
+	if err != nil {
+		t.Fatalf("checkSocket() error: %v", err)
+	}
+	if live {
+		t.Error("stale socket should not be detected as live")
+	}
+}
+
+func TestCheckSocketUnknownError(t *testing.T) {
+	// Simulate an unknown dial error by injecting a failing dial function.
+	orig := dialUnixFunc
+	defer func() { dialUnixFunc = orig }()
+
+	dialUnixFunc = func(addr string, timeout time.Duration) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "unix", Err: syscall.EACCES}
 	}
 
-	listener.Close()
+	live, err := checkSocket("/tmp/does-not-matter.sock")
+	if err == nil {
+		t.Fatal("expected error for unknown dial error")
+	}
+	if live {
+		t.Error("should not report live on error")
+	}
+}
 
-	time.Sleep(100 * time.Millisecond)
+func TestPrepareListenerUnknownDialError(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
 
-	if isLiveSocket(socketPath) {
-		t.Error("closed socket should not be live")
+	// Create a real socket file so os.Stat sees ModeSocket.
+	f, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("cannot create socket: %v", err)
+	}
+	addr := &syscall.SockaddrUnix{Name: socketPath}
+	if err := syscall.Bind(f, addr); err != nil {
+		syscall.Close(f)
+		t.Fatalf("cannot bind socket: %v", err)
+	}
+	syscall.Close(f)
+
+	// Inject a dial error that is not ECONNREFUSED.
+	orig := dialUnixFunc
+	defer func() { dialUnixFunc = orig }()
+
+	dialUnixFunc = func(a string, timeout time.Duration) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected failure")}
+	}
+
+	_, err = prepareListener(socketPath)
+	if err == nil {
+		t.Fatal("expected error from prepareListener on unknown dial error")
+	}
+
+	// Socket must not be deleted.
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Error("socket should not be deleted on unknown dial error")
 	}
 }
 

@@ -95,7 +95,11 @@ func prepareListener(socketPath string) (net.Listener, error) {
 	}
 
 	// It's a socket — check if it's live or stale.
-	if isLiveSocket(socketPath) {
+	live, err := checkSocket(socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot check socket %s: %w", socketPath, err)
+	}
+	if live {
 		return nil, fmt.Errorf("another docker-helper is already listening on %s", socketPath)
 	}
 
@@ -121,13 +125,28 @@ func createListener(socketPath string) (net.Listener, error) {
 	return listener, nil
 }
 
-func isLiveSocket(socketPath string) bool {
-	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
+// dialUnixFunc is the dial function used to probe a Unix socket.
+// It can be replaced in tests to simulate specific dial errors.
+var dialUnixFunc = func(addr string, timeout time.Duration) (net.Conn, error) {
+	return net.DialTimeout("unix", addr, timeout)
+}
+
+// checkSocket returns (true, nil) if a process is listening on the socket,
+// (false, nil) if the socket is stale (ECONNREFUSED),
+// or (false, err) for any other dial error.
+func checkSocket(socketPath string) (bool, error) {
+	conn, err := dialUnixFunc(socketPath, 2*time.Second)
 	if err != nil {
-		return false
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && opErr.Err != nil {
+			if errors.Is(opErr.Err, syscall.ECONNREFUSED) {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("cannot determine socket status: %w", err)
 	}
 	conn.Close()
-	return true
+	return true, nil
 }
 
 func runServe() error {
@@ -147,33 +166,29 @@ func runServe() error {
 	if err != nil {
 		return err
 	}
+	defer lockFile.Close()
 
 	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
 	if err != nil {
-		lockFile.Close()
 		return err
 	}
 
 	db, err := openDatabase(cfg.DatabasePath)
 	if err != nil {
-		lockFile.Close()
 		return err
 	}
 	defer db.Close()
 
 	if err := initializeDatabase(db); err != nil {
-		lockFile.Close()
 		return err
 	}
 
 	if err := cleanupExpiredSessions(db); err != nil {
-		lockFile.Close()
 		return err
 	}
 
 	listener, err := prepareListener(cfg.SocketPath)
 	if err != nil {
-		lockFile.Close()
 		return err
 	}
 
@@ -200,13 +215,9 @@ func runServe() error {
 	fmt.Printf("docker-helper listening on %s\n", cfg.SocketPath)
 
 	// server.Serve blocks until the server is stopped.
-	// On exit, lockFile is closed by the deferred/return path, releasing the lock.
-	serveErr := server.Serve(listener)
-
-	lockFile.Close()
-
-	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		return serveErr
+	// On exit, lockFile is closed by defer, releasing the lock.
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
 
 	return nil
