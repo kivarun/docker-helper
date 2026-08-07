@@ -91,6 +91,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		exitCode = extractExitCode(err)
 		result = "build_error"
 
+		log.Printf("docker build error: %v", err)
+
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,
 			Code:     "docker_build_failed",

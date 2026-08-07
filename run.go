@@ -252,6 +252,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			exitCode = extractExitCode(err)
 			result = "docker_error"
 
+			log.Printf("docker run error: %v", err)
+
 			writeJSON(w, http.StatusInternalServerError, response{
 				OK:       false,
 				Code:     "docker_run_failed",

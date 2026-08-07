@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os/exec"
 	"time"
@@ -66,6 +67,8 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		exitCode = extractExitCode(err)
 		result = "pull_error"
+
+		log.Printf("docker pull error: %v", err)
 
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,

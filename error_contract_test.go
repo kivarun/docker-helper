@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -666,10 +667,6 @@ func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 // ---------- all ok:false responses have non-empty code ----------
 
 func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
-	// This is a meta-test that verifies every ok:false response has a code.
-	// Each sub-test above already checks this, but this test ensures the
-	// invariant holds for the most common error paths in a single pass.
-
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -677,11 +674,13 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		req  *http.Request
+		name    string
+		handler func(http.ResponseWriter, *http.Request)
+		req     *http.Request
 	}{
 		{
-			name: "invalid_json_run",
+			name:    "invalid_json_run",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handleRun(w, r) },
 			req: func() *http.Request {
 				r := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{bad`)))
 				r.Header.Set("Authorization", "Bearer "+result.Token)
@@ -689,7 +688,35 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 			}(),
 		},
 		{
-			name: "invalid_image_run",
+			name:    "invalid_json_build",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handleBuild(w, r) },
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{bad`)))
+				r.Header.Set("Authorization", "Bearer "+result.Token)
+				return r
+			}(),
+		},
+		{
+			name:    "invalid_json_pull",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handlePull(w, r) },
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader([]byte(`{bad`)))
+				r.Header.Set("Authorization", "Bearer "+result.Token)
+				return r
+			}(),
+		},
+		{
+			name:    "invalid_json_sessions",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handleCreateSession(w, r) },
+			req: func() *http.Request {
+				r := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{bad`)))
+				withAuth(r)
+				return r
+			}(),
+		},
+		{
+			name:    "invalid_image_run",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handleRun(w, r) },
 			req: func() *http.Request {
 				b, _ := json.Marshal(map[string]string{"image": ""})
 				r := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(b))
@@ -698,7 +725,18 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 			}(),
 		},
 		{
-			name: "invalid_environment",
+			name:    "invalid_image_pull",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handlePull(w, r) },
+			req: func() *http.Request {
+				b, _ := json.Marshal(map[string]string{"image": ""})
+				r := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(b))
+				r.Header.Set("Authorization", "Bearer "+result.Token)
+				return r
+			}(),
+		},
+		{
+			name:    "invalid_environment",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handleRun(w, r) },
 			req: func() *http.Request {
 				b, _ := json.Marshal(map[string]any{
 					"image":       "alpine:latest",
@@ -710,7 +748,8 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 			}(),
 		},
 		{
-			name: "invalid_mount",
+			name:    "invalid_mount",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handleRun(w, r) },
 			req: func() *http.Request {
 				b, _ := json.Marshal(map[string]any{
 					"image":  "alpine:latest",
@@ -722,7 +761,8 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 			}(),
 		},
 		{
-			name: "invalid_build_context",
+			name:    "invalid_build_context",
+			handler: func(w http.ResponseWriter, r *http.Request) { app.handleBuild(w, r) },
 			req: func() *http.Request {
 				b, _ := json.Marshal(map[string]any{
 					"context":    "",
@@ -739,16 +779,207 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			app.handleRun(w, tt.req)
+			tt.handler(w, tt.req)
 
 			var resp response
 			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-				// Try createSession handler for /sessions tests
-				return
+				t.Fatalf("decode: %v", err)
 			}
 			if !resp.OK && resp.Code == "" {
 				t.Errorf("ok=false response has empty code, status=%d", w.Code)
 			}
 		})
 	}
+}
+
+// ---------- Docker error logging ----------
+
+func TestDockerErrorLogBuild(t *testing.T) {
+	cap := captureStderr(t)
+	defer cap.flush()
+	log.SetOutput(os.Stderr)
+
+	app := newTestAppWithAuth(t)
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dfPath := app.Config.AllowedRoot + "/Dockerfile"
+	if err := os.WriteFile(dfPath, []byte("FROM scratch"), 0644); err != nil {
+		t.Fatalf("cannot write Dockerfile: %v", err)
+	}
+
+	const secretMarker = "secret_build_marker_xyz"
+	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte(secretMarker + "\n"), &mockExitError{code: 1, msg: "exit status 1"}
+	}
+
+	reqBody, _ := json.Marshal(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	raw := cap.buffer().String()
+
+	// Error is logged
+	if !containsLogMarker(raw, "docker build error") {
+		t.Errorf("expected docker build error in log, got:\n%s", raw)
+	}
+	// Docker output not logged
+	if containsLogMarker(raw, secretMarker) {
+		t.Error("Docker output must not appear in log")
+	}
+	// Token not logged
+	if containsLogMarker(raw, result.Token) {
+		t.Error("session token must not appear in log")
+	}
+
+	// Client response unchanged
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != "docker_build_failed" {
+		t.Errorf("expected code 'docker_build_failed', got %q", resp.Code)
+	}
+	if resp.Output != secretMarker+"\n" {
+		t.Errorf("expected output preserved, got %q", resp.Output)
+	}
+}
+
+func TestDockerErrorLogPull(t *testing.T) {
+	cap := captureStderr(t)
+	defer cap.flush()
+	log.SetOutput(os.Stderr)
+
+	app := newTestAppWithAuth(t)
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	const secretMarker = "secret_pull_marker_xyz"
+	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte(secretMarker + "\n"), &mockExitError{code: 1, msg: "exit status 1"}
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	raw := cap.buffer().String()
+
+	if !containsLogMarker(raw, "docker pull error") {
+		t.Errorf("expected docker pull error in log, got:\n%s", raw)
+	}
+	if containsLogMarker(raw, secretMarker) {
+		t.Error("Docker output must not appear in log")
+	}
+	if containsLogMarker(raw, result.Token) {
+		t.Error("session token must not appear in log")
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != "docker_pull_failed" {
+		t.Errorf("expected code 'docker_pull_failed', got %q", resp.Code)
+	}
+	if resp.Output != secretMarker+"\n" {
+		t.Errorf("expected output preserved, got %q", resp.Output)
+	}
+}
+
+func TestDockerErrorLogRun(t *testing.T) {
+	cap := captureStderr(t)
+	defer cap.flush()
+	log.SetOutput(os.Stderr)
+
+	app := newTestAppWithAuth(t)
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	const secretMarker = "secret_run_marker_xyz"
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte(secretMarker + "\n"), &mockExitError{code: 125, msg: "exit status 125"}
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	raw := cap.buffer().String()
+
+	if !containsLogMarker(raw, "docker run error") {
+		t.Errorf("expected docker run error in log, got:\n%s", raw)
+	}
+	if containsLogMarker(raw, secretMarker) {
+		t.Error("Docker output must not appear in log")
+	}
+	if containsLogMarker(raw, result.Token) {
+		t.Error("session token must not appear in log")
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Code != "docker_run_failed" {
+		t.Errorf("expected code 'docker_run_failed', got %q", resp.Code)
+	}
+	if resp.Output != secretMarker+"\n" {
+		t.Errorf("expected output preserved, got %q", resp.Output)
+	}
+}
+
+func containsLogMarker(raw, marker string) bool {
+	for _, line := range splitLines(raw) {
+		if len(line) == 0 {
+			continue
+		}
+		// Log lines start with a timestamp like "2026/08/07 ..."
+		if len(line) > 15 && line[4] == '/' && line[7] == '/' {
+			if containsSubstring(line, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
+func containsSubstring(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
