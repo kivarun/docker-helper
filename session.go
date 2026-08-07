@@ -13,6 +13,22 @@ import (
 )
 
 var ErrSessionNotFound = errors.New("session not found")
+var ErrInvalidWorkspace = errors.New("invalid workspace")
+var ErrDatabase = errors.New("database error")
+var ErrSystem = errors.New("system error")
+
+func classifyCreateSessionError(err error) string {
+	switch {
+	case errors.Is(err, ErrInvalidWorkspace):
+		return "invalid_workspace"
+	case errors.Is(err, ErrDatabase):
+		return "database_error"
+	case errors.Is(err, ErrSystem):
+		return "system_error"
+	default:
+		return "unknown_error"
+	}
+}
 
 type Session struct {
 	ID        string
@@ -29,45 +45,45 @@ type CreatedSession struct {
 
 func (a *App) createSession(workspace string) (*CreatedSession, error) {
 	if workspace == "" {
-		return nil, errors.New("workspace is required")
+		return nil, fmt.Errorf("workspace is required: %w", ErrInvalidWorkspace)
 	}
 
 	absWorkspace, err := filepath.Abs(workspace)
 	if err != nil {
-		return nil, fmt.Errorf("cannot resolve workspace path: %w", err)
+		return nil, fmt.Errorf("cannot resolve workspace path: %w: %w", err, ErrInvalidWorkspace)
 	}
 
 	absWorkspace, err = filepath.EvalSymlinks(absWorkspace)
 	if err != nil {
-		return nil, fmt.Errorf("cannot resolve workspace symlinks: %w", err)
+		return nil, fmt.Errorf("cannot resolve workspace symlinks: %w: %w", err, ErrInvalidWorkspace)
 	}
 
 	info, err := os.Stat(absWorkspace)
 	if err != nil {
-		return nil, fmt.Errorf("cannot access workspace: %w", err)
+		return nil, fmt.Errorf("cannot access workspace: %w: %w", err, ErrInvalidWorkspace)
 	}
 	if !info.IsDir() {
-		return nil, errors.New("workspace is not a directory")
+		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
 	}
 
 	allowedRoot, err := filepath.EvalSymlinks(a.Config.AllowedRoot)
 	if err != nil {
-		return nil, fmt.Errorf("cannot resolve allowed root: %w", err)
+		return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
 	}
 
 	if !isInside(allowedRoot, absWorkspace) {
-		return nil, fmt.Errorf("workspace must be inside %s", allowedRoot)
+		return nil, fmt.Errorf("workspace must be inside %s: %w", allowedRoot, ErrInvalidWorkspace)
 	}
 
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
-		return nil, fmt.Errorf("cannot generate session ID: %w", err)
+		return nil, fmt.Errorf("cannot generate session ID: %w: %w", err, ErrSystem)
 	}
 	sessionID := "dhs_" + hex.EncodeToString(idBytes)
 
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
-		return nil, fmt.Errorf("cannot generate session token: %w", err)
+		return nil, fmt.Errorf("cannot generate session token: %w: %w", err, ErrSystem)
 	}
 	token := "dht_" + hex.EncodeToString(tokenBytes)
 
@@ -87,7 +103,7 @@ func (a *App) createSession(workspace string) (*CreatedSession, error) {
 		expiresAt.Unix(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("cannot create session: %w", err)
+		return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
 	}
 
 	return &CreatedSession{
@@ -145,18 +161,52 @@ func (a *App) listSessions() ([]Session, error) {
 	return sessions, nil
 }
 
-func (a *App) deleteSession(id string) (bool, error) {
+func (a *App) deleteSession(id string) (*Session, error) {
+	// First get the session data before deleting
+	var s Session
+	var createdAt int64
+	var expiresAt int64
+	var revokedAt sql.NullInt64
+
+	err := a.DB.QueryRow(
+		`SELECT id, workspace, created_at, expires_at, revoked_at
+		 FROM sessions WHERE id = ?`,
+		id,
+	).Scan(&s.ID, &s.Workspace, &createdAt, &expiresAt, &revokedAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
+		}
+		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
+	}
+
+	s.CreatedAt = time.Unix(createdAt, 0)
+	s.ExpiresAt = time.Unix(expiresAt, 0)
+
+	if revokedAt.Valid {
+		t := time.Unix(revokedAt.Int64, 0)
+		s.RevokedAt = &t
+	}
+
+	// Now delete the session
 	result, err := a.DB.Exec(`DELETE FROM sessions WHERE id = ?`, id)
 	if err != nil {
-		return false, fmt.Errorf("cannot delete session: %w", err)
+		// Session was found, but delete failed - return session with error
+		return &s, fmt.Errorf("cannot delete session: %w: %w", err, ErrDatabase)
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("cannot check deletion result: %w", err)
+		// Session was found, but RowsAffected failed - return session with error
+		return &s, fmt.Errorf("cannot check deletion result: %w: %w", err, ErrDatabase)
 	}
 
-	return rowsAffected > 0, nil
+	if rowsAffected == 0 {
+		return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
+	}
+
+	return &s, nil
 }
 
 func (a *App) findSessionByToken(token string) (*Session, error) {

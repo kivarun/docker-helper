@@ -10,13 +10,14 @@ import (
 type auditRecord struct {
 	Time        string       `json:"time"`
 	Event       string       `json:"event"`
-	SessionID   string       `json:"session_id"`
+	SessionID   string       `json:"session_id,omitempty"`
 	Image       string       `json:"image,omitempty"`
 	Command     []string     `json:"command,omitempty"`
 	Mounts      []auditMount `json:"mounts,omitempty"`
 	EnvKeys     []string     `json:"env_keys,omitempty"`
 	Context     string       `json:"context,omitempty"`
 	Dockerfile  string       `json:"dockerfile,omitempty"`
+	Workspace   string       `json:"workspace,omitempty"`
 	Result      string       `json:"result,omitempty"`
 	ExitCode    *int         `json:"exit_code,omitempty"`
 	Duration    string       `json:"duration,omitempty"`

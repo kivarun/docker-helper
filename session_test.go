@@ -253,8 +253,8 @@ func TestDeleteSession(t *testing.T) {
 		t.Fatalf("deleteSession() error: %v", err)
 	}
 
-	if !deleted {
-		t.Error("expected deleted to be true")
+	if deleted == nil {
+		t.Error("expected deleted session to be returned")
 	}
 
 	sessions, err := app.listSessions()
@@ -271,16 +271,16 @@ func TestDeleteSessionNotFound(t *testing.T) {
 	app := newTestApp(t)
 
 	deleted, err := app.deleteSession("dhs_nonexistent")
-	if err != nil {
-		t.Fatalf("deleteSession() error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for nonexistent session")
 	}
 
-	if deleted {
-		t.Error("expected deleted to be false for nonexistent session")
+	if deleted != nil {
+		t.Error("expected deleted to be nil for nonexistent session")
 	}
 }
 
-func TestDeleteSessionRepeatedReturnsFalse(t *testing.T) {
+func TestDeleteSessionRepeatedReturnsError(t *testing.T) {
 	app := newTestApp(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -293,13 +293,9 @@ func TestDeleteSessionRepeatedReturnsFalse(t *testing.T) {
 		t.Fatalf("first deleteSession() error: %v", err)
 	}
 
-	deleted, err := app.deleteSession(result.Session.ID)
-	if err != nil {
-		t.Fatalf("second deleteSession() error: %v", err)
-	}
-
-	if deleted {
-		t.Error("expected second deletion to return false")
+	_, err = app.deleteSession(result.Session.ID)
+	if err == nil {
+		t.Fatal("expected error for second deletion")
 	}
 }
 

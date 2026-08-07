@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -39,6 +40,8 @@ func sessionToJSON(s Session) sessionJSON {
 }
 
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+
 	if !a.requireAdmin(w, r) {
 		return
 	}
@@ -49,15 +52,38 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeAudit(auditRecord{
+			Event:    "session.create",
+			Result:   "invalid_json",
+			Duration: duration,
+		})
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 
 	result, err := a.createSession(req.Workspace)
+	duration := time.Since(started).Round(time.Millisecond).String()
+
 	if err != nil {
+		resultCode := classifyCreateSessionError(err)
+		writeAudit(auditRecord{
+			Event:     "session.create",
+			Workspace: req.Workspace,
+			Result:    resultCode,
+			Duration:  duration,
+		})
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	writeAudit(auditRecord{
+		Event:     "session.create",
+		SessionID: result.Session.ID,
+		Workspace: result.Session.Workspace,
+		Result:    "success",
+		Duration:  duration,
+	})
 
 	writeJSONRaw(w, http.StatusCreated, createSessionResponse{
 		OK:      true,
@@ -90,26 +116,69 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+
 	if !a.requireAdmin(w, r) {
 		return
 	}
 
 	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
 	if id == "" {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeAudit(auditRecord{
+			Event:    "session.delete",
+			Result:   "invalid_session_id",
+			Duration: duration,
+		})
 		writeError(w, http.StatusBadRequest, "session id is required")
 		return
 	}
 
-	deleted, err := a.deleteSession(id)
+	session, err := a.deleteSession(id)
+	duration := time.Since(started).Round(time.Millisecond).String()
+
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		var resultCode string
+		var workspace string
+
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			resultCode = "not_found"
+		case errors.Is(err, ErrDatabase):
+			resultCode = "database_error"
+			if session != nil {
+				workspace = session.Workspace
+			}
+		default:
+			resultCode = "unknown_error"
+		}
+
+		auditRec := auditRecord{
+			Event:     "session.delete",
+			SessionID: id,
+			Result:    resultCode,
+			Duration:  duration,
+		}
+		if workspace != "" {
+			auditRec.Workspace = workspace
+		}
+		writeAudit(auditRec)
+
+		if errors.Is(err, ErrSessionNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
-	if !deleted {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
+	writeAudit(auditRecord{
+		Event:     "session.delete",
+		SessionID: session.ID,
+		Workspace: session.Workspace,
+		Result:    "success",
+		Duration:  duration,
+	})
 
 	w.WriteHeader(http.StatusNoContent)
 }

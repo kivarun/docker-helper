@@ -146,7 +146,7 @@ func TestRunSessionAuthDeletedSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deleteSession() error: %v", err)
 	}
-	if !deleted {
+	if deleted == nil {
 		t.Fatal("expected session to be deleted")
 	}
 
