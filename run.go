@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -80,6 +81,10 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		return nil, fmt.Errorf("mount target is invalid: %s", mount.Target)
 	}
 
+	if strings.Contains(cleaned, ",") {
+		return nil, fmt.Errorf("mount target contains unsupported character: %s", cleaned)
+	}
+
 	sourcePath := filepath.Join(workspace, mount.Source)
 	sourcePath, err := filepath.Abs(sourcePath)
 	if err != nil {
@@ -92,6 +97,10 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 			return nil, fmt.Errorf("mount source does not exist: %s", mount.Source)
 		}
 		return nil, fmt.Errorf("cannot resolve mount source: %w", err)
+	}
+
+	if strings.Contains(sourcePath, ",") {
+		return nil, fmt.Errorf("mount source contains unsupported character: %s", sourcePath)
 	}
 
 	if !isInside(workspace, sourcePath) {
@@ -109,7 +118,7 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 
 	return &resolvedMount{
 		HostPath: sourcePath,
-		Target:   mount.Target,
+		Target:   cleaned,
 		ReadOnly: mount.ReadOnly,
 	}, nil
 }
@@ -167,11 +176,11 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if targetSeen[mount.Target] {
-			writeErrorWithCode(w, http.StatusBadRequest, "invalid_mount", "duplicate mount target: "+mount.Target)
+		if targetSeen[resolved.Target] {
+			writeErrorWithCode(w, http.StatusBadRequest, "invalid_mount", "duplicate mount target: "+resolved.Target)
 			return
 		}
-		targetSeen[mount.Target] = true
+		targetSeen[resolved.Target] = true
 
 		resolvedMounts = append(resolvedMounts, *resolved)
 	}

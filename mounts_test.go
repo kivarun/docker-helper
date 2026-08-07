@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -685,5 +686,197 @@ func TestMountInvalidMountCode(t *testing.T) {
 
 	if resp.Code != "invalid_mount" {
 		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	}
+}
+
+func TestMountCommaInTarget(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	called := false
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		called = true
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/data,readonly"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if resp.Code != "invalid_mount" {
+		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	}
+
+	if called {
+		t.Error("RunCommand should not be called with comma in target")
+	}
+}
+
+func TestMountCommaInSource(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	commaDir := filepath.Join(app.Config.AllowedRoot, "dir,with,commas")
+	if err := os.MkdirAll(commaDir, 0755); err != nil {
+		t.Fatalf("cannot create comma dir: %v", err)
+	}
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	called := false
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		called = true
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": "dir,with,commas", "target": "/data"},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if resp.Code != "invalid_mount" {
+		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	}
+
+	if called {
+		t.Error("RunCommand should not be called with comma in source")
+	}
+}
+
+func TestMountDuplicateTargetAfterClean(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	called := false
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		called = true
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/data"},
+			{"source": ".", "target": "/data/."},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if resp.Code != "invalid_mount" {
+		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
+	}
+
+	if called {
+		t.Error("RunCommand should not be called with duplicate targets")
+	}
+}
+
+func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		capturedArgs = args
+		return []byte("ok"), nil
+	}
+
+	reqBody := map[string]any{
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{"source": ".", "target": "/data/."},
+		},
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--mount" && i+1 < len(capturedArgs) {
+			spec := capturedArgs[i+1]
+			if strings.HasSuffix(spec, "target=/data") && !strings.Contains(spec, "target=/data/.") {
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		t.Errorf("expected normalized target=/data in mount spec, args: %v", capturedArgs)
 	}
 }
