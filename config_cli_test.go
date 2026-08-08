@@ -2091,8 +2091,8 @@ func TestConfigUnsetHelp(t *testing.T) {
 	if !strings.Contains(out, "info") {
 		t.Error("help should mention default info")
 	}
-	if !strings.Contains(out, "log_level") && !strings.Contains(out, "derived") {
-		t.Error("help should mention derived behavior")
+	if !strings.Contains(out, "derived") {
+		t.Error("help should mention derived behavior for audit_enabled")
 	}
 	if !strings.Contains(out, "unset") {
 		t.Error("help should mention unset feedback")
