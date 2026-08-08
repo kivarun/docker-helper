@@ -31,26 +31,23 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
 	if req.Image == "" {
-		writeError(w, http.StatusBadRequest, "invalid_image", "image is required")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image is required")
 		return
 	}
 
 	if !imagePattern.MatchString(req.Image) {
-		writeError(w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
 		return
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:      time.Now().UTC().Format(time.RFC3339),
-		Stream:    "audit",
 		Event:     "pull.start",
 		SessionID: session.ID,
-		RequestID: requestIDFromContext(ctx),
 		Image:     req.Image,
 	})
 
@@ -78,7 +75,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 		)
 
-		writeJSONWithCtx(ctx, w, http.StatusInternalServerError, response{
+		writeJSON(ctx, w, http.StatusInternalServerError, response{
 			OK:       false,
 			Code:     "docker_pull_failed",
 			Message:  "docker pull failed",
@@ -88,7 +85,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	} else {
 		result = "success"
 
-		writeJSONWithCtx(ctx, w, http.StatusOK, response{
+		writeJSON(ctx, w, http.StatusOK, response{
 			OK:       true,
 			Message:  "image pulled successfully",
 			Output:   string(output),
@@ -97,11 +94,8 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:      time.Now().UTC().Format(time.RFC3339),
-		Stream:    "audit",
 		Event:     "pull.finish",
 		SessionID: session.ID,
-		RequestID: requestIDFromContext(ctx),
 		Image:     req.Image,
 		Result:    result,
 		ExitCode:  exitCode,

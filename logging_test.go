@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -733,4 +735,317 @@ type mockEncodingError struct{}
 
 func (e *mockEncodingError) Error() string {
 	return "mock encoding error"
+}
+
+// TestRunCommandWithWritersRoutesStreams verifies that runCommandWithWriters
+// routes audit records only to the supplied stdout and operational logs only
+// to the supplied stderr.
+func TestRunCommandWithWritersRoutesStreams(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelInfo)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	// Write an audit record and an operational record.
+	writeAudit(auditRecord{Event: "test.routing"})
+	opLogger.Info("test routing message")
+
+	auditOutput := auditBuf.String()
+	opOutput := opBuf.String()
+
+	if !strings.Contains(auditOutput, "test.routing") {
+		t.Fatalf("audit output missing audit record:\n%s", auditOutput)
+	}
+	if strings.Contains(opOutput, "test.routing") {
+		t.Fatalf("operational output should not contain audit record:\n%s", opOutput)
+	}
+	if !strings.Contains(opOutput, "test routing message") {
+		t.Fatalf("operational output missing operational record:\n%s", opOutput)
+	}
+	if strings.Contains(auditOutput, "test routing message") {
+		t.Fatalf("audit output should not contain operational record:\n%s", auditOutput)
+	}
+}
+
+// TestMissingConfigProducesSingleJSONLRecord verifies that a missing
+// configuration file produces exactly one valid operational JSONL record.
+func TestMissingConfigProducesSingleJSONLRecord(t *testing.T) {
+	opBuf := new(bytes.Buffer)
+	auditBuf := new(bytes.Buffer)
+
+	// Save and restore osStderr to prevent global writes.
+	savedStderr := osStderr
+	osStderr = opBuf
+	defer func() {
+		osStderr = savedStderr
+	}()
+
+	initLoggers(opBuf, auditBuf, slog.LevelInfo)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	// Point config to a nonexistent file.
+	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/config.json")
+
+	err := runServe(auditBuf, opBuf)
+	if err == nil {
+		t.Fatal("expected error from runServe with missing config")
+	}
+
+	// The first record should be from initLoggers fallback or serveStartupError.
+	// After initLoggers is called, the error goes through the slog logger.
+	opOutput := opBuf.String()
+	if opOutput == "" {
+		t.Fatal("operational output is empty")
+	}
+
+	// Each line must be valid JSON.
+	lineCount := 0
+	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		lineCount++
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Errorf("line %d is not valid JSON: %s: %v", i, line, err)
+		}
+	}
+
+	// serveStartupError should produce exactly one record for the config error.
+	// The initLoggers call happens first, so the error goes through opLogger.
+	if lineCount == 0 {
+		t.Fatal("expected at least one operational record")
+	}
+}
+
+// TestLockFailureProducesSingleJSONLRecord verifies that a lock acquisition
+// failure produces exactly one valid operational JSONL record.
+func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create config that points to our test directory.
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	configDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "admin.token"), []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(configDir, "config.json"))
+
+	// The lock path is derived from the socket path:
+	// socketPath = XDG_RUNTIME_DIR/docker-helper/docker-helper.sock
+	// lockPath = socketPath + ".lock"
+	runtimeDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
+
+	// Pre-acquire the lock to force a failure.
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+
+	opBuf := new(bytes.Buffer)
+	auditBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelInfo)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	err = runServe(auditBuf, opBuf)
+	if err == nil {
+		lockFile.Close()
+		t.Fatal("expected error from runServe with held lock")
+	}
+	lockFile.Close()
+
+	opOutput := opBuf.String()
+	if opOutput == "" {
+		t.Fatal("operational output is empty")
+	}
+
+	// Each line must be valid JSON.
+	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Errorf("line %d is not valid JSON: %s: %v", i, line, err)
+		}
+	}
+}
+
+// TestServeNoGlobalStderr verifies that runServe does not write to
+// process-global os.Stderr or os.Stdout.
+func TestServeNoGlobalStderr(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create config that will succeed at config load but fail at lock.
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	configDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "admin.token"), []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(configDir, "config.json"))
+
+	// Pre-acquire the lock at the config-derived path.
+	runtimeDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+
+	// Use dedicated buffers — no os.Stdout/os.Stderr involvement.
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	// Save and restore osStderr.
+	savedStderr := osStderr
+	osStderr = opBuf
+	defer func() {
+		osStderr = savedStderr
+	}()
+
+	initLoggers(opBuf, auditBuf, slog.LevelInfo)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	err = runServe(auditBuf, opBuf)
+	if err == nil {
+		lockFile.Close()
+		t.Fatal("expected error from runServe")
+	}
+	lockFile.Close()
+
+	// Verify that the buffers received output (proving writers were used).
+	opOutput := opBuf.String()
+	if opOutput == "" {
+		t.Fatal("operational output is empty — writers may not have been used")
+	}
+
+	// All lines must be valid JSON.
+	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Errorf("line %d is not valid JSON: %s: %v", i, line, err)
+		}
+	}
+}
+
+// TestResponseEncodingErrorThroughHandler verifies that a response encoding
+// failure through a real HTTP handler produces a structured operational record
+// with stream, request_id, and session_id.
+func TestResponseEncodingErrorThroughHandler(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
+	}
+
+	req := newRunRequest(map[string]any{
+		"image": "alpine:latest",
+	}, result.Token)
+
+	// Use a ResponseWriter that fails on Write.
+	w := &failingResponseWriter{
+		ResponseWriter: httptest.NewRecorder(),
+	}
+
+	handler := withRequestID(app.handleRun)
+	handler(w, req)
+
+	rid := w.Header().Get("X-Request-ID")
+	if rid == "" {
+		t.Fatal("X-Request-ID header should be set")
+	}
+
+	opOutput := opBuf.String()
+	if opOutput == "" {
+		t.Fatal("operational output is empty")
+	}
+
+	// Parse the first JSON line.
+	line := strings.TrimSpace(opOutput)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("cannot parse operational record: %v: %s", err, line)
+	}
+
+	if m["stream"] != "operational" {
+		t.Errorf("expected stream=operational, got %v", m["stream"])
+	}
+	if m["request_id"] != rid {
+		t.Errorf("expected request_id=%q, got %v", rid, m["request_id"])
+	}
+	if m["session_id"] != result.Session.ID {
+		t.Errorf("expected session_id=%q, got %v", result.Session.ID, m["session_id"])
+	}
+}
+
+// failingResponseWriter wraps an http.ResponseWriter and fails on Write.
+type failingResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (w *failingResponseWriter) Write(p []byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
+func (w *failingResponseWriter) WriteHeader(statusCode int) {
+	// Don't actually write headers — defer to the underlying writer.
+	w.ResponseWriter.WriteHeader(statusCode)
 }

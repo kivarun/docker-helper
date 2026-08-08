@@ -130,30 +130,30 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
 	if req.Image == "" {
-		writeError(w, http.StatusBadRequest, "invalid_image", "image is required")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image is required")
 		return
 	}
 
 	if !imagePattern.MatchString(req.Image) {
-		writeError(w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
 		return
 	}
 
 	if req.Workdir != "" {
 		if !filepath.IsAbs(req.Workdir) {
-			writeError(w, http.StatusBadRequest, "invalid_workdir", "workdir must be an absolute path")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_workdir", "workdir must be an absolute path")
 			return
 		}
 	}
 
 	for name := range req.Environment {
 		if !envNamePattern.MatchString(name) {
-			writeError(w, http.StatusBadRequest, "invalid_environment", "invalid environment variable name")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_environment", "invalid environment variable name")
 			return
 		}
 	}
@@ -170,12 +170,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	for _, mount := range req.Mounts {
 		resolved, err := resolveMount(mount, session.Workspace)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
 			return
 		}
 
 		if targetSeen[resolved.Target] {
-			writeError(w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
 			return
 		}
 		targetSeen[resolved.Target] = true
@@ -199,11 +199,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:            time.Now().UTC().Format(time.RFC3339),
-		Stream:          "audit",
 		Event:           "run.start",
 		SessionID:       session.ID,
-		RequestID:       requestIDFromContext(ctx),
 		Image:           req.Image,
 		CommandArgCount: cmdArgCount,
 		Mounts:          mountAudit,
@@ -259,7 +256,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			exitCode = ec
 			result = "container_exit_nonzero"
 
-			writeJSONWithCtx(ctx, w, http.StatusOK, response{
+			writeJSON(ctx, w, http.StatusOK, response{
 				OK:       false,
 				Code:     "container_exit_nonzero",
 				Message:  "container exited with non-zero status",
@@ -276,7 +273,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", err.Error()),
 			)
 
-			writeJSONWithCtx(ctx, w, http.StatusInternalServerError, response{
+			writeJSON(ctx, w, http.StatusInternalServerError, response{
 				OK:       false,
 				Code:     "docker_run_failed",
 				Message:  "docker run failed",
@@ -287,7 +284,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	} else {
 		result = "success"
 
-		writeJSONWithCtx(ctx, w, http.StatusOK, response{
+		writeJSON(ctx, w, http.StatusOK, response{
 			OK:       true,
 			Message:  "container finished successfully",
 			Output:   string(output),
@@ -296,11 +293,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:            time.Now().UTC().Format(time.RFC3339),
-		Stream:          "audit",
 		Event:           "run.finish",
 		SessionID:       session.ID,
-		RequestID:       requestIDFromContext(ctx),
 		Image:           req.Image,
 		CommandArgCount: cmdArgCount,
 		Mounts:          mountAudit,

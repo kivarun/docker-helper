@@ -214,9 +214,9 @@ func serveWithShutdown(
 	}
 }
 
-func runServe(stderr io.Writer) error {
+func runServe(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
-	initLoggers(stderr, os.Stdout, slog.LevelInfo)
+	initLoggers(stderr, stdout, slog.LevelInfo)
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -229,9 +229,11 @@ func runServe(stderr io.Writer) error {
 	}
 
 	// Re-initialize with the configured log level.
-	initLoggers(stderr, os.Stdout, cfg.LogLevel)
+	initLoggers(stderr, stdout, cfg.LogLevel)
 
-	return runWithLock(cfg.LockPath, cfg.SocketPath, func(listener net.Listener) error {
+	callbackEntered := false
+	err = runWithLock(cfg.LockPath, cfg.SocketPath, func(listener net.Listener) error {
+		callbackEntered = true
 		adminHash, err := loadAdminToken(cfg.AdminTokenPath)
 		if err != nil {
 			serveStartupError(err, "run docker-helper init")
@@ -285,12 +287,22 @@ func runServe(stderr io.Writer) error {
 
 		err = serveWithShutdown(ctx, server, listener, shutdownTimeout)
 
-		if err == nil {
+		if err != nil {
+			opLogger.Error("daemon serve error", slog.String("error", err.Error()))
+		} else {
 			opLogger.Info("daemon stopped")
 		}
 
 		return err
 	})
+
+	// Log lock/listener errors that runWithLock returns before entering the callback.
+	// Errors inside the callback (admin token, database, serve) are already logged.
+	if err != nil && !callbackEntered {
+		opLogger.Error("daemon startup failed", slog.String("error", err.Error()))
+	}
+
+	return err
 }
 
 func main() {

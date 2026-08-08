@@ -57,14 +57,11 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err := decoder.Decode(&req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeAuditWithRequestID(ctx, auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
-			Event:     "session.create",
-			RequestID: requestIDFromContext(ctx),
-			Result:    "invalid_json",
-			Duration:  duration,
+			Event:    "session.create",
+			Result:   "invalid_json",
+			Duration: duration,
 		})
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
@@ -74,39 +71,33 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		resultCode := classifyCreateSessionError(err)
 		writeAuditWithRequestID(ctx, auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
 			Event:     "session.create",
-			RequestID: requestIDFromContext(ctx),
 			Workspace: req.Workspace,
 			Result:    resultCode,
 			Duration:  duration,
 		})
 
 		if errors.Is(err, ErrInvalidWorkspace) {
-			writeError(w, http.StatusBadRequest, "invalid_workspace", "invalid workspace")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", "invalid workspace")
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),
 				slog.String("error", err.Error()),
 			)
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:      time.Now().UTC().Format(time.RFC3339),
-		Stream:    "audit",
 		Event:     "session.create",
 		SessionID: result.Session.ID,
-		RequestID: requestIDFromContext(ctx),
 		Workspace: result.Session.Workspace,
 		Result:    "success",
 		Duration:  duration,
 	})
 
-	writeJSONRawWithCtx(ctx, w, http.StatusCreated, createSessionResponse{
+	writeJSONRaw(ctx, w, http.StatusCreated, createSessionResponse{
 		OK:      true,
 		Session: sessionToJSON(result.Session),
 		Token:   result.Token,
@@ -126,7 +117,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "session_list"),
 			slog.String("error", err.Error()),
 		)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -139,7 +130,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		resp.Sessions = append(resp.Sessions, sessionToJSON(s))
 	}
 
-	writeJSONRawWithCtx(ctx, w, http.StatusOK, resp)
+	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }
 
 func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -155,14 +146,11 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeAuditWithRequestID(ctx, auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
-			Event:     "session.delete",
-			RequestID: requestIDFromContext(ctx),
-			Result:    "invalid_session_id",
-			Duration:  duration,
+			Event:    "session.delete",
+			Result:   "invalid_session_id",
+			Duration: duration,
 		})
-		writeError(w, http.StatusBadRequest, "invalid_session_id", "session id is required")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_session_id", "session id is required")
 		return
 	}
 
@@ -186,11 +174,8 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		}
 
 		auditRec := auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
 			Event:     "session.delete",
 			SessionID: id,
-			RequestID: requestIDFromContext(ctx),
 			Result:    resultCode,
 			Duration:  duration,
 		}
@@ -200,23 +185,20 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeAudit(auditRec)
 
 		if errors.Is(err, ErrSessionNotFound) {
-			writeError(w, http.StatusNotFound, "session_not_found", "session not found")
+			writeError(ctx, w, http.StatusNotFound, "session_not_found", "session not found")
 		} else {
 			opLog(ctx).Error("delete session error",
 				slog.String("operation", "session_delete"),
 				slog.String("error", err.Error()),
 			)
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:      time.Now().UTC().Format(time.RFC3339),
-		Stream:    "audit",
 		Event:     "session.delete",
 		SessionID: session.ID,
-		RequestID: requestIDFromContext(ctx),
 		Workspace: session.Workspace,
 		Result:    "success",
 		Duration:  duration,

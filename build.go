@@ -43,7 +43,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
 
@@ -54,19 +54,16 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "build_validate"),
 				slog.String("error", err.Error()),
 			)
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
 		return
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:       time.Now().UTC().Format(time.RFC3339),
-		Stream:     "audit",
 		Event:      "build.start",
 		SessionID:  session.ID,
-		RequestID:  requestIDFromContext(ctx),
 		Image:      req.Image,
 		Context:    req.Context,
 		Dockerfile: req.Dockerfile,
@@ -104,7 +101,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 		)
 
-		writeJSONWithCtx(ctx, w, http.StatusInternalServerError, response{
+		writeJSON(ctx, w, http.StatusInternalServerError, response{
 			OK:       false,
 			Code:     "docker_build_failed",
 			Message:  "docker build failed",
@@ -114,7 +111,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	} else {
 		result = "success"
 
-		writeJSONWithCtx(ctx, w, http.StatusOK, response{
+		writeJSON(ctx, w, http.StatusOK, response{
 			OK:       true,
 			Message:  "image built successfully",
 			Output:   string(output),
@@ -123,11 +120,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Time:       time.Now().UTC().Format(time.RFC3339),
-		Stream:     "audit",
 		Event:      "build.finish",
 		SessionID:  session.ID,
-		RequestID:  requestIDFromContext(ctx),
 		Image:      req.Image,
 		Context:    req.Context,
 		Dockerfile: req.Dockerfile,

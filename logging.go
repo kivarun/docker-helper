@@ -130,9 +130,13 @@ func writeAudit(record auditRecord) {
 	}
 }
 
-// writeAuditWithRequestID is like writeAudit but includes the request_id from the context.
+// writeAuditWithRequestID is like writeAudit but includes the request_id and
+// session_id from the context.
 func writeAuditWithRequestID(ctx context.Context, record auditRecord) {
 	record.RequestID = requestIDFromContext(ctx)
+	if record.SessionID == "" {
+		record.SessionID = sessionIDFromContext(ctx)
+	}
 	writeAudit(record)
 }
 

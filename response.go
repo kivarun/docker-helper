@@ -20,27 +20,7 @@ type response struct {
 	ExitCode *int   `json:"exit_code,omitempty"`
 }
 
-func writeJSON(w http.ResponseWriter, status int, value response) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		writeJSONError(context.Background(), err)
-	}
-}
-
-func writeJSONRaw(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		writeJSONError(context.Background(), err)
-	}
-}
-
-// writeJSONWithCtx is like writeJSON but uses the request context for
-// correlation in encoding error logs.
-func writeJSONWithCtx(ctx context.Context, w http.ResponseWriter, status int, value response) {
+func writeJSON(ctx context.Context, w http.ResponseWriter, status int, value response) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
@@ -49,9 +29,7 @@ func writeJSONWithCtx(ctx context.Context, w http.ResponseWriter, status int, va
 	}
 }
 
-// writeJSONRawWithCtx is like writeJSONRaw but uses the request context for
-// correlation in encoding error logs.
-func writeJSONRawWithCtx(ctx context.Context, w http.ResponseWriter, status int, value any) {
+func writeJSONRaw(ctx context.Context, w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
@@ -60,8 +38,8 @@ func writeJSONRawWithCtx(ctx context.Context, w http.ResponseWriter, status int,
 	}
 }
 
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, response{
+func writeError(ctx context.Context, w http.ResponseWriter, status int, code, message string) {
+	writeJSON(ctx, w, status, response{
 		OK:      false,
 		Code:    code,
 		Message: message,
@@ -86,18 +64,18 @@ func parseBearerToken(r *http.Request) (string, bool) {
 	return token, true
 }
 
-func writeUnauthorizedAdmin(w http.ResponseWriter) {
+func writeUnauthorizedAdmin(ctx context.Context, w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
-	writeJSON(w, http.StatusUnauthorized, response{
+	writeJSON(ctx, w, http.StatusUnauthorized, response{
 		OK:      false,
 		Code:    "unauthorized",
 		Message: "Administrative authentication required.",
 	})
 }
 
-func writeUnauthorizedSession(w http.ResponseWriter) {
+func writeUnauthorizedSession(ctx context.Context, w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
-	writeJSON(w, http.StatusUnauthorized, response{
+	writeJSON(ctx, w, http.StatusUnauthorized, response{
 		OK:      false,
 		Code:    "unauthorized",
 		Message: "Valid session authentication required.",
@@ -114,7 +92,7 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 			Path:   r.URL.Path,
 			Result: "admin.parse_failed",
 		})
-		writeUnauthorizedAdmin(w)
+		writeUnauthorizedAdmin(ctx, w)
 		return false
 	}
 
@@ -126,7 +104,7 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 			Path:   r.URL.Path,
 			Result: "admin.wrong_token",
 		})
-		writeUnauthorizedAdmin(w)
+		writeUnauthorizedAdmin(ctx, w)
 		return false
 	}
 
@@ -143,7 +121,7 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 			Path:   r.URL.Path,
 			Result: "session.parse_failed",
 		})
-		writeUnauthorizedSession(w)
+		writeUnauthorizedSession(ctx, w)
 		return nil, false
 	}
 
@@ -165,9 +143,9 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 				slog.String("operation", "session_lookup"),
 				slog.String("error", err.Error()),
 			)
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		} else {
-			writeUnauthorizedSession(w)
+			writeUnauthorizedSession(ctx, w)
 		}
 		return nil, false
 	}
@@ -176,7 +154,7 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, response{
+	writeJSON(r.Context(), w, http.StatusOK, response{
 		OK:      true,
 		Message: "docker-helper is running",
 	})
