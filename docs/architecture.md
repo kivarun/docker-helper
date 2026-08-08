@@ -122,6 +122,63 @@ Expired sessions are rejected immediately by the `expires_at` check in
 `findSessionByToken`. Their database rows are physically removed the next
 time `docker-helper serve` starts.
 
+## Session CLI
+
+docker-helper provides a CLI for session management.
+
+### docker-helper session create
+
+Create a new session. Requires the admin token.
+
+```
+docker-helper session create --workspace PATH [--json]
+```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--workspace PATH` | Workspace directory (required) |
+| `--json` | Output in JSON format |
+
+Returns the session ID, token, workspace, creation time, and expiration
+time. The token is shown only once and cannot be retrieved later.
+
+### docker-helper session list
+
+List active sessions. Requires the admin token.
+
+```
+docker-helper session list [--json]
+```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output in JSON format |
+
+Returns a table of active sessions with ID, workspace, creation time,
+and expiration time.
+
+### docker-helper session delete
+
+Delete a session. Requires the admin token.
+
+```
+docker-helper session delete --id SESSION_ID [--json]
+```
+
+Flags:
+
+| Flag | Description |
+|------|-------------|
+| `--id SESSION_ID` | Session ID to delete (required) |
+| `--json` | Output in JSON format |
+
+Permanently removes the session. Subsequent requests with the session's
+token will receive 401 Unauthorized.
+
 ## systemd user service
 
 docker-helper can run as a systemd user service. The unit file is
@@ -142,14 +199,17 @@ manager environment.
 
 ### Stop and restart
 
-docker-helper does not install a signal handler and does not call
-`http.Server.Shutdown`. On stop:
+docker-helper installs a signal handler for SIGINT and SIGTERM and calls
+`http.Server.Shutdown` with a 30-second timeout. On stop:
 
-- helper and any child `docker` CLI processes receive SIGTERM;
-- the process terminates immediately;
-- in-flight HTTP requests are aborted with no response to the client;
-- a running Docker build or container may or may not be affected —
-  the current code does not guarantee either outcome.
+- the server stops accepting new connections;
+- in-flight HTTP requests are drained until the timeout expires;
+- the lock is held during the entire drain so a second instance cannot
+  start until the first fully stops;
+- if the timeout is exceeded, `server.Close()` is called and the process
+  terminates;
+- child `docker` CLI processes are not explicitly waited on — they may
+  continue running after the helper exits.
 
 After `TimeoutStopSec=30s`, systemd sends SIGKILL if any processes
 remain.
@@ -201,7 +261,7 @@ Two token types exist.
 - generated per session by `POST /sessions`;
 - returned once in the creation response;
 - SHA-256 hash stored in SQLite;
-- required for `POST /build`, `POST /run`;
+- required for `POST /build`, `POST /run`, `POST /pull`;
 - sent as `Authorization: Bearer <session-token>`;
 - looked up by hash, checked for expiration and revocation.
 
@@ -276,6 +336,8 @@ Authentication
     │
 Request validation
     │
+Workdir validation
+    │
 Environment validation
     │
 Mount resolution
@@ -284,19 +346,42 @@ Docker invocation
 ```
 
 Authentication validates the session token. Request validation checks
-the image name. Environment validation ensures variable names match
+the image name. Workdir validation ensures the value is an absolute path
+if provided. Environment validation ensures variable names match
 `^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
 against the workspace and checks for duplicate targets. Docker invocation
 runs `docker run` with fixed security policy.
 
 Validation details:
 
+- workdir must be an absolute path if provided;
 - mount source must be relative to workspace;
 - mount target must be absolute;
 - source is resolved through `EvalSymlinks` and checked via `isInside`;
 - environment values are masked before logging;
 - environment names are sorted for deterministic output;
 - container runs with fixed security policy (details in implementation).
+
+## Pull pipeline
+
+```
+Authentication
+    │
+Request validation
+    │
+Docker invocation
+```
+
+Authentication validates the session token. Request validation checks
+that the image name is present and matches
+`^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`. Docker invocation runs
+`docker pull` with the image name.
+
+## Health endpoint
+
+`GET /health` returns a 200 OK response with a JSON body indicating the
+server is running. No authentication is required. This endpoint is
+intended for liveness probes and does not perform any audit logging.
 
 ## Filesystem policy
 
@@ -364,7 +449,16 @@ Current error codes:
 |------|----------|-----------|
 | `unauthorized` | all protected | missing/invalid token |
 | `invalid_build_context` | `POST /build` | context validation failure |
+| `invalid_image` | `POST /build`, `POST /run`, `POST /pull` | image name empty or invalid format |
 | `invalid_mount` | `POST /run` | mount validation failure |
+| `invalid_workdir` | `POST /run` | workdir is not an absolute path |
+| `invalid_environment` | `POST /run` | environment variable name invalid |
+| `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot |
+| `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
+| `docker_build_failed` | `POST /build` | docker build returned non-zero |
+| `docker_pull_failed` | `POST /pull` | docker pull returned non-zero |
+| `docker_run_failed` | `POST /run` | docker run failed (exit 125 or other error) |
+| `container_exit_nonzero` | `POST /run` | container exited with non-zero status (not 125) |
 
 Planned:
 
@@ -533,6 +627,29 @@ Result codes:
 | `session.not_found` | No active session matches the token (unknown, expired, or deleted) |
 | `session.database_error` | Database error during session lookup |
 
+#### pull.start
+
+Emitted before a Docker pull begins.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | image name with tag |
+
+No `result` or `duration` field.
+
+#### pull.finish
+
+Emitted after a Docker pull completes (success or failure).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | session identifier |
+| `image` | string | image name with tag |
+| `result` | string | `success` or `pull_error` |
+| `exit_code` | number | present when an exit code is available |
+| `duration` | string | pull wall-clock time |
+
 ### What is never logged
 
 The audit log never contains:
@@ -654,4 +771,6 @@ Items discussed but not yet implemented:
 - systemd user service;
 - structured logging (JSON);
 - token rotation command;
-- session revocation (soft delete via `revoked_at`).
+- session revocation (soft delete via `revoked_at` — the column exists
+  in the database schema and is checked during token lookup, but the
+  current `DELETE /sessions/{id}` implementation performs a hard delete).
