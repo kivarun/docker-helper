@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -912,5 +913,131 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 	})
 	if subErr != nil {
 		t.Fatalf("subsequent runWithLock: %v", subErr)
+	}
+}
+
+// When the shutdown deadline expires, serveWithShutdown forces server.Close()
+// and returns a graceful shutdown timeout error.
+func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	shutdownTimeout := 100 * time.Millisecond
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	handlerStarted := make(chan struct{})
+	handlerDone := make(chan struct{})
+
+	mux.HandleFunc("POST /hang", func(w http.ResponseWriter, r *http.Request) {
+		close(handlerStarted)
+		defer close(handlerDone)
+
+		<-r.Context().Done()
+	})
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	var serverErr error
+	serverDone := make(chan struct{})
+
+	go func() {
+		defer close(serverDone)
+		serverErr = serveWithShutdown(ctx, server, listener, shutdownTimeout)
+	}()
+
+	// Create HTTP client that dials the Unix socket.
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", socketPath)
+		},
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+
+	var requestErr error
+	requestDone := make(chan struct{})
+
+	go func() {
+		defer close(requestDone)
+		req, err := http.NewRequestWithContext(requestCtx, "POST", "http://localhost/hang", nil)
+		if err != nil {
+			requestErr = err
+			return
+		}
+		resp, err := (&http.Client{Transport: transport}).Do(req)
+		if err != nil {
+			requestErr = err
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			requestErr = fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		}
+	}()
+
+	// Emergency cleanup.
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			cancel()
+			cancelRequest()
+			_ = server.Close()
+			_ = listener.Close()
+			transport.CloseIdleConnections()
+		})
+	}
+	t.Cleanup(func() {
+		cleanup()
+		<-serverDone
+		<-requestDone
+	})
+
+	// Wait for handler to start.
+	select {
+	case <-handlerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	// Initiate shutdown — Shutdown will hit its deadline.
+	cancel()
+
+	// Wait for serveWithShutdown to return.
+	select {
+	case <-serverDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveWithShutdown did not return")
+	}
+
+	// Handler should finish after request context is cancelled by server.Close().
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not finish after forced close")
+	}
+
+	// Request should complete with an error.
+	select {
+	case <-requestDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not finish")
+	}
+
+	if serverErr == nil {
+		t.Fatal("expected graceful shutdown timeout error")
+	}
+	if !strings.Contains(serverErr.Error(), "graceful shutdown timeout") {
+		t.Fatalf("unexpected server error: %v", serverErr)
+	}
+	if requestErr == nil {
+		t.Fatal("expected active request to be interrupted by forced close")
 	}
 }
