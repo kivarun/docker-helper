@@ -360,10 +360,10 @@ func runSessionCommand(args []string) int {
 
 func runSessionCommandWithWriters(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "error: session subcommand required (list)")
+		fmt.Fprintln(stderr, "error: session subcommand required (create, list)")
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Run the following for usage information:")
-		fmt.Fprintln(stderr, "  docker-helper session list --help")
+		fmt.Fprintln(stderr, "  docker-helper session --help")
 		return 2
 	}
 
@@ -381,19 +381,32 @@ func runSessionCommandWithWriters(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		return runSessionListWithWriters(args[1:], stdout, stderr)
+	case "create":
+		for _, arg := range args[1:] {
+			if arg == "help" || arg == "-h" || arg == "--help" {
+				fmt.Fprintln(stdout, "Usage: docker-helper session create --workspace PATH [--json]")
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, "Create a new session.")
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, "Flags:")
+				fmt.Fprintln(stdout, "  --workspace PATH  Workspace directory")
+				fmt.Fprintln(stdout, "  --json            Output in JSON format")
+				return 0
+			}
+		}
+		return runSessionCreateWithWriters(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
-		fmt.Fprintln(stdout, "Usage: docker-helper session list [--json]")
+		fmt.Fprintln(stdout, "Usage: docker-helper session <subcommand> [flags]")
 		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "List active sessions.")
-		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "Flags:")
-		fmt.Fprintln(stdout, "  --json  Output in JSON format")
+		fmt.Fprintln(stdout, "Subcommands:")
+		fmt.Fprintln(stdout, "  create  Create a new session")
+		fmt.Fprintln(stdout, "  list    List active sessions")
 		return 0
 	default:
 		fmt.Fprintf(stderr, "error: unknown session subcommand %q\n", args[0])
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Run the following for usage information:")
-		fmt.Fprintln(stderr, "  docker-helper session list --help")
+		fmt.Fprintln(stderr, "  docker-helper session --help")
 		return 2
 	}
 }
@@ -462,4 +475,75 @@ func printSessionsTable(w io.Writer, sessions []sessionJSON) {
 	}
 
 	tw.Flush()
+}
+
+func parseSessionCreateFlags(args []string) (workspace string, jsonOutput bool, err error) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--workspace":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return "", false, fmt.Errorf("--workspace requires a value")
+			}
+			i++
+			workspace = args[i]
+		case "--json":
+			jsonOutput = true
+		default:
+			return "", false, fmt.Errorf("unknown flag: %s", args[i])
+		}
+	}
+
+	if workspace == "" {
+		return "", false, fmt.Errorf("--workspace is required")
+	}
+
+	return workspace, jsonOutput, nil
+}
+
+func runSessionCreateWithWriters(args []string, stdout, stderr io.Writer) int {
+	workspace, jsonOutput, err := parseSessionCreateFlags(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
+		return readAdminTokenPlain(cfg.AdminTokenPath)
+	})
+
+	result, err := client.createSession(workspace)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(result); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "ID:        %s\n", result.Session.ID)
+	fmt.Fprintf(&buf, "TOKEN:     %s\n", result.Token)
+	fmt.Fprintf(&buf, "WORKSPACE: %s\n", result.Session.Workspace)
+	fmt.Fprintf(&buf, "CREATED:   %s\n", result.Session.CreatedAt)
+	fmt.Fprintf(&buf, "EXPIRES:   %s\n", result.Session.ExpiresAt)
+
+	if _, err := stdout.Write([]byte(buf.String())); err != nil {
+		fmt.Fprintln(stderr, "error: cannot write output")
+		return 1
+	}
+
+	return 0
 }

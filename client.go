@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -56,6 +57,9 @@ func (c *apiClient) doAuthenticatedRequest(method, path string, body io.Reader) 
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -78,11 +82,40 @@ func (c *apiClient) listSessions() (*listSessionsResponse, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API error: status %d body=%s", resp.StatusCode, body)
+		return nil, fmt.Errorf("API error: status %d", resp.StatusCode)
 	}
 
 	var result listSessionsResponse
 	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+func (c *apiClient) createSession(workspace string) (*createSessionResponse, error) {
+	body, err := json.Marshal(sessionRequest{Workspace: workspace})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("POST", "/sessions", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("API error: status %d", resp.StatusCode)
+	}
+
+	var result createSessionResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
 
