@@ -93,12 +93,18 @@ docker-helper config set log_level debug
 docker-helper config set audit_enabled true
 ```
 
+Each command prints feedback: `updated` when the value changes, `unchanged`
+when it was already set to the same value.
+
 To remove a setting and restore its default:
 
 ```bash
 docker-helper config unset log_level
 docker-helper config unset audit_enabled
 ```
+
+Each prints `unset` when the member was removed, or `unchanged ... is already unset`
+when it was already absent.
 
 Configuration fields:
 

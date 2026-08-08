@@ -549,8 +549,8 @@ func TestConfigFileMode0600(t *testing.T) {
 	}
 }
 
-// Req 18: successful set/unset writes nothing
-func TestConfigSetUnsetSilent(t *testing.T) {
+// Req 18: successful set/unset prints feedback
+func TestConfigSetUnsetFeedback(t *testing.T) {
 	cfg := `{
   "allowed_root": "/home/user/work",
   "session_ttl": "12h",
@@ -563,11 +563,11 @@ func TestConfigSetUnsetSilent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
-	if stdout.Len() > 0 {
-		t.Errorf("set should be silent, got stdout: %s", stdout.String())
+	if stdout.String() != "updated log_level=warn\n" {
+		t.Errorf("set stdout = %q, want 'updated log_level=warn\\n'", stdout.String())
 	}
 	if stderr.Len() > 0 {
-		t.Errorf("set should be silent, got stderr: %s", stderr.String())
+		t.Errorf("set should not write to stderr, got: %s", stderr.String())
 	}
 
 	stdout.Reset()
@@ -576,11 +576,11 @@ func TestConfigSetUnsetSilent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
-	if stdout.Len() > 0 {
-		t.Errorf("unset should be silent, got stdout: %s", stdout.String())
+	if stdout.String() != "unset log_level\n" {
+		t.Errorf("unset stdout = %q, want 'unset log_level\\n'", stdout.String())
 	}
 	if stderr.Len() > 0 {
-		t.Errorf("unset should be silent, got stderr: %s", stderr.String())
+		t.Errorf("unset should not write to stderr, got: %s", stderr.String())
 	}
 }
 
@@ -688,8 +688,8 @@ func TestConfigNoGlobalStdio(t *testing.T) {
 	if code2 != 0 {
 		t.Errorf("set: expected exit 0, got %d", code2)
 	}
-	if stdout2.Len() > 0 {
-		t.Errorf("set stdout = %q", stdout2.String())
+	if stdout2.String() != "updated log_level=warn\n" {
+		t.Errorf("set stdout = %q, want 'updated log_level=warn\\n'", stdout2.String())
 	}
 	if stderr2.Len() > 0 {
 		t.Errorf("set stderr = %q", stderr2.String())
@@ -1678,4 +1678,181 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 			})
 		}
 	})
+}
+
+// Regression: set prints updated when it adds or changes an explicit member
+func TestRegressionSetPrintsUpdated(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "updated log_level=debug\n" {
+		t.Errorf("expected 'updated log_level=debug\\n', got %q", stdout.String())
+	}
+}
+
+// Regression: set prints unchanged when the explicit JSON value is identical
+func TestRegressionSetPrintsUnchanged(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug"
+}`
+	configPath := setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "unchanged log_level=debug\n" {
+		t.Errorf("expected 'unchanged log_level=debug\\n', got %q", stdout.String())
+	}
+
+	// Verify file was not rewritten (mtime unchanged)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("cannot read config: %v", err)
+	}
+	if !bytes.Equal(data, []byte(cfg)) {
+		t.Error("unchanged set should not rewrite config.json")
+	}
+}
+
+// Regression: effective value without explicit member still counts as update
+func TestRegressionSetEffectiveValueCountsAsUpdate(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	// audit_enabled resolves to true via log_level=debug, but is not explicit
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "audit_enabled", "true"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "updated audit_enabled=true\n" {
+		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout.String())
+	}
+}
+
+// Regression: unset prints unset when it removes a member
+func TestRegressionUnsetPrintsUnset(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "unset log_level\n" {
+		t.Errorf("expected 'unset log_level\\n', got %q", stdout.String())
+	}
+}
+
+// Regression: unset prints unchanged when the member is absent
+func TestRegressionUnsetPrintsUnchanged(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`
+	configPath := setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "unchanged log_level is already unset\n" {
+		t.Errorf("expected 'unchanged log_level is already unset\\n', got %q", stdout.String())
+	}
+
+	// Verify file was not rewritten
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("cannot read config: %v", err)
+	}
+	if !bytes.Equal(data, []byte(cfg)) {
+		t.Error("unchanged unset should not rewrite config.json")
+	}
+}
+
+// Regression: unchanged operations leave config.json byte-for-byte unchanged
+func TestRegressionUnchangedOperationsPreserveFile(t *testing.T) {
+	cfg := []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug"
+}`)
+	configPath := setupConfigTestWithData(t, cfg)
+
+	// set with same value
+	var stdout, stderr bytes.Buffer
+	runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("cannot read config: %v", err)
+	}
+	if !bytes.Equal(data, cfg) {
+		t.Error("unchanged set should not rewrite config.json")
+	}
+
+	// unset already absent
+	stdout.Reset()
+	stderr.Reset()
+	runCommandWithWriters([]string{"config", "unset", "audit_enabled"}, &stdout, &stderr)
+	data, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("cannot read config: %v", err)
+	}
+	if !bytes.Equal(data, cfg) {
+		t.Error("unchanged unset should not rewrite config.json")
+	}
+}
+
+// Regression: failure paths leave stdout empty
+func TestRegressionFailurePathsEmptyStdout(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"set invalid value", []string{"config", "set", "log_level", "invalid"}},
+		{"set read-only", []string{"config", "set", "config_path", "/tmp"}},
+		{"unset required", []string{"config", "unset", "allowed_root"}},
+		{"show unknown", []string{"config", "show", "nonexistent"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			runCommandWithWriters(tt.args, &stdout, &stderr)
+			if stdout.Len() > 0 {
+				t.Errorf("failure should leave stdout empty, got: %s", stdout.String())
+			}
+			if stderr.Len() == 0 {
+				t.Error("failure should write to stderr")
+			}
+		})
+	}
 }

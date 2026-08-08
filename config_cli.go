@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -574,17 +575,26 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Compute the JSON-encoded value for the field.
+	var newValue json.RawMessage
 	switch field {
 	case "allowed_root":
-		raw["allowed_root"], _ = json.Marshal(value)
+		newValue, _ = json.Marshal(value)
 	case "session_ttl":
-		raw["session_ttl"], _ = json.Marshal(value)
+		newValue, _ = json.Marshal(value)
 	case "log_level":
-		raw["log_level"], _ = json.Marshal(value)
+		newValue, _ = json.Marshal(value)
 	case "audit_enabled":
-		b, _ := json.Marshal(value == "true")
-		raw["audit_enabled"] = b
+		newValue, _ = json.Marshal(value == "true")
 	}
+
+	// Compare with the existing explicit JSON member.
+	if existing, ok := raw[field]; ok && bytes.Equal(existing, newValue) {
+		fmt.Fprintf(stdout, "unchanged %s=%s\n", field, value)
+		return 0
+	}
+
+	raw[field] = newValue
 
 	// Validate the complete resulting configuration before writing.
 	if err := validateRawConfig(raw); err != nil {
@@ -603,6 +613,8 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+
+	fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
 	return 0
 }
 
@@ -626,6 +638,12 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Check if the member is already absent.
+	if _, ok := raw[field]; !ok {
+		fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
+		return 0
+	}
+
 	delete(raw, field)
 
 	// Validate the complete resulting configuration before writing.
@@ -645,5 +663,7 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+
+	fmt.Fprintln(stdout, "unset", field)
 	return 0
 }
