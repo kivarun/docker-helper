@@ -137,7 +137,8 @@ func loadConfig() (*Config, error) {
 
 	stateDir := getStateDir()
 
-	configDir := getConfigDir()
+	// Derive configDir from configPath so DOCKER_HELPER_CONFIG is respected.
+	configDir := filepath.Dir(configPath)
 
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
@@ -172,7 +173,8 @@ func generateToken() (string, error) {
 }
 
 func runInit() error {
-	configDir := getConfigDir()
+	configPath := getConfigPath()
+	configDir := filepath.Dir(configPath)
 	stateDir := getStateDir()
 
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -182,8 +184,6 @@ func runInit() error {
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		return fmt.Errorf("cannot create state directory: %w", err)
 	}
-
-	configPath := getConfigPath()
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultConfig := fileConfig{

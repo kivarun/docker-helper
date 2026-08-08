@@ -93,6 +93,17 @@ func isRuntimeDependent(name string) bool {
 	}
 }
 
+// isPureComputed returns true for fields that can be resolved without
+// reading config.json (config_path, config_dir, admin_token_path).
+func isPureComputed(name string) bool {
+	switch name {
+	case "config_path", "config_dir", "admin_token_path":
+		return true
+	default:
+		return false
+	}
+}
+
 var configShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show configuration values",
@@ -144,12 +155,24 @@ var configUnsetCommand = &Command{
 	},
 }
 
+// loadFileConfig reads and parses config.json into a fileConfig.
+// Returns an error if the top-level JSON value is not an object.
 func loadFileConfig() (*fileConfig, string, error) {
 	configPath := getConfigPath()
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, "", err
 	}
+
+	// Check that the top-level value is a JSON object.
+	var check any
+	if err := json.Unmarshal(data, &check); err != nil {
+		return nil, "", err
+	}
+	if _, ok := check.(map[string]any); !ok {
+		return nil, "", fmt.Errorf("configuration is not a JSON object")
+	}
+
 	var fc fileConfig
 	if err := json.Unmarshal(data, &fc); err != nil {
 		return nil, "", err
@@ -157,17 +180,87 @@ func loadFileConfig() (*fileConfig, string, error) {
 	return &fc, configPath, nil
 }
 
+// loadRawConfig reads config.json as a raw JSON map to preserve unknown members.
+// Returns an error if the top-level JSON value is not an object.
 func loadRawConfig() (map[string]json.RawMessage, string, error) {
 	configPath := getConfigPath()
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, "", err
 	}
+
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, "", err
 	}
+	if raw == nil {
+		return nil, "", fmt.Errorf("configuration is not a JSON object")
+	}
 	return raw, configPath, nil
+}
+
+// validateRawConfig validates the known fields in a raw config map.
+// It does not require XDG_RUNTIME_DIR and does not create directories.
+// Returns an error if the document is malformed or known fields are invalid.
+func validateRawConfig(raw map[string]json.RawMessage) error {
+	if raw == nil {
+		return fmt.Errorf("configuration is not a JSON object")
+	}
+
+	// Validate allowed_root: must exist as a non-empty absolute string.
+	if v, ok := raw["allowed_root"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("allowed_root must be a JSON string")
+		}
+		if s == "" {
+			return fmt.Errorf("allowed_root must be a non-empty absolute path")
+		}
+		if !filepath.IsAbs(s) {
+			return fmt.Errorf("allowed_root must be a non-empty absolute path")
+		}
+	} else {
+		return fmt.Errorf("allowed_root is required")
+	}
+
+	// Validate session_ttl: must exist as a valid positive duration string.
+	if v, ok := raw["session_ttl"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("session_ttl must be a JSON string")
+		}
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("cannot parse session_ttl %q: %w", s, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("session_ttl must be a positive duration")
+		}
+	} else {
+		return fmt.Errorf("session_ttl is required")
+	}
+
+	// Validate log_level if present: must be a valid level string.
+	if v, ok := raw["log_level"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("log_level must be a JSON string")
+		}
+		if _, err := parseLogLevel(s); err != nil {
+			return fmt.Errorf("invalid log_level %q: must be one of debug, info, warn, error", s)
+		}
+	}
+
+	// Validate audit_enabled if present: must be a JSON boolean.
+	if v, ok := raw["audit_enabled"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("audit_enabled must be a JSON boolean")
+		}
+		_ = b
+	}
+
+	return nil
 }
 
 func safeWriteConfig(configPath string, data []byte) error {
@@ -236,12 +329,6 @@ func configShowAll(stdout, stderr io.Writer) int {
 		auditSource = "explicit"
 	}
 
-	adminToken := "<redacted>"
-	if data, err := os.ReadFile(adminTokenPath); err == nil {
-		adminToken = "<redacted>"
-		_ = data
-	}
-
 	result := map[string]any{
 		"allowed_root":         fc.AllowedRoot,
 		"session_ttl":          fc.SessionTTL,
@@ -256,7 +343,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"state_dir":            stateDir,
 		"database_path":        databasePath,
 		"admin_token_path":     adminTokenPath,
-		"admin_token":          adminToken,
+		"admin_token":          "<redacted>",
 	}
 
 	enc := json.NewEncoder(stdout)
@@ -298,9 +385,11 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// admin_token: read only the token file, never parse config.json.
 	if field == "admin_token" {
 		configPath := getConfigPath()
-		adminTokenPath := filepath.Join(filepath.Dir(configPath), "admin.token")
+		configDir := filepath.Dir(configPath)
+		adminTokenPath := filepath.Join(configDir, "admin.token")
 		data, err := os.ReadFile(adminTokenPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
@@ -315,6 +404,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	// Runtime-dependent fields: require XDG_RUNTIME_DIR.
 	if isRuntimeDependent(field) {
 		runtimeDir := getRuntimeDirSafe()
 		if runtimeDir == "" {
@@ -332,6 +422,22 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	// Pure computed fields: resolve from paths without reading config.json.
+	if isPureComputed(field) {
+		configPath := getConfigPath()
+		configDir := filepath.Dir(configPath)
+		switch field {
+		case "config_path":
+			fmt.Fprintln(stdout, configPath)
+		case "config_dir":
+			fmt.Fprintln(stdout, configDir)
+		case "admin_token_path":
+			fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
+		}
+		return 0
+	}
+
+	// Config-backed fields: require valid config.json.
 	fc, configPath, err := loadFileConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -365,20 +471,15 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		} else {
 			fmt.Fprintln(stdout, "log_level")
 		}
-	case "config_path":
-		fmt.Fprintln(stdout, configPath)
-	case "config_dir":
-		fmt.Fprintln(stdout, configDir)
 	case "state_dir":
 		fmt.Fprintln(stdout, stateDir)
 	case "database_path":
 		fmt.Fprintln(stdout, filepath.Join(stateDir, "docker-helper.db"))
-	case "admin_token_path":
-		fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
 	default:
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
+	_ = configDir
 	return 0
 }
 
@@ -437,6 +538,12 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		raw["audit_enabled"] = b
 	}
 
+	// Validate the complete resulting configuration before writing.
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
@@ -472,6 +579,12 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 	}
 
 	delete(raw, field)
+
+	// Validate the complete resulting configuration before writing.
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
 
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {

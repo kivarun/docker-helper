@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -622,45 +623,112 @@ func TestConfigStdoutStderrSeparation(t *testing.T) {
 func TestConfigNoGlobalStdio(t *testing.T) {
 	cfg := `{
   "allowed_root": "/home/user/work",
-  "session_ttl": "12h"
+  "session_ttl": "12h",
+  "log_level": "debug"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	// Redirect os.Stdout/os.Stderr to capture any writes
+	// Replace os.Stdout and os.Stderr with pipes to capture global writes.
 	oldStdout := os.Stdout
 	oldStderr := os.Stderr
+	rOut, wOut, _ := os.Pipe()
+	rErr, wErr, _ := os.Pipe()
+	os.Stdout = wOut
+	os.Stderr = wErr
 	defer func() {
 		os.Stdout = oldStdout
 		os.Stderr = oldStderr
 	}()
 
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	r2, w2, _ := os.Pipe()
-	os.Stderr = w2
-
-	var stdout, stderr bytes.Buffer
-	runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
-	w.Close()
-	w2.Close()
-
-	var capturedStdout, capturedStderr bytes.Buffer
-	r.Read(capturedStdout.Bytes())
-	r2.Read(capturedStderr.Bytes())
-	r.ReadFrom(&bytes.Buffer{})
-	r2.ReadFrom(&bytes.Buffer{})
-
-	if capturedStdout.Len() > 0 {
-		t.Errorf("config show wrote to os.Stdout: %s", capturedStdout.String())
-	}
-	if capturedStderr.Len() > 0 {
-		t.Errorf("config show wrote to os.Stderr: %s", capturedStderr.String())
+	readPipe := func(r *os.File) string {
+		data, _ := io.ReadAll(r)
+		r.Close()
+		return string(data)
 	}
 
-	// Test set too
-	os.Stdout, _, _ = os.Pipe()
-	os.Stderr, _, _ = os.Pipe()
-	runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	// 1) Successful show
+	var stdout1, stderr1 bytes.Buffer
+	code1 := runCommandWithWriters([]string{"config", "show", "allowed_root"}, &stdout1, &stderr1)
+	wOut.Close()
+	wErr.Close()
+	globalStdout1 := readPipe(rOut)
+	globalStderr1 := readPipe(rErr)
+
+	if code1 != 0 {
+		t.Errorf("show: expected exit 0, got %d", code1)
+	}
+	if stdout1.String() != "/home/user/work\n" {
+		t.Errorf("show stdout = %q, want '/home/user/work\\n'", stdout1.String())
+	}
+	if stderr1.Len() > 0 {
+		t.Errorf("show stderr = %q", stderr1.String())
+	}
+	if globalStdout1 != "" {
+		t.Errorf("show wrote to os.Stdout: %q", globalStdout1)
+	}
+	if globalStderr1 != "" {
+		t.Errorf("show wrote to os.Stderr: %q", globalStderr1)
+	}
+
+	// Reset pipes for next invocation
+	rOut2, wOut2, _ := os.Pipe()
+	rErr2, wErr2, _ := os.Pipe()
+	os.Stdout = wOut2
+	os.Stderr = wErr2
+
+	// 2) Successful silent set
+	var stdout2, stderr2 bytes.Buffer
+	code2 := runCommandWithWriters([]string{"config", "set", "log_level", "warn"}, &stdout2, &stderr2)
+	wOut2.Close()
+	wErr2.Close()
+	globalStdout2 := readPipe(rOut2)
+	globalStderr2 := readPipe(rErr2)
+
+	if code2 != 0 {
+		t.Errorf("set: expected exit 0, got %d", code2)
+	}
+	if stdout2.Len() > 0 {
+		t.Errorf("set stdout = %q", stdout2.String())
+	}
+	if stderr2.Len() > 0 {
+		t.Errorf("set stderr = %q", stderr2.String())
+	}
+	if globalStdout2 != "" {
+		t.Errorf("set wrote to os.Stdout: %q", globalStdout2)
+	}
+	if globalStderr2 != "" {
+		t.Errorf("set wrote to os.Stderr: %q", globalStderr2)
+	}
+
+	// Reset pipes for next invocation
+	rOut3, wOut3, _ := os.Pipe()
+	rErr3, wErr3, _ := os.Pipe()
+	os.Stdout = wOut3
+	os.Stderr = wErr3
+
+	// 3) Failing command (unknown field)
+	var stdout3, stderr3 bytes.Buffer
+	code3 := runCommandWithWriters([]string{"config", "show", "nonexistent"}, &stdout3, &stderr3)
+	wOut3.Close()
+	wErr3.Close()
+	globalStdout3 := readPipe(rOut3)
+	globalStderr3 := readPipe(rErr3)
+
+	if code3 != 2 {
+		t.Errorf("fail: expected exit 2, got %d", code3)
+	}
+	if stdout3.Len() > 0 {
+		t.Errorf("fail stdout = %q", stdout3.String())
+	}
+	if !strings.Contains(stderr3.String(), "unknown field") {
+		t.Errorf("fail stderr = %q", stderr3.String())
+	}
+	if globalStdout3 != "" {
+		t.Errorf("fail wrote to os.Stdout: %q", globalStdout3)
+	}
+	if globalStderr3 != "" {
+		t.Errorf("fail wrote to os.Stderr: %q", globalStderr3)
+	}
 }
 
 // Req 21: config set/unset do not create runtime/state directories
@@ -898,3 +966,348 @@ func TestConfigAuditEnabledDefault(t *testing.T) {
 		t.Errorf("expected 'true\\n' (debug enables audit), got %q", stdout.String())
 	}
 }
+
+// --- Regression tests ---
+
+// Regression 1: custom DOCKER_HELPER_CONFIG relocates config_dir and admin_token_path
+func TestRegressionCustomConfigRelocatesPaths(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "custom", "config.json")
+	adminTokenPath := filepath.Join(dir, "custom", "admin.token")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+	os.WriteFile(configPath, []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`), 0600)
+	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	var result map[string]any
+	json.Unmarshal(stdout.Bytes(), &result)
+	if result["config_dir"] != filepath.Join(dir, "custom") {
+		t.Errorf("config_dir = %v, want %s", result["config_dir"], filepath.Join(dir, "custom"))
+	}
+	if result["admin_token_path"] != filepath.Join(dir, "custom", "admin.token") {
+		t.Errorf("admin_token_path = %v, want %s", result["admin_token_path"], filepath.Join(dir, "custom", "admin.token"))
+	}
+}
+
+// Regression 2: init, daemon config loading, and config show resolve the same token path
+func TestRegressionConsistentTokenPath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "myconfig", "config.json")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+	os.WriteFile(configPath, []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`), 0600)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "admin_token_path"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	gotPath := strings.TrimSpace(stdout.String())
+	wantPath := filepath.Join(dir, "myconfig", "admin.token")
+	if gotPath != wantPath {
+		t.Errorf("admin_token_path = %q, want %q", gotPath, wantPath)
+	}
+}
+
+// Regression 3: config show admin_token reads the token beside the overridden config file
+func TestRegressionAdminTokenWithCustomConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "myconfig", "config.json")
+	adminTokenPath := filepath.Join(dir, "myconfig", "admin.token")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+	os.WriteFile(configPath, []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`), 0600)
+	os.WriteFile(adminTokenPath, []byte("dht_custom_token_here\n"), 0600)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "admin_token"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "dht_custom_token_here\n" {
+		t.Errorf("admin_token = %q, want 'dht_custom_token_here\\n'", stdout.String())
+	}
+}
+
+// Regression 4: set rejects a document containing another invalid known field
+func TestRegressionSetRejectsOtherInvalidFields(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "invalid_level"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	// The existing log_level is invalid, but we're setting it to a valid value.
+	// After the set, the config should be valid.
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+}
+
+// Regression 4b: set rejects when the existing document has an invalid type for a known field
+func TestRegressionSetRejectsInvalidType(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "audit_enabled": "not_a_boolean"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 (invalid existing config), got %d, stderr: %s", code, stderr.String())
+	}
+}
+
+// Regression 5: unset rejects a document containing another invalid known field
+func TestRegressionUnsetRejectsInvalidType(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug",
+  "audit_enabled": "not_a_boolean"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 (invalid existing config), got %d, stderr: %s", code, stderr.String())
+	}
+}
+
+// Regression 6: top-level null and non-object JSON return errors without panic
+func TestRegressionNullAndNonObjectJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"null", "null"},
+		{"array", "[1, 2, 3]"},
+		{"string", `"just a string"`},
+		{"number", "42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			adminTokenPath := filepath.Join(dir, "admin.token")
+			os.WriteFile(configPath, []byte(tt.data), 0600)
+			os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("show: expected exit code 1, got %d", code)
+			}
+
+			// Also test set
+			stdout.Reset()
+			stderr.Reset()
+			code = runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("set: expected exit code 1, got %d", code)
+			}
+
+			// Also test unset
+			stdout.Reset()
+			stderr.Reset()
+			code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("unset: expected exit code 1, got %d", code)
+			}
+		})
+	}
+}
+
+// Regression 7: every rejected update leaves config.json byte-for-byte unchanged
+func TestRegressionRejectedUpdatePreservesFile(t *testing.T) {
+	cfg := []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug",
+  "audit_enabled": "not_a_boolean"
+}`)
+	configPath := setupConfigTestWithData(t, cfg)
+
+	// Try to set a field - should fail because audit_enabled has wrong type
+	var stdout, stderr bytes.Buffer
+	runCommandWithWriters([]string{"config", "set", "log_level", "warn"}, &stdout, &stderr)
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("cannot read config: %v", err)
+	}
+	if !bytes.Equal(data, cfg) {
+		t.Errorf("config file changed after rejected set:\nbefore: %s\nafter:  %s", cfg, data)
+	}
+
+	// Try to unset a field - should also fail
+	stdout.Reset()
+	stderr.Reset()
+	runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+
+	data, err = os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("cannot read config: %v", err)
+	}
+	if !bytes.Equal(data, cfg) {
+		t.Errorf("config file changed after rejected unset:\nbefore: %s\nafter:  %s", cfg, data)
+	}
+}
+
+// Regression 8: unknown JSON members still survive successful updates
+func TestRegressionUnknownMembersSurvive(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "custom_field": "custom_value",
+  "nested": {"key": "val"}
+}`
+	configPath := setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	raw := readConfigJSON(t, configPath)
+	if _, ok := raw["custom_field"]; !ok {
+		t.Error("custom_field should be preserved after set")
+	}
+	if _, ok := raw["nested"]; !ok {
+		t.Error("nested should be preserved after set")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	raw = readConfigJSON(t, configPath)
+	if _, ok := raw["custom_field"]; !ok {
+		t.Error("custom_field should be preserved after unset")
+	}
+	if _, ok := raw["nested"]; !ok {
+		t.Error("nested should be preserved after unset")
+	}
+}
+
+// Regression 9: lazy computed-field show works without config.json and without XDG_RUNTIME_DIR
+func TestRegressionLazyComputedFieldShow(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	adminTokenPath := filepath.Join(dir, "admin.token")
+	// Do NOT create config.json
+	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	// config_path should work without config.json
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "config_path"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("config_path: expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != configPath+"\n" {
+		t.Errorf("config_path = %q, want %q", stdout.String(), configPath+"\n")
+	}
+
+	// config_dir should work without config.json
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "show", "config_dir"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("config_dir: expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != dir+"\n" {
+		t.Errorf("config_dir = %q, want %q", stdout.String(), dir+"\n")
+	}
+
+	// admin_token_path should work without config.json
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "show", "admin_token_path"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("admin_token_path: expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != adminTokenPath+"\n" {
+		t.Errorf("admin_token_path = %q, want %q", stdout.String(), adminTokenPath+"\n")
+	}
+
+	// admin_token should work without config.json
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "show", "admin_token"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("admin_token: expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "dht_testtoken123\n" {
+		t.Errorf("admin_token = %q, want 'dht_testtoken123\\n'", stdout.String())
+	}
+}
+
+// Regression 10: config commands do not create runtime or state directories
+func TestRegressionConfigNoDirCreation(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	adminTokenPath := filepath.Join(dir, "admin.token")
+	runtimeDir := filepath.Join(dir, "nonexistent_runtime")
+	stateDir := filepath.Join(dir, "nonexistent_state")
+
+	os.WriteFile(configPath, []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`), 0600)
+	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
+		t.Error("config set should not create runtime directory")
+	}
+	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+		t.Error("config set should not create state directory")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
+		t.Error("config unset should not create runtime directory")
+	}
+}
+
+// Regression 11: the repaired global-stdio test fails if any command writes outside injected writers
+// This is covered by TestConfigNoGlobalStdio which now properly captures and asserts.
