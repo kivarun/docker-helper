@@ -46,6 +46,35 @@ func parseLogLevel(s string) (slog.Level, error) {
 	}
 }
 
+// reservedConfigFields are computed or read-only and must not appear in config.json.
+var reservedConfigFields = map[string]bool{
+	"audit_enabled_source": true,
+	"config_path":          true,
+	"config_dir":           true,
+	"runtime_dir":          true,
+	"socket_path":          true,
+	"lock_path":            true,
+	"state_dir":            true,
+	"database_path":        true,
+	"admin_token_path":     true,
+	"admin_token":          true,
+}
+
+// validateNoReservedFields checks that no reserved field appears in the config JSON.
+// It returns an error naming the first offending field found.
+func validateNoReservedFields(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("cannot parse config: %w", err)
+	}
+	for field := range raw {
+		if reservedConfigFields[field] {
+			return fmt.Errorf("%s is computed and cannot be configured", field)
+		}
+	}
+	return nil
+}
+
 func getConfigPath() string {
 	if p := os.Getenv("DOCKER_HELPER_CONFIG"); p != "" {
 		return p
@@ -64,16 +93,7 @@ func getConfigPath() string {
 }
 
 func getConfigDir() string {
-	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
-	if xdgConfig == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		xdgConfig = filepath.Join(home, ".config")
-	}
-
-	return filepath.Join(xdgConfig, "docker-helper")
+	return filepath.Dir(getConfigPath())
 }
 
 func getRuntimeDir() (string, error) {
@@ -103,6 +123,11 @@ func loadConfig() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read config: %w", err)
+	}
+
+	// Check for reserved fields that must not appear in config.json.
+	if err := validateNoReservedFields(data); err != nil {
+		return nil, err
 	}
 
 	var fc fileConfig

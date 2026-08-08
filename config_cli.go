@@ -173,6 +173,11 @@ func loadFileConfig() (*fileConfig, string, error) {
 		return nil, "", fmt.Errorf("configuration is not a JSON object")
 	}
 
+	// Reject reserved fields that must not appear in config.json.
+	if err := validateNoReservedFields(data); err != nil {
+		return nil, "", err
+	}
+
 	var fc fileConfig
 	if err := json.Unmarshal(data, &fc); err != nil {
 		return nil, "", err
@@ -196,6 +201,14 @@ func loadRawConfig() (map[string]json.RawMessage, string, error) {
 	if raw == nil {
 		return nil, "", fmt.Errorf("configuration is not a JSON object")
 	}
+
+	// Reject reserved fields that must not appear in config.json.
+	for field := range raw {
+		if readOnlyFields[field] {
+			return nil, "", fmt.Errorf("%s is computed and cannot be configured", field)
+		}
+	}
+
 	return raw, configPath, nil
 }
 

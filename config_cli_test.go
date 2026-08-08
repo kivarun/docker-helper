@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1311,3 +1312,247 @@ func TestRegressionConfigNoDirCreation(t *testing.T) {
 
 // Regression 11: the repaired global-stdio test fails if any command writes outside injected writers
 // This is covered by TestConfigNoGlobalStdio which now properly captures and asserts.
+
+// --- Reserved field regression tests ---
+
+// Regression: every reserved field is rejected when present in config.json
+func TestRegressionReservedFieldsRejected(t *testing.T) {
+	reservedFields := []string{
+		"audit_enabled_source",
+		"config_path",
+		"config_dir",
+		"runtime_dir",
+		"socket_path",
+		"lock_path",
+		"state_dir",
+		"database_path",
+		"admin_token_path",
+		"admin_token",
+	}
+
+	for _, field := range reservedFields {
+		t.Run(field, func(t *testing.T) {
+			cfg := fmt.Sprintf(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "%s": "should_not_be_here"
+}`, field)
+			configPath := setupConfigTestWithData(t, []byte(cfg))
+
+			// config show must reject
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("show: expected exit code 1, got %d, stderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), field) {
+				t.Errorf("show: error must identify field %q, got: %s", field, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "computed and cannot be configured") {
+				t.Errorf("show: error must say 'computed and cannot be configured', got: %s", stderr.String())
+			}
+
+			// config set must also reject (without modifying file)
+			stdout.Reset()
+			stderr.Reset()
+			code = runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("set: expected exit code 1, got %d, stderr: %s", code, stderr.String())
+			}
+
+			// config unset must also reject
+			stdout.Reset()
+			stderr.Reset()
+			code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("unset: expected exit code 1, got %d, stderr: %s", code, stderr.String())
+			}
+
+			// File must be unchanged
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("cannot read config: %v", err)
+			}
+			if !bytes.Equal(data, []byte(cfg)) {
+				t.Errorf("config file was modified after rejected operations")
+			}
+		})
+	}
+}
+
+// Regression: unrelated unknown members remain accepted and survive successful updates
+func TestRegressionUnknownMembersAccepted(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "future_feature": true,
+  "custom_metadata": {"version": 2}
+}`
+	configPath := setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	raw := readConfigJSON(t, configPath)
+	if _, ok := raw["future_feature"]; !ok {
+		t.Error("future_feature should be preserved")
+	}
+	if _, ok := raw["custom_metadata"]; !ok {
+		t.Error("custom_metadata should be preserved")
+	}
+}
+
+// Regression: the four bootstrapping show queries remain lazy with missing or malformed config
+func TestRegressionBootstrapQueriesLazy(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	adminTokenPath := filepath.Join(dir, "admin.token")
+	// Write token but NOT config.json
+	os.WriteFile(adminTokenPath, []byte("dht_lazy_token\n"), 0600)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	queries := []struct {
+		field  string
+		expect string
+	}{
+		{"config_path", configPath + "\n"},
+		{"config_dir", dir + "\n"},
+		{"admin_token_path", adminTokenPath + "\n"},
+		{"admin_token", "dht_lazy_token\n"},
+	}
+
+	for _, q := range queries {
+		t.Run(q.field, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "show", q.field}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+			}
+			if stdout.String() != q.expect {
+				t.Errorf("got %q, want %q", stdout.String(), q.expect)
+			}
+		})
+	}
+
+	// Now test with malformed config.json
+	os.WriteFile(configPath, []byte("not json at all"), 0600)
+	for _, q := range queries {
+		t.Run(q.field+"_malformed", func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "show", q.field}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+			}
+			if stdout.String() != q.expect {
+				t.Errorf("got %q, want %q", stdout.String(), q.expect)
+			}
+		})
+	}
+}
+
+// Regression: getConfigDir follows getConfigPath
+func TestRegressionGetConfigDirFollowsGetConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "custom", "config.json")
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+
+	gotDir := getConfigDir()
+	wantDir := filepath.Dir(getConfigPath())
+	if gotDir != wantDir {
+		t.Errorf("getConfigDir() = %q, want %q (filepath.Dir(getConfigPath()))", gotDir, wantDir)
+	}
+}
+
+// Regression: init, daemon loaders, and config show use the same overridden paths
+func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "myconfig", "config.json")
+	xdgOther := filepath.Join(dir, "xdg_other")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_CONFIG_HOME", xdgOther)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	// 1) Run init - should create files at DOCKER_HELPER_CONFIG, not XDG_CONFIG_HOME
+	if err := runInit(); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	// Verify config.json was created at DOCKER_HELPER_CONFIG
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Error("init did not create config.json at DOCKER_HELPER_CONFIG")
+	}
+
+	// Verify admin.token was created beside config.json
+	adminTokenPath := filepath.Join(dir, "myconfig", "admin.token")
+	if _, err := os.Stat(adminTokenPath); os.IsNotExist(err) {
+		t.Error("init did not create admin.token beside config.json")
+	}
+
+	// Verify NO files were created under XDG_CONFIG_HOME
+	xdgDhDir := filepath.Join(xdgOther, "docker-helper")
+	if _, err := os.Stat(xdgDhDir); !os.IsNotExist(err) {
+		t.Errorf("init created files under XDG_CONFIG_HOME: %s", xdgDhDir)
+	}
+
+	// 2) Verify daemon config loader uses the same paths
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.AdminTokenPath != adminTokenPath {
+		t.Errorf("loadConfig AdminTokenPath = %q, want %q", cfg.AdminTokenPath, adminTokenPath)
+	}
+
+	// 3) Verify token loading works
+	if _, err := loadAdminToken(cfg.AdminTokenPath); err != nil {
+		t.Fatalf("loadAdminToken failed: %v", err)
+	}
+
+	// 4) Verify config show reports the same paths
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "config_path"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("config show config_path: exit %d, stderr: %s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != configPath {
+		t.Errorf("config show config_path = %q, want %q", stdout.String(), configPath)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "show", "config_dir"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("config show config_dir: exit %d, stderr: %s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != filepath.Join(dir, "myconfig") {
+		t.Errorf("config show config_dir = %q, want %q", stdout.String(), filepath.Join(dir, "myconfig"))
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "show", "admin_token_path"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("config show admin_token_path: exit %d, stderr: %s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != adminTokenPath {
+		t.Errorf("config show admin_token_path = %q, want %q", stdout.String(), adminTokenPath)
+	}
+
+	// 5) Verify config show admin_token reads the real token
+	tokenData, _ := os.ReadFile(adminTokenPath)
+	realToken := strings.TrimSpace(string(tokenData))
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "show", "admin_token"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("config show admin_token: exit %d, stderr: %s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != realToken {
+		t.Errorf("config show admin_token = %q, want %q", stdout.String(), realToken)
+	}
+}
