@@ -317,21 +317,69 @@ func main() {
 	}
 }
 
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+func printServeHelp() {
+	fmt.Println("Usage: docker-helper serve")
+	fmt.Println()
+	fmt.Println("Start the HTTP server.")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  -h, --help  Show this help message")
+}
+
+func printInitHelp() {
+	fmt.Println("Usage: docker-helper init")
+	fmt.Println()
+	fmt.Println("Initialize configuration and admin token.")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  -h, --help  Show this help message")
+}
+
+func printVersionHelp() {
+	fmt.Println("Usage: docker-helper version")
+	fmt.Println()
+	fmt.Println("Print version.")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  -h, --help  Show this help message")
+}
+
 func runCommand(args []string) int {
 	switch args[0] {
 	case "serve":
+		if hasHelpFlag(args[1:]) {
+			printServeHelp()
+			return 0
+		}
 		if err := runServe(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 
 	case "init":
+		if hasHelpFlag(args[1:]) {
+			printInitHelp()
+			return 0
+		}
 		if err := runInit(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 
 	case "version":
+		if hasHelpFlag(args[1:]) {
+			printVersionHelp()
+			return 0
+		}
 		fmt.Println(version)
 
 	case "help", "-h", "--help":
@@ -360,7 +408,7 @@ func runSessionCommand(args []string) int {
 
 func runSessionCommandWithWriters(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "error: session subcommand required (create, list)")
+		fmt.Fprintln(stderr, "error: session subcommand required (create, list, delete)")
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Run the following for usage information:")
 		fmt.Fprintln(stderr, "  docker-helper session --help")
