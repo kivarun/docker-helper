@@ -72,16 +72,54 @@ token is printed once and stored at:
 ${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/admin.token
 ```
 
-### 3. Review configuration
+### 3. Review and modify configuration
 
-Edit the configuration file:
-
-```
-${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json
+```bash
+docker-helper config show
 ```
 
-Set `allowed_root` to the directory that should contain all agent
-workspaces.
+Displays all configuration fields as JSON. The `admin_token` is shown as
+`"<redacted>"`. To see the real token:
+
+```bash
+docker-helper config show admin_token
+```
+
+To modify a setting:
+
+```bash
+docker-helper config set allowed_root /path/to/workspaces
+docker-helper config set log_level debug
+docker-helper config set audit_enabled true
+```
+
+To remove a setting and restore its default:
+
+```bash
+docker-helper config unset log_level
+docker-helper config unset audit_enabled
+```
+
+Configuration fields:
+
+| Field | Type | Writable | Description |
+|-------|------|----------|-------------|
+| `allowed_root` | string | yes | Root directory for agent workspaces (required) |
+| `session_ttl` | duration | yes | Session lifetime, e.g. `12h` (required) |
+| `log_level` | string | yes | `debug`, `info`, `warn`, `error` (default: `info`) |
+| `audit_enabled` | boolean | yes | Override audit behavior (default: derived from `log_level`) |
+| `audit_enabled_source` | string | no | `"explicit"` or `"log_level"` |
+| `config_path` | string | no | Path to `config.json` |
+| `config_dir` | string | no | Configuration directory |
+| `runtime_dir` | string | no | Runtime directory under `XDG_RUNTIME_DIR` |
+| `socket_path` | string | no | Unix socket path |
+| `lock_path` | string | no | Lock file path |
+| `state_dir` | string | no | State directory |
+| `database_path` | string | no | SQLite database path |
+| `admin_token_path` | string | no | Path to `admin.token` |
+| `admin_token` | string | no | Admin token (redacted in general show) |
+
+Changes take effect after restarting the daemon.
 
 ### 4. Start the daemon
 
@@ -201,6 +239,24 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 ```
 
 No authentication required.
+
+### Getting the socket path and admin token
+
+Use `config show` to retrieve paths and tokens for scripting:
+
+```bash
+SOCKET=$(docker-helper config show socket_path)
+curl --unix-socket "$SOCKET" http://localhost/health
+
+ADMIN_TOKEN=$(docker-helper config show admin_token)
+curl --unix-socket "$SOCKET" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost/sessions
+```
+
+Note: `docker-helper config show` (without a field) displays
+`"admin_token": "<redacted>"` to prevent accidental leakage. Use
+`docker-helper config show admin_token` to print the real token.
 
 ## Security
 

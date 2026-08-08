@@ -17,6 +17,8 @@ type Command struct {
 	Name          string
 	Summary       string
 	Usage         string
+	MinPosArgs    int
+	MaxPosArgs    int
 	Subcommands   []*Command
 	NewInvocation func(*flag.FlagSet) Invocation
 }
@@ -108,16 +110,40 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 		return 2
 	}
 
-	// Reject positional arguments
-	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "error: unexpected argument %q\n", fs.Arg(0))
-		return 2
-	}
-
-	// Handle help after successful parsing, before Validate/Run
+	// Handle help after successful parsing, before arg count/Validate/Run
 	if *helpShort || *helpLong {
 		c.printHelp(stdout, path)
 		return 0
+	}
+
+	// Check positional argument count
+	nArgs := fs.NArg()
+	if c.MinPosArgs > 0 || c.MaxPosArgs > 0 {
+		if c.MaxPosArgs == -1 {
+			// Unlimited
+			if nArgs < c.MinPosArgs {
+				fmt.Fprintf(stderr, "error: expected %d positional argument(s), got %d\n", c.MinPosArgs, nArgs)
+				return 2
+			}
+		} else if c.MaxPosArgs == 0 {
+			// No positional args allowed (zero-value default behavior)
+			if nArgs > 0 {
+				fmt.Fprintf(stderr, "error: unexpected argument %q\n", fs.Arg(0))
+				return 2
+			}
+		} else {
+			// Bounded range
+			if nArgs < c.MinPosArgs || nArgs > c.MaxPosArgs {
+				fmt.Fprintf(stderr, "error: expected %d positional argument(s), got %d\n", c.MinPosArgs, nArgs)
+				return 2
+			}
+		}
+	} else {
+		// Default: reject all positional args
+		if nArgs > 0 {
+			fmt.Fprintf(stderr, "error: unexpected argument %q\n", fs.Arg(0))
+			return 2
+		}
 	}
 
 	// Validate required options
@@ -287,6 +313,7 @@ func init() {
 		serveCommand,
 		initCommand,
 		sessionCommand,
+		configCommand,
 		versionCommand,
 		helpCommand,
 	}
