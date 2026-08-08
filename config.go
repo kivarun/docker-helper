@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,6 +15,7 @@ import (
 type Config struct {
 	AllowedRoot    string
 	SessionTTL     time.Duration
+	LogLevel       slog.Level
 	SocketPath     string
 	LockPath       string
 	StateDir       string
@@ -24,6 +26,22 @@ type Config struct {
 type fileConfig struct {
 	AllowedRoot string `json:"allowed_root"`
 	SessionTTL  string `json:"session_ttl"`
+	Level       string `json:"log_level,omitempty"`
+}
+
+func parseLogLevel(s string) (slog.Level, error) {
+	switch s {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("invalid log_level %q: must be one of debug, info, warn, error", s)
+	}
 }
 
 func getConfigPath() string {
@@ -96,6 +114,14 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("cannot parse session_ttl %q: %w", fc.SessionTTL, err)
 	}
 
+	level := slog.LevelInfo
+	if fc.Level != "" {
+		level, err = parseLogLevel(fc.Level)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
 		return nil, err
@@ -116,6 +142,7 @@ func loadConfig() (*Config, error) {
 	return &Config{
 		AllowedRoot:    fc.AllowedRoot,
 		SessionTTL:     ttl,
+		LogLevel:       level,
 		SocketPath:     socketPath,
 		LockPath:       socketPath + ".lock",
 		StateDir:       stateDir,
@@ -150,6 +177,7 @@ func runInit() error {
 		defaultConfig := fileConfig{
 			AllowedRoot: "/home/michael/work/git",
 			SessionTTL:  "12h",
+			Level:       "info",
 		}
 
 		data, err := json.MarshalIndent(defaultConfig, "", "  ")

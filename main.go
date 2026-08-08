@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -237,6 +238,9 @@ func runServe() error {
 		return err
 	}
 
+	// Initialize logging: operational → stderr, audit → stdout.
+	initLoggers(os.Stderr, os.Stdout, cfg.LogLevel)
+
 	return runWithLock(cfg.LockPath, cfg.SocketPath, func(listener net.Listener) error {
 		adminHash, err := loadAdminToken(cfg.AdminTokenPath)
 		if err != nil {
@@ -264,25 +268,34 @@ func runServe() error {
 		}
 
 		mux := http.NewServeMux()
-		mux.HandleFunc("POST /build", app.handleBuild)
-		mux.HandleFunc("GET /health", app.handleHealth)
-		mux.HandleFunc("POST /pull", app.handlePull)
-		mux.HandleFunc("POST /run", app.handleRun)
-		mux.HandleFunc("POST /sessions", app.handleCreateSession)
-		mux.HandleFunc("GET /sessions", app.handleListSessions)
-		mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+		mux.HandleFunc("POST /build", withRequestID(app.handleBuild))
+		mux.HandleFunc("GET /health", withRequestID(app.handleHealth))
+		mux.HandleFunc("POST /pull", withRequestID(app.handlePull))
+		mux.HandleFunc("POST /run", withRequestID(app.handleRun))
+		mux.HandleFunc("POST /sessions", withRequestID(app.handleCreateSession))
+		mux.HandleFunc("GET /sessions", withRequestID(app.handleListSessions))
+		mux.HandleFunc("DELETE /sessions/{id}", withRequestID(app.handleDeleteSession))
 
 		server := &http.Server{
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 
-		fmt.Printf("docker-helper listening on %s\n", cfg.SocketPath)
+		opLogger.Info("daemon starting",
+			slog.String("socket", cfg.SocketPath),
+			slog.String("log_level", cfg.LogLevel.String()),
+		)
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		return serveWithShutdown(ctx, server, listener, shutdownTimeout)
+		err = serveWithShutdown(ctx, server, listener, shutdownTimeout)
+
+		if err == nil {
+			opLogger.Info("daemon stopped")
+		}
+
+		return err
 	})
 }
 

@@ -5,57 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-type stderrCapture struct {
-	old  *os.File
-	r    *os.File
-	w    *os.File
-	buf  *bytes.Buffer
-	done chan struct{}
-}
-
-func captureStderr(t *testing.T) *stderrCapture {
-	t.Helper()
-
-	old := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("cannot create pipe: %v", err)
-	}
-	os.Stderr = w
-
-	buf := new(bytes.Buffer)
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(buf, r)
-		close(done)
-	}()
-
-	return &stderrCapture{
-		old:  old,
-		r:    r,
-		w:    w,
-		buf:  buf,
-		done: done,
-	}
-}
-
-func (c *stderrCapture) flush() {
-	c.w.Close()
-	<-c.done
-	c.r.Close()
-	os.Stderr = c.old
-}
-
-func (c *stderrCapture) buffer() *bytes.Buffer {
-	return c.buf
+func newRunRequest(body map[string]any, token string) *http.Request {
+	data, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(data))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
 
 func parseAuditRecords(buf *bytes.Buffer) []auditRecord {
@@ -99,16 +62,8 @@ func auditRawLinesBySession(buf *bytes.Buffer, sessionID string) []string {
 	return lines
 }
 
-func newRunRequest(body map[string]any, token string) *http.Request {
-	data, _ := json.Marshal(body)
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(data))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	return req
-}
-
 func TestRunStartAndFinish(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -132,9 +87,7 @@ func TestRunStartAndFinish(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -146,8 +99,8 @@ func TestRunStartAndFinish(t *testing.T) {
 	if startRec.Image != "alpine:latest" {
 		t.Errorf("start image: expected 'alpine:latest', got %q", startRec.Image)
 	}
-	if len(startRec.Command) != 2 || startRec.Command[0] != "echo" || startRec.Command[1] != "hello" {
-		t.Errorf("start command: expected [echo hello], got %v", startRec.Command)
+	if startRec.CommandArgCount == nil || *startRec.CommandArgCount != 2 {
+		t.Errorf("start command_arg_count: expected 2, got %v", startRec.CommandArgCount)
 	}
 
 	finishRec := records[1]
@@ -163,7 +116,7 @@ func TestRunStartAndFinish(t *testing.T) {
 }
 
 func TestAuditEnvKeysNoValues(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -188,16 +141,14 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
-
-	output := cap.buffer().String()
+	output := auditBuf.String()
 
 	// Check that raw secret is absent from everything (audit + debug)
 	if strings.Contains(output, secretValue) {
-		t.Fatalf("stderr contains raw env value!\n%s", output)
+		t.Fatalf("audit contains raw env value!\n%s", output)
 	}
 
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -230,7 +181,7 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 }
 
 func TestAuditDebugNoRawValue(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -254,17 +205,15 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
+	output := auditBuf.String()
 
-	output := cap.buffer().String()
-
-	// The raw secret must never appear anywhere in stderr (audit + debug)
+	// The raw secret must never appear anywhere in audit
 	if strings.Contains(output, secretValue) {
-		t.Fatalf("stderr contains raw env value!\n%s", output)
+		t.Fatalf("audit contains raw env value!\n%s", output)
 	}
 
 	// Verify audit records only contain env_keys, not values
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	for _, rec := range records {
 		raw, _ := json.Marshal(rec)
 		if strings.Contains(string(raw), secretValue) {
@@ -274,7 +223,7 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 }
 
 func TestAuditNonZeroExit(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -298,9 +247,7 @@ func TestAuditNonZeroExit(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -318,7 +265,7 @@ func TestAuditNonZeroExit(t *testing.T) {
 }
 
 func TestAuditDockerError(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -341,9 +288,7 @@ func TestAuditDockerError(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -355,7 +300,7 @@ func TestAuditDockerError(t *testing.T) {
 }
 
 func TestAuditDockerExit125HasExitCode(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -378,9 +323,7 @@ func TestAuditDockerExit125HasExitCode(t *testing.T) {
 		t.Fatalf("expected 500 (docker error), got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -394,34 +337,8 @@ func TestAuditDockerExit125HasExitCode(t *testing.T) {
 	}
 }
 
-func TestAuditDebugContainsMaskedValue(t *testing.T) {
-	// Test that maskEnvValue produces the correct masked format
-	const secretValue = "my-long-secret-token-value"
-	masked := maskEnvValue("API_KEY", secretValue)
-
-	// Raw secret must not appear in masked output
-	if strings.Contains(masked, secretValue) {
-		t.Fatalf("masked value contains raw secret: %s", masked)
-	}
-
-	// Must contain key name
-	if !strings.Contains(masked, "API_KEY") {
-		t.Errorf("expected API_KEY in masked value: %s", masked)
-	}
-
-	// Must contain first char + ***
-	if !strings.Contains(masked, "m***") {
-		t.Errorf("expected masked value m***: %s", masked)
-	}
-
-	// Must contain length
-	if !strings.Contains(masked, "(length=26)") {
-		t.Errorf("expected (length=26): %s", masked)
-	}
-}
-
 func TestAuditMountsRelativeSource(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -447,9 +364,7 @@ func TestAuditMountsRelativeSource(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -470,7 +385,7 @@ func TestAuditMountsRelativeSource(t *testing.T) {
 }
 
 func TestAuditNoContainerOutput(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	const containerOutput = "this-is-container-stdout-and-stderr"
 
@@ -491,9 +406,7 @@ func TestAuditNoContainerOutput(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	for _, rec := range records {
 		raw, _ := json.Marshal(rec)
 		if strings.Contains(string(raw), containerOutput) {
@@ -502,25 +415,8 @@ func TestAuditNoContainerOutput(t *testing.T) {
 	}
 }
 
-func TestMaskEnvNoRawValue(t *testing.T) {
-	secret := "my-super-secret-value-12345"
-	result := maskEnvValue("API_KEY", secret)
-
-	if strings.Contains(result, secret) {
-		t.Fatalf("masked value contains raw secret: %s", result)
-	}
-
-	if !strings.Contains(result, "API_KEY") {
-		t.Errorf("masked value should contain key name: %s", result)
-	}
-
-	if !strings.Contains(result, "(length=") {
-		t.Errorf("masked value should contain length: %s", result)
-	}
-}
-
 func TestAuditRecordTimeIsRFC3339(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -539,9 +435,7 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) == 0 {
 		t.Fatal("expected audit records")
 	}
@@ -553,8 +447,8 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 	}
 }
 
-func TestAuditCommandPreservesBoundaries(t *testing.T) {
-	cap := captureStderr(t)
+func TestAuditCommandArgCount(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -574,24 +468,76 @@ func TestAuditCommandPreservesBoundaries(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
 
 	startRec := records[0]
-	if len(startRec.Command) != 3 {
-		t.Fatalf("expected 3 command args, got %d: %v", len(startRec.Command), startRec.Command)
+	if startRec.CommandArgCount == nil || *startRec.CommandArgCount != 3 {
+		t.Fatalf("expected command_arg_count 3, got %v", startRec.CommandArgCount)
 	}
-	if startRec.Command[0] != "sh" {
-		t.Errorf("expected 'sh', got %q", startRec.Command[0])
+
+	// Verify that the raw command arguments do NOT appear in the audit record
+	raw, _ := json.Marshal(startRec)
+	if strings.Contains(string(raw), "echo hello world") {
+		t.Fatalf("audit record contains raw command argument!\n%s", raw)
 	}
-	if startRec.Command[1] != "-c" {
-		t.Errorf("expected '-c', got %q", startRec.Command[1])
+}
+
+func TestAuditNoCommandInRecord(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
 	}
-	if startRec.Command[2] != "echo hello world" {
-		t.Errorf("expected 'echo hello world', got %q", startRec.Command[2])
+
+	const secretCmd = "SECRET_CMD_ARG_UNIQUE_12345"
+
+	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+		return []byte("ok"), nil
 	}
+
+	req := newRunRequest(map[string]any{
+		"image":   "alpine:latest",
+		"command": []string{"sh", "-c", secretCmd},
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	for _, rec := range records {
+		raw, _ := json.Marshal(rec)
+		if strings.Contains(string(raw), secretCmd) {
+			t.Fatalf("audit record contains secret command argument!\n%s", raw)
+		}
+	}
+}
+
+// setupTestLogging initializes the logging infrastructure with test buffers.
+// Returns the audit buffer and operational buffer.
+func setupTestLogging(t *testing.T) (*bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+	initLoggers(opBuf, auditBuf, slog.LevelError)
+	t.Cleanup(func() {
+		opLogger = nil
+		auditWriter = nil
+	})
+	return auditBuf, opBuf
+}
+
+// setupTestLoggingDiscard initializes the logging infrastructure with
+// discard writers for tests that don't need to capture logs.
+func setupTestLoggingDiscard(t *testing.T) {
+	t.Helper()
+	initLoggers(io.Discard, io.Discard, slog.LevelError)
+	t.Cleanup(func() {
+		opLogger = nil
+		auditWriter = nil
+	})
 }

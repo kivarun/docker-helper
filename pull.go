@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"time"
@@ -22,6 +22,8 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+
+	ctx := withSessionID(r.Context(), session.ID)
 
 	var req pullRequest
 
@@ -43,9 +45,12 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAudit(auditRecord{
+	writeAuditWithRequestID(ctx, auditRecord{
+		Time:      time.Now().UTC().Format(time.RFC3339),
+		Stream:    "audit",
 		Event:     "pull.start",
 		SessionID: session.ID,
+		RequestID: requestIDFromContext(ctx),
 		Image:     req.Image,
 	})
 
@@ -68,7 +73,10 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		exitCode = extractExitCode(err)
 		result = "pull_error"
 
-		log.Printf("docker pull error: %v", err)
+		opLog(ctx).Error("docker pull error",
+			slog.String("operation", "pull"),
+			slog.String("error", err.Error()),
+		)
 
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,
@@ -88,9 +96,12 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeAudit(auditRecord{
+	writeAuditWithRequestID(ctx, auditRecord{
+		Time:      time.Now().UTC().Format(time.RFC3339),
+		Stream:    "audit",
 		Event:     "pull.finish",
 		SessionID: session.ID,
+		RequestID: requestIDFromContext(ctx),
 		Image:     req.Image,
 		Result:    result,
 		ExitCode:  exitCode,

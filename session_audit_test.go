@@ -169,7 +169,7 @@ func assertNoInjectedError(t *testing.T, raw string, injected string) {
 // --- session.create handler tests ---
 
 func TestSessionCreateAuditSuccess(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
@@ -183,14 +183,13 @@ func TestSessionCreateAuditSuccess(t *testing.T) {
 	if w.Code != 201 {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
-	cap.flush()
 
 	var resp createSessionResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
 	}
 
-	rawLines := auditRawLinesBySession(cap.buffer(), resp.Session.ID)
+	rawLines := auditRawLinesBySession(auditBuf, resp.Session.ID)
 	if len(rawLines) != 1 {
 		t.Fatalf("expected 1 audit line, got %d", len(rawLines))
 	}
@@ -217,7 +216,7 @@ func TestSessionCreateAuditSuccess(t *testing.T) {
 }
 
 func TestSessionCreateAuditInvalidJSON(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("not-json")))
@@ -228,11 +227,10 @@ func TestSessionCreateAuditInvalidJSON(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
-	cap.flush()
 
-	raw := findAuditLine(cap.buffer(), "session.create")
+	raw := findAuditLine(auditBuf, "session.create")
 	if raw == "" {
-		t.Fatalf("expected session.create audit line, got none\n%s", cap.buffer().String())
+		t.Fatalf("expected session.create audit line, got none\n%s", auditBuf.String())
 	}
 	m := parseAuditMap(t, raw)
 
@@ -247,7 +245,7 @@ func TestSessionCreateAuditInvalidJSON(t *testing.T) {
 }
 
 func TestSessionCreateAuditInvalidWorkspace(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"workspace": "/tmp/outside-workspace"}
@@ -261,11 +259,10 @@ func TestSessionCreateAuditInvalidWorkspace(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
-	cap.flush()
 
-	raw := findAuditLine(cap.buffer(), "session.create")
+	raw := findAuditLine(auditBuf, "session.create")
 	if raw == "" {
-		t.Fatalf("expected session.create audit line, got none\n%s", cap.buffer().String())
+		t.Fatalf("expected session.create audit line, got none\n%s", auditBuf.String())
 	}
 	m := parseAuditMap(t, raw)
 
@@ -282,7 +279,7 @@ func TestSessionCreateAuditInvalidWorkspace(t *testing.T) {
 // TestSessionCreateAuditDatabaseError uses a failExec driver so INSERT
 // returns a known error. The error text must not appear in audit JSON.
 func TestSessionCreateAuditDatabaseError(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	// Controlled injection: replace DB with one that fails Exec.
@@ -302,11 +299,10 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 	if w.Code != 500 {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
-	cap.flush()
 
-	raw := findAuditLine(cap.buffer(), "session.create")
+	raw := findAuditLine(auditBuf, "session.create")
 	if raw == "" {
-		t.Fatalf("expected session.create audit line, got none\n%s", cap.buffer().String())
+		t.Fatalf("expected session.create audit line, got none\n%s", auditBuf.String())
 	}
 	m := parseAuditMap(t, raw)
 
@@ -324,7 +320,7 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 // TestSessionCreateAuditSystemError uses a broken symlink for AllowedRoot
 // so that EvalSymlinks fails with system_error.
 func TestSessionCreateAuditSystemError(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	// Valid workspace that passes steps 1-5.
@@ -349,11 +345,10 @@ func TestSessionCreateAuditSystemError(t *testing.T) {
 	if w.Code != 500 {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
-	cap.flush()
 
-	raw := findAuditLine(cap.buffer(), "session.create")
+	raw := findAuditLine(auditBuf, "session.create")
 	if raw == "" {
-		t.Fatalf("expected session.create audit line, got none\n%s", cap.buffer().String())
+		t.Fatalf("expected session.create audit line, got none\n%s", auditBuf.String())
 	}
 	m := parseAuditMap(t, raw)
 
@@ -371,7 +366,7 @@ func TestSessionCreateAuditSystemError(t *testing.T) {
 // --- session.delete handler tests ---
 
 func TestSessionDeleteAuditSuccess(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -387,9 +382,8 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 	if w.Code != 204 {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
-	cap.flush()
 
-	rawLines := auditRawLinesBySession(cap.buffer(), result.Session.ID)
+	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) != 1 {
 		t.Fatalf("expected 1 audit line, got %d", len(rawLines))
 	}
@@ -416,7 +410,7 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 }
 
 func TestSessionDeleteAuditInvalidID(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/", nil)
@@ -427,11 +421,10 @@ func TestSessionDeleteAuditInvalidID(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
-	cap.flush()
 
-	raw := findAuditLine(cap.buffer(), "session.delete")
+	raw := findAuditLine(auditBuf, "session.delete")
 	if raw == "" {
-		t.Fatalf("expected session.delete audit line, got none\n%s", cap.buffer().String())
+		t.Fatalf("expected session.delete audit line, got none\n%s", auditBuf.String())
 	}
 	m := parseAuditMap(t, raw)
 
@@ -446,7 +439,7 @@ func TestSessionDeleteAuditInvalidID(t *testing.T) {
 }
 
 func TestSessionDeleteAuditNotFound(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
@@ -457,9 +450,8 @@ func TestSessionDeleteAuditNotFound(t *testing.T) {
 	if w.Code != 404 {
 		t.Fatalf("expected 404, got %d", w.Code)
 	}
-	cap.flush()
 
-	rawLines := auditRawLinesBySession(cap.buffer(), "dhs_nonexistent")
+	rawLines := auditRawLinesBySession(auditBuf, "dhs_nonexistent")
 	if len(rawLines) != 1 {
 		t.Fatalf("expected 1 audit line, got %d", len(rawLines))
 	}
@@ -483,7 +475,7 @@ func TestSessionDeleteAuditNotFound(t *testing.T) {
 // SELECT succeeds (Query is not intercepted) but DELETE fails with a
 // known error. The workspace must be preserved in the audit.
 func TestSessionDeleteAuditDatabaseError(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -506,11 +498,10 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 	if w.Code != 500 {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
-	cap.flush()
 
-	raw := findAuditLine(cap.buffer(), "session.delete")
+	raw := findAuditLine(auditBuf, "session.delete")
 	if raw == "" {
-		t.Fatalf("expected session.delete audit line, got none\n%s", cap.buffer().String())
+		t.Fatalf("expected session.delete audit line, got none\n%s", auditBuf.String())
 	}
 	m := parseAuditMap(t, raw)
 

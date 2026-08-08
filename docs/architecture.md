@@ -406,7 +406,7 @@ Validation details:
 - mount source must be relative to workspace;
 - mount target must be absolute;
 - source is resolved through `EvalSymlinks` and checked via `isInside`;
-- environment values are masked before logging;
+- environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
 - container runs with fixed security policy (details in implementation).
 
@@ -469,15 +469,7 @@ Environment variable names must match `^[A-Za-z_][A-Za-z0-9_]*$`.
 
 Values can be any string, including empty.
 
-Values are logged in masked form:
-
-```
-KEY=s*** (length=32)
-FLAG="" (length=0)
-```
-
-Full values are never logged. The mask shows the first character and the
-length. This prevents secret leakage while retaining diagnostic value.
+Values are never logged. Only variable names appear in `env_keys`.
 
 Environment variables are sorted by name before being passed to Docker.
 This makes the command line deterministic and reproducible.
@@ -510,21 +502,76 @@ Current error codes:
 
 Planned:
 
-- internal errors (database failures, encoding errors) will be logged
-  through the standard Go `log` package;
-- when running under systemd, these logs will be available in journald;
-- internal error details will not be exposed in API responses.
+- audit coverage for rejected build/run/pull requests;
+- audit events for GET /sessions and GET /health.
 
 ## Audit logging
 
-docker-helper writes structured audit records to `stderr`. There is no
-configuration option to change the output destination; redirect `stderr`
-when starting the daemon to persist the log.
+docker-helper writes structured audit records to **stdout**. Operational
+logs are written to **stderr**. Both streams use JSON Lines format.
+
+### Stream separation
+
+| Stream | Destination | Content | Level-filtered |
+|--------|-------------|---------|----------------|
+| Audit | stdout | Audit records (JSONL) | Never |
+| Operational | stderr | Daemon events (JSONL) | Yes, by `log_level` |
+
+No runtime `fmt.Printf`, `log.Printf`, or other free-form text output
+is emitted. Human-oriented CLI output from `init`, `version`, `help`,
+and `session` commands remains unchanged.
+
+Every audit record contains `"stream": "audit"`.
+Every operational record contains `"stream": "operational"`.
+
+### Operational log levels
+
+The `log_level` field in `config.json` controls operational log verbosity:
+
+| Value | Records emitted |
+|-------|-----------------|
+| `debug` | debug, info, warn, error |
+| `info` | info, warn, error (default) |
+| `warn` | warn, error |
+| `error` | error only |
+
+Audit records are **never** suppressed by `log_level`.
+
+### Request correlation
+
+Every HTTP request receives a server-generated request ID. It is:
+
+- returned in the `X-Request-ID` response header;
+- added as `request_id` to every audit record for that request;
+- added to every operational record for that request;
+- `session_id` is added to operational records when authentication
+  has established a session.
+
+The server does not trust or reuse any client-supplied request ID.
+
+### Sensitive data
+
+The following are **never** logged:
+
+- command arguments (only `command_arg_count` appears in audit);
+- environment variable values (only names in `env_keys`);
+- Docker build output or container stdout/stderr;
+- `Authorization` header values;
+- raw HTTP request bodies.
+
+### Log collection
+
+Log collection, retention, and rotation are delegated to the process
+supervisor (systemd/journald or another log shipper). docker-helper
+does not write log files or implement internal rotation.
 
 ### Format
 
 JSON Lines: one JSON object per line, UTF-8 encoded. Each line is an
 independent record.
+
+Operational records use slog's structured `time`, `level`, and `msg`
+fields.
 
 ### Common fields
 
@@ -616,8 +663,9 @@ Emitted before a container starts.
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
+| `request_id` | string | request correlation ID |
 | `image` | string | container image name with tag |
-| `command` | string[] | container command with arguments (present when set) |
+| `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set; values are never logged) |
 
@@ -638,8 +686,9 @@ Emitted after a container run attempt completes.
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
+| `request_id` | string | request correlation ID |
 | `image` | string | container image name with tag |
-| `command` | string[] | container command with arguments (present when set) |
+| `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set) |
 | `result` | string | outcome code |
@@ -700,18 +749,15 @@ Emitted after a Docker pull completes (success or failure).
 
 ### What is never logged
 
-The audit log never contains:
+The audit log and operational log never contain:
 
 - the raw HTTP request body;
 - HTTP request headers;
 - `Authorization` header values and the token used for authentication;
 - environment variable values (only names appear in `env_keys`);
 - Docker build output or container stdout/stderr;
-- internal error messages or stack traces.
-
-The `command` field in `run.start`/`run.finish` records the full command
-with arguments as provided, without masking. Do not pass secrets in
-command arguments.
+- internal error messages or stack traces;
+- command arguments (only `command_arg_count` is recorded).
 
 ### Examples
 
@@ -737,8 +783,8 @@ Authorization failure:
 Container run:
 
 ```json
-{"time":"2026-01-15T10:32:00Z","event":"run.start","session_id":"dhs_0a1b2c3d4e5f","image":"alpine:3.19","command":["sh","-c","echo hello"],"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
-{"time":"2026-01-15T10:32:01Z","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","image":"alpine:3.19","command":["sh","-c","echo hello"],"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"success","duration":"1s"}
+{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","session_id":"dhs_0a1b2c3d4e5f","request_id":"req_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
+{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","request_id":"req_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"success","duration":"1s"}
 ```
 
 ## Security considerations
@@ -773,8 +819,10 @@ through the HTTP API. The Unix socket has `0600` permissions.
 
 ### Secret leakage through logs
 
-Environment variable values are masked before logging. Admin and session
-tokens are never logged.
+Command arguments, environment variable values, and Docker output are
+never logged. Admin and session tokens are never logged. The audit
+record for `POST /run` includes `command_arg_count` but never the
+arguments themselves.
 
 ### Container security
 
@@ -816,8 +864,6 @@ Items discussed but not yet implemented:
 - OpenCode custom tool integration (client-side);
 - launcher component;
 - RPM/DEB packaging;
-- systemd user service;
-- structured logging (JSON);
 - token rotation command;
 - session revocation (soft delete via `revoked_at` — the column exists
   in the database schema and is checked during token lookup, but the

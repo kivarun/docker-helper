@@ -10,7 +10,7 @@ import (
 )
 
 func TestPullStartContainsFields(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -33,9 +33,7 @@ func TestPullStartContainsFields(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -53,7 +51,7 @@ func TestPullStartContainsFields(t *testing.T) {
 }
 
 func TestPullFinishSuccess(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -76,9 +74,7 @@ func TestPullFinishSuccess(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -96,7 +92,7 @@ func TestPullFinishSuccess(t *testing.T) {
 }
 
 func TestPullFinishErrorWithExitCode(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -119,9 +115,7 @@ func TestPullFinishErrorWithExitCode(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -139,7 +133,7 @@ func TestPullFinishErrorWithExitCode(t *testing.T) {
 }
 
 func TestPullAuditNoPullOutput(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	const pullOutput = "Digest: sha256:abc123\nStatus: Downloaded newer image for alpine:3.24\n"
 
@@ -160,9 +154,7 @@ func TestPullAuditNoPullOutput(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handlePull(w, req)
 
-	cap.flush()
-
-	rawLines := auditRawLinesBySession(cap.buffer(), result.Session.ID)
+	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
 		t.Fatalf("expected at least 2 audit lines, got %d", len(rawLines))
 	}
@@ -183,7 +175,7 @@ func TestPullAuditNoPullOutput(t *testing.T) {
 }
 
 func TestPullAuditNoErrorOutput(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	const pullErrorOutput = "ERROR: failed to pull: access denied\n"
 
@@ -204,9 +196,7 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handlePull(w, req)
 
-	cap.flush()
-
-	rawLines := auditRawLinesBySession(cap.buffer(), result.Session.ID)
+	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
 		t.Fatalf("expected at least 2 audit lines, got %d", len(rawLines))
 	}
@@ -227,6 +217,8 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 }
 
 func TestPullDockerArgsUnchanged(t *testing.T) {
+	setupTestLoggingDiscard(t)
+
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)

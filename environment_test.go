@@ -296,24 +296,3 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 		}
 	}
 }
-
-func TestMaskEnvValueEmpty(t *testing.T) {
-	result := maskEnvValue("FLAG", "")
-	if result != `FLAG="" (length=0)` {
-		t.Errorf("expected FLAG=\"\" (length=0), got %q", result)
-	}
-}
-
-func TestMaskEnvValueSingleChar(t *testing.T) {
-	result := maskEnvValue("KEY", "a")
-	if result != "KEY=a*** (length=1)" {
-		t.Errorf("expected KEY=a*** (length=1), got %q", result)
-	}
-}
-
-func TestMaskEnvValueLong(t *testing.T) {
-	result := maskEnvValue("LLM_KEY", "secret123")
-	if result != "LLM_KEY=s*** (length=9)" {
-		t.Errorf("expected LLM_KEY=s*** (length=9), got %q", result)
-	}
-}

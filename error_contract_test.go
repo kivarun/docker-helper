@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -799,10 +799,14 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 // ---------- Docker error logging ----------
 
 func TestDockerErrorLogBuild(t *testing.T) {
-	buf := new(bytes.Buffer)
-	old := log.Writer()
-	log.SetOutput(buf)
-	t.Cleanup(func() { log.SetOutput(old) })
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -831,7 +835,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	raw := buf.String()
+	raw := opBuf.String()
 
 	// Error marker is logged
 	if !strings.Contains(raw, errMarker) {
@@ -866,10 +870,14 @@ func TestDockerErrorLogBuild(t *testing.T) {
 }
 
 func TestDockerErrorLogPull(t *testing.T) {
-	buf := new(bytes.Buffer)
-	old := log.Writer()
-	log.SetOutput(buf)
-	t.Cleanup(func() { log.SetOutput(old) })
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -889,7 +897,7 @@ func TestDockerErrorLogPull(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handlePull(w, req)
 
-	raw := buf.String()
+	raw := opBuf.String()
 
 	// Error marker is logged
 	if !strings.Contains(raw, errMarker) {
@@ -924,10 +932,14 @@ func TestDockerErrorLogPull(t *testing.T) {
 }
 
 func TestDockerErrorLogRun(t *testing.T) {
-	buf := new(bytes.Buffer)
-	old := log.Writer()
-	log.SetOutput(buf)
-	t.Cleanup(func() { log.SetOutput(old) })
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -951,7 +963,7 @@ func TestDockerErrorLogRun(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	raw := buf.String()
+	raw := opBuf.String()
 
 	// Error marker is logged
 	if !strings.Contains(raw, errMarker) {

@@ -225,7 +225,7 @@ func assertNoAuthFailure(t *testing.T, buf *bytes.Buffer) {
 // ========================
 
 func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const headerMarker = "hdr_admin_parse_secret_x7k2m"
@@ -239,9 +239,8 @@ func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -249,7 +248,7 @@ func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 }
 
 func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const authHeader = "Basic dXNlcjpwYXNz"
@@ -262,9 +261,8 @@ func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -272,7 +270,7 @@ func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 }
 
 func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const authHeader = "Bearer "
@@ -285,9 +283,8 @@ func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -299,7 +296,7 @@ func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 // ========================
 
 func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_wrong_admin_token_xyz"
@@ -316,9 +313,8 @@ func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -326,7 +322,7 @@ func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 }
 
 func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_wrong_admin_token_abc"
@@ -340,9 +336,8 @@ func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -350,7 +345,7 @@ func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
 }
 
 func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_wrong_admin_token_del"
@@ -364,9 +359,8 @@ func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -378,7 +372,7 @@ func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
 // ========================
 
 func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const headerMarker = "hdr_session_parse_secret_g2h6j"
@@ -392,9 +386,8 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -402,7 +395,7 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
 }
 
 func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const authHeader = "Basic dXNlcjpwYXNz"
@@ -415,9 +408,8 @@ func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -425,7 +417,7 @@ func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
 }
 
 func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const authHeader = "Bearer "
@@ -438,9 +430,8 @@ func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -448,7 +439,7 @@ func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
 }
 
 func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
@@ -458,9 +449,8 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -472,7 +462,7 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
 // ========================
 
 func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_unknown_token_abc123"
@@ -489,9 +479,8 @@ func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -499,7 +488,7 @@ func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
 }
 
 func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -523,9 +512,8 @@ func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -533,7 +521,7 @@ func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
 }
 
 func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -556,9 +544,8 @@ func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -566,7 +553,7 @@ func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
 }
 
 func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const authHeader = "Bearer " + testAdminToken
@@ -579,9 +566,8 @@ func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -589,7 +575,7 @@ func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
 }
 
 func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	const token = "dht_unknown_build_token"
@@ -603,9 +589,8 @@ func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -617,7 +602,7 @@ func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
 // ========================
 
 func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	// Create a real session so the token is known.
@@ -645,9 +630,8 @@ func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -655,7 +639,7 @@ func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 }
 
 func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -678,9 +662,8 @@ func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
-	cap.flush()
 
-	lines := findAuthFailureRawLines(cap.buffer())
+	lines := findAuthFailureRawLines(auditBuf)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
@@ -692,7 +675,7 @@ func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
 // ========================
 
 func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
@@ -706,13 +689,12 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
-	cap.flush()
 
-	assertNoAuthFailure(t, cap.buffer())
+	assertNoAuthFailure(t, auditBuf)
 }
 
 func TestAuthAuditNoFailureOnValidAdminAuth_ListSessions(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
@@ -723,13 +705,12 @@ func TestAuthAuditNoFailureOnValidAdminAuth_ListSessions(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	cap.flush()
 
-	assertNoAuthFailure(t, cap.buffer())
+	assertNoAuthFailure(t, auditBuf)
 }
 
 func TestAuthAuditNoFailureOnValidAdminAuth_DeleteSession(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -745,13 +726,12 @@ func TestAuthAuditNoFailureOnValidAdminAuth_DeleteSession(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
-	cap.flush()
 
-	assertNoAuthFailure(t, cap.buffer())
+	assertNoAuthFailure(t, auditBuf)
 }
 
 func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -771,13 +751,12 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	cap.flush()
 
-	assertNoAuthFailure(t, cap.buffer())
+	assertNoAuthFailure(t, auditBuf)
 }
 
 func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -804,9 +783,8 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	cap.flush()
 
-	assertNoAuthFailure(t, cap.buffer())
+	assertNoAuthFailure(t, auditBuf)
 }
 
 // ========================
@@ -814,7 +792,7 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 // ========================
 
 func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -824,9 +802,8 @@ func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	cap.flush()
 
-	assertNoAuthFailure(t, cap.buffer())
+	assertNoAuthFailure(t, auditBuf)
 }
 
 // ========================
@@ -834,7 +811,7 @@ func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
 // ========================
 
 func TestAuthAuditAdminHashNotLeaked(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	adminHash := sha256.Sum256([]byte(testAdminToken))
@@ -845,9 +822,7 @@ func TestAuthAuditAdminHashNotLeaked(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
-	cap.flush()
-
-	raw := cap.buffer().String()
+	raw := auditBuf.String()
 	if strings.Contains(raw, hashHex) {
 		t.Error("audit output contains admin token hash")
 	}
@@ -858,16 +833,14 @@ func TestAuthAuditAdminHashNotLeaked(t *testing.T) {
 // ========================
 
 func TestAuthAuditRawJSONStructure_Complete(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
-
-	raw := strings.TrimSpace(cap.buffer().String())
+	raw := strings.TrimSpace(auditBuf.String())
 
 	// Must be valid JSON
 	var m map[string]any
@@ -903,7 +876,7 @@ func TestAuthAuditRawJSONStructure_Complete(t *testing.T) {
 // ========================
 
 func TestAuthAuditNoInternalErrorText_UnknownToken(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
@@ -911,9 +884,7 @@ func TestAuthAuditNoInternalErrorText_UnknownToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
-
-	raw := cap.buffer().String()
+	raw := auditBuf.String()
 
 	for _, text := range []string{
 		"session not found",
@@ -928,7 +899,7 @@ func TestAuthAuditNoInternalErrorText_UnknownToken(t *testing.T) {
 }
 
 func TestAuthAuditNoInternalErrorText_DatabaseError(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -946,9 +917,7 @@ func TestAuthAuditNoInternalErrorText_DatabaseError(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	cap.flush()
-
-	raw := cap.buffer().String()
+	raw := auditBuf.String()
 
 	for _, text := range []string{
 		"mock_query_injection_error_for_testing",

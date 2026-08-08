@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -122,6 +122,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := withSessionID(r.Context(), session.ID)
+
 	var req runRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
@@ -162,10 +164,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(envNames)
 
-	for _, name := range envNames {
-		log.Printf("env: %s", maskEnvValue(name, req.Environment[name]))
-	}
-
 	targetSeen := make(map[string]bool)
 	resolvedMounts := make([]resolvedMount, 0, len(req.Mounts))
 
@@ -194,13 +192,22 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeAudit(auditRecord{
-		Event:     "run.start",
-		SessionID: session.ID,
-		Image:     req.Image,
-		Command:   req.Command,
-		Mounts:    mountAudit,
-		EnvKeys:   envNames,
+	var cmdArgCount *int
+	if len(req.Command) > 0 {
+		n := len(req.Command)
+		cmdArgCount = &n
+	}
+
+	writeAuditWithRequestID(ctx, auditRecord{
+		Time:            time.Now().UTC().Format(time.RFC3339),
+		Stream:          "audit",
+		Event:           "run.start",
+		SessionID:       session.ID,
+		RequestID:       requestIDFromContext(ctx),
+		Image:           req.Image,
+		CommandArgCount: cmdArgCount,
+		Mounts:          mountAudit,
+		EnvKeys:         envNames,
 	})
 
 	started := time.Now()
@@ -264,7 +271,10 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			exitCode = extractExitCode(err)
 			result = "docker_error"
 
-			log.Printf("docker run error: %v", err)
+			opLog(ctx).Error("docker run error",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
 
 			writeJSON(w, http.StatusInternalServerError, response{
 				OK:       false,
@@ -285,15 +295,18 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeAudit(auditRecord{
-		Event:     "run.finish",
-		SessionID: session.ID,
-		Image:     req.Image,
-		Command:   req.Command,
-		Mounts:    mountAudit,
-		EnvKeys:   envNames,
-		Result:    result,
-		ExitCode:  exitCode,
-		Duration:  duration,
+	writeAuditWithRequestID(ctx, auditRecord{
+		Time:            time.Now().UTC().Format(time.RFC3339),
+		Stream:          "audit",
+		Event:           "run.finish",
+		SessionID:       session.ID,
+		RequestID:       requestIDFromContext(ctx),
+		Image:           req.Image,
+		CommandArgCount: cmdArgCount,
+		Mounts:          mountAudit,
+		EnvKeys:         envNames,
+		Result:          result,
+		ExitCode:        exitCode,
+		Duration:        duration,
 	})
 }

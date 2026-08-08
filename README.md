@@ -97,8 +97,8 @@ to complete.
 docker-helper serve
 ```
 
-Use this mode for testing and troubleshooting. Logs are written directly
-to the terminal. Stop the daemon with Ctrl+C.
+Use this mode for testing and troubleshooting. Audit records are written
+to stdout, operational logs to stderr. Stop the daemon with Ctrl+C.
 
 #### systemd user service
 
@@ -227,6 +227,47 @@ No authentication required.
   concurrency limit.
 - Detached containers, custom networks, named volumes, and resource
   controls are not supported.
+
+## Logging
+
+docker-helper writes two separate JSON Lines streams:
+
+- **stdout** — audit records (one JSON object per line). These are never
+  suppressed by log level. Every record contains `"stream": "audit"`.
+- **stderr** — operational records (structured slog JSON). Level-filtered
+  by `log_level` in config.json. Every record contains `"stream": "operational"`.
+
+### Log levels
+
+The `log_level` field in `config.json` controls operational log verbosity:
+
+| Value | Operational records emitted |
+|-------|----------------------------|
+| `debug` | debug, info, warn, error |
+| `info` | info, warn, error (default) |
+| `warn` | warn, error |
+| `error` | error only |
+
+Audit records are **never** suppressed by `log_level`.
+
+### Request correlation
+
+Every HTTP request receives a server-generated `X-Request-ID` response
+header. The same ID appears in all audit and operational records for
+that request, enabling end-to-end tracing.
+
+### Sensitive data
+
+Command arguments, environment values, Docker output, and Authorization
+headers are **never** logged. The audit record for `POST /run` includes
+`command_arg_count` (number of arguments) but never the arguments
+themselves.
+
+### Log collection
+
+Log collection, retention, and rotation are delegated to the process
+supervisor (systemd/journald, Docker, or a log shipper). docker-helper
+does not write log files or implement internal rotation.
 
 ## More information
 

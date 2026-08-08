@@ -5,9 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type response struct {
@@ -24,7 +25,7 @@ func writeJSON(w http.ResponseWriter, status int, value response) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		log.Printf("failed to encode response: %v", err)
+		opLogger.Error("failed to encode response", slog.String("error", err.Error()))
 	}
 }
 
@@ -33,7 +34,7 @@ func writeJSONRaw(w http.ResponseWriter, status int, value any) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		log.Printf("failed to encode response: %v", err)
+		opLogger.Error("failed to encode response", slog.String("error", err.Error()))
 	}
 }
 
@@ -82,13 +83,17 @@ func writeUnauthorizedSession(w http.ResponseWriter) {
 }
 
 func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	ctx := r.Context()
 	token, ok := parseBearerToken(r)
 	if !ok {
-		writeAudit(auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: "admin.parse_failed",
+		writeAuditWithRequestID(ctx, auditRecord{
+			Time:      time.Now().UTC().Format(time.RFC3339),
+			Stream:    "audit",
+			Event:     "auth.failure",
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			RequestID: requestIDFromContext(ctx),
+			Result:    "admin.parse_failed",
 		})
 		writeUnauthorizedAdmin(w)
 		return false
@@ -96,11 +101,14 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 
 	tokenHash := sha256.Sum256([]byte(token))
 	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) != 1 {
-		writeAudit(auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: "admin.wrong_token",
+		writeAuditWithRequestID(ctx, auditRecord{
+			Time:      time.Now().UTC().Format(time.RFC3339),
+			Stream:    "audit",
+			Event:     "auth.failure",
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			RequestID: requestIDFromContext(ctx),
+			Result:    "admin.wrong_token",
 		})
 		writeUnauthorizedAdmin(w)
 		return false
@@ -110,13 +118,17 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, bool) {
+	ctx := r.Context()
 	token, ok := parseBearerToken(r)
 	if !ok {
-		writeAudit(auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: "session.parse_failed",
+		writeAuditWithRequestID(ctx, auditRecord{
+			Time:      time.Now().UTC().Format(time.RFC3339),
+			Stream:    "audit",
+			Event:     "auth.failure",
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			RequestID: requestIDFromContext(ctx),
+			Result:    "session.parse_failed",
 		})
 		writeUnauthorizedSession(w)
 		return nil, false
@@ -128,15 +140,21 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 		if !errors.Is(err, ErrSessionNotFound) {
 			resultCode = "session.database_error"
 		}
-		writeAudit(auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: resultCode,
+		writeAuditWithRequestID(ctx, auditRecord{
+			Time:      time.Now().UTC().Format(time.RFC3339),
+			Stream:    "audit",
+			Event:     "auth.failure",
+			Method:    r.Method,
+			Path:      r.URL.Path,
+			RequestID: requestIDFromContext(ctx),
+			Result:    resultCode,
 		})
 
 		if !errors.Is(err, ErrSessionNotFound) {
-			log.Printf("session lookup error: %v", err)
+			opLog(ctx).Error("session lookup error",
+				slog.String("operation", "session_lookup"),
+				slog.String("error", err.Error()),
+			)
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		} else {
 			writeUnauthorizedSession(w)
@@ -147,7 +165,7 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 	return session, true
 }
 
-func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response{
 		OK:      true,
 		Message: "docker-helper is running",

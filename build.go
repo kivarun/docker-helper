@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -35,6 +35,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := withSessionID(r.Context(), session.ID)
+
 	var req buildRequest
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
@@ -48,7 +50,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
 	if err != nil {
 		if errors.Is(err, ErrInternal) {
-			log.Printf("build validation internal error: %v", err)
+			opLog(ctx).Error("build validation error",
+				slog.String("operation", "build_validate"),
+				slog.String("error", err.Error()),
+			)
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
@@ -56,9 +61,12 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAudit(auditRecord{
+	writeAuditWithRequestID(ctx, auditRecord{
+		Time:       time.Now().UTC().Format(time.RFC3339),
+		Stream:     "audit",
 		Event:      "build.start",
 		SessionID:  session.ID,
+		RequestID:  requestIDFromContext(ctx),
 		Image:      req.Image,
 		Context:    req.Context,
 		Dockerfile: req.Dockerfile,
@@ -91,7 +99,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		exitCode = extractExitCode(err)
 		result = "build_error"
 
-		log.Printf("docker build error: %v", err)
+		opLog(ctx).Error("docker build error",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
 
 		writeJSON(w, http.StatusInternalServerError, response{
 			OK:       false,
@@ -111,9 +122,12 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeAudit(auditRecord{
+	writeAuditWithRequestID(ctx, auditRecord{
+		Time:       time.Now().UTC().Format(time.RFC3339),
+		Stream:     "audit",
 		Event:      "build.finish",
 		SessionID:  session.ID,
+		RequestID:  requestIDFromContext(ctx),
 		Image:      req.Image,
 		Context:    req.Context,
 		Dockerfile: req.Dockerfile,

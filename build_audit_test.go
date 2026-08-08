@@ -12,7 +12,7 @@ import (
 )
 
 func TestBuildStartContainsFields(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -42,9 +42,7 @@ func TestBuildStartContainsFields(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -68,7 +66,7 @@ func TestBuildStartContainsFields(t *testing.T) {
 }
 
 func TestBuildFinishSuccess(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -98,9 +96,7 @@ func TestBuildFinishSuccess(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -118,7 +114,7 @@ func TestBuildFinishSuccess(t *testing.T) {
 }
 
 func TestBuildFinishErrorWithExitCode(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -148,9 +144,7 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	cap.flush()
-
-	records := filterBySession(parseAuditRecords(cap.buffer()), result.Session.ID)
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
@@ -168,7 +162,7 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 }
 
 func TestBuildAuditNoSuccessOutput(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	const buildOutput = "Step 1/1 : FROM alpine\n ---> somehash\nSuccessfully built abc123\n"
 
@@ -196,9 +190,7 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	cap.flush()
-
-	rawLines := auditRawLinesBySession(cap.buffer(), result.Session.ID)
+	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
 		t.Fatalf("expected at least 2 audit lines, got %d", len(rawLines))
 	}
@@ -219,7 +211,7 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 }
 
 func TestBuildAuditNoErrorOutput(t *testing.T) {
-	cap := captureStderr(t)
+	auditBuf, _ := setupTestLogging(t)
 
 	const buildOutput = "ERROR: failed to solve: something went wrong\n"
 
@@ -247,9 +239,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	cap.flush()
-
-	rawLines := auditRawLinesBySession(cap.buffer(), result.Session.ID)
+	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
 		t.Fatalf("expected at least 2 audit lines, got %d", len(rawLines))
 	}
