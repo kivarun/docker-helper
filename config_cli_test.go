@@ -1556,3 +1556,126 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 		t.Errorf("config show admin_token = %q, want %q", stdout.String(), realToken)
 	}
 }
+
+// Regression: non-bootstrap fields validate config.json before returning a value
+func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
+	// Fields that must validate config.json before returning a value.
+	nonBootstrapFields := []string{
+		"allowed_root",
+		"session_ttl",
+		"log_level",
+		"audit_enabled",
+		"audit_enabled_source",
+		"runtime_dir",
+		"socket_path",
+		"lock_path",
+		"state_dir",
+		"database_path",
+	}
+
+	// Bootstrap fields that must NOT validate config.json.
+	bootstrapFields := []string{
+		"config_path",
+		"config_dir",
+		"admin_token_path",
+		"admin_token",
+	}
+
+	// 1) Every non-bootstrap field validates config.json before returning a value.
+	//    If config.json contains a reserved field, the query must fail.
+	for _, field := range nonBootstrapFields {
+		t.Run(field+"_reserved_field_rejected", func(t *testing.T) {
+			cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "database_path": "/should/not/be/here"
+}`
+			setupConfigTestWithData(t, []byte(cfg))
+			t.Setenv("XDG_RUNTIME_DIR", "/tmp/runtime")
+
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "show", field}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("expected exit code 1, got %d, stderr: %s", code, stderr.String())
+			}
+			if stdout.Len() > 0 {
+				t.Errorf("stdout must be empty on failure, got: %s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "database_path") {
+				t.Errorf("error must identify offending field, got: %s", stderr.String())
+			}
+		})
+	}
+
+	// 2) runtime_dir, socket_path, lock_path no longer bypass reserved-field validation.
+	for _, field := range []string{"runtime_dir", "socket_path", "lock_path"} {
+		t.Run(field+"_no_bypass", func(t *testing.T) {
+			cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "socket_path": "/should/not/be/here"
+}`
+			setupConfigTestWithData(t, []byte(cfg))
+			t.Setenv("XDG_RUNTIME_DIR", "/tmp/runtime")
+
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "show", field}, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("expected exit code 1, got %d", code)
+			}
+			if !strings.Contains(stderr.String(), "socket_path") {
+				t.Errorf("error must identify offending field, got: %s", stderr.String())
+			}
+		})
+	}
+
+	// 3) The four bootstrap fields still work with reserved-field-containing config.json.
+	for _, field := range bootstrapFields {
+		t.Run(field+"_bootstrap_works", func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			adminTokenPath := filepath.Join(dir, "admin.token")
+			os.WriteFile(configPath, []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "database_path": "/should/not/be/here"
+}`), 0600)
+			os.WriteFile(adminTokenPath, []byte("dht_bootstrap_token\n"), 0600)
+			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+			t.Setenv("XDG_RUNTIME_DIR", "")
+
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "show", field}, &stdout, &stderr)
+			if code != 0 {
+				t.Errorf("bootstrap field %s: expected exit 0, got %d, stderr: %s", field, code, stderr.String())
+			}
+			if stdout.Len() == 0 {
+				t.Errorf("bootstrap field %s: expected non-empty stdout", field)
+			}
+		})
+	}
+
+	// 4) Valid configurations retain the existing output for all fields.
+	t.Run("valid_config_all_fields", func(t *testing.T) {
+		cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug"
+}`
+		setupConfigTestWithData(t, []byte(cfg))
+		t.Setenv("XDG_RUNTIME_DIR", "/tmp/runtime")
+
+		for _, field := range nonBootstrapFields {
+			t.Run(field, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				code := runCommandWithWriters([]string{"config", "show", field}, &stdout, &stderr)
+				if code != 0 {
+					t.Errorf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+				}
+				if stdout.Len() == 0 {
+					t.Errorf("expected non-empty stdout, got empty")
+				}
+			})
+		}
+	})
+}

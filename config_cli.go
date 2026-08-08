@@ -392,13 +392,43 @@ func resolveAuditEnabledForShow(cfg *bool, levelStr string) bool {
 	return level == -4
 }
 
+// validateConfigJSON reads config.json, checks it is a valid JSON object,
+// rejects reserved fields, and validates known field types/values.
+// It does not require XDG_RUNTIME_DIR and does not create directories.
+func validateConfigJSON() error {
+	configPath := getConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return err
+	}
+
+	var check any
+	if err := json.Unmarshal(data, &check); err != nil {
+		return err
+	}
+	if _, ok := check.(map[string]any); !ok {
+		return fmt.Errorf("configuration is not a JSON object")
+	}
+
+	if err := validateNoReservedFields(data); err != nil {
+		return err
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	return validateRawConfig(raw)
+}
+
 func configShowField(field string, stdout, stderr io.Writer) int {
 	if !isKnownField(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
 
-	// admin_token: read only the token file, never parse config.json.
+	// Bootstrap fields: never parse config.json.
+	// admin_token reads only the token file.
 	if field == "admin_token" {
 		configPath := getConfigPath()
 		configDir := filepath.Dir(configPath)
@@ -417,7 +447,28 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// Runtime-dependent fields: require XDG_RUNTIME_DIR.
+	// Pure computed fields: resolve from paths without reading config.json.
+	if isPureComputed(field) {
+		configPath := getConfigPath()
+		configDir := filepath.Dir(configPath)
+		switch field {
+		case "config_path":
+			fmt.Fprintln(stdout, configPath)
+		case "config_dir":
+			fmt.Fprintln(stdout, configDir)
+		case "admin_token_path":
+			fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
+		}
+		return 0
+	}
+
+	// All other fields must validate config.json first.
+	if err := validateConfigJSON(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Runtime-dependent fields: validate config first, then check XDG_RUNTIME_DIR.
 	if isRuntimeDependent(field) {
 		runtimeDir := getRuntimeDirSafe()
 		if runtimeDir == "" {
@@ -435,29 +486,13 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// Pure computed fields: resolve from paths without reading config.json.
-	if isPureComputed(field) {
-		configPath := getConfigPath()
-		configDir := filepath.Dir(configPath)
-		switch field {
-		case "config_path":
-			fmt.Fprintln(stdout, configPath)
-		case "config_dir":
-			fmt.Fprintln(stdout, configDir)
-		case "admin_token_path":
-			fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
-		}
-		return 0
-	}
-
-	// Config-backed fields: require valid config.json.
+	// Config-backed fields: parse config.json (already validated above).
 	fc, configPath, err := loadFileConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	configDir := filepath.Dir(configPath)
 	stateDir := getStateDir()
 
 	switch field {
@@ -492,7 +527,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	_ = configDir
+	_ = configPath
 	return 0
 }
 
