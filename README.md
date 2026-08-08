@@ -232,10 +232,12 @@ No authentication required.
 
 docker-helper writes two separate JSON Lines streams:
 
-- **stdout** — audit records (one JSON object per line). These are never
-  suppressed by log level. Every record contains `"stream": "audit"`.
+- **stdout** — audit records (one JSON object per line). Every record
+  contains `"stream": "audit"`.
 - **stderr** — operational records (structured slog JSON). Level-filtered
   by `log_level` in config.json. Every record contains `"stream": "operational"`.
+
+All timestamps use UTC in RFC 3339 nanosecond format (`time.RFC3339Nano`).
 
 ### Log levels
 
@@ -248,7 +250,41 @@ The `log_level` field in `config.json` controls operational log verbosity:
 | `warn` | warn, error |
 | `error` | error only |
 
-Audit records are **never** suppressed by `log_level`.
+### Audit enablement
+
+Audit output is controlled by the optional `audit_enabled` field in
+`config.json`. The effective value is resolved as follows:
+
+1. Explicit `audit_enabled: true` enables audit.
+2. Explicit `audit_enabled: false` disables audit, even when `log_level`
+   is `debug`.
+3. When `audit_enabled` is absent:
+   - `log_level=debug` enables audit;
+   - every other `log_level` disables audit.
+
+`docker-helper init` omits `audit_enabled` from the generated config.
+Since the default `log_level` is `info`, audit is disabled by default.
+If the user later changes `log_level` to `debug`, audit becomes enabled
+unless explicitly overridden with `audit_enabled: false`.
+
+When audit is disabled, no audit records are written to stdout and no
+audit encoding or writer errors are emitted. Operational logging and
+request handling are unaffected.
+
+### Debug request logging
+
+When `log_level` is `debug`, an additional operational record is emitted
+after every HTTP request:
+
+```json
+{"time":"...","level":"DEBUG","msg":"request completed","request_id":"req_...","method":"POST","route":"/run","status":200,"duration_ms":401,"stream":"operational"}
+```
+
+This record is suppressed at `info`, `warn`, and `error` levels. The
+`route` field uses the registered route pattern (e.g.
+`DELETE /sessions/{id}`), never the actual request URI or session ID.
+Query parameters, request bodies, headers, and Docker output are never
+included.
 
 ### Request correlation
 

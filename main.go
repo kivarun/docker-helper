@@ -216,7 +216,7 @@ func serveWithShutdown(
 
 func runServe(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
-	initLoggers(stderr, stdout, slog.LevelInfo)
+	initLoggers(stderr, stdout, slog.LevelInfo, false)
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -228,8 +228,8 @@ func runServe(stdout, stderr io.Writer) error {
 		return err
 	}
 
-	// Re-initialize with the configured log level.
-	initLoggers(stderr, stdout, cfg.LogLevel)
+	// Re-initialize with the configured log level and audit setting.
+	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
 
 	callbackEntered := false
 	err = runWithLock(cfg.LockPath, cfg.SocketPath, func(listener net.Listener) error {
@@ -264,22 +264,21 @@ func runServe(stdout, stderr io.Writer) error {
 		}
 
 		mux := http.NewServeMux()
-		mux.HandleFunc("POST /build", withRequestID(app.handleBuild))
-		mux.HandleFunc("GET /health", withRequestID(app.handleHealth))
-		mux.HandleFunc("POST /pull", withRequestID(app.handlePull))
-		mux.HandleFunc("POST /run", withRequestID(app.handleRun))
-		mux.HandleFunc("POST /sessions", withRequestID(app.handleCreateSession))
-		mux.HandleFunc("GET /sessions", withRequestID(app.handleListSessions))
-		mux.HandleFunc("DELETE /sessions/{id}", withRequestID(app.handleDeleteSession))
+		mux.HandleFunc("POST /build", withRequestID(withLogging(app.handleBuild)))
+		mux.HandleFunc("GET /health", withRequestID(withLogging(app.handleHealth)))
+		mux.HandleFunc("POST /pull", withRequestID(withLogging(app.handlePull)))
+		mux.HandleFunc("POST /run", withRequestID(withLogging(app.handleRun)))
+		mux.HandleFunc("POST /sessions", withRequestID(withLogging(app.handleCreateSession)))
+		mux.HandleFunc("GET /sessions", withRequestID(withLogging(app.handleListSessions)))
+		mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 		server := &http.Server{
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 
-		opLogger.Info("daemon starting",
+		opLogger.Info("daemon listening",
 			slog.String("socket", cfg.SocketPath),
-			slog.String("log_level", cfg.LogLevel.String()),
 		)
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

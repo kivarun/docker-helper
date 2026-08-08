@@ -54,6 +54,10 @@ var opLogger *slog.Logger
 // It is initialized by initLoggers and can be replaced in tests.
 var auditWriter io.Writer
 
+// auditEnabled controls whether audit records are written.
+// When false, writeAudit is a no-op.
+var auditEnabled bool
+
 // operationalHandler wraps a slog.Handler to inject "stream": "operational"
 // into every record.
 type operationalHandler struct {
@@ -75,21 +79,38 @@ func (h *operationalHandler) WithGroup(name string) slog.Handler {
 
 // initLoggers creates the operational logger and audit writer.
 // The operational logger writes JSON to the given writer at the given level,
-// with "stream": "operational" on every record.
+// with "stream": "operational" on every record. Timestamps use UTC RFC3339Nano.
 // The audit writer receives JSON Lines audit records.
-func initLoggers(opWriter io.Writer, audWriter io.Writer, level slog.Level) {
+// When auditEnabled is true, audit records are written to audWriter.
+func initLoggers(opWriter io.Writer, audWriter io.Writer, level slog.Level, enabled bool) {
 	opLogger = slog.New(&operationalHandler{
-		Handler: slog.NewJSONHandler(opWriter, &slog.HandlerOptions{Level: level}),
+		Handler: slog.NewJSONHandler(opWriter, &slog.HandlerOptions{
+			Level: level,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey && len(groups) == 0 {
+					return slog.Attr{
+						Key:   slog.TimeKey,
+						Value: slog.StringValue(a.Value.Time().UTC().Format(time.RFC3339Nano)),
+					}
+				}
+				return a
+			},
+		}),
 	})
 	auditWriter = audWriter
+	auditEnabled = enabled
 }
 
 // writeAudit marshals the audit record to JSON and writes it to the audit writer.
 // It centrally enforces stream="audit" and populates the timestamp.
+// If audit is disabled, the record is silently dropped.
 // If the audit writer is nil (e.g. during tests that don't set it up), the record
 // is silently dropped. If writing or encoding fails, a structured operational error
 // is emitted to stderr with correlation fields copied from the record.
 func writeAudit(record auditRecord) {
+	if !auditEnabled {
+		return
+	}
 	if auditWriter == nil {
 		return
 	}
@@ -97,7 +118,7 @@ func writeAudit(record auditRecord) {
 	// Central enforcement: always set stream and time.
 	record.Stream = "audit"
 	if record.Time == "" {
-		record.Time = time.Now().UTC().Format(time.RFC3339)
+		record.Time = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
 	data, err := json.Marshal(record)

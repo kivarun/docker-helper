@@ -523,10 +523,11 @@ func setupTestLogging(t *testing.T) (*bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
-	initLoggers(opBuf, auditBuf, slog.LevelError)
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	t.Cleanup(func() {
 		opLogger = nil
 		auditWriter = nil
+		auditEnabled = false
 	})
 	return auditBuf, opBuf
 }
@@ -535,9 +536,10 @@ func setupTestLogging(t *testing.T) (*bytes.Buffer, *bytes.Buffer) {
 // discard writers for tests that don't need to capture logs.
 func setupTestLoggingDiscard(t *testing.T) {
 	t.Helper()
-	initLoggers(io.Discard, io.Discard, slog.LevelError)
+	initLoggers(io.Discard, io.Discard, slog.LevelError, true)
 	t.Cleanup(func() {
 		opLogger = nil
 		auditWriter = nil
+		auditEnabled = false
 	})
 }

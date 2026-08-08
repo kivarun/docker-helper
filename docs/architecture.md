@@ -509,12 +509,14 @@ Planned:
 
 docker-helper writes structured audit records to **stdout**. Operational
 logs are written to **stderr**. Both streams use JSON Lines format.
+Timestamps in both streams use UTC in RFC 3339 nanosecond format
+(`time.RFC3339Nano`).
 
 ### Stream separation
 
 | Stream | Destination | Content | Level-filtered |
 |--------|-------------|---------|----------------|
-| Audit | stdout | Audit records (JSONL) | Never |
+| Audit | stdout | Audit records (JSONL) | No (controlled by `audit_enabled`) |
 | Operational | stderr | Daemon events (JSONL) | Yes, by `log_level` |
 
 No runtime `fmt.Printf`, `log.Printf`, or other free-form text output
@@ -523,6 +525,29 @@ and `session` commands remains unchanged.
 
 Every audit record contains `"stream": "audit"`.
 Every operational record contains `"stream": "operational"`.
+
+### Audit enablement
+
+Audit output is controlled by the optional `audit_enabled` field in
+`config.json`. The effective value is resolved using these rules:
+
+1. Explicit `audit_enabled: true` enables audit.
+2. Explicit `audit_enabled: false` disables audit, including when
+   `log_level` is `debug`.
+3. When `audit_enabled` is absent:
+   - `log_level=debug` enables audit;
+   - every other `log_level` disables audit.
+
+`docker-helper init` omits `audit_enabled` from the generated config.
+Since the default `log_level` is `info`, audit is disabled by default.
+If the user later changes `log_level` to `debug`, audit becomes enabled
+unless explicitly overridden with `audit_enabled: false`.
+
+When audit is disabled:
+
+- no audit records are written to stdout;
+- no audit encoding or writer errors are emitted;
+- operational logging and request handling are unaffected.
 
 ### Operational log levels
 
@@ -535,7 +560,21 @@ The `log_level` field in `config.json` controls operational log verbosity:
 | `warn` | warn, error |
 | `error` | error only |
 
-Audit records are **never** suppressed by `log_level`.
+### Debug request logging
+
+When `log_level` is `debug`, an operational record is emitted after
+every HTTP request:
+
+```json
+{"time":"...","level":"DEBUG","msg":"request completed","request_id":"req_...","method":"POST","route":"/run","status":200,"duration_ms":401,"stream":"operational"}
+```
+
+This record is suppressed at `info`, `warn`, and `error` levels. The
+`route` field uses the registered route pattern (e.g.
+`DELETE /sessions/{id}`), never the actual request URI or session ID.
+Query parameters, request bodies, headers, command arguments, session
+tokens, and Docker output are never included. `duration_ms` is a JSON
+number.
 
 ### Request correlation
 
@@ -577,7 +616,7 @@ fields.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `time` | string | UTC timestamp, RFC 3339 |
+| `time` | string | UTC timestamp, RFC 3339 with nanoseconds |
 | `event` | string | event name |
 | `result` | string | outcome code (omitted on `build.start`) |
 | `session_id` | string | session identifier (omitted on `auth.failure`) |

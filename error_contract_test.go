@@ -802,7 +802,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
 
-	initLoggers(opBuf, auditBuf, slog.LevelError)
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer func() {
 		opLogger = nil
 		auditWriter = nil
@@ -873,7 +873,7 @@ func TestDockerErrorLogPull(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
 
-	initLoggers(opBuf, auditBuf, slog.LevelError)
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer func() {
 		opLogger = nil
 		auditWriter = nil
@@ -935,7 +935,7 @@ func TestDockerErrorLogRun(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
 
-	initLoggers(opBuf, auditBuf, slog.LevelError)
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer func() {
 		opLogger = nil
 		auditWriter = nil

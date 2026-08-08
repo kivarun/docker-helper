@@ -16,6 +16,7 @@ type Config struct {
 	AllowedRoot    string
 	SessionTTL     time.Duration
 	LogLevel       slog.Level
+	AuditEnabled   bool
 	SocketPath     string
 	LockPath       string
 	StateDir       string
@@ -24,9 +25,10 @@ type Config struct {
 }
 
 type fileConfig struct {
-	AllowedRoot string `json:"allowed_root"`
-	SessionTTL  string `json:"session_ttl"`
-	Level       string `json:"log_level,omitempty"`
+	AllowedRoot  string `json:"allowed_root"`
+	SessionTTL   string `json:"session_ttl"`
+	Level        string `json:"log_level,omitempty"`
+	AuditEnabled *bool  `json:"audit_enabled,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -122,6 +124,8 @@ func loadConfig() (*Config, error) {
 		}
 	}
 
+	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, level)
+
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
 		return nil, err
@@ -143,12 +147,20 @@ func loadConfig() (*Config, error) {
 		AllowedRoot:    fc.AllowedRoot,
 		SessionTTL:     ttl,
 		LogLevel:       level,
+		AuditEnabled:   auditEnabled,
 		SocketPath:     socketPath,
 		LockPath:       socketPath + ".lock",
 		StateDir:       stateDir,
 		DatabasePath:   filepath.Join(stateDir, "docker-helper.db"),
 		AdminTokenPath: adminTokenPath,
 	}, nil
+}
+
+func resolveAuditEnabled(cfg *bool, level slog.Level) bool {
+	if cfg != nil {
+		return *cfg
+	}
+	return level == slog.LevelDebug
 }
 
 func generateToken() (string, error) {
