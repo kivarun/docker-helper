@@ -229,7 +229,7 @@ func TestSessionListJSONOutput(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters([]string{"list", "--json"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"session", "list", "--json"}, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
@@ -260,58 +260,114 @@ func TestSessionListJSONOutput(t *testing.T) {
 	}
 }
 
-func TestParseSessionListFlagsJSON(t *testing.T) {
-	jsonOut, err := parseSessionListFlags([]string{"--json"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !jsonOut {
-		t.Error("expected jsonOutput=true")
-	}
-}
+func TestSessionListJSONFlag(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "runtime")
+	xdgConfigHome := dir
+	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
+	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
+	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
 
-func TestParseSessionListFlagsUnknown(t *testing.T) {
-	_, err := parseSessionListFlags([]string{"--unknown"})
-	if err == nil {
-		t.Fatal("expected error for unknown flag")
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
 	}
-}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
 
-func TestParseSessionListFlagsEmpty(t *testing.T) {
-	jsonOut, err := parseSessionListFlags([]string{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
 	}
-	if jsonOut {
-		t.Error("expected jsonOutput=false")
-	}
-}
 
-func TestRunSessionCommandNoSubcommand(t *testing.T) {
-	code := runSessionCommand([]string{})
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
-}
 
-func TestRunSessionCommandUnknownSubcommand(t *testing.T) {
-	code := runSessionCommand([]string{"unknown"})
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
+	expectedSessions := []sessionJSON{
+		{ID: "dhs_001", Workspace: "/home/user/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
 	}
-}
 
-func TestRunCommandUnknown(t *testing.T) {
-	code := runCommand([]string{"bogus"})
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-}
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(listSessionsResponse{
+			OK:       true,
+			Sessions: expectedSessions,
+		})
+	})
 
-func TestRunCommandSessionHelp(t *testing.T) {
-	code := runCommand([]string{"session", "list", "--help"})
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "list", "--json"}, &stdout, &stderr)
+
 	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	var decoded listSessionsResponse
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (output: %s)", err, stdout.String())
+	}
+
+	if !decoded.OK {
+		t.Fatal("expected ok=true")
+	}
+}
+
+func TestSessionListUnknownFlag(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "list", "--unknown"}, &bytes.Buffer{}, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+}
+
+func TestSessionListNoFlags(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "runtime")
+	xdgConfigHome := dir
+	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
+	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
+	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(listSessionsResponse{
+			OK:       true,
+			Sessions: []sessionJSON{},
+		})
+	})
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "list"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
 	}
 }
 
@@ -434,8 +490,8 @@ func TestSessionCreateJSONOutput(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--workspace", "/home/user/proj", "--json"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--workspace", "/home/user/proj", "--json"},
 		&stdout, &stderr,
 	)
 
@@ -510,8 +566,8 @@ func TestSessionCreateTextOutput(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--workspace", "/home/user/proj"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--workspace", "/home/user/proj"},
 		&stdout, &stderr,
 	)
 
@@ -573,8 +629,8 @@ func TestSessionCreateTokenNotInStderr(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--workspace", "/home/user/proj"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--workspace", "/home/user/proj"},
 		&stdout, &stderr,
 	)
 
@@ -594,8 +650,8 @@ func TestSessionCreateTokenNotInStderr(t *testing.T) {
 
 func TestSessionCreateMissingWorkspace(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create"},
+	code := runCommandWithWriters(
+		[]string{"session", "create"},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -605,8 +661,8 @@ func TestSessionCreateMissingWorkspace(t *testing.T) {
 
 func TestSessionCreateUnknownFlag(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--unknown"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--unknown"},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -647,8 +703,8 @@ func TestSessionCreateHTTPError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--workspace", "/home/user/proj"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--workspace", "/home/user/proj"},
 		&stdout, &stderr,
 	)
 
@@ -662,8 +718,8 @@ func TestSessionCreateHelpNoAPI(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/that/does/not/exist/config.json")
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--help"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--help"},
 		&stdout, &stderr,
 	)
 	if code != 0 {
@@ -725,8 +781,8 @@ func TestSessionCreateStdoutWriteError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--workspace", "/home/user/proj"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--workspace", "/home/user/proj"},
 		errorWriter{}, &stderr,
 	)
 
@@ -742,8 +798,8 @@ func TestSessionCreateStdoutWriteError(t *testing.T) {
 
 func TestSessionCreateWorkspaceNoValue(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--workspace"},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--workspace"},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -753,8 +809,8 @@ func TestSessionCreateWorkspaceNoValue(t *testing.T) {
 
 func TestSessionCreateWorkspaceEmptyValue(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"create", "--workspace", ""},
+	code := runCommandWithWriters(
+		[]string{"session", "create", "--workspace", ""},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -879,8 +935,8 @@ func TestSessionDeleteJSONOutput(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--id", "dhs_001", "--json"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--id", "dhs_001", "--json"},
 		&stdout, &stderr,
 	)
 
@@ -937,8 +993,8 @@ func TestSessionDeleteTextOutput(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--id", "dhs_001"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--id", "dhs_001"},
 		&stdout, &stderr,
 	)
 
@@ -957,8 +1013,8 @@ func TestSessionDeleteTextOutput(t *testing.T) {
 
 func TestSessionDeleteMissingID(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete"},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -968,8 +1024,8 @@ func TestSessionDeleteMissingID(t *testing.T) {
 
 func TestSessionDeleteIDNoValue(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--id"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--id"},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -979,8 +1035,8 @@ func TestSessionDeleteIDNoValue(t *testing.T) {
 
 func TestSessionDeleteIDEmptyValue(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--id", ""},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--id", ""},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -990,8 +1046,8 @@ func TestSessionDeleteIDEmptyValue(t *testing.T) {
 
 func TestSessionDeleteUnknownFlag(t *testing.T) {
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--unknown"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--unknown"},
 		&bytes.Buffer{}, &stderr,
 	)
 	if code != 2 {
@@ -1033,8 +1089,8 @@ func TestSessionDeleteHTTPError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--id", "dhs_001"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--id", "dhs_001"},
 		&stdout, &stderr,
 	)
 
@@ -1083,8 +1139,8 @@ func TestSessionDeleteStdoutWriteError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--id", "dhs_001"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--id", "dhs_001"},
 		errorWriter{}, &stderr,
 	)
 
@@ -1097,8 +1153,8 @@ func TestSessionDeleteHelpNoAPI(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/that/does/not/exist/config.json")
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionCommandWithWriters(
-		[]string{"delete", "--help"},
+	code := runCommandWithWriters(
+		[]string{"session", "delete", "--help"},
 		&stdout, &stderr,
 	)
 	if code != 0 {

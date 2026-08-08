@@ -1,0 +1,302 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+type Invocation struct {
+	Validate func() error
+	Run      func(stdout, stderr io.Writer) int
+}
+
+type Command struct {
+	Name          string
+	Summary       string
+	Usage         string
+	Subcommands   []*Command
+	NewInvocation func(*flag.FlagSet) Invocation
+}
+
+// dispatch recursively routes args through the command tree.
+// For branch commands: selects subcommand, requires it (except root).
+// For leaf commands: parses flags, validates, runs.
+func (c *Command) dispatch(args []string, path []string, stdout, stderr io.Writer) int {
+	if c.NewInvocation != nil {
+		return c.dispatchLeaf(args, path, stdout, stderr)
+	}
+	return c.dispatchBranch(args, path, stdout, stderr)
+}
+
+func (c *Command) dispatchBranch(args []string, path []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		// Root with no args: show help, exit 0.
+		// Other branch commands: missing subcommand, exit 2.
+		if c == rootCommand {
+			c.printHelp(stdout, path)
+			return 0
+		}
+		c.printSubcommandRequired(stderr, path)
+		return 2
+	}
+
+	// Validate help args: --help with unknown flags or positional args is an error
+	if args[0] == "-h" || args[0] == "--help" {
+		if len(args) > 1 {
+			// Check for unknown flags or positional args after --help
+			for _, arg := range args[1:] {
+				if arg == "-h" || arg == "--help" {
+					continue
+				}
+				if strings.HasPrefix(arg, "-") {
+					fmt.Fprintf(stderr, "flag provided but not defined: %s\n", arg)
+					return 2
+				}
+				fmt.Fprintf(stderr, "error: unexpected argument %q\n", arg)
+				return 2
+			}
+		}
+		c.printHelp(stdout, path)
+		return 0
+	}
+
+	// Find matching subcommand
+	for _, sub := range c.Subcommands {
+		if sub.Name == args[0] {
+			newPath := path
+			// Don't include root command name in path
+			if c != rootCommand {
+				newPath = appendPath(path, c.Name)
+			}
+			return sub.dispatch(args[1:], newPath, stdout, stderr)
+		}
+	}
+
+	// Unknown subcommand
+	if c == rootCommand {
+		fmt.Fprintf(stderr, "error: unknown command %q\n", args[0])
+		fmt.Fprintln(stderr)
+		fmt.Fprintln(stderr, "Run the following for usage information:")
+		fmt.Fprintln(stderr, "  docker-helper help")
+	} else {
+		fmt.Fprintf(stderr, "error: unknown %s subcommand %q\n", c.Name, args[0])
+		fmt.Fprintln(stderr)
+		prefix := buildPrefix(path)
+		fmt.Fprintf(stderr, "Run the following for usage information:\n")
+		fmt.Fprintf(stderr, "  %s %s --help\n", prefix, c.Name)
+	}
+	return 2
+}
+
+func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet(c.Name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	// Register help flags
+	helpShort := fs.Bool("h", false, "Show help for this command")
+	helpLong := fs.Bool("help", false, "Show help for this command")
+
+	// Register command-specific flags
+	inv := c.NewInvocation(fs)
+
+	// Parse flags
+	if err := fs.Parse(args); err != nil {
+		// flag.FlagSet already printed the error via SetOutput(stderr)
+		return 2
+	}
+
+	// Reject positional arguments
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "error: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+
+	// Handle help after successful parsing, before Validate/Run
+	if *helpShort || *helpLong {
+		c.printHelp(stdout, path)
+		return 0
+	}
+
+	// Validate required options
+	if inv.Validate != nil {
+		if err := inv.Validate(); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+	}
+
+	// Run the command
+	return inv.Run(stdout, stderr)
+}
+
+func (c *Command) printSubcommandRequired(stderr io.Writer, path []string) {
+	subNames := make([]string, len(c.Subcommands))
+	for i, sub := range c.Subcommands {
+		subNames[i] = sub.Name
+	}
+	fmt.Fprintf(stderr, "error: %s subcommand required (%s)\n", c.Name, strings.Join(subNames, ", "))
+	fmt.Fprintln(stderr)
+	prefix := buildPrefix(path)
+	fmt.Fprintf(stderr, "Run the following for usage information:\n")
+	fmt.Fprintf(stderr, "  %s %s --help\n", prefix, c.Name)
+}
+
+func (c *Command) printHelp(w io.Writer, path []string) {
+	prefix := buildPrefix(path)
+
+	// Print Usage line
+	usage := c.usageLine(prefix)
+	fmt.Fprintln(w, usage)
+	fmt.Fprintln(w)
+
+	if c.Summary != "" {
+		fmt.Fprintf(w, "%s\n", c.Summary)
+		fmt.Fprintln(w)
+	}
+
+	if len(c.Subcommands) > 0 {
+		fmt.Fprintln(w, "Subcommands:")
+		for _, sub := range c.Subcommands {
+			fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
+		}
+		fmt.Fprintln(w)
+	}
+
+	// Print Flags section
+	fmt.Fprintln(w, "Flags:")
+	if c.NewInvocation != nil {
+		fs := flag.NewFlagSet("", flag.ContinueOnError)
+		c.NewInvocation(fs)
+		// Print command-specific flags first
+		fs.VisitAll(func(f *flag.Flag) {
+			if f.Name != "h" && f.Name != "help" {
+				fmt.Fprintln(w, usageLine(f))
+			}
+		})
+	}
+	// Always print -h/--help
+	fmt.Fprintln(w, "  -h, --help  Show help for this command")
+	fmt.Fprintln(w)
+}
+
+func (c *Command) usageLine(prefix string) string {
+	if c.Usage != "" {
+		return "Usage: " + c.Usage
+	}
+	if c.NewInvocation != nil {
+		return fmt.Sprintf("Usage: %s %s [flags]", prefix, c.Name)
+	}
+	if c == rootCommand {
+		return fmt.Sprintf("Usage: %s <subcommand> [flags]", prefix)
+	}
+	return fmt.Sprintf("Usage: %s %s <subcommand> [flags]", prefix, c.Name)
+}
+
+func usageLine(f *flag.Flag) string {
+	name := f.Name
+	if len(name) == 1 {
+		return fmt.Sprintf("  -%s    %s", name, f.Usage)
+	}
+	return fmt.Sprintf("  --%s    %s", name, f.Usage)
+}
+
+func buildPrefix(path []string) string {
+	if len(path) == 0 {
+		return "docker-helper"
+	}
+	return "docker-helper " + strings.Join(path, " ")
+}
+
+func appendPath(path []string, name string) []string {
+	result := make([]string, len(path)+1)
+	copy(result, path)
+	result[len(path)] = name
+	return result
+}
+
+var rootCommand = &Command{
+	Name: "docker-helper",
+}
+
+var serveCommand = &Command{
+	Name:    "serve",
+	Summary: "Start the HTTP server",
+	Usage:   "docker-helper serve",
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				if err := runServe(); err != nil {
+					fmt.Fprintln(stderr, err)
+					return 1
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var initCommand = &Command{
+	Name:    "init",
+	Summary: "Initialize configuration and admin token",
+	Usage:   "docker-helper init",
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				if err := runInit(); err != nil {
+					fmt.Fprintln(stderr, err)
+					return 1
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var versionCommand = &Command{
+	Name:    "version",
+	Summary: "Print version",
+	Usage:   "docker-helper version",
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				fmt.Fprintln(stdout, version)
+				return 0
+			},
+		}
+	},
+}
+
+var helpCommand = &Command{
+	Name:    "help",
+	Summary: "Show help",
+	Usage:   "docker-helper help",
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				rootCommand.printHelp(stdout, []string{})
+				return 0
+			},
+		}
+	},
+}
+
+func init() {
+	rootCommand.Subcommands = []*Command{
+		serveCommand,
+		initCommand,
+		sessionCommand,
+		versionCommand,
+		helpCommand,
+	}
+}
+
+func runCommandWithWriters(args []string, stdout, stderr io.Writer) int {
+	return rootCommand.dispatch(args, []string{}, stdout, stderr)
+}
+
+func runCommand(args []string) int {
+	return runCommandWithWriters(args, os.Stdout, os.Stderr)
+}
