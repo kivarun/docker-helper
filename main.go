@@ -27,6 +27,7 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  serve    Start the HTTP server")
 	fmt.Println("  init     Initialize configuration and admin token")
+	fmt.Println("  session  Manage sessions")
 	fmt.Println("  version  Print version")
 	fmt.Println("  help     Show this help message")
 	fmt.Println()
@@ -354,11 +355,15 @@ func runCommand(args []string) int {
 }
 
 func runSessionCommand(args []string) int {
+	return runSessionCommandWithWriters(args, os.Stdout, os.Stderr)
+}
+
+func runSessionCommandWithWriters(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "error: session subcommand required (list)")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Run the following for usage information:")
-		fmt.Fprintln(os.Stderr, "  docker-helper session list --help")
+		fmt.Fprintln(stderr, "error: session subcommand required (list)")
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Run the following for usage information:")
+		fmt.Fprintln(stderr, "  docker-helper session list --help")
 		return 2
 	}
 
@@ -366,29 +371,29 @@ func runSessionCommand(args []string) int {
 	case "list":
 		for _, arg := range args[1:] {
 			if arg == "help" || arg == "-h" || arg == "--help" {
-				fmt.Println("Usage: docker-helper session list [--json]")
-				fmt.Println()
-				fmt.Println("List active sessions.")
-				fmt.Println()
-				fmt.Println("Flags:")
-				fmt.Println("  --json  Output in JSON format")
+				fmt.Fprintln(stdout, "Usage: docker-helper session list [--json]")
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, "List active sessions.")
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, "Flags:")
+				fmt.Fprintln(stdout, "  --json  Output in JSON format")
 				return 0
 			}
 		}
-		return runSessionList(args[1:])
+		return runSessionListWithWriters(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
-		fmt.Println("Usage: docker-helper session list [--json]")
-		fmt.Println()
-		fmt.Println("List active sessions.")
-		fmt.Println()
-		fmt.Println("Flags:")
-		fmt.Println("  --json  Output in JSON format")
+		fmt.Fprintln(stdout, "Usage: docker-helper session list [--json]")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "List active sessions.")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Flags:")
+		fmt.Fprintln(stdout, "  --json  Output in JSON format")
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown session subcommand %q\n", args[0])
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Run the following for usage information:")
-		fmt.Fprintln(os.Stderr, "  docker-helper session list --help")
+		fmt.Fprintf(stderr, "error: unknown session subcommand %q\n", args[0])
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Run the following for usage information:")
+		fmt.Fprintln(stderr, "  docker-helper session list --help")
 		return 2
 	}
 }

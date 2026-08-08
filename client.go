@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 )
 
 type apiClient struct {
@@ -36,8 +37,8 @@ func readAdminTokenPlain(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot read admin token: %w", err)
 	}
-	token := string(data)
-	if len(token) == 0 {
+	token := strings.TrimSpace(string(data))
+	if token == "" {
 		return "", fmt.Errorf("admin token file is empty")
 	}
 	return token, nil

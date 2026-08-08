@@ -75,8 +75,8 @@ func TestListSessionsAuthHeader(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	tokenPath := filepath.Join(dir, "admin.token")
 
-	const token = "my-secret-token"
-	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+	// Write token with trailing newline, as runInit does.
+	if err := os.WriteFile(tokenPath, []byte("my-secret-token\n"), 0600); err != nil {
 		t.Fatalf("write token: %v", err)
 	}
 
@@ -136,6 +136,23 @@ func TestListSessionsConnectionError(t *testing.T) {
 	_, err := client.listSessions()
 	if err == nil {
 		t.Fatal("expected connection error for nonexistent socket")
+	}
+}
+
+func TestReadAdminTokenPlainWhitespaceOnly(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("   \n\t  \n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	_, err := readAdminTokenPlain(tokenPath)
+	if err == nil {
+		t.Fatal("expected error for whitespace-only token file")
+	}
+	if !strings.Contains(err.Error(), "admin token file is empty") {
+		t.Errorf("expected 'admin token file is empty', got: %v", err)
 	}
 }
 
@@ -209,7 +226,7 @@ func TestSessionListJSONOutput(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
-	code := runSessionListWithWriters([]string{"--json"}, &stdout, &stderr)
+	code := runSessionCommandWithWriters([]string{"list", "--json"}, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
