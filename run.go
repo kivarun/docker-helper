@@ -29,6 +29,7 @@ func extractExitCode(err error) *int {
 type runRequest struct {
 	Image       string            `json:"image"`
 	Entrypoint  string            `json:"entrypoint,omitempty"`
+	Workdir     string            `json:"workdir,omitempty"`
 	Command     []string          `json:"command,omitempty"`
 	Environment map[string]string `json:"environment,omitempty"`
 	Mounts      []mountRequest    `json:"mounts,omitempty"`
@@ -141,6 +142,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Workdir != "" {
+		if !filepath.IsAbs(req.Workdir) {
+			writeError(w, http.StatusBadRequest, "invalid_workdir", "workdir must be an absolute path")
+			return
+		}
+	}
+
 	for name := range req.Environment {
 		if !envNamePattern.MatchString(name) {
 			writeError(w, http.StatusBadRequest, "invalid_environment", "invalid environment variable name")
@@ -206,6 +214,10 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	if req.Entrypoint != "" {
 		args = append(args, "--entrypoint", req.Entrypoint)
+	}
+
+	if req.Workdir != "" {
+		args = append(args, "--workdir", req.Workdir)
 	}
 
 	for _, name := range envNames {
