@@ -563,8 +563,8 @@ func TestConfigSetUnsetFeedback(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
-	if stdout.String() != "updated log_level=warn\n" {
-		t.Errorf("set stdout = %q, want 'updated log_level=warn\\n'", stdout.String())
+	if !strings.HasPrefix(stdout.String(), "updated log_level=warn\n") {
+		t.Errorf("set stdout = %q, want output starting with 'updated log_level=warn\\n'", stdout.String())
 	}
 	if stderr.Len() > 0 {
 		t.Errorf("set should not write to stderr, got: %s", stderr.String())
@@ -576,8 +576,8 @@ func TestConfigSetUnsetFeedback(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
-	if stdout.String() != "unset log_level\n" {
-		t.Errorf("unset stdout = %q, want 'unset log_level\\n'", stdout.String())
+	if !strings.HasPrefix(stdout.String(), "unset log_level\n") {
+		t.Errorf("unset stdout = %q, want output starting with 'unset log_level\\n'", stdout.String())
 	}
 	if stderr.Len() > 0 {
 		t.Errorf("unset should not write to stderr, got: %s", stderr.String())
@@ -688,8 +688,8 @@ func TestConfigNoGlobalStdio(t *testing.T) {
 	if code2 != 0 {
 		t.Errorf("set: expected exit 0, got %d", code2)
 	}
-	if stdout2.String() != "updated log_level=warn\n" {
-		t.Errorf("set stdout = %q, want 'updated log_level=warn\\n'", stdout2.String())
+	if !strings.HasPrefix(stdout2.String(), "updated log_level=warn\n") {
+		t.Errorf("set stdout = %q, want output starting with 'updated log_level=warn\\n'", stdout2.String())
 	}
 	if stderr2.Len() > 0 {
 		t.Errorf("set stderr = %q", stderr2.String())
@@ -1693,7 +1693,7 @@ func TestRegressionSetPrintsUpdated(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != "updated log_level=debug\n" {
+	if !strings.HasPrefix(stdout.String(), "updated log_level=debug\n") {
 		t.Errorf("expected 'updated log_level=debug\\n', got %q", stdout.String())
 	}
 }
@@ -1741,7 +1741,7 @@ func TestRegressionSetEffectiveValueCountsAsUpdate(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != "updated audit_enabled=true\n" {
+	if !strings.HasPrefix(stdout.String(), "updated audit_enabled=true\n") {
 		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout.String())
 	}
 }
@@ -1760,7 +1760,7 @@ func TestRegressionUnsetPrintsUnset(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != "unset log_level\n" {
+	if !strings.HasPrefix(stdout.String(), "unset log_level\n") {
 		t.Errorf("expected 'unset log_level\\n', got %q", stdout.String())
 	}
 }
@@ -1974,7 +1974,7 @@ func TestRegressionRepairInvalidField(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != "updated audit_enabled=true\n" {
+	if !strings.HasPrefix(stdout.String(), "updated audit_enabled=true\n") {
 		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout.String())
 	}
 
@@ -1993,7 +1993,7 @@ func TestRegressionRepairInvalidField(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
-	if stdout.String() != "unset audit_enabled\n" {
+	if !strings.HasPrefix(stdout.String(), "unset audit_enabled\n") {
 		t.Errorf("expected 'unset audit_enabled\\n', got %q", stdout.String())
 	}
 
@@ -2066,8 +2066,8 @@ func TestConfigSetHelp(t *testing.T) {
 	if !strings.Contains(out, "unchanged") {
 		t.Error("help should mention unchanged feedback")
 	}
-	if !strings.Contains(out, "restart") {
-		t.Error("help should mention restart requirement")
+	if !strings.Contains(out, "daemon") {
+		t.Error("help should mention daemon reload behavior")
 	}
 }
 

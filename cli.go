@@ -301,6 +301,32 @@ var versionCommand = &Command{
 	},
 }
 
+var reloadCommand = &Command{
+	Name:    "reload",
+	Summary: "Reload configuration from disk",
+	Usage:   "docker-helper reload",
+	Help: `Ask the running daemon to re-read config.json and apply changes without restarting.
+
+The following configurable fields are applied at runtime:
+  allowed_root    root directory for agent workspaces
+  session_ttl     session lifetime
+  log_level       operational log verbosity
+  audit_enabled   audit output enablement
+
+Runtime paths (socket, database, state) are not changed.
+
+If the daemon is not running, this command fails with a non-zero exit code.
+If the new configuration is invalid, the daemon keeps its current
+configuration and this command returns an error.`,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				return runReload(stdout, stderr)
+			},
+		}
+	},
+}
+
 var helpCommand = &Command{
 	Name:    "help",
 	Summary: "Show help",
@@ -319,6 +345,7 @@ func init() {
 	rootCommand.Subcommands = []*Command{
 		serveCommand,
 		initCommand,
+		reloadCommand,
 		sessionCommand,
 		configCommand,
 		versionCommand,

@@ -66,7 +66,8 @@ func (a *App) createSession(workspace string) (*CreatedSession, error) {
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
 	}
 
-	allowedRoot, err := filepath.EvalSymlinks(a.Config.AllowedRoot)
+	cfg := a.getConfig()
+	allowedRoot, err := filepath.EvalSymlinks(cfg.AllowedRoot)
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
 	}
@@ -91,7 +92,7 @@ func (a *App) createSession(workspace string) (*CreatedSession, error) {
 	tokenHashHex := hex.EncodeToString(tokenHash[:])
 
 	now := time.Now()
-	expiresAt := now.Add(a.Config.SessionTTL)
+	expiresAt := now.Add(cfg.SessionTTL)
 
 	_, err = a.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)

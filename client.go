@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 type apiClient struct {
@@ -29,6 +30,21 @@ func newUnixAPIClient(socketPath string, tokenSource func() (string, error)) *ap
 
 	return &apiClient{
 		httpClient:  &http.Client{Transport: transport},
+		baseURL:     "http://localhost",
+		tokenSource: tokenSource,
+	}
+}
+
+func newUnixAPIClientWithTimeout(socketPath string, tokenSource func() (string, error), timeout time.Duration) *apiClient {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", socketPath)
+		},
+	}
+
+	return &apiClient{
+		httpClient:  &http.Client{Transport: transport, Timeout: timeout},
 		baseURL:     "http://localhost",
 		tokenSource: tokenSource,
 	}

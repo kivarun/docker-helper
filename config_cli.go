@@ -158,7 +158,9 @@ var configSetCommand = &Command{
   audit_enabled   true or false
 
 A successful command reports either "updated" or "unchanged".
-Changes take effect after restarting the daemon.`,
+If the daemon is running, the change is applied immediately.
+If the daemon is not running, the change is written to disk and
+will apply on the next start.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -179,7 +181,10 @@ var configUnsetCommand = &Command{
   log_level       removing it restores the effective default info
   audit_enabled   removing it restores behavior derived from log_level
 
-A successful command reports either "unset" or "unchanged".`,
+A successful command reports either "unset" or "unchanged".
+If the daemon is running, the change is applied immediately.
+If the daemon is not running, the change is written to disk and
+will apply on the next start.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -654,6 +659,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+	tryReloadConfig(stdout, stderr)
 	return 0
 }
 
@@ -709,5 +715,56 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintln(stdout, "unset", field)
+	tryReloadConfig(stdout, stderr)
 	return 0
+}
+
+// tryReloadConfig attempts to reload the running daemon's configuration.
+// It is called after a successful config set/unset.
+// If the daemon is not running, the operation is still considered successful.
+// If the daemon is running but reload fails (e.g., invalid config), the error
+// is printed but the config change is not rolled back.
+func tryReloadConfig(stdout, stderr io.Writer) {
+	// Use safe path resolution without creating directories.
+	configPath := getConfigPath()
+	configDir := filepath.Dir(configPath)
+	adminTokenPath := filepath.Join(configDir, "admin.token")
+
+	tokenData, err := os.ReadFile(adminTokenPath)
+	if err != nil {
+		return
+	}
+	token := strings.TrimSpace(string(tokenData))
+	if token == "" {
+		return
+	}
+
+	runtimeDir := getRuntimeDirSafe()
+	if runtimeDir == "" {
+		return
+	}
+	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
+
+	client := newReloadClient(socketPath, func() (string, error) {
+		return token, nil
+	})
+	if err := client.reload(); err != nil {
+		if isDaemonNotRunning(err) {
+			fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
+		} else {
+			fmt.Fprintf(stderr, "warning: reload failed: %v\n", err)
+		}
+	}
+}
+
+// isDaemonNotRunning returns true if the error indicates the daemon
+// is not listening on the socket.
+func isDaemonNotRunning(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "no such file or directory")
 }

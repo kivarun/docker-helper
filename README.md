@@ -146,6 +146,31 @@ Configuration fields:
 
 Only `log_level` and `audit_enabled` may be unset to restore defaults.
 
+Runtime reload: after `config set` or `config unset`, the change is written
+to disk immediately. If the daemon is running, the new configuration is
+applied automatically. If the daemon is not running, the change will apply
+on the next start.
+
+You can also trigger a reload explicitly:
+
+```bash
+docker-helper reload
+```
+
+This asks the running daemon to re-read `config.json` and apply changes
+without restarting. If the daemon is not running, the command fails with
+a non-zero exit code. The reload validates the new configuration before
+applying it; if validation fails, the daemon keeps its current configuration
+and the command returns an error.
+
+The following fields are applied at runtime:
+- `allowed_root`
+- `session_ttl`
+- `log_level`
+- `audit_enabled`
+
+Runtime paths (socket, database, state) are not changed by reload.
+
 **Computed/output-only fields** are read-only and must not be added to
 config.json. If present, configuration validation and daemon startup fail:
 
@@ -161,8 +186,6 @@ config.json. If present, configuration validation and daemon startup fail:
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
-
-Changes take effect after restarting the daemon.
 
 ### 4. Start the daemon
 
@@ -200,6 +223,14 @@ Check status and logs:
 ```bash
 systemctl --user status docker-helper
 journalctl --user -u docker-helper
+```
+
+Reload configuration without restarting:
+
+```bash
+docker-helper reload
+# or
+systemctl --user reload docker-helper
 ```
 
 ## Session management

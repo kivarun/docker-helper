@@ -271,6 +271,7 @@ func runServe(stdout, stderr io.Writer) error {
 		mux.HandleFunc("POST /sessions", withRequestID(withLogging(app.handleCreateSession)))
 		mux.HandleFunc("GET /sessions", withRequestID(withLogging(app.handleListSessions)))
 		mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+		mux.HandleFunc("POST /reload", withRequestID(withLogging(app.handleReload)))
 
 		server := &http.Server{
 			Handler:           mux,
