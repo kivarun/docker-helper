@@ -590,6 +590,11 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 
 	// Compare with the existing explicit JSON member.
 	if existing, ok := raw[field]; ok && bytes.Equal(existing, newValue) {
+		// Validate the existing configuration before returning unchanged.
+		if err := validateRawConfig(raw); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
 		fmt.Fprintf(stdout, "unchanged %s=%s\n", field, value)
 		return 0
 	}
@@ -640,6 +645,11 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 
 	// Check if the member is already absent.
 	if _, ok := raw[field]; !ok {
+		// Validate the existing configuration before returning unchanged.
+		if err := validateRawConfig(raw); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
 		fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
 		return 0
 	}

@@ -1856,3 +1856,150 @@ func TestRegressionFailurePathsEmptyStdout(t *testing.T) {
 		})
 	}
 }
+
+// Regression: unchanged set with another invalid known field
+func TestRegressionUnchangedSetWithInvalidField(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug",
+  "audit_enabled": "not_a_boolean"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.Len() > 0 {
+		t.Errorf("stdout must be empty on failure, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "audit_enabled") {
+		t.Errorf("error must identify offending field, got: %s", stderr.String())
+	}
+}
+
+// Regression: unchanged unset with another invalid known field
+func TestRegressionUnchangedUnsetWithInvalidField(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug",
+  "audit_enabled": "not_a_boolean"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.Len() > 0 {
+		t.Errorf("stdout must be empty on failure, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "audit_enabled") {
+		t.Errorf("error must identify offending field, got: %s", stderr.String())
+	}
+}
+
+// Regression: valid unchanged operations still avoid replacing the file
+func TestRegressionValidUnchangedAvoidsFileReplace(t *testing.T) {
+	cfg := []byte(`{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug"
+}`)
+	configPath := setupConfigTestWithData(t, cfg)
+
+	// Get original file info
+	info1, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("cannot stat config: %v", err)
+	}
+
+	// unchanged set
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "unchanged log_level=debug\n" {
+		t.Errorf("expected 'unchanged log_level=debug\\n', got %q", stdout.String())
+	}
+
+	// Verify file was not rewritten
+	info2, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("cannot stat config: %v", err)
+	}
+	if info2.ModTime() != info1.ModTime() {
+		t.Error("unchanged set should not rewrite config.json")
+	}
+
+	// unchanged unset
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "unset", "audit_enabled"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "unchanged audit_enabled is already unset\n" {
+		t.Errorf("expected 'unchanged audit_enabled is already unset\\n', got %q", stdout.String())
+	}
+
+	// Verify file was not rewritten
+	info3, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("cannot stat config: %v", err)
+	}
+	if info3.ModTime() != info1.ModTime() {
+		t.Error("unchanged unset should not rewrite config.json")
+	}
+}
+
+// Regression: changing or removing the invalid field itself can still repair the config
+func TestRegressionRepairInvalidField(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug",
+  "audit_enabled": "not_a_boolean"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	// Repair by setting audit_enabled to a valid value
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "audit_enabled", "true"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "updated audit_enabled=true\n" {
+		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout.String())
+	}
+
+	// Repair by unsetting the invalid field
+	cfg2 := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h",
+  "log_level": "debug",
+  "audit_enabled": "not_a_boolean"
+}`
+	configPath := setupConfigTestWithData(t, []byte(cfg2))
+
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "unset", "audit_enabled"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "unset audit_enabled\n" {
+		t.Errorf("expected 'unset audit_enabled\\n', got %q", stdout.String())
+	}
+
+	// Verify the file is now valid
+	raw := readConfigJSON(t, configPath)
+	if _, ok := raw["audit_enabled"]; ok {
+		t.Error("audit_enabled should be removed")
+	}
+}
