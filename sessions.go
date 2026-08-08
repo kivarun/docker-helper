@@ -182,7 +182,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		if workspace != "" {
 			auditRec.Workspace = workspace
 		}
-		writeAudit(auditRec)
+		writeAuditWithRequestID(ctx, auditRec)
 
 		if errors.Is(err, ErrSessionNotFound) {
 			writeError(ctx, w, http.StatusNotFound, "session_not_found", "session not found")

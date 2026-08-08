@@ -288,7 +288,10 @@ func runServe(stdout, stderr io.Writer) error {
 		err = serveWithShutdown(ctx, server, listener, shutdownTimeout)
 
 		if err != nil {
-			opLogger.Error("daemon serve error", slog.String("error", err.Error()))
+			opLogger.Error("daemon serve error",
+				slog.String("operation", "serve"),
+				slog.String("error", err.Error()),
+			)
 		} else {
 			opLogger.Info("daemon stopped")
 		}
@@ -299,7 +302,10 @@ func runServe(stdout, stderr io.Writer) error {
 	// Log lock/listener errors that runWithLock returns before entering the callback.
 	// Errors inside the callback (admin token, database, serve) are already logged.
 	if err != nil && !callbackEntered {
-		opLogger.Error("daemon startup failed", slog.String("error", err.Error()))
+		opLogger.Error("daemon startup failed",
+			slog.String("operation", "serve_startup"),
+			slog.String("error", err.Error()),
+		)
 	}
 
 	return err

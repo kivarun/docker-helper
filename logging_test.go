@@ -737,10 +737,9 @@ func (e *mockEncodingError) Error() string {
 	return "mock encoding error"
 }
 
-// TestRunCommandWithWritersRoutesStreams verifies that runCommandWithWriters
-// routes audit records only to the supplied stdout and operational logs only
-// to the supplied stderr.
-func TestRunCommandWithWritersRoutesStreams(t *testing.T) {
+// TestLoggerStreamSeparation verifies that audit records go only to the audit
+// writer and operational records go only to the operational writer.
+func TestLoggerStreamSeparation(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
 
@@ -771,15 +770,85 @@ func TestRunCommandWithWritersRoutesStreams(t *testing.T) {
 	}
 }
 
+// TestRunCommandWithWritersServeFailure verifies that runCommandWithWriters
+// routes audit to stdout and operational to stderr during a serve failure.
+func TestRunCommandWithWritersServeFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	configDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "admin.token"), []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(configDir, "config.json"))
+
+	// Pre-acquire the lock.
+	runtimeDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+
+	stdoutBuf := new(bytes.Buffer)
+	stderrBuf := new(bytes.Buffer)
+
+	sentinel := new(bytes.Buffer)
+	savedStderr := osStderr
+	osStderr = sentinel
+	defer func() {
+		osStderr = savedStderr
+	}()
+
+	code := runCommandWithWriters([]string{"serve"}, stdoutBuf, stderrBuf)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	lockFile.Close()
+
+	// Sentinel must be empty — no global stderr writes.
+	if sentinel.Len() > 0 {
+		t.Errorf("serve wrote to global stderr: %s", sentinel.String())
+	}
+
+	// Operational output must be valid JSONL.
+	opOutput := stderrBuf.String()
+	if opOutput == "" {
+		t.Fatal("stderr is empty")
+	}
+	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Errorf("stderr line %d not valid JSON: %s: %v", i, line, err)
+		}
+	}
+}
+
 // TestMissingConfigProducesSingleJSONLRecord verifies that a missing
 // configuration file produces exactly one valid operational JSONL record.
 func TestMissingConfigProducesSingleJSONLRecord(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 	auditBuf := new(bytes.Buffer)
 
-	// Save and restore osStderr to prevent global writes.
+	sentinel := new(bytes.Buffer)
 	savedStderr := osStderr
-	osStderr = opBuf
+	osStderr = sentinel
 	defer func() {
 		osStderr = savedStderr
 	}()
@@ -798,30 +867,27 @@ func TestMissingConfigProducesSingleJSONLRecord(t *testing.T) {
 		t.Fatal("expected error from runServe with missing config")
 	}
 
-	// The first record should be from initLoggers fallback or serveStartupError.
-	// After initLoggers is called, the error goes through the slog logger.
+	// Sentinel must be empty — no global stderr writes.
+	if sentinel.Len() > 0 {
+		t.Errorf("serve wrote to global stderr: %s", sentinel.String())
+	}
+
 	opOutput := opBuf.String()
 	if opOutput == "" {
 		t.Fatal("operational output is empty")
 	}
 
-	// Each line must be valid JSON.
-	lineCount := 0
-	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		lineCount++
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Errorf("line %d is not valid JSON: %s: %v", i, line, err)
-		}
+	lines := strings.Split(strings.TrimSpace(opOutput), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 operational line, got %d:\n%s", len(lines), opOutput)
 	}
 
-	// serveStartupError should produce exactly one record for the config error.
-	// The initLoggers call happens first, so the error goes through opLogger.
-	if lineCount == 0 {
-		t.Fatal("expected at least one operational record")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &m); err != nil {
+		t.Fatalf("line is not valid JSON: %s: %v", lines[0], err)
+	}
+	if m["stream"] != "operational" {
+		t.Errorf("expected stream=operational, got %v", m["stream"])
 	}
 }
 
@@ -884,15 +950,17 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 		t.Fatal("operational output is empty")
 	}
 
-	// Each line must be valid JSON.
-	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Errorf("line %d is not valid JSON: %s: %v", i, line, err)
-		}
+	lines := strings.Split(strings.TrimSpace(opOutput), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 operational line, got %d:\n%s", len(lines), opOutput)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &m); err != nil {
+		t.Fatalf("line is not valid JSON: %s: %v", lines[0], err)
+	}
+	if m["stream"] != "operational" {
+		t.Errorf("expected stream=operational, got %v", m["stream"])
 	}
 }
 
@@ -930,13 +998,13 @@ func TestServeNoGlobalStderr(t *testing.T) {
 		t.Fatalf("acquireLock: %v", err)
 	}
 
-	// Use dedicated buffers — no os.Stdout/os.Stderr involvement.
+	// Use distinct buffers: sentinel for global stderr, opBuf for operational writer.
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
+	sentinel := new(bytes.Buffer)
 
-	// Save and restore osStderr.
 	savedStderr := osStderr
-	osStderr = opBuf
+	osStderr = sentinel
 	defer func() {
 		osStderr = savedStderr
 	}()
@@ -954,7 +1022,12 @@ func TestServeNoGlobalStderr(t *testing.T) {
 	}
 	lockFile.Close()
 
-	// Verify that the buffers received output (proving writers were used).
+	// Sentinel must be empty — no global stderr writes.
+	if sentinel.Len() > 0 {
+		t.Errorf("serve wrote to global stderr: %s", sentinel.String())
+	}
+
+	// Operational output must be non-empty (writers were used).
 	opOutput := opBuf.String()
 	if opOutput == "" {
 		t.Fatal("operational output is empty — writers may not have been used")
@@ -1048,4 +1121,55 @@ func (w *failingResponseWriter) Write(p []byte) (int, error) {
 func (w *failingResponseWriter) WriteHeader(statusCode int) {
 	// Don't actually write headers — defer to the underlying writer.
 	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+// TestDeleteSessionAuditContainsRequestID verifies that a failing DELETE
+// /sessions/{id} audit record contains the request_id from the context.
+func TestDeleteSessionAuditContainsRequestID(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelInfo)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/sessions/nonexistent-id", nil)
+	withAuth(req)
+	w := httptest.NewRecorder()
+
+	handler := withRequestID(app.handleDeleteSession)
+	handler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+
+	rid := w.Header().Get("X-Request-ID")
+	if rid == "" {
+		t.Fatal("X-Request-ID header should be set")
+	}
+
+	// Find the delete audit record and check request_id.
+	for _, line := range strings.Split(strings.TrimSpace(auditBuf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		if m["event"] != "session.delete" {
+			continue
+		}
+		if m["request_id"] != rid {
+			t.Errorf("expected request_id=%q in audit record, got %v", rid, m["request_id"])
+		}
+		return
+	}
+
+	t.Fatal("no session.delete audit record found")
 }
