@@ -3,14 +3,17 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 )
 
@@ -307,17 +310,24 @@ func main() {
 		os.Exit(0)
 	}
 
+	exitCode := runCommand(args)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+}
+
+func runCommand(args []string) int {
 	switch args[0] {
 	case "serve":
 		if err := runServe(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			return 1
 		}
 
 	case "init":
 		if err := runInit(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			return 1
 		}
 
 	case "version":
@@ -326,11 +336,125 @@ func main() {
 	case "help", "-h", "--help":
 		printHelp()
 
+	case "session":
+		code := runSessionCommand(args[1:])
+		if code != 0 {
+			return code
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown command %q\n", args[0])
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Run the following for usage information:")
 		fmt.Fprintln(os.Stderr, "  docker-helper help")
-		os.Exit(1)
+		return 1
 	}
+
+	return 0
+}
+
+func runSessionCommand(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "error: session subcommand required (list)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run the following for usage information:")
+		fmt.Fprintln(os.Stderr, "  docker-helper session list --help")
+		return 2
+	}
+
+	switch args[0] {
+	case "list":
+		for _, arg := range args[1:] {
+			if arg == "help" || arg == "-h" || arg == "--help" {
+				fmt.Println("Usage: docker-helper session list [--json]")
+				fmt.Println()
+				fmt.Println("List active sessions.")
+				fmt.Println()
+				fmt.Println("Flags:")
+				fmt.Println("  --json  Output in JSON format")
+				return 0
+			}
+		}
+		return runSessionList(args[1:])
+	case "help", "-h", "--help":
+		fmt.Println("Usage: docker-helper session list [--json]")
+		fmt.Println()
+		fmt.Println("List active sessions.")
+		fmt.Println()
+		fmt.Println("Flags:")
+		fmt.Println("  --json  Output in JSON format")
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown session subcommand %q\n", args[0])
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Run the following for usage information:")
+		fmt.Fprintln(os.Stderr, "  docker-helper session list --help")
+		return 2
+	}
+}
+
+func parseSessionListFlags(args []string) (jsonOutput bool, err error) {
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		default:
+			return false, fmt.Errorf("unknown flag: %s", arg)
+		}
+	}
+	return jsonOutput, nil
+}
+
+func runSessionList(args []string) int {
+	return runSessionListWithWriters(args, os.Stdout, os.Stderr)
+}
+
+func runSessionListWithWriters(args []string, stdout, stderr io.Writer) int {
+	jsonOutput, err := parseSessionListFlags(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
+		return readAdminTokenPlain(cfg.AdminTokenPath)
+	})
+
+	result, err := client.listSessions()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(result); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	printSessionsTable(stdout, result.Sessions)
+	return 0
+}
+
+func printSessionsTable(w io.Writer, sessions []sessionJSON) {
+	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
+
+	fmt.Fprintln(tw, "ID\tWORKSPACE\tCREATED\tEXPIRES")
+
+	for _, s := range sessions {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+			s.ID, s.Workspace, s.CreatedAt, s.ExpiresAt)
+	}
+
+	tw.Flush()
 }
