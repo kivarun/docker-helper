@@ -837,8 +837,9 @@ func TestDeleteSessionEscapedID(t *testing.T) {
 	if capturedRawQuery != "" {
 		t.Errorf("expected empty RawQuery, got %q", capturedRawQuery)
 	}
-	if !strings.Contains(capturedRequestURI, url.PathEscape("dhs_001")) {
-		t.Errorf("expected percent-encoded ID in RequestURI, got %q", capturedRequestURI)
+	expectedRequestURI := "/sessions/" + url.PathEscape(testID)
+	if capturedRequestURI != expectedRequestURI {
+		t.Errorf("expected RequestURI %q, got %q", expectedRequestURI, capturedRequestURI)
 	}
 	if capturedAuth != "Bearer test-token" {
 		t.Errorf("expected 'Bearer test-token', got %q", capturedAuth)
