@@ -44,8 +44,11 @@ func withLogging(next http.HandlerFunc) http.HandlerFunc {
 		route := getRoutePattern(r)
 		rid := requestIDFromContext(r.Context())
 
-		if opLogger != nil {
-			opLogger.Debug("request completed",
+		loggerMu.RLock()
+		logger := opLogger
+		loggerMu.RUnlock()
+		if logger != nil {
+			logger.Debug("request completed",
 				"request_id", rid,
 				"method", r.Method,
 				"route", route,

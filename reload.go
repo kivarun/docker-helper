@@ -62,12 +62,20 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 
 	a.setConfig(newCfg)
 
-	// Re-initialize loggers with the new log level and audit setting.
-	// This updates opLogger and auditWriter in place.
-	initLoggers(opWriter, auditWriter, newCfg.LogLevel, newCfg.AuditEnabled)
+	// Snapshot writers under read lock, then re-initialize loggers
+	// with the new log level and audit setting under write lock.
+	loggerMu.RLock()
+	opW := opWriter
+	audW := auditWriter
+	loggerMu.RUnlock()
 
-	if opLogger != nil {
-		opLogger.Info("configuration reloaded",
+	initLoggers(opW, audW, newCfg.LogLevel, newCfg.AuditEnabled)
+
+	loggerMu.RLock()
+	logger := opLogger
+	loggerMu.RUnlock()
+	if logger != nil {
+		logger.Info("configuration reloaded",
 			slog.String("allowed_root", newCfg.AllowedRoot),
 			slog.String("session_ttl", newCfg.SessionTTL.String()),
 			slog.String("log_level", newCfg.LogLevel.String()),

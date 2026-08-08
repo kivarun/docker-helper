@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -892,4 +893,145 @@ func TestConfigSnapshotRace(t *testing.T) {
 	if final.DatabasePath != "/tmp/db" {
 		t.Errorf("expected DatabasePath /tmp/db, got %s", final.DatabasePath)
 	}
+}
+
+// safeBuf is a thread-safe bytes.Buffer for concurrent logger writes in tests.
+type safeBuf struct {
+	sync.Mutex
+	bytes.Buffer
+}
+
+func (s *safeBuf) Write(p []byte) (int, error) {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+	return s.Buffer.Write(p)
+}
+
+// TestLoggingReloadConcurrency verifies that concurrent logging/audit
+// and runtime reload of log_level/audit_enabled does not race.
+func TestLoggingReloadConcurrency(t *testing.T) {
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	opBuf := &safeBuf{}
+	auditBuf := &safeBuf{}
+	initLoggers(opBuf, auditBuf, slog.LevelInfo, false)
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	configPath := getConfigPath()
+
+	// Concurrently do logging, audit writes, and reloads
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Goroutine 1: continuous logging
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				loggerMu.RLock()
+				l := opLogger
+				loggerMu.RUnlock()
+				if l != nil {
+					l.Info("concurrent log")
+				}
+			}
+		}
+	}()
+
+	// Goroutine 2: continuous audit writes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				writeAudit(auditRecord{Event: "concurrent.audit"})
+			}
+		}
+	}()
+
+	// Goroutine 3: continuous reloads
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				newCfg := map[string]any{
+					"allowed_root":    "/tmp/work",
+					"session_ttl":     "12h",
+					"log_level":       "debug",
+					"audit_enabled":   true,
+				}
+				data, _ := json.MarshalIndent(newCfg, "", "  ")
+				os.WriteFile(configPath, data, 0600)
+
+				req, _ := http.NewRequest("POST", "http://localhost/reload", nil)
+				req.Header.Set("Authorization", "Bearer test-admin-token")
+				resp, err := client.Do(req)
+				if err == nil {
+					resp.Body.Close()
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+
+	// Let it run for a bit
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }

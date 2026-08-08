@@ -278,22 +278,34 @@ func runServe(stdout, stderr io.Writer) error {
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 
-		opLogger.Info("daemon listening",
-			slog.String("socket", cfg.SocketPath),
-		)
+		loggerMu.RLock()
+		logger := opLogger
+		loggerMu.RUnlock()
+		if logger != nil {
+			logger.Info("daemon listening",
+				slog.String("socket", cfg.SocketPath),
+			)
+		}
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
 		err = serveWithShutdown(ctx, server, listener, shutdownTimeout)
 
+		loggerMu.RLock()
+		logger = opLogger
+		loggerMu.RUnlock()
 		if err != nil {
-			opLogger.Error("daemon serve error",
-				slog.String("operation", "serve"),
-				slog.String("error", err.Error()),
-			)
+			if logger != nil {
+				logger.Error("daemon serve error",
+					slog.String("operation", "serve"),
+					slog.String("error", err.Error()),
+				)
+			}
 		} else {
-			opLogger.Info("daemon stopped")
+			if logger != nil {
+				logger.Info("daemon stopped")
+			}
 		}
 
 		return err
@@ -302,10 +314,15 @@ func runServe(stdout, stderr io.Writer) error {
 	// Log lock/listener errors that runWithLock returns before entering the callback.
 	// Errors inside the callback (admin token, database, serve) are already logged.
 	if err != nil && !callbackEntered {
-		opLogger.Error("daemon startup failed",
-			slog.String("operation", "serve_startup"),
-			slog.String("error", err.Error()),
-		)
+		loggerMu.RLock()
+		logger := opLogger
+		loggerMu.RUnlock()
+		if logger != nil {
+			logger.Error("daemon startup failed",
+				slog.String("operation", "serve_startup"),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	return err

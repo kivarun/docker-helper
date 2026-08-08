@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -62,6 +63,10 @@ var auditWriter io.Writer
 // When false, writeAudit is a no-op.
 var auditEnabled bool
 
+// loggerMu protects opLogger, opWriter, auditWriter, and auditEnabled
+// from concurrent access during runtime reload.
+var loggerMu sync.RWMutex
+
 // operationalHandler wraps a slog.Handler to inject "stream": "operational"
 // into every record.
 type operationalHandler struct {
@@ -87,6 +92,8 @@ func (h *operationalHandler) WithGroup(name string) slog.Handler {
 // The audit writer receives JSON Lines audit records.
 // When auditEnabled is true, audit records are written to audWriter.
 func initLoggers(opW io.Writer, audW io.Writer, level slog.Level, enabled bool) {
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
 	opWriter = opW
 	auditWriter = audW
 	auditEnabled = enabled
@@ -113,10 +120,16 @@ func initLoggers(opW io.Writer, audW io.Writer, level slog.Level, enabled bool) 
 // is silently dropped. If writing or encoding fails, a structured operational error
 // is emitted to stderr with correlation fields copied from the record.
 func writeAudit(record auditRecord) {
-	if !auditEnabled {
+	loggerMu.RLock()
+	enabled := auditEnabled
+	aw := auditWriter
+	logger := opLogger
+	loggerMu.RUnlock()
+
+	if !enabled {
 		return
 	}
-	if auditWriter == nil {
+	if aw == nil {
 		return
 	}
 
@@ -128,8 +141,8 @@ func writeAudit(record auditRecord) {
 
 	data, err := json.Marshal(record)
 	if err != nil {
-		if opLogger != nil {
-			l := opLogger.With(
+		if logger != nil {
+			l := logger.With(
 				slog.String("operation", "audit_encode"),
 				slog.String("error", err.Error()),
 			)
@@ -145,9 +158,9 @@ func writeAudit(record auditRecord) {
 	}
 
 	data = append(data, '\n')
-	if _, err := auditWriter.Write(data); err != nil {
-		if opLogger != nil {
-			l := opLogger.With(
+	if _, err := aw.Write(data); err != nil {
+		if logger != nil {
+			l := logger.With(
 				slog.String("operation", "audit_write"),
 				slog.String("error", err.Error()),
 			)
@@ -175,10 +188,12 @@ func writeAuditWithRequestID(ctx context.Context, record auditRecord) {
 // opLog returns the operational logger with request-scoped attributes.
 // It adds request_id and session_id when available in the context.
 func opLog(ctx context.Context) *slog.Logger {
-	if opLogger == nil {
+	loggerMu.RLock()
+	l := opLogger
+	loggerMu.RUnlock()
+	if l == nil {
 		return slog.Default()
 	}
-	l := opLogger
 	if rid := requestIDFromContext(ctx); rid != "" {
 		l = l.With(slog.String("request_id", rid))
 	}
@@ -191,10 +206,13 @@ func opLog(ctx context.Context) *slog.Logger {
 // writeJSONError logs a response encoding failure using the request context.
 // It includes request_id and session_id when available.
 func writeJSONError(ctx context.Context, err error) {
-	if opLogger == nil {
+	loggerMu.RLock()
+	logger := opLogger
+	loggerMu.RUnlock()
+	if logger == nil {
 		return
 	}
-	l := opLogger.With(slog.String("operation", "response_encode"), slog.String("error", err.Error()))
+	l := logger.With(slog.String("operation", "response_encode"), slog.String("error", err.Error()))
 	if rid := requestIDFromContext(ctx); rid != "" {
 		l = l.With(slog.String("request_id", rid))
 	}
@@ -210,8 +228,11 @@ var osStderr io.Writer = os.Stderr
 // serveStartupError logs a daemon startup failure as structured JSON to stderr.
 // It is safe to call before initLoggers.
 func serveStartupError(err error, hint string) {
-	if opLogger != nil {
-		l := opLogger.With(
+	loggerMu.RLock()
+	logger := opLogger
+	loggerMu.RUnlock()
+	if logger != nil {
+		l := logger.With(
 			slog.String("operation", "serve_startup"),
 			slog.String("error", err.Error()),
 		)
