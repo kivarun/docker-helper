@@ -111,6 +111,27 @@ var configShowCommand = &Command{
 	Usage:      "docker-helper config show [FIELD]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
+	Help: `Without FIELD, prints the complete effective configuration as JSON.
+With FIELD, prints only that field's scalar value followed by a newline.
+
+The general JSON output redacts admin_token.
+"config show admin_token" intentionally prints the complete real token.
+
+Fields:
+  allowed_root
+  session_ttl
+  log_level
+  audit_enabled
+  audit_enabled_source
+  config_path
+  config_dir
+  runtime_dir
+  socket_path
+  lock_path
+  state_dir
+  database_path
+  admin_token_path
+  admin_token`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -130,6 +151,14 @@ var configSetCommand = &Command{
 	Usage:      "docker-helper config set FIELD VALUE",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
+	Help: `Writable fields:
+  allowed_root    non-empty absolute path (required)
+  session_ttl     positive Go duration, for example 30m or 12h (required)
+  log_level       debug, info, warn, or error
+  audit_enabled   true or false
+
+A successful command reports either "updated" or "unchanged".
+Changes take effect after restarting the daemon.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -146,6 +175,11 @@ var configUnsetCommand = &Command{
 	Usage:      "docker-helper config unset FIELD",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+	Help: `Unsettable fields:
+  log_level       removing it restores the effective default info
+  audit_enabled   removing it restores behavior derived from log_level
+
+A successful command reports either "unset" or "unchanged".`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {

@@ -2003,3 +2003,218 @@ func TestRegressionRepairInvalidField(t *testing.T) {
 		t.Error("audit_enabled should be removed")
 	}
 }
+
+// --- Help tests ---
+
+func TestConfigShowHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("stderr should be empty, got: %s", stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Without FIELD") {
+		t.Error("help should explain general behavior")
+	}
+	if !strings.Contains(out, "With FIELD") {
+		t.Error("help should explain single-field behavior")
+	}
+	if !strings.Contains(out, "redacts admin_token") {
+		t.Error("help should mention token redaction")
+	}
+	if !strings.Contains(out, "config show admin_token") {
+		t.Error("help should mention admin_token exception")
+	}
+
+	// Check all 14 fields are listed
+	for _, field := range allFields {
+		if !strings.Contains(out, field) {
+			t.Errorf("help should list field %q", field)
+		}
+	}
+}
+
+func TestConfigSetHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("stderr should be empty, got: %s", stderr.String())
+	}
+
+	out := stdout.String()
+	for _, field := range writableFields {
+		if !strings.Contains(out, field) {
+			t.Errorf("help should list writable field %q", field)
+		}
+	}
+	if !strings.Contains(out, "absolute path") {
+		t.Error("help should mention absolute path validation")
+	}
+	if !strings.Contains(out, "duration") {
+		t.Error("help should mention duration validation")
+	}
+	if !strings.Contains(out, "updated") {
+		t.Error("help should mention updated feedback")
+	}
+	if !strings.Contains(out, "unchanged") {
+		t.Error("help should mention unchanged feedback")
+	}
+	if !strings.Contains(out, "restart") {
+		t.Error("help should mention restart requirement")
+	}
+}
+
+func TestConfigUnsetHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("stderr should be empty, got: %s", stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "log_level") {
+		t.Error("help should list log_level")
+	}
+	if !strings.Contains(out, "audit_enabled") {
+		t.Error("help should list audit_enabled")
+	}
+	if !strings.Contains(out, "info") {
+		t.Error("help should mention default info")
+	}
+	if !strings.Contains(out, "log_level") && !strings.Contains(out, "derived") {
+		t.Error("help should mention derived behavior")
+	}
+	if !strings.Contains(out, "unset") {
+		t.Error("help should mention unset feedback")
+	}
+	if !strings.Contains(out, "unchanged") {
+		t.Error("help should mention unchanged feedback")
+	}
+	// Must not list required fields as unsettable
+	if strings.Contains(out, "allowed_root") {
+		t.Error("help must not list allowed_root as unsettable")
+	}
+	if strings.Contains(out, "session_ttl") {
+		t.Error("help must not list session_ttl as unsettable")
+	}
+}
+
+func TestConfigHelpNoConfigNeeded(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	// config.json does not exist
+
+	for _, args := range [][]string{
+		{"config", "show", "--help"},
+		{"config", "set", "--help"},
+		{"config", "unset", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage:") {
+				t.Error("expected help output")
+			}
+		})
+	}
+}
+
+func TestConfigHelpNoDirCreation(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "custom", "config.json")
+	runtimeDir := filepath.Join(dir, "runtime")
+	stateDir := filepath.Join(dir, "state")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	for _, args := range [][]string{
+		{"config", "show", "--help"},
+		{"config", "set", "--help"},
+		{"config", "unset", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			runCommandWithWriters(args, &stdout, &stderr)
+
+			if _, err := os.Stat(filepath.Dir(configPath)); !os.IsNotExist(err) {
+				t.Error("help should not create config directory")
+			}
+			if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
+				t.Error("help should not create runtime directory")
+			}
+			if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+				t.Error("help should not create state directory")
+			}
+		})
+	}
+}
+
+func TestConfigHelpStdoutStderrSeparation(t *testing.T) {
+	for _, args := range [][]string{
+		{"config", "show", "--help"},
+		{"config", "set", "--help"},
+		{"config", "unset", "--help"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("expected exit code 0, got %d", code)
+			}
+			if stderr.Len() > 0 {
+				t.Errorf("help should not write to stderr, got: %s", stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage:") {
+				t.Error("help should write to stdout")
+			}
+		})
+	}
+}
+
+func TestConfigHelpUnknownFlagStillRejected(t *testing.T) {
+	for _, args := range [][]string{
+		{"config", "show", "--unknown"},
+		{"config", "set", "--unknown"},
+		{"config", "unset", "--unknown"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("expected exit code 2, got %d", code)
+			}
+		})
+	}
+}
+
+func TestConfigHelpPositionalArgsStillRejected(t *testing.T) {
+	for _, args := range [][]string{
+		{"config", "set", "a", "b", "c"},
+		{"config", "unset", "a", "b"},
+		{"config", "show", "a", "b"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("expected exit code 2, got %d", code)
+			}
+		})
+	}
+}

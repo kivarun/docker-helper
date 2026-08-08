@@ -17,6 +17,7 @@ type Command struct {
 	Name          string
 	Summary       string
 	Usage         string
+	Help          string
 	MinPosArgs    int
 	MaxPosArgs    int
 	Subcommands   []*Command
@@ -188,6 +189,12 @@ func (c *Command) printHelp(w io.Writer, path []string) {
 		for _, sub := range c.Subcommands {
 			fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
 		}
+		fmt.Fprintln(w)
+	}
+
+	// Print Help text if present
+	if c.Help != "" {
+		fmt.Fprintln(w, c.Help)
 		fmt.Fprintln(w)
 	}
 

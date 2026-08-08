@@ -66,11 +66,38 @@ docker-helper init
 
 Creates configuration and state directories, writes `config.json` with
 `allowed_root` and `session_ttl`, and generates an admin token. The
-token is printed once and stored at:
+token is printed once and stored beside the config file.
+
+By default, the config file is at:
+
+```
+${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json
+```
+
+and the token at:
 
 ```
 ${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/admin.token
 ```
+
+To relocate the config and token, set `DOCKER_HELPER_CONFIG` before
+running `init`, `serve`, and `config` commands:
+
+```bash
+export DOCKER_HELPER_CONFIG=/some/path/config.json
+```
+
+This changes the effective locations to:
+
+```
+config_path=/some/path/config.json
+config_dir=/some/path
+admin_token_path=/some/path/admin.token
+```
+
+The same environment variable must be supplied to the daemon and CLI.
+`DOCKER_HELPER_CONFIG` does not relocate runtime or state data; those
+continue to follow `XDG_RUNTIME_DIR` and `XDG_STATE_HOME`.
 
 ### 3. Review and modify configuration
 
@@ -108,22 +135,32 @@ when it was already absent.
 
 Configuration fields:
 
-| Field | Type | Writable | Description |
-|-------|------|----------|-------------|
-| `allowed_root` | string | yes | Root directory for agent workspaces (required) |
-| `session_ttl` | duration | yes | Session lifetime, e.g. `12h` (required) |
-| `log_level` | string | yes | `debug`, `info`, `warn`, `error` (default: `info`) |
-| `audit_enabled` | boolean | yes | Override audit behavior (default: derived from `log_level`) |
-| `audit_enabled_source` | string | no | `"explicit"` or `"log_level"` |
-| `config_path` | string | no | Path to `config.json` |
-| `config_dir` | string | no | Configuration directory |
-| `runtime_dir` | string | no | Runtime directory under `XDG_RUNTIME_DIR` |
-| `socket_path` | string | no | Unix socket path |
-| `lock_path` | string | no | Lock file path |
-| `state_dir` | string | no | State directory |
-| `database_path` | string | no | SQLite database path |
-| `admin_token_path` | string | no | Path to `admin.token` |
-| `admin_token` | string | no | Admin token (redacted in general show) |
+**Configurable members** accepted in config.json:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `allowed_root` | string | Root directory for agent workspaces (required) |
+| `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
+| `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
+| `audit_enabled` | boolean | Override audit behavior (default: derived from `log_level`) |
+
+Only `log_level` and `audit_enabled` may be unset to restore defaults.
+
+**Computed/output-only fields** are read-only and must not be added to
+config.json. If present, configuration validation and daemon startup fail:
+
+| Field | Description |
+|-------|-------------|
+| `audit_enabled_source` | `"explicit"` or `"log_level"` |
+| `config_path` | Path to `config.json` |
+| `config_dir` | Configuration directory |
+| `runtime_dir` | Runtime directory under `XDG_RUNTIME_DIR` |
+| `socket_path` | Unix socket path |
+| `lock_path` | Lock file path |
+| `state_dir` | State directory |
+| `database_path` | SQLite database path |
+| `admin_token_path` | Path to `admin.token` |
+| `admin_token` | Admin token (redacted in general show) |
 
 Changes take effect after restarting the daemon.
 
