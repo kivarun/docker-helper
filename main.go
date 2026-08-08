@@ -395,11 +395,26 @@ func runSessionCommandWithWriters(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		return runSessionCreateWithWriters(args[1:], stdout, stderr)
+	case "delete":
+		for _, arg := range args[1:] {
+			if arg == "help" || arg == "-h" || arg == "--help" {
+				fmt.Fprintln(stdout, "Usage: docker-helper session delete --id SESSION_ID [--json]")
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, "Delete a session.")
+				fmt.Fprintln(stdout)
+				fmt.Fprintln(stdout, "Flags:")
+				fmt.Fprintln(stdout, "  --id SESSION_ID  Session ID to delete")
+				fmt.Fprintln(stdout, "  --json            Output in JSON format")
+				return 0
+			}
+		}
+		return runSessionDeleteWithWriters(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprintln(stdout, "Usage: docker-helper session <subcommand> [flags]")
 		fmt.Fprintln(stdout)
 		fmt.Fprintln(stdout, "Subcommands:")
 		fmt.Fprintln(stdout, "  create  Create a new session")
+		fmt.Fprintln(stdout, "  delete  Delete a session")
 		fmt.Fprintln(stdout, "  list    List active sessions")
 		return 0
 	default:
@@ -539,6 +554,73 @@ func runSessionCreateWithWriters(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(&buf, "WORKSPACE: %s\n", result.Session.Workspace)
 	fmt.Fprintf(&buf, "CREATED:   %s\n", result.Session.CreatedAt)
 	fmt.Fprintf(&buf, "EXPIRES:   %s\n", result.Session.ExpiresAt)
+
+	if _, err := stdout.Write([]byte(buf.String())); err != nil {
+		fmt.Fprintln(stderr, "error: cannot write output")
+		return 1
+	}
+
+	return 0
+}
+
+func parseSessionDeleteFlags(args []string) (id string, jsonOutput bool, err error) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--id":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return "", false, fmt.Errorf("--id requires a value")
+			}
+			i++
+			id = args[i]
+		case "--json":
+			jsonOutput = true
+		default:
+			return "", false, fmt.Errorf("unknown flag: %s", args[i])
+		}
+	}
+
+	if id == "" {
+		return "", false, fmt.Errorf("--id is required")
+	}
+
+	return id, jsonOutput, nil
+}
+
+func runSessionDeleteWithWriters(args []string, stdout, stderr io.Writer) int {
+	id, jsonOutput, err := parseSessionDeleteFlags(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
+		return readAdminTokenPlain(cfg.AdminTokenPath)
+	})
+
+	if err := client.deleteSession(id); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if jsonOutput {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(map[string]any{"ok": true, "id": id, "deleted": true}); err != nil {
+			fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "ID: %s\n", id)
+	fmt.Fprintf(&buf, "DELETED: true\n")
 
 	if _, err := stdout.Write([]byte(buf.String())); err != nil {
 		fmt.Fprintln(stderr, "error: cannot write output")

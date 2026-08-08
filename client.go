@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -120,4 +121,18 @@ func (c *apiClient) createSession(workspace string) (*createSessionResponse, err
 	}
 
 	return &result, nil
+}
+
+func (c *apiClient) deleteSession(id string) error {
+	resp, err := c.doAuthenticatedRequest("DELETE", "/sessions/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("API error: status %d", resp.StatusCode)
+	}
+
+	return nil
 }

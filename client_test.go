@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -758,5 +759,352 @@ func TestSessionCreateWorkspaceEmptyValue(t *testing.T) {
 	)
 	if code != 2 {
 		t.Errorf("expected exit code 2, got %d", code)
+	}
+}
+
+func TestDeleteSessionRequest(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	var capturedMethod string
+	var capturedPath string
+	var capturedAuth string
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	})
+
+	if err := client.deleteSession("dhs_001"); err != nil {
+		t.Fatalf("deleteSession: %v", err)
+	}
+
+	if capturedMethod != "DELETE" {
+		t.Errorf("expected method DELETE, got %q", capturedMethod)
+	}
+	if capturedPath != "/sessions/dhs_001" {
+		t.Errorf("expected path /sessions/dhs_001, got %q", capturedPath)
+	}
+	if capturedAuth != "Bearer test-token" {
+		t.Errorf("expected 'Bearer test-token', got %q", capturedAuth)
+	}
+}
+
+func TestDeleteSessionEscapedID(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	testID := "dhs_001/with?special#chars"
+
+	var capturedMethod string
+	var capturedRequestURI string
+	var capturedRawQuery string
+	var capturedAuth string
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		capturedRequestURI = r.RequestURI
+		capturedRawQuery = r.URL.RawQuery
+		capturedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	})
+
+	if err := client.deleteSession(testID); err != nil {
+		t.Fatalf("deleteSession: %v", err)
+	}
+
+	if capturedMethod != "DELETE" {
+		t.Errorf("expected method DELETE, got %q", capturedMethod)
+	}
+	if capturedRawQuery != "" {
+		t.Errorf("expected empty RawQuery, got %q", capturedRawQuery)
+	}
+	if !strings.Contains(capturedRequestURI, url.PathEscape("dhs_001")) {
+		t.Errorf("expected percent-encoded ID in RequestURI, got %q", capturedRequestURI)
+	}
+	if capturedAuth != "Bearer test-token" {
+		t.Errorf("expected 'Bearer test-token', got %q", capturedAuth)
+	}
+}
+
+func TestSessionDeleteJSONOutput(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "runtime")
+	xdgConfigHome := dir
+	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
+	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
+	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	var stdout, stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--id", "dhs_001", "--json"},
+		&stdout, &stderr,
+	)
+
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (output: %s)", err, stdout.String())
+	}
+
+	if decoded["ok"] != true {
+		t.Error("expected ok=true")
+	}
+	if decoded["id"] != "dhs_001" {
+		t.Errorf("expected id dhs_001, got %v", decoded["id"])
+	}
+	if decoded["deleted"] != true {
+		t.Error("expected deleted=true")
+	}
+}
+
+func TestSessionDeleteTextOutput(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "runtime")
+	xdgConfigHome := dir
+	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
+	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
+	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	var stdout, stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--id", "dhs_001"},
+		&stdout, &stderr,
+	)
+
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "dhs_001") {
+		t.Errorf("expected ID in output: %s", output)
+	}
+	if !strings.Contains(output, "DELETED: true") {
+		t.Errorf("expected 'DELETED: true' in output: %s", output)
+	}
+}
+
+func TestSessionDeleteMissingID(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete"},
+		&bytes.Buffer{}, &stderr,
+	)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+}
+
+func TestSessionDeleteIDNoValue(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--id"},
+		&bytes.Buffer{}, &stderr,
+	)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+}
+
+func TestSessionDeleteIDEmptyValue(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--id", ""},
+		&bytes.Buffer{}, &stderr,
+	)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+}
+
+func TestSessionDeleteUnknownFlag(t *testing.T) {
+	var stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--unknown"},
+		&bytes.Buffer{}, &stderr,
+	)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+}
+
+func TestSessionDeleteHTTPError(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "runtime")
+	xdgConfigHome := dir
+	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
+	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
+	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"secret":"dht_must_not_leak"}`)
+	})
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	var stdout, stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--id", "dhs_001"},
+		&stdout, &stderr,
+	)
+
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+
+	if strings.Contains(stderr.String(), "dht_must_not_leak") {
+		t.Errorf("marker must not appear in stderr: %s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "dht_must_not_leak") {
+		t.Errorf("marker must not appear in stdout: %s", stdout.String())
+	}
+}
+
+func TestSessionDeleteStdoutWriteError(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "runtime")
+	xdgConfigHome := dir
+	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
+	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
+	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	var stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--id", "dhs_001"},
+		errorWriter{}, &stderr,
+	)
+
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+}
+
+func TestSessionDeleteHelpNoAPI(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/that/does/not/exist/config.json")
+
+	var stdout, stderr bytes.Buffer
+	code := runSessionCommandWithWriters(
+		[]string{"delete", "--help"},
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+
+	if !strings.Contains(stdout.String(), "delete") {
+		t.Errorf("expected help text: %s", stdout.String())
 	}
 }
