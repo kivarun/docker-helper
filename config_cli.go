@@ -732,15 +732,21 @@ func tryReloadConfig(stdout, stderr io.Writer) {
 
 	tokenData, err := os.ReadFile(adminTokenPath)
 	if err != nil {
+		// Cannot read token - assume daemon not running
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		return
 	}
 	token := strings.TrimSpace(string(tokenData))
 	if token == "" {
+		// Empty token - assume daemon not running
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		return
 	}
 
 	runtimeDir := getRuntimeDirSafe()
 	if runtimeDir == "" {
+		// No runtime dir - assume daemon not running
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		return
 	}
 	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
@@ -749,9 +755,11 @@ func tryReloadConfig(stdout, stderr io.Writer) {
 		return token, nil
 	})
 	if err := client.reload(); err != nil {
+		// Check if the error is due to the daemon not running.
 		if isDaemonNotRunning(err) {
 			fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		} else {
+			// Real reload error - print warning
 			fmt.Fprintf(stderr, "warning: reload failed: %v\n", err)
 		}
 	}

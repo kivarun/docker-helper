@@ -16,21 +16,26 @@ type App struct {
 	PullCommand    func(string, ...string) ([]byte, error)
 }
 
-// getConfig returns the current configuration under a read lock.
-func (a *App) getConfig() *Config {
+// getConfig returns a snapshot copy of the current configuration under a read lock.
+// The caller receives an independent copy that cannot be mutated by setConfig.
+func (a *App) getConfig() Config {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.Config
+	return *a.Config
 }
 
-// setConfig updates the configurable fields of the current configuration:
-// allowed_root, session_ttl, log_level, audit_enabled.
-// Computed paths (socket, database, etc.) remain unchanged.
+// setConfig atomically replaces the configuration pointer.
+// Only configurable fields (allowed_root, session_ttl, log_level,
+// audit_enabled) are taken from newCfg; computed paths are preserved
+// from the current configuration.
 func (a *App) setConfig(newCfg *Config) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.Config.AllowedRoot = newCfg.AllowedRoot
-	a.Config.SessionTTL = newCfg.SessionTTL
-	a.Config.LogLevel = newCfg.LogLevel
-	a.Config.AuditEnabled = newCfg.AuditEnabled
+	merged := *newCfg
+	merged.SocketPath = a.Config.SocketPath
+	merged.LockPath = a.Config.LockPath
+	merged.StateDir = a.Config.StateDir
+	merged.DatabasePath = a.Config.DatabasePath
+	merged.AdminTokenPath = a.Config.AdminTokenPath
+	a.Config = &merged
 }

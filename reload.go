@@ -62,6 +62,10 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 
 	a.setConfig(newCfg)
 
+	// Re-initialize loggers with the new log level and audit setting.
+	// This updates opLogger and auditWriter in place.
+	initLoggers(opWriter, auditWriter, newCfg.LogLevel, newCfg.AuditEnabled)
+
 	if opLogger != nil {
 		opLogger.Info("configuration reloaded",
 			slog.String("allowed_root", newCfg.AllowedRoot),

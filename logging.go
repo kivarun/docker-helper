@@ -50,6 +50,10 @@ func generateRequestID() string {
 // All operational logging goes through this logger.
 var opLogger *slog.Logger
 
+// opWriter is the operational log output writer.
+// It is initialized by initLoggers and can be replaced in tests.
+var opWriter io.Writer
+
 // auditWriter is the package-level writer for audit records.
 // It is initialized by initLoggers and can be replaced in tests.
 var auditWriter io.Writer
@@ -82,9 +86,12 @@ func (h *operationalHandler) WithGroup(name string) slog.Handler {
 // with "stream": "operational" on every record. Timestamps use UTC RFC3339Nano.
 // The audit writer receives JSON Lines audit records.
 // When auditEnabled is true, audit records are written to audWriter.
-func initLoggers(opWriter io.Writer, audWriter io.Writer, level slog.Level, enabled bool) {
+func initLoggers(opW io.Writer, audW io.Writer, level slog.Level, enabled bool) {
+	opWriter = opW
+	auditWriter = audW
+	auditEnabled = enabled
 	opLogger = slog.New(&operationalHandler{
-		Handler: slog.NewJSONHandler(opWriter, &slog.HandlerOptions{
+		Handler: slog.NewJSONHandler(opW, &slog.HandlerOptions{
 			Level: level,
 			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 				if a.Key == slog.TimeKey && len(groups) == 0 {
@@ -97,8 +104,6 @@ func initLoggers(opWriter io.Writer, audWriter io.Writer, level slog.Level, enab
 			},
 		}),
 	})
-	auditWriter = audWriter
-	auditEnabled = enabled
 }
 
 // writeAudit marshals the audit record to JSON and writes it to the audit writer.

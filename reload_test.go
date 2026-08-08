@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -256,6 +257,9 @@ func TestReloadEndpoint(t *testing.T) {
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
+
 	// Create a test server with reload endpoint
 	cfg, err := loadConfig()
 	if err != nil {
@@ -488,6 +492,9 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
+
 	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -571,10 +578,318 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	}
 
 	// Verify config was updated
-	if app.Config.LogLevel != -4 { // slog.LevelDebug = -4
-		t.Fatalf("expected log_level=debug after reload, got %s", app.Config.LogLevel.String())
+	cfgAfter := app.getConfig()
+	if cfgAfter.LogLevel != -4 { // slog.LevelDebug = -4
+		t.Fatalf("expected log_level=debug after reload, got %s", cfgAfter.LogLevel.String())
 	}
-	if app.Config.AllowedRoot != "/tmp/new-work" {
-		t.Fatalf("expected allowed_root=/tmp/new-work, got %s", app.Config.AllowedRoot)
+	if cfgAfter.AllowedRoot != "/tmp/new-work" {
+		t.Fatalf("expected allowed_root=/tmp/new-work, got %s", cfgAfter.AllowedRoot)
+	}
+}
+
+// TestReloadRuntimeLogLevel verifies that log_level change takes effect at runtime.
+func TestReloadRuntimeLogLevel(t *testing.T) {
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Capture operational logs
+	logBuf := &bytes.Buffer{}
+	initLoggers(logBuf, io.Discard, slog.LevelInfo, false)
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// At info level, debug logs should NOT appear
+	logBuf.Reset()
+	if opLogger != nil {
+		opLogger.Debug("test debug message")
+	}
+	if logBuf.Len() > 0 {
+		t.Fatalf("debug log should not appear at info level, got: %s", logBuf.String())
+	}
+
+	// Update config to debug level
+	configPath := getConfigPath()
+	newCfg := map[string]any{
+		"allowed_root": "/tmp/work",
+		"session_ttl":  "12h",
+		"log_level":    "debug",
+	}
+	data, err := json.MarshalIndent(newCfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reload
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// At debug level, debug logs SHOULD appear
+	logBuf.Reset()
+	if opLogger != nil {
+		opLogger.Debug("test debug message after reload")
+	}
+	if logBuf.Len() == 0 {
+		t.Fatal("debug log should appear at debug level after reload")
+	}
+	if !strings.Contains(logBuf.String(), "test debug message after reload") {
+		t.Fatalf("debug log message not found, got: %s", logBuf.String())
+	}
+}
+
+// TestReloadRuntimeAuditEnabled verifies that audit_enabled change takes effect at runtime.
+func TestReloadRuntimeAuditEnabled(t *testing.T) {
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Capture audit logs
+	auditBuf := &bytes.Buffer{}
+	initLoggers(io.Discard, auditBuf, slog.LevelInfo, false)
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Audit disabled - no audit records should be written
+	auditBuf.Reset()
+	writeAudit(auditRecord{Event: "test.event"})
+	if auditBuf.Len() > 0 {
+		t.Fatalf("audit should be disabled, got: %s", auditBuf.String())
+	}
+
+	// Update config to enable audit
+	configPath := getConfigPath()
+	newCfg := map[string]any{
+		"allowed_root":    "/tmp/work",
+		"session_ttl":     "12h",
+		"log_level":       "info",
+		"audit_enabled":   true,
+	}
+	data, err := json.MarshalIndent(newCfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reload
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Audit enabled - audit records SHOULD be written
+	auditBuf.Reset()
+	writeAudit(auditRecord{Event: "test.event.after.reload"})
+	if auditBuf.Len() == 0 {
+		t.Fatal("audit should be enabled after reload")
+	}
+	if !strings.Contains(auditBuf.String(), "test.event.after.reload") {
+		t.Fatalf("audit record not found, got: %s", auditBuf.String())
+	}
+}
+
+// TestTryReloadConfigNoRuntimeDir verifies that config set prints
+// "daemon not running" when XDG_RUNTIME_DIR is absent (early return path).
+func TestTryReloadConfigNoRuntimeDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	adminTokenPath := filepath.Join(dir, "admin.token")
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp/work","session_ttl":"12h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(adminTokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "daemon not running") {
+		t.Fatalf("expected 'daemon not running' message, got: %s", stdout.String())
+	}
+}
+
+// TestTryReloadConfigMissingToken verifies that config set prints
+// "daemon not running" when the admin token file is absent (early return path).
+func TestTryReloadConfigMissingToken(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp/work","session_ttl":"12h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// No admin.token file created
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "daemon not running") {
+		t.Fatalf("expected 'daemon not running' message, got: %s", stdout.String())
+	}
+}
+
+// TestConfigSnapshotRace verifies that concurrent getConfig/setConfig
+// does not race. Run with -race flag.
+func TestConfigSnapshotRace(t *testing.T) {
+	cfg := &Config{
+		AllowedRoot:  "/tmp/work",
+		SessionTTL:   12 * time.Hour,
+		LogLevel:     slog.LevelInfo,
+		AuditEnabled: false,
+		SocketPath:   "/tmp/sock",
+		DatabasePath: "/tmp/db",
+	}
+	app := &App{Config: cfg}
+
+	done := make(chan bool)
+	go func() {
+		for i := 0; i < 200; i++ {
+			c := app.getConfig()
+			_ = c.AllowedRoot
+			_ = c.SessionTTL
+			_ = c.LogLevel
+			_ = c.AuditEnabled
+			_ = c.SocketPath
+			_ = c.DatabasePath
+		}
+		done <- true
+	}()
+
+	for i := 0; i < 200; i++ {
+		newCfg := &Config{
+			AllowedRoot:  "/tmp/new-work",
+			SessionTTL:   6 * time.Hour,
+			LogLevel:     slog.LevelDebug,
+			AuditEnabled: true,
+		}
+		app.setConfig(newCfg)
+	}
+
+	<-done
+
+	// Verify computed paths are preserved
+	final := app.getConfig()
+	if final.SocketPath != "/tmp/sock" {
+		t.Errorf("expected SocketPath /tmp/sock, got %s", final.SocketPath)
+	}
+	if final.DatabasePath != "/tmp/db" {
+		t.Errorf("expected DatabasePath /tmp/db, got %s", final.DatabasePath)
 	}
 }
