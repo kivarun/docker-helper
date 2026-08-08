@@ -179,6 +179,54 @@ Flags:
 Permanently removes the session. Subsequent requests with the session's
 token will receive 401 Unauthorized.
 
+## CLI reference
+
+### `docker-helper <command>`
+
+Root command. Without arguments, prints help and exits 0.
+
+```
+docker-helper <command>
+```
+
+Available commands: `serve`, `init`, `session`, `version`, `help`.
+
+### `docker-helper help`
+
+Prints root help (identical to running without arguments).
+
+### `docker-helper serve`
+
+Starts the HTTP server on the Unix socket.
+
+### `docker-helper init`
+
+Initializes configuration and admin token.
+
+### `docker-helper version`
+
+Prints the current version.
+
+### `docker-helper session <subcommand>`
+
+Manages sessions. Requires a subcommand.
+
+Subcommands: `create`, `list`, `delete` (see Session CLI section above).
+
+### Help flag
+
+The `-h` / `--help` flag is available on every command and session
+subcommand. It prints usage information and exits 0 without executing
+the command action.
+
+### Exit codes
+
+| Code | Meaning | Examples |
+|------|---------|----------|
+| 0 | Success or help displayed | `docker-helper version`, `docker-helper serve --help` |
+| 1 | Runtime error (config load, API call, server failure) | `docker-helper init` with an unwritable configuration directory, `docker-helper session create` with unreachable server |
+| 2 | CLI syntax or argument validation error | unknown command, missing/unknown subcommand, missing required flag, unexpected positional argument, unknown flag |
+
 ## systemd user service
 
 docker-helper can run as a systemd user service. The unit file is
