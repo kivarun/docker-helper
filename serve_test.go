@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -745,5 +746,171 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 	err = <-serveDone
 	if err == nil {
 		t.Fatal("expected error from serveWithShutdown when listener is closed")
+	}
+}
+
+// Graceful shutdown drains in-flight requests and holds the lock until drain completes.
+func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	lockPath := socketPath + ".lock"
+
+	// Synchronization channels.
+	listenerReady := make(chan struct{})
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+
+	// Shared error variables — safe to read after corresponding done channel closes.
+	var serverErr error
+	serverDone := make(chan struct{})
+	var requestErr error
+	requestDone := make(chan struct{})
+	var subErr error
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mux.HandleFunc("POST /drain", func(w http.ResponseWriter, r *http.Request) {
+		close(handlerStarted)
+		<-releaseHandler
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Start server in a goroutine via runWithLock.
+	go func() {
+		defer close(serverDone)
+		serverErr = runWithLock(lockPath, socketPath, func(listener net.Listener) error {
+			close(listenerReady)
+			return serveWithShutdown(ctx, server, listener, 30*time.Second)
+		})
+	}()
+
+	// Wait for listener to be ready.
+	select {
+	case <-listenerReady:
+	case <-serverDone:
+		t.Fatalf("server returned before listener ready: %v", serverErr)
+	}
+
+	// Create HTTP client that dials the Unix socket.
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport}
+
+	// Send request in a goroutine.
+	go func() {
+		defer close(requestDone)
+		req, err := http.NewRequestWithContext(context.Background(), "POST", "http://localhost/drain", nil)
+		if err != nil {
+			requestErr = err
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			requestErr = err
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			requestErr = fmt.Errorf("unexpected status: %d", resp.StatusCode)
+		}
+	}()
+
+	// Emergency cleanup — registered before any t.Fatalf so goroutines
+	// are always drained even if an early assertion fails.
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseHandler)
+		})
+	}
+
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			release()
+			cancel()
+			_ = server.Close()
+			transport.CloseIdleConnections()
+		})
+	}
+
+	t.Cleanup(func() {
+		cleanup()
+		<-serverDone
+		<-requestDone
+	})
+
+	// Wait for handler to start.
+	select {
+	case <-handlerStarted:
+	case <-requestDone:
+		t.Fatalf("request finished before handler started: %v", requestErr)
+	}
+
+	// Initiate shutdown.
+	cancel()
+
+	// Wait for shutdown to take effect: listener must stop accepting new connections.
+	listenerClosed := false
+	testDeadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(testDeadline) {
+		conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond)
+		if err != nil {
+			listenerClosed = true
+			break
+		}
+		_ = conn.Close()
+	}
+
+	if !listenerClosed {
+		t.Fatal("listener still accepts connections after shutdown started")
+	}
+
+	// Verify server has not returned yet (handler still active).
+	select {
+	case <-serverDone:
+		t.Fatalf("server returned while handler was active: %v", serverErr)
+	default:
+	}
+
+	// Attempt second runWithLock — must fail because lock is held.
+	secondCalled := false
+	secondLockErr := runWithLock(lockPath, socketPath, func(net.Listener) error {
+		secondCalled = true
+		return nil
+	})
+	if secondLockErr == nil {
+		t.Fatal("second runWithLock should fail while server drains")
+	}
+	if secondCalled {
+		t.Fatal("second callback must not be called while lock is held")
+	}
+
+	// Release handler and wait for request to complete.
+	release()
+
+	<-requestDone
+	if requestErr != nil {
+		t.Fatalf("request failed after handler released: %v", requestErr)
+	}
+
+	// Wait for server to finish.
+	<-serverDone
+	if serverErr != nil {
+		t.Fatalf("server returned error: %v", serverErr)
+	}
+
+	// Subsequent runWithLock must succeed.
+	subErr = runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return nil
+	})
+	if subErr != nil {
+		t.Fatalf("subsequent runWithLock: %v", subErr)
 	}
 }
