@@ -435,9 +435,11 @@ Log collection, retention, and rotation are delegated to the process
 supervisor (systemd/journald, Docker, or a log shipper). docker-helper
 does not write log files or implement internal rotation.
 
-## Agent instructions
+## Example agent instructions
 
-Instructions for containerized coding agents using docker-helper.
+The following is an example `AGENTS.md` fragment used by the OpenCode Docker
+environment. The `/exchange` section is environment-specific; the Docker
+Helper section describes the agent-facing docker-helper contract.
 
 ### Shared exchange directory
 
