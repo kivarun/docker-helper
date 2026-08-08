@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -644,4 +646,104 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// --- Graceful shutdown tests ---
+
+// After shutdown starts, new connections are rejected.
+func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveWithShutdown(ctx, server, listener, 30*time.Second)
+	}()
+
+	// Initiate shutdown before any connections.
+	cancel()
+
+	err = <-serveDone
+	if err != nil {
+		t.Fatalf("serveWithShutdown: %v", err)
+	}
+
+	// New connection must fail.
+	if _, err := net.Dial("unix", socketPath); err == nil {
+		t.Fatal("connection should be rejected after shutdown")
+	}
+}
+
+// After graceful shutdown, subsequent startup is possible.
+func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	lockPath := socketPath + ".lock"
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- runWithLock(lockPath, socketPath, func(listener net.Listener) error {
+			return serveWithShutdown(ctx, server, listener, 30*time.Second)
+		})
+	}()
+
+	// Initiate shutdown before any connections.
+	cancel()
+
+	err := <-serveDone
+	if err != nil {
+		t.Fatalf("first serveWithShutdown: %v", err)
+	}
+
+	// Subsequent startup must work.
+	err = runWithLock(lockPath, socketPath, func(net.Listener) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("subsequent runWithLock: %v", err)
+	}
+}
+
+// Serve error before shutdown is not lost.
+func TestServeErrorBeforeShutdown(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveWithShutdown(ctx, server, listener, 30*time.Second)
+	}()
+
+	// Close listener to force Serve error.
+	listener.Close()
+
+	err = <-serveDone
+	if err == nil {
+		t.Fatal("expected error from serveWithShutdown when listener is closed")
+	}
 }

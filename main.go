@@ -1,18 +1,22 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 )
 
 const version = "0.1.0"
+
+const shutdownTimeout = 30 * time.Second
 
 func printHelp() {
 	fmt.Println("Usage: docker-helper <command>")
@@ -194,6 +198,45 @@ func runWithLock(lockPath, socketPath string, fn func(net.Listener) error) error
 	return fn(listener)
 }
 
+// serveWithShutdown runs server.Serve(listener) in a background goroutine and
+// waits for either ctx cancellation (graceful shutdown) or a Serve error.
+// On ctx cancellation it calls server.Shutdown with the given timeout.
+// If Shutdown exceeds the timeout, server.Close is called and an error returned.
+// The callback in runWithLock must not return until Shutdown completes so the
+// lock stays held during the entire drain.
+func serveWithShutdown(
+	ctx context.Context,
+	server *http.Server,
+	listener net.Listener,
+	timeout time.Duration,
+) error {
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(listener)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		shutdownErr := server.Shutdown(shutdownCtx)
+
+		// Serve goroutine returns ErrServerClosed after Shutdown closes the listener.
+		// Drain it so we do not leak the goroutine.
+		<-serveDone
+
+		if shutdownErr == context.DeadlineExceeded {
+			server.Close()
+			return fmt.Errorf("graceful shutdown timeout after %v", timeout)
+		}
+		return shutdownErr
+
+	case err := <-serveDone:
+		return err
+	}
+}
+
 func runServe() error {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -249,12 +292,10 @@ func runServe() error {
 
 		fmt.Printf("docker-helper listening on %s\n", cfg.SocketPath)
 
-		serveErr := server.Serve(listener)
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
 
-		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			return serveErr
-		}
-		return nil
+		return serveWithShutdown(ctx, server, listener, shutdownTimeout)
 	})
 }
 
