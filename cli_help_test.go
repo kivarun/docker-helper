@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -72,9 +74,13 @@ func TestVersionHelpShortFlag(t *testing.T) {
 }
 
 func TestSessionMissingSubcommandIncludesDelete(t *testing.T) {
-	exitCode := runSessionCommandWithWriters([]string{}, os.Stdout, os.Stderr)
+	var stdout, stderr bytes.Buffer
+	exitCode := runSessionCommandWithWriters([]string{}, &stdout, &stderr)
 	if exitCode != 2 {
 		t.Errorf("expected exit code 2, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "session subcommand required (create, list, delete)") {
+		t.Errorf("expected 'session subcommand required (create, list, delete)' in stderr, got: %s", stderr.String())
 	}
 }
 
