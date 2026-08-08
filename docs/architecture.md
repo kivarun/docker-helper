@@ -41,7 +41,7 @@ docker-helper and holds the administrative token. The custom tool is the
 OpenCode-side client that communicates with docker-helper.
 
 docker-helper listens on a Unix socket at
-`$XDG_RUNTIME_DIR/docker-helper.sock` with `0600` permissions.
+`$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock` with `0600` permissions.
 
 ## Trust model
 
