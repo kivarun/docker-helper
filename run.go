@@ -259,7 +259,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			exitCode = ec
 			result = "container_exit_nonzero"
 
-			writeJSON(w, http.StatusOK, response{
+			writeJSONWithCtx(ctx, w, http.StatusOK, response{
 				OK:       false,
 				Code:     "container_exit_nonzero",
 				Message:  "container exited with non-zero status",
@@ -276,7 +276,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", err.Error()),
 			)
 
-			writeJSON(w, http.StatusInternalServerError, response{
+			writeJSONWithCtx(ctx, w, http.StatusInternalServerError, response{
 				OK:       false,
 				Code:     "docker_run_failed",
 				Message:  "docker run failed",
@@ -287,7 +287,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	} else {
 		result = "success"
 
-		writeJSON(w, http.StatusOK, response{
+		writeJSONWithCtx(ctx, w, http.StatusOK, response{
 			OK:       true,
 			Message:  "container finished successfully",
 			Output:   string(output),

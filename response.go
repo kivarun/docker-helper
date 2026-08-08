@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -8,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 )
 
 type response struct {
@@ -25,7 +25,7 @@ func writeJSON(w http.ResponseWriter, status int, value response) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		opLogger.Error("failed to encode response", slog.String("error", err.Error()))
+		writeJSONError(context.Background(), err)
 	}
 }
 
@@ -34,7 +34,29 @@ func writeJSONRaw(w http.ResponseWriter, status int, value any) {
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		opLogger.Error("failed to encode response", slog.String("error", err.Error()))
+		writeJSONError(context.Background(), err)
+	}
+}
+
+// writeJSONWithCtx is like writeJSON but uses the request context for
+// correlation in encoding error logs.
+func writeJSONWithCtx(ctx context.Context, w http.ResponseWriter, status int, value response) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		writeJSONError(ctx, err)
+	}
+}
+
+// writeJSONRawWithCtx is like writeJSONRaw but uses the request context for
+// correlation in encoding error logs.
+func writeJSONRawWithCtx(ctx context.Context, w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		writeJSONError(ctx, err)
 	}
 }
 
@@ -87,13 +109,10 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	token, ok := parseBearerToken(r)
 	if !ok {
 		writeAuditWithRequestID(ctx, auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
-			Event:     "auth.failure",
-			Method:    r.Method,
-			Path:      r.URL.Path,
-			RequestID: requestIDFromContext(ctx),
-			Result:    "admin.parse_failed",
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: "admin.parse_failed",
 		})
 		writeUnauthorizedAdmin(w)
 		return false
@@ -102,13 +121,10 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	tokenHash := sha256.Sum256([]byte(token))
 	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) != 1 {
 		writeAuditWithRequestID(ctx, auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
-			Event:     "auth.failure",
-			Method:    r.Method,
-			Path:      r.URL.Path,
-			RequestID: requestIDFromContext(ctx),
-			Result:    "admin.wrong_token",
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: "admin.wrong_token",
 		})
 		writeUnauthorizedAdmin(w)
 		return false
@@ -122,13 +138,10 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 	token, ok := parseBearerToken(r)
 	if !ok {
 		writeAuditWithRequestID(ctx, auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
-			Event:     "auth.failure",
-			Method:    r.Method,
-			Path:      r.URL.Path,
-			RequestID: requestIDFromContext(ctx),
-			Result:    "session.parse_failed",
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: "session.parse_failed",
 		})
 		writeUnauthorizedSession(w)
 		return nil, false
@@ -141,13 +154,10 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 			resultCode = "session.database_error"
 		}
 		writeAuditWithRequestID(ctx, auditRecord{
-			Time:      time.Now().UTC().Format(time.RFC3339),
-			Stream:    "audit",
-			Event:     "auth.failure",
-			Method:    r.Method,
-			Path:      r.URL.Path,
-			RequestID: requestIDFromContext(ctx),
-			Result:    resultCode,
+			Event:  "auth.failure",
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Result: resultCode,
 		})
 
 		if !errors.Is(err, ErrSessionNotFound) {

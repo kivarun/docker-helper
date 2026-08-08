@@ -1,9 +1,5 @@
 package main
 
-import (
-	"time"
-)
-
 type auditRecord struct {
 	Time            string       `json:"time"`
 	Stream          string       `json:"stream"`
@@ -28,13 +24,4 @@ type auditMount struct {
 	Source   string `json:"source"`
 	Target   string `json:"target"`
 	ReadOnly bool   `json:"read_only"`
-}
-
-// makeAuditRecord sets the time and stream fields on an audit record.
-func makeAuditRecord(event string) auditRecord {
-	return auditRecord{
-		Time:   time.Now().UTC().Format(time.RFC3339),
-		Stream: "audit",
-		Event:  event,
-	}
 }

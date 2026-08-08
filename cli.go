@@ -228,8 +228,7 @@ var serveCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				if err := runServe(); err != nil {
-					fmt.Fprintln(stderr, err)
+				if err := runServe(stderr); err != nil {
 					return 1
 				}
 				return 0

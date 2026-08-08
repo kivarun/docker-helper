@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -23,25 +24,13 @@ func loadAdminToken(path string) ([sha256.Size]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "error: admin token not found")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
-			fmt.Fprintln(os.Stderr, "  docker-helper init")
-			return [sha256.Size]byte{}, err
+			return [sha256.Size]byte{}, fmt.Errorf("admin token not found: %w", err)
 		}
-		fmt.Fprintln(os.Stderr, "error: cannot read admin token")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Run the following to initialize:")
-		fmt.Fprintln(os.Stderr, "  docker-helper init")
-		return [sha256.Size]byte{}, err
+		return [sha256.Size]byte{}, fmt.Errorf("cannot read admin token: %w", err)
 	}
 
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "error: admin token is empty")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Run the following to initialize:")
-		fmt.Fprintln(os.Stderr, "  docker-helper init")
 		return [sha256.Size]byte{}, errors.New("admin token is empty")
 	}
 
@@ -225,39 +214,44 @@ func serveWithShutdown(
 	}
 }
 
-func runServe() error {
+func runServe(stderr io.Writer) error {
+	// Initialize logging before any other work so all errors are structured.
+	initLoggers(stderr, os.Stdout, slog.LevelInfo)
+
 	cfg, err := loadConfig()
 	if err != nil {
+		hint := "run docker-helper init"
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "error: configuration not found")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "Run the following to initialize:")
-			fmt.Fprintln(os.Stderr, "  docker-helper init")
-			return err
+			hint = "configuration not found; run docker-helper init"
 		}
+		serveStartupError(err, hint)
 		return err
 	}
 
-	// Initialize logging: operational → stderr, audit → stdout.
-	initLoggers(os.Stderr, os.Stdout, cfg.LogLevel)
+	// Re-initialize with the configured log level.
+	initLoggers(stderr, os.Stdout, cfg.LogLevel)
 
 	return runWithLock(cfg.LockPath, cfg.SocketPath, func(listener net.Listener) error {
 		adminHash, err := loadAdminToken(cfg.AdminTokenPath)
 		if err != nil {
+			serveStartupError(err, "run docker-helper init")
 			return err
 		}
 
 		db, err := openDatabase(cfg.DatabasePath)
 		if err != nil {
+			serveStartupError(err, "")
 			return err
 		}
 		defer db.Close()
 
 		if err := initializeDatabase(db); err != nil {
+			serveStartupError(err, "")
 			return err
 		}
 
 		if err := cleanupExpiredSessions(db); err != nil {
+			serveStartupError(err, "")
 			return err
 		}
 

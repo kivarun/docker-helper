@@ -78,7 +78,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 		)
 
-		writeJSON(w, http.StatusInternalServerError, response{
+		writeJSONWithCtx(ctx, w, http.StatusInternalServerError, response{
 			OK:       false,
 			Code:     "docker_pull_failed",
 			Message:  "docker pull failed",
@@ -88,7 +88,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	} else {
 		result = "success"
 
-		writeJSON(w, http.StatusOK, response{
+		writeJSONWithCtx(ctx, w, http.StatusOK, response{
 			OK:       true,
 			Message:  "image pulled successfully",
 			Output:   string(output),

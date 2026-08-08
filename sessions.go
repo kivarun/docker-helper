@@ -106,7 +106,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Duration:  duration,
 	})
 
-	writeJSONRaw(w, http.StatusCreated, createSessionResponse{
+	writeJSONRawWithCtx(ctx, w, http.StatusCreated, createSessionResponse{
 		OK:      true,
 		Session: sessionToJSON(result.Session),
 		Token:   result.Token,
@@ -139,7 +139,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		resp.Sessions = append(resp.Sessions, sessionToJSON(s))
 	}
 
-	writeJSONRaw(w, http.StatusOK, resp)
+	writeJSONRawWithCtx(ctx, w, http.StatusOK, resp)
 }
 
 func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {

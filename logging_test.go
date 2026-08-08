@@ -25,11 +25,7 @@ func TestStreamSeparation(t *testing.T) {
 	}()
 
 	// Write an audit record.
-	writeAudit(auditRecord{
-		Time:   "2026-01-01T00:00:00Z",
-		Stream: "audit",
-		Event:  "test.audit",
-	})
+	writeAudit(auditRecord{Event: "test.audit"})
 
 	// Write an operational record.
 	opLogger.Info("test operational message")
@@ -66,10 +62,9 @@ func TestAllAuditRecordsAreValidJSON(t *testing.T) {
 		auditWriter = nil
 	}()
 
-	// Write several audit records.
-	writeAudit(auditRecord{Time: "2026-01-01T00:00:00Z", Stream: "audit", Event: "test.1"})
-	writeAudit(auditRecord{Time: "2026-01-01T00:00:01Z", Stream: "audit", Event: "test.2"})
-	writeAudit(auditRecord{Time: "2026-01-01T00:00:02Z", Stream: "audit", Event: "test.3"})
+	writeAudit(auditRecord{Event: "test.1"})
+	writeAudit(auditRecord{Event: "test.2"})
+	writeAudit(auditRecord{Event: "test.3"})
 
 	for i, line := range strings.Split(strings.TrimSpace(auditBuf.String()), "\n") {
 		if line == "" {
@@ -138,28 +133,21 @@ func TestLogLevelFiltering(t *testing.T) {
 
 			output := opBuf.String()
 
-			// Error should always appear.
 			if !strings.Contains(output, "error message") {
 				t.Error("error message should always appear")
 			}
-
-			// Warn should appear at warn level and below.
 			if tt.level <= slog.LevelWarn && !strings.Contains(output, "warn message") {
 				t.Error("warn message should appear at warn level and below")
 			}
 			if tt.level > slog.LevelWarn && strings.Contains(output, "warn message") {
 				t.Error("warn message should not appear at error level")
 			}
-
-			// Info should appear at info level and below.
 			if tt.level <= slog.LevelInfo && !strings.Contains(output, "info message") {
 				t.Error("info message should appear at info level and below")
 			}
 			if tt.level > slog.LevelInfo && strings.Contains(output, "info message") {
 				t.Error("info message should not appear at warn/error level")
 			}
-
-			// Debug should only appear at debug level.
 			if tt.level == slog.LevelDebug && !strings.Contains(output, "debug message") {
 				t.Error("debug message should appear at debug level")
 			}
@@ -176,14 +164,13 @@ func TestAuditNotSuppressedByLogLevel(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
 
-	// Set level to error — only errors should appear in operational.
 	initLoggers(opBuf, auditBuf, slog.LevelError)
 	defer func() {
 		opLogger = nil
 		auditWriter = nil
 	}()
 
-	writeAudit(auditRecord{Time: "2026-01-01T00:00:00Z", Stream: "audit", Event: "test.audit"})
+	writeAudit(auditRecord{Event: "test.audit"})
 
 	if !strings.Contains(auditBuf.String(), "test.audit") {
 		t.Error("audit record should appear even at error log level")
@@ -201,7 +188,7 @@ func TestAuditStreamField(t *testing.T) {
 		auditWriter = nil
 	}()
 
-	writeAudit(auditRecord{Time: "2026-01-01T00:00:00Z", Stream: "audit", Event: "test.audit"})
+	writeAudit(auditRecord{Event: "test.audit"})
 
 	var rec map[string]any
 	if err := json.Unmarshal(auditBuf.Bytes(), &rec); err != nil {
@@ -213,7 +200,7 @@ func TestAuditStreamField(t *testing.T) {
 }
 
 // TestOperationalStreamField verifies that operational records contain
-// "stream": "operational".
+// "stream": "operational" by parsing the emitted JSON.
 func TestOperationalStreamField(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
@@ -224,15 +211,19 @@ func TestOperationalStreamField(t *testing.T) {
 		auditWriter = nil
 	}()
 
-	// The operational logger doesn't automatically add "stream" field.
-	// We verify that operational records go to the operational writer.
 	opLogger.Info("test message")
 
-	if !strings.Contains(opBuf.String(), "test message") {
-		t.Error("operational message should appear in operational writer")
+	line := strings.TrimSpace(opBuf.String())
+	if line == "" {
+		t.Fatal("operational output is empty")
 	}
-	if strings.Contains(auditBuf.String(), "test message") {
-		t.Error("operational message should not appear in audit writer")
+
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("cannot parse operational record: %v: %s", err, line)
+	}
+	if m["stream"] != "operational" {
+		t.Errorf("expected stream=operational, got %v", m["stream"])
 	}
 }
 
@@ -309,7 +300,6 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 		t.Fatal("X-Request-ID header should be set")
 	}
 
-	// Check that the request ID appears in audit records.
 	auditOutput := auditBuf.String()
 	if !strings.Contains(auditOutput, rid) {
 		t.Fatalf("audit records should contain request_id %q:\n%s", rid, auditOutput)
@@ -317,7 +307,7 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 }
 
 // TestRequestScopedOperationalErrorContainsIDs verifies that request-scoped
-// operational errors contain request_id and session_id where applicable.
+// operational errors contain request_id and session_id as JSON fields.
 func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
@@ -335,7 +325,6 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	// Trigger a docker error to generate an operational log.
 	app.RunCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("error"), io.EOF
 	}
@@ -354,8 +343,20 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	}
 
 	opOutput := opBuf.String()
-	if !strings.Contains(opOutput, rid) {
-		t.Fatalf("operational error should contain request_id %q:\n%s", rid, opOutput)
+	if opOutput == "" {
+		t.Fatal("operational output is empty")
+	}
+
+	// Parse as JSON and assert both fields.
+	var m map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(opOutput)), &m); err != nil {
+		t.Fatalf("cannot parse operational record: %v: %s", err, opOutput)
+	}
+	if m["request_id"] != rid {
+		t.Errorf("expected request_id=%q, got %v", rid, m["request_id"])
+	}
+	if m["session_id"] != result.Session.ID {
+		t.Errorf("expected session_id=%q, got %v", result.Session.ID, m["session_id"])
 	}
 }
 
@@ -483,7 +484,6 @@ func TestAuditRecordHasRequestID(t *testing.T) {
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
 
-	// Parse audit records and check for request_id.
 	for _, line := range strings.Split(strings.TrimSpace(auditBuf.String()), "\n") {
 		if line == "" {
 			continue
@@ -493,7 +493,6 @@ func TestAuditRecordHasRequestID(t *testing.T) {
 			continue
 		}
 		if rid, ok := m["request_id"].(string); ok && rid != "" {
-			// Found a record with request_id — good.
 			return
 		}
 	}
@@ -531,7 +530,6 @@ func TestGenerateRequestIDFormat(t *testing.T) {
 	if !strings.HasPrefix(rid, "req_") {
 		t.Errorf("request ID should start with 'req_', got %q", rid)
 	}
-	// After prefix, should be 32 hex chars (16 bytes)
 	hex := strings.TrimPrefix(rid, "req_")
 	if len(hex) != 32 {
 		t.Errorf("request ID hex part should be 32 chars, got %d", len(hex))
@@ -601,9 +599,6 @@ func TestParseLogLevel(t *testing.T) {
 
 // TestConfigLogLevelDefault verifies that an empty log_level defaults to info.
 func TestConfigLogLevelDefault(t *testing.T) {
-	// When fileConfig.Level is empty, loadConfig should default to info.
-	// This is tested implicitly through loadConfig, but we verify the
-	// default behavior here.
 	fc := fileConfig{
 		AllowedRoot: "/tmp",
 		SessionTTL:  "12h",
@@ -621,4 +616,121 @@ func TestConfigLogLevelDefault(t *testing.T) {
 	if level != slog.LevelInfo {
 		t.Errorf("expected default level info, got %v", level)
 	}
+}
+
+// TestWriteAuditSetsStreamAndTime verifies that writeAudit called without
+// pre-filled Time or Stream still emits a complete audit record.
+func TestWriteAuditSetsStreamAndTime(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelInfo)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	writeAudit(auditRecord{Event: "test.auto"})
+
+	var m map[string]any
+	if err := json.Unmarshal(auditBuf.Bytes(), &m); err != nil {
+		t.Fatalf("cannot parse audit record: %v", err)
+	}
+	if m["stream"] != "audit" {
+		t.Errorf("expected stream=audit, got %v", m["stream"])
+	}
+	if m["time"] == nil {
+		t.Error("expected time to be set automatically")
+	}
+	if m["event"] != "test.auto" {
+		t.Errorf("expected event=test.auto, got %v", m["event"])
+	}
+}
+
+// TestResponseEncodingErrorContainsCorrelation verifies that a response
+// encoding failure contains stream, request_id, and session_id.
+func TestResponseEncodingErrorContainsCorrelation(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	ctx := context.WithValue(context.Background(), requestIDKey, "req_corr")
+	ctx = context.WithValue(ctx, sessionIDKey, "dhs_corr")
+
+	writeJSONError(ctx, errMockEncoding)
+
+	line := strings.TrimSpace(opBuf.String())
+	if line == "" {
+		t.Fatal("operational output is empty")
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("cannot parse operational record: %v: %s", err, line)
+	}
+	if m["stream"] != "operational" {
+		t.Errorf("expected stream=operational, got %v", m["stream"])
+	}
+	if m["request_id"] != "req_corr" {
+		t.Errorf("expected request_id=req_corr, got %v", m["request_id"])
+	}
+	if m["session_id"] != "dhs_corr" {
+		t.Errorf("expected session_id=dhs_corr, got %v", m["session_id"])
+	}
+}
+
+// TestAuditWriterFailureContainsCorrelation verifies that an audit writer
+// failure contains the same correlation fields as the audit record.
+func TestAuditWriterFailureContainsCorrelation(t *testing.T) {
+	// Use a writer that always fails.
+	failingWriter := &failingAuditWriter{}
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, failingWriter, slog.LevelError)
+	defer func() {
+		opLogger = nil
+		auditWriter = nil
+	}()
+
+	writeAudit(auditRecord{
+		Event:     "test.fail",
+		RequestID: "req_fail",
+		SessionID: "dhs_fail",
+	})
+
+	line := strings.TrimSpace(opBuf.String())
+	if line == "" {
+		t.Fatal("operational output is empty")
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatalf("cannot parse operational record: %v: %s", err, line)
+	}
+	if m["request_id"] != "req_fail" {
+		t.Errorf("expected request_id=req_fail, got %v", m["request_id"])
+	}
+	if m["session_id"] != "dhs_fail" {
+		t.Errorf("expected session_id=dhs_fail, got %v", m["session_id"])
+	}
+}
+
+// failingAuditWriter always returns an error on Write.
+type failingAuditWriter struct{}
+
+func (w *failingAuditWriter) Write(p []byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
+var errMockEncoding = &mockEncodingError{}
+
+type mockEncodingError struct{}
+
+func (e *mockEncodingError) Error() string {
+	return "mock encoding error"
 }
