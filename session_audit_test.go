@@ -30,22 +30,8 @@ type failExecDriver struct {
 }
 
 func (d *failExecDriver) Open(dsn string) (driver.Conn, error) {
-	db, err := sql.Open("sqlite3", dsn)
+	realConn, db, err := openRealSQLiteConn(dsn)
 	if err != nil {
-		return nil, err
-	}
-	sqlConn, err := db.Conn(context.Background())
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	var realConn driver.Conn
-	err = sqlConn.Raw(func(v any) error {
-		realConn = v.(driver.Conn)
-		return nil
-	})
-	if err != nil {
-		db.Close()
 		return nil, err
 	}
 	return &failExecConn{Conn: realConn, fail: d.fail, db: db}, nil
@@ -73,18 +59,48 @@ func (c *failExecConn) Close() error {
 	return c.Conn.Close()
 }
 
+// --- shared mock driver plumbing ---
+
 var mockDriverMu sync.Mutex
 var mockDriverSeq int64
 
-// newFailExecDB opens the same SQLite file with a driver that fails Exec.
-func newFailExecDB(t *testing.T, dbPath string, failErr error) *sql.DB {
-	t.Helper()
+func nextMockDriverName(prefix string) string {
 	mockDriverMu.Lock()
 	mockDriverSeq++
 	seq := mockDriverSeq
 	mockDriverMu.Unlock()
+	return fmt.Sprintf("mock_sqlite_%s_%d", prefix, seq)
+}
 
-	name := fmt.Sprintf("mock_sqlite_fe_%d", seq)
+// openRealSQLiteConn opens the real sqlite3 database, pins a connection,
+// and extracts the underlying driver.Conn. The returned *sql.DB must be
+// kept alive for the lifetime of the driver.Conn.
+func openRealSQLiteConn(dsn string) (driver.Conn, *sql.DB, error) {
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, nil, err
+	}
+	sqlConn, err := db.Conn(context.Background())
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+	var realConn driver.Conn
+	err = sqlConn.Raw(func(v any) error {
+		realConn = v.(driver.Conn)
+		return nil
+	})
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+	return realConn, db, nil
+}
+
+// newFailExecDB opens the same SQLite file with a driver that fails Exec.
+func newFailExecDB(t *testing.T, dbPath string, failErr error) *sql.DB {
+	t.Helper()
+	name := nextMockDriverName("fe")
 	sql.Register(name, &failExecDriver{fail: failErr})
 
 	db, err := sql.Open(name, dbPath)

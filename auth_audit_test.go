@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -29,22 +28,8 @@ type failQueryDriver struct {
 }
 
 func (d *failQueryDriver) Open(dsn string) (driver.Conn, error) {
-	db, err := sql.Open("sqlite3", dsn)
+	realConn, db, err := openRealSQLiteConn(dsn)
 	if err != nil {
-		return nil, err
-	}
-	sqlConn, err := db.Conn(context.Background())
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	var realConn driver.Conn
-	err = sqlConn.Raw(func(v any) error {
-		realConn = v.(driver.Conn)
-		return nil
-	})
-	if err != nil {
-		db.Close()
 		return nil, err
 	}
 	return &failQueryConn{Conn: realConn, fail: d.fail, db: db}, nil
@@ -71,17 +56,9 @@ func (c *failQueryConn) Close() error {
 	return c.Conn.Close()
 }
 
-var failQueryMu sync.Mutex
-var failQuerySeq int64
-
 func newFailQueryDB(t *testing.T, dbPath string, failErr error) *sql.DB {
 	t.Helper()
-	failQueryMu.Lock()
-	failQuerySeq++
-	seq := failQuerySeq
-	failQueryMu.Unlock()
-
-	name := fmt.Sprintf("mock_sqlite_fq_%d", seq)
+	name := nextMockDriverName("fq")
 	sql.Register(name, &failQueryDriver{fail: failErr})
 
 	db, err := sql.Open(name, dbPath)
