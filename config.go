@@ -293,10 +293,11 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// resolveAllowedRoot resolves the user-provided allowed root path.
-// If the path is empty, it falls back to the default (current working directory).
-// Paths starting with ~/ are expanded against the user's home directory.
-// The resulting path is validated: it must be absolute, exist, and be a directory.
+// resolveAllowedRoot normalizes and validates an allowed-root path.
+// It expands ~/ prefixes, resolves to an absolute canonical path,
+// and verifies that the path exists and is a directory.
+// When called from the init command with an empty path, it falls back
+// to the current working directory.
 func resolveAllowedRoot(path string) (string, error) {
 	if path == "" {
 		cwd, err := os.Getwd()

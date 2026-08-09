@@ -238,14 +238,14 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		return fmt.Errorf("session_ttl is required")
 	}
 
-	// Validate log_level if present: must be a valid level string.
+	// Validate log_level if present.
 	if v, ok := raw["log_level"]; ok {
 		var s string
 		if err := json.Unmarshal(v, &s); err != nil {
 			return fmt.Errorf("log_level must be a JSON string")
 		}
 		if _, err := parseLogLevel(s); err != nil {
-			return fmt.Errorf("invalid log_level %q: must be one of debug, info, warn, error", s)
+			return err
 		}
 	}
 

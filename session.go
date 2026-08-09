@@ -179,7 +179,6 @@ func (a *App) listSessions() ([]Session, error) {
 }
 
 func (a *App) deleteSession(id string) (*Session, error) {
-	// First get the session data before deleting
 	row := a.DB.QueryRow(
 		`SELECT id, workspace, created_at, expires_at, revoked_at
 		 FROM sessions WHERE id = ?`,
@@ -194,16 +193,16 @@ func (a *App) deleteSession(id string) (*Session, error) {
 		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
 	}
 
-	// Now delete the session
+	// Read-before-delete: the session must be returned to the caller so that
+	// the handler can populate the audit record with the workspace even when
+	// the DELETE itself fails.
 	result, err := a.DB.Exec(`DELETE FROM sessions WHERE id = ?`, id)
 	if err != nil {
-		// Session was found, but delete failed - return session with error
 		return &s, fmt.Errorf("cannot delete session: %w: %w", err, ErrDatabase)
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		// Session was found, but RowsAffected failed - return session with error
 		return &s, fmt.Errorf("cannot check deletion result: %w: %w", err, ErrDatabase)
 	}
 
