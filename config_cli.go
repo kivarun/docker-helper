@@ -65,6 +65,24 @@ func isKnownField(name string) bool {
 	return false
 }
 
+// isDeprecatedField returns true if the field is a known deprecated config key.
+func isDeprecatedField(name string) bool {
+	for old := range deprecatedConfigFields {
+		if old == name {
+			return true
+		}
+	}
+	return false
+}
+
+// deprecatedFieldMessage returns the rename diagnostic for a deprecated field.
+func deprecatedFieldMessage(name string) string {
+	if newField, ok := deprecatedConfigFields[name]; ok {
+		return fmt.Sprintf("error: %s was renamed to %s\n", name, newField)
+	}
+	return ""
+}
+
 func isRuntimeDependent(name string) bool {
 	switch name {
 	case "runtime_dir", "socket_path", "lock_path":
@@ -143,7 +161,7 @@ var configSetCommand = &Command{
   shutdown_timeout        positive Go duration, for example 30s (default 30s)
   operation_retention_ttl positive Go duration, for example 10m (default 10m)
   operation_max_completed positive integer (default 200)
-  operation_log_max_bytes     positive integer, bytes (default 4194304 = 4 MiB)
+  operation_log_max_bytes positive integer, bytes (default 4194304 = 4 MiB)
 
 A successful command reports either "updated" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -171,7 +189,7 @@ var configUnsetCommand = &Command{
   shutdown_timeout        removing it restores the default 30s
   operation_retention_ttl removing it restores the default 10m
   operation_max_completed removing it restores the default 200
-  operation_log_max_bytes     removing it restores the default 4 MiB
+  operation_log_max_bytes removing it restores the default 4 MiB
 
 A successful command reports either "unset" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -235,6 +253,11 @@ func decodeFileConfig(raw map[string]json.RawMessage) (*fileConfig, error) {
 func validateRawConfig(raw map[string]json.RawMessage) error {
 	if raw == nil {
 		return fmt.Errorf("configuration is not a JSON object")
+	}
+
+	// Reject deprecated config keys with a clear rename diagnostic.
+	if _, ok := raw["build_log_max_bytes"]; ok {
+		return fmt.Errorf("build_log_max_bytes was renamed to operation_log_max_bytes")
 	}
 
 	// Validate allowed_root: must exist as a non-empty absolute string.
@@ -438,6 +461,10 @@ func configShowAll(stdout, stderr io.Writer) int {
 }
 
 func configShowField(field string, stdout, stderr io.Writer) int {
+	if isDeprecatedField(field) {
+		fmt.Fprint(stderr, deprecatedFieldMessage(field))
+		return 2
+	}
 	if !isKnownField(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
@@ -577,6 +604,10 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 }
 
 func configSet(field, value string, stdout, stderr io.Writer) int {
+	if isDeprecatedField(field) {
+		fmt.Fprint(stderr, deprecatedFieldMessage(field))
+		return 2
+	}
 	if !isKnownField(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
@@ -703,6 +734,10 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 }
 
 func configUnset(field string, stdout, stderr io.Writer) int {
+	if isDeprecatedField(field) {
+		fmt.Fprint(stderr, deprecatedFieldMessage(field))
+		return 2
+	}
 	if !isKnownField(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2

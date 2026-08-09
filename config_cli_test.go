@@ -2502,3 +2502,154 @@ func TestReloadRejectsNegativeSessionTTL(t *testing.T) {
 		t.Fatal("expected reload to reject negative session_ttl")
 	}
 }
+
+// --- Deprecated field tests ---
+
+// Deprecated 1: config file with old build_log_max_bytes rejected by daemon
+func TestDeprecatedBuildLogMaxBytesLoadConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "allowed_root": "/tmp/work",
+  "session_ttl": "12h",
+  "build_log_max_bytes": 8192
+}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error for deprecated build_log_max_bytes")
+	}
+	if !strings.Contains(err.Error(), "build_log_max_bytes") {
+		t.Fatalf("error must mention deprecated key, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "operation_log_max_bytes") {
+		t.Fatalf("error must mention new key, got: %v", err)
+	}
+}
+
+// Deprecated 2: config file with both old and new keys rejected
+func TestDeprecatedBuildLogMaxBytesBothKeys(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{
+  "allowed_root": "/tmp/work",
+  "session_ttl": "12h",
+  "build_log_max_bytes": 8192,
+  "operation_log_max_bytes": 16384
+}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error when both deprecated and new keys present")
+	}
+	if !strings.Contains(err.Error(), "build_log_max_bytes") {
+		t.Fatalf("error must mention deprecated key, got: %v", err)
+	}
+}
+
+// Deprecated 3: CLI config show with deprecated key
+func TestDeprecatedBuildLogMaxBytesShow(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/tmp/work",
+  "session_ttl": "12h"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "build_log_max_bytes"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	if stdout.Len() > 0 {
+		t.Errorf("stdout must be empty, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "build_log_max_bytes") {
+		t.Errorf("stderr must mention deprecated key, got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "operation_log_max_bytes") {
+		t.Errorf("stderr must mention new key, got: %s", stderr.String())
+	}
+}
+
+// Deprecated 4: CLI config set with deprecated key
+func TestDeprecatedBuildLogMaxBytesSet(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/tmp/work",
+  "session_ttl": "12h"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "build_log_max_bytes", "123"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	if stdout.Len() > 0 {
+		t.Errorf("stdout must be empty, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "build_log_max_bytes") {
+		t.Errorf("stderr must mention deprecated key, got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "operation_log_max_bytes") {
+		t.Errorf("stderr must mention new key, got: %s", stderr.String())
+	}
+}
+
+// Deprecated 5: CLI config unset with deprecated key
+func TestDeprecatedBuildLogMaxBytesUnset(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/tmp/work",
+  "session_ttl": "12h"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "build_log_max_bytes"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	if stdout.Len() > 0 {
+		t.Errorf("stdout must be empty, got: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "build_log_max_bytes") {
+		t.Errorf("stderr must mention deprecated key, got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "operation_log_max_bytes") {
+		t.Errorf("stderr must mention new key, got: %s", stderr.String())
+	}
+}
+
+// Deprecated 6: new operation_log_max_bytes still works
+func TestDeprecatedOperationLogMaxBytesWorks(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/tmp/work",
+  "session_ttl": "12h",
+  "operation_log_max_bytes": 8192
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show", "operation_log_max_bytes"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "8192\n" {
+		t.Errorf("expected '8192\\n', got %q", stdout.String())
+	}
+}

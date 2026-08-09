@@ -76,6 +76,12 @@ var reservedConfigFields = map[string]bool{
 	"admin_token":          true,
 }
 
+// deprecatedConfigFields were renamed and must not appear in config.json.
+// The map value is the new field name for the diagnostic message.
+var deprecatedConfigFields = map[string]string{
+	"build_log_max_bytes": "operation_log_max_bytes",
+}
+
 // validateNoReservedFields checks that no reserved field appears in the config JSON.
 // It returns an error naming the first offending field found.
 func validateNoReservedFields(data []byte) error {
@@ -86,6 +92,21 @@ func validateNoReservedFields(data []byte) error {
 	for field := range raw {
 		if reservedConfigFields[field] {
 			return fmt.Errorf("%s is computed and cannot be configured", field)
+		}
+	}
+	return nil
+}
+
+// validateNoDeprecatedFields checks that no deprecated field appears in the config JSON.
+// It returns an error with a clear rename diagnostic.
+func validateNoDeprecatedFields(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("cannot parse config: %w", err)
+	}
+	for field, newField := range deprecatedConfigFields {
+		if _, ok := raw[field]; ok {
+			return fmt.Errorf("%s was renamed to %s", field, newField)
 		}
 	}
 	return nil
@@ -143,6 +164,11 @@ func loadConfig() (*Config, error) {
 
 	// Check for reserved fields that must not appear in config.json.
 	if err := validateNoReservedFields(data); err != nil {
+		return nil, err
+	}
+
+	// Check for deprecated fields that were renamed.
+	if err := validateNoDeprecatedFields(data); err != nil {
 		return nil, err
 	}
 
