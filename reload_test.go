@@ -638,8 +638,8 @@ func TestReloadRuntimeLogLevel(t *testing.T) {
 
 	// At info level, debug logs should NOT appear
 	logBuf.Reset()
-	if opLogger != nil {
-		opLogger.Debug("test debug message")
+	if logging.snapshotLogger() != nil {
+		logging.snapshotLogger().Debug("test debug message")
 	}
 	if logBuf.Len() > 0 {
 		t.Fatalf("debug log should not appear at info level, got: %s", logBuf.String())
@@ -682,8 +682,8 @@ func TestReloadRuntimeLogLevel(t *testing.T) {
 
 	// At debug level, debug logs SHOULD appear
 	logBuf.Reset()
-	if opLogger != nil {
-		opLogger.Debug("test debug message after reload")
+	if logging.snapshotLogger() != nil {
+		logging.snapshotLogger().Debug("test debug message after reload")
 	}
 	if logBuf.Len() == 0 {
 		t.Fatal("debug log should appear at debug level after reload")
@@ -977,9 +977,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				loggerMu.RLock()
-				l := opLogger
-				loggerMu.RUnlock()
+				l := logging.snapshotLogger()
 				if l != nil {
 					l.Info("concurrent log")
 				}

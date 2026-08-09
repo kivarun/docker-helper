@@ -67,16 +67,11 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 
 	// Snapshot writers under read lock, then re-initialize loggers
 	// with the new log level and audit setting under write lock.
-	loggerMu.RLock()
-	opW := opWriter
-	audW := auditWriter
-	loggerMu.RUnlock()
+	opW, audW := logging.snapshotWriters()
 
-	initLoggers(opW, audW, newCfg.LogLevel, newCfg.AuditEnabled)
+	logging.configure(opW, audW, newCfg.LogLevel, newCfg.AuditEnabled)
 
-	loggerMu.RLock()
-	logger := opLogger
-	loggerMu.RUnlock()
+	logger := logging.snapshotLogger()
 	if logger != nil {
 		logger.Info("configuration reloaded",
 			slog.String("allowed_root", newCfg.AllowedRoot),

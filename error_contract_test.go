@@ -803,10 +803,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -874,10 +871,7 @@ func TestDockerErrorLogPull(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -936,10 +930,7 @@ func TestDockerErrorLogRun(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)

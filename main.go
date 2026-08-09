@@ -278,9 +278,8 @@ func runServe(stdout, stderr io.Writer) error {
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 
-		loggerMu.RLock()
-		logger := opLogger
-		loggerMu.RUnlock()
+		logger := logging.snapshotLogger()
+
 		if logger != nil {
 			logger.Info("daemon listening",
 				slog.String("socket", cfg.SocketPath),
@@ -292,9 +291,8 @@ func runServe(stdout, stderr io.Writer) error {
 
 		err = serveWithShutdown(ctx, server, listener, shutdownTimeout)
 
-		loggerMu.RLock()
-		logger = opLogger
-		loggerMu.RUnlock()
+		logger = logging.snapshotLogger()
+
 		if err != nil {
 			if logger != nil {
 				logger.Error("daemon serve error",
@@ -314,9 +312,9 @@ func runServe(stdout, stderr io.Writer) error {
 	// Log lock/listener errors that runWithLock returns before entering the callback.
 	// Errors inside the callback (admin token, database, serve) are already logged.
 	if err != nil && !callbackEntered {
-		loggerMu.RLock()
-		logger := opLogger
-		loggerMu.RUnlock()
+
+		logger := logging.snapshotLogger()
+
 		if logger != nil {
 			logger.Error("daemon startup failed",
 				slog.String("operation", "serve_startup"),

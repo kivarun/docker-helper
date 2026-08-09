@@ -155,11 +155,7 @@ func TestDisabledAuditNoOutput(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, false)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	writeAudit(auditRecord{Event: "test.no_output"})
 
@@ -174,11 +170,7 @@ func TestDisabledAuditNoWriteAttempt(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, panicWriter, slog.LevelInfo, false)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	// Should not panic because audit is disabled.
 	writeAudit(auditRecord{Event: "test.no_write"})
@@ -220,14 +212,10 @@ func TestStartupRecordFormat(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, false)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	// Simulate the exact log call used in main.go
-	opLogger.Info("daemon listening",
+	logging.snapshotLogger().Info("daemon listening",
 		"socket", "/run/user/1000/docker-helper/docker-helper.sock",
 	)
 
@@ -271,13 +259,9 @@ func TestOperationalTimestampRFC3339Nano(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, false)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
-	opLogger.Info("timestamp test")
+	logging.snapshotLogger().Info("timestamp test")
 
 	line := strings.TrimSpace(opBuf.String())
 	if line == "" {
@@ -309,11 +293,7 @@ func TestAuditTimestampRFC3339Nano(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	writeAudit(auditRecord{Event: "test.timestamp"})
 
@@ -349,11 +329,7 @@ func TestDebugRequestLogEmitAtDebug(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -374,11 +350,7 @@ func TestDebugRequestLogSuppressedAtInfo(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -399,11 +371,7 @@ func TestDebugRequestLogFields(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -474,11 +442,7 @@ func TestDebugRequestLogNoSessionIDLeak(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -521,11 +485,7 @@ func TestDebugRequestLogParameterizedRoute(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -579,11 +539,7 @@ func TestDebugRequestLogIncludesHealth(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -604,11 +560,7 @@ func TestDebugRequestLogNon200Status(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 

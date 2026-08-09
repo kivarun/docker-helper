@@ -21,17 +21,13 @@ func TestStreamSeparation(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	// Write an audit record.
 	writeAudit(auditRecord{Event: "test.audit"})
 
 	// Write an operational record.
-	opLogger.Info("test operational message")
+	logging.snapshotLogger().Info("test operational message")
 
 	auditOutput := auditBuf.String()
 	opOutput := opBuf.String()
@@ -60,11 +56,7 @@ func TestAllAuditRecordsAreValidJSON(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	writeAudit(auditRecord{Event: "test.1"})
 	writeAudit(auditRecord{Event: "test.2"})
@@ -88,14 +80,10 @@ func TestAllOperationalRecordsAreValidJSON(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
-	opLogger.Info("test info message")
-	opLogger.Error("test error message", slog.String("key", "value"))
+	logging.snapshotLogger().Info("test info message")
+	logging.snapshotLogger().Error("test error message", slog.String("key", "value"))
 
 	for i, line := range strings.Split(strings.TrimSpace(opBuf.String()), "\n") {
 		if line == "" {
@@ -126,15 +114,12 @@ func TestLogLevelFiltering(t *testing.T) {
 			opBuf := new(bytes.Buffer)
 
 			initLoggers(opBuf, auditBuf, tt.level, true)
-			defer func() {
-				opLogger = nil
-				auditWriter = nil
-			}()
+			defer logging.reset()
 
-			opLogger.Debug("debug message")
-			opLogger.Info("info message")
-			opLogger.Warn("warn message")
-			opLogger.Error("error message")
+			logging.snapshotLogger().Debug("debug message")
+			logging.snapshotLogger().Info("info message")
+			logging.snapshotLogger().Warn("warn message")
+			logging.snapshotLogger().Error("error message")
 
 			output := opBuf.String()
 
@@ -170,11 +155,7 @@ func TestAuditNotSuppressedByLogLevel(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	writeAudit(auditRecord{Event: "test.audit"})
 
@@ -189,11 +170,7 @@ func TestAuditStreamField(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	writeAudit(auditRecord{Event: "test.audit"})
 
@@ -213,13 +190,9 @@ func TestOperationalStreamField(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
-	opLogger.Info("test message")
+	logging.snapshotLogger().Info("test message")
 
 	line := strings.TrimSpace(opBuf.String())
 	if line == "" {
@@ -242,11 +215,7 @@ func TestRequestIDInResponseHeader(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -276,11 +245,7 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -323,11 +288,7 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -379,11 +340,7 @@ func TestNoCommandInAuditStream(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -425,11 +382,7 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -473,11 +426,7 @@ func TestAuditRecordHasRequestID(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -557,11 +506,7 @@ func TestOpLogWithContext(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	ctx := context.WithValue(context.Background(), requestIDKey, "req_test")
 	ctx = context.WithValue(ctx, sessionIDKey, "dhs_test")
@@ -640,11 +585,7 @@ func TestWriteAuditSetsStreamAndTime(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	writeAudit(auditRecord{Event: "test.auto"})
 
@@ -670,11 +611,7 @@ func TestResponseEncodingErrorContainsCorrelation(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	ctx := context.WithValue(context.Background(), requestIDKey, "req_corr")
 	ctx = context.WithValue(ctx, sessionIDKey, "dhs_corr")
@@ -709,11 +646,7 @@ func TestAuditWriterFailureContainsCorrelation(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, failingWriter, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	writeAudit(auditRecord{
 		Event:     "test.fail",
@@ -760,15 +693,11 @@ func TestLoggerStreamSeparation(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	// Write an audit record and an operational record.
 	writeAudit(auditRecord{Event: "test.routing"})
-	opLogger.Info("test routing message")
+	logging.snapshotLogger().Info("test routing message")
 
 	auditOutput := auditBuf.String()
 	opOutput := opBuf.String()
@@ -871,11 +800,7 @@ func TestMissingConfigProducesSingleJSONLRecord(t *testing.T) {
 	}()
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	// Point config to a nonexistent file.
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/config.json")
@@ -951,11 +876,7 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	err = runServe(auditBuf, opBuf)
 	if err == nil {
@@ -1029,11 +950,7 @@ func TestServeNoGlobalStderr(t *testing.T) {
 	}()
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	err = runServe(auditBuf, opBuf)
 	if err == nil {
@@ -1073,11 +990,7 @@ func TestResponseEncodingErrorThroughHandler(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 
@@ -1151,11 +1064,7 @@ func TestDeleteSessionAuditContainsRequestID(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer func() {
-		opLogger = nil
-		auditWriter = nil
-		auditEnabled = false
-	}()
+	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
 

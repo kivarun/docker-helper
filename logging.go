@@ -46,26 +46,18 @@ func generateRequestID() string {
 	return "req_" + hex.EncodeToString(b)
 }
 
-// opLogger is the package-level operational logger.
-// It is initialized by initLoggers and can be replaced in tests.
-// All operational logging goes through this logger.
-var opLogger *slog.Logger
+// loggingState owns the operational logger, audit writer, and audit flag.
+// All mutation is atomic under mu.
+type loggingState struct {
+	mu           sync.RWMutex
+	opLogger     *slog.Logger
+	opWriter     io.Writer
+	auditWriter  io.Writer
+	auditEnabled bool
+}
 
-// opWriter is the operational log output writer.
-// It is initialized by initLoggers and can be replaced in tests.
-var opWriter io.Writer
-
-// auditWriter is the package-level writer for audit records.
-// It is initialized by initLoggers and can be replaced in tests.
-var auditWriter io.Writer
-
-// auditEnabled controls whether audit records are written.
-// When false, writeAudit is a no-op.
-var auditEnabled bool
-
-// loggerMu protects opLogger, opWriter, auditWriter, and auditEnabled
-// from concurrent access during runtime reload.
-var loggerMu sync.RWMutex
+// logging is the package-level logging state.
+var logging = new(loggingState)
 
 // operationalHandler wraps a slog.Handler to inject "stream": "operational"
 // into every record.
@@ -86,18 +78,17 @@ func (h *operationalHandler) WithGroup(name string) slog.Handler {
 	return &operationalHandler{Handler: h.Handler.WithGroup(name)}
 }
 
-// initLoggers creates the operational logger and audit writer.
-// The operational logger writes JSON to the given writer at the given level,
-// with "stream": "operational" on every record. Timestamps use UTC RFC3339Nano.
-// The audit writer receives JSON Lines audit records.
-// When auditEnabled is true, audit records are written to audWriter.
-func initLoggers(opW io.Writer, audW io.Writer, level slog.Level, enabled bool) {
-	loggerMu.Lock()
-	defer loggerMu.Unlock()
-	opWriter = opW
-	auditWriter = audW
-	auditEnabled = enabled
-	opLogger = slog.New(&operationalHandler{
+// configure replaces the logging configuration atomically.
+// The operational logger writes JSON to opW at the given level with
+// "stream": "operational" on every record. Timestamps use UTC RFC3339Nano.
+// The audit writer receives JSON Lines audit records when enabled is true.
+func (ls *loggingState) configure(opW, audW io.Writer, level slog.Level, enabled bool) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.opWriter = opW
+	ls.auditWriter = audW
+	ls.auditEnabled = enabled
+	ls.opLogger = slog.New(&operationalHandler{
 		Handler: slog.NewJSONHandler(opW, &slog.HandlerOptions{
 			Level: level,
 			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
@@ -113,6 +104,47 @@ func initLoggers(opW io.Writer, audW io.Writer, level slog.Level, enabled bool) 
 	})
 }
 
+// snapshotLogger returns the current operational logger under read lock.
+func (ls *loggingState) snapshotLogger() *slog.Logger {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+	return ls.opLogger
+}
+
+// snapshotWriters returns the current writers under read lock.
+func (ls *loggingState) snapshotWriters() (opW, audW io.Writer) {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+	return ls.opWriter, ls.auditWriter
+}
+
+// reset clears all logging state.  Intended for test cleanup.
+func (ls *loggingState) reset() {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.opLogger = nil
+	ls.opWriter = nil
+	ls.auditWriter = nil
+	ls.auditEnabled = false
+}
+
+// snapshotAudit returns (auditEnabled, auditWriter, opLogger) under a single
+// read lock so the caller sees a consistent configuration.
+func (ls *loggingState) snapshotAudit() (bool, io.Writer, *slog.Logger) {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+	return ls.auditEnabled, ls.auditWriter, ls.opLogger
+}
+
+// initLoggers creates the operational logger and audit writer.
+// The operational logger writes JSON to the given writer at the given level,
+// with "stream": "operational" on every record. Timestamps use UTC RFC3339Nano.
+// The audit writer receives JSON Lines audit records.
+// When auditEnabled is true, audit records are written to audWriter.
+func initLoggers(opW io.Writer, audW io.Writer, level slog.Level, enabled bool) {
+	logging.configure(opW, audW, level, enabled)
+}
+
 // writeAudit marshals the audit record to JSON and writes it to the audit writer.
 // It centrally enforces stream="audit" and populates the timestamp.
 // If audit is disabled, the record is silently dropped.
@@ -120,16 +152,8 @@ func initLoggers(opW io.Writer, audW io.Writer, level slog.Level, enabled bool) 
 // is silently dropped. If writing or encoding fails, a structured operational error
 // is emitted to stderr with correlation fields copied from the record.
 func writeAudit(record auditRecord) {
-	loggerMu.RLock()
-	enabled := auditEnabled
-	aw := auditWriter
-	logger := opLogger
-	loggerMu.RUnlock()
-
-	if !enabled {
-		return
-	}
-	if aw == nil {
+	enabled, aw, logger := logging.snapshotAudit()
+	if !enabled || aw == nil {
 		return
 	}
 
@@ -188,9 +212,7 @@ func writeAuditWithRequestID(ctx context.Context, record auditRecord) {
 // opLog returns the operational logger with request-scoped attributes.
 // It adds request_id and session_id when available in the context.
 func opLog(ctx context.Context) *slog.Logger {
-	loggerMu.RLock()
-	l := opLogger
-	loggerMu.RUnlock()
+	l := logging.snapshotLogger()
 	if l == nil {
 		return slog.Default()
 	}
@@ -206,9 +228,7 @@ func opLog(ctx context.Context) *slog.Logger {
 // writeJSONError logs a response encoding failure using the request context.
 // It includes request_id and session_id when available.
 func writeJSONError(ctx context.Context, err error) {
-	loggerMu.RLock()
-	logger := opLogger
-	loggerMu.RUnlock()
+	logger := logging.snapshotLogger()
 	if logger == nil {
 		return
 	}
@@ -228,9 +248,7 @@ var osStderr io.Writer = os.Stderr
 // serveStartupError logs a daemon startup failure as structured JSON to stderr.
 // It is safe to call before initLoggers.
 func serveStartupError(err error, hint string) {
-	loggerMu.RLock()
-	logger := opLogger
-	loggerMu.RUnlock()
+	logger := logging.snapshotLogger()
 	if logger != nil {
 		l := logger.With(
 			slog.String("operation", "serve_startup"),
