@@ -20,7 +20,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	var req pullRequest
 
-	if err := decodeJSONRequest(r, &req); err != nil {
+	if err := decodeJSONRequest(w, r, &req); err != nil {
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}

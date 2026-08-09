@@ -50,7 +50,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	var req sessionRequest
 
-	if err := decodeJSONRequest(r, &req); err != nil {
+	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:    "session.create",

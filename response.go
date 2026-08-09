@@ -17,8 +17,8 @@ const maxRequestBody = 16 * 1024
 // decodeJSONRequest decodes exactly one JSON value from the request body
 // into target.  It enforces a body size limit, rejects unknown fields,
 // and requires EOF (after optional whitespace) following the first value.
-func decodeJSONRequest(r *http.Request, target any) error {
-	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxRequestBody))
+func decodeJSONRequest(w http.ResponseWriter, r *http.Request, target any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(target); err != nil {
