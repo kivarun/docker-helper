@@ -296,10 +296,13 @@ func runServe(stdout, stderr io.Writer) error {
 		if app.OperationRegistry != nil {
 			app.OperationRegistry.setShuttingDown()
 
-			// Give running operations time to finish.
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-			app.OperationRegistry.terminateAll(shutdownCtx)
-			shutdownCancel()
+			// Operation termination shares the same shutdown budget as HTTP drain.
+			// We've already spent some time in serveWithShutdown, so use remaining time.
+			if deadline, ok := ctx.Deadline(); ok {
+				shutdownCtx, shutdownCancel := context.WithDeadline(context.Background(), deadline)
+				app.OperationRegistry.terminateAll(shutdownCtx)
+				shutdownCancel()
+			}
 		}
 
 		logger = logging.snapshotLogger()

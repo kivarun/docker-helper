@@ -162,12 +162,10 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	}
 	r.mu.RUnlock()
 
-	// Phase 1: Cancel and signal all running operations.
+	// Phase 1: Send graceful SIGTERM to all running operations.
+	// Do NOT call cancel() here - that would immediately kill the process.
 	for _, op := range ops {
 		op.mu.Lock()
-		if op.cancel != nil {
-			op.cancel()
-		}
 		if op.cmd != nil && op.cmd.Process != nil {
 			op.cmd.Process.Signal(os.Interrupt)
 		}
@@ -175,6 +173,7 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	}
 
 	// Phase 2: Wait for operations to complete with context deadline.
+	// The completion goroutine owns cmd.Wait() and will close op.done.
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		deadline = time.Now().Add(5 * time.Second)
@@ -183,15 +182,16 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	for _, op := range ops {
 		select {
 		case <-op.done:
-			// Operation completed normally.
+			// Operation completed normally (or was killed by completion goroutine).
 		case <-time.After(time.Until(deadline)):
-			// Timeout: force kill.
+			// Timeout: force kill the process.
+			// The completion goroutine will still call cmd.Wait() and close op.done.
 			op.mu.Lock()
 			if op.cmd != nil && op.cmd.Process != nil {
 				op.cmd.Process.Kill()
 			}
 			op.mu.Unlock()
-			// Wait for the killed process to be reaped by the completion goroutine.
+			// Wait for the completion goroutine to reap the killed process.
 			select {
 			case <-op.done:
 			case <-time.After(2 * time.Second):

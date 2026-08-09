@@ -1,0 +1,222 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// TestShutdownGracefulSignalsBuild tests that shutdown sends graceful
+// SIGTERM to a running build process, and if the process exits after
+// the signal, force kill is not needed.
+func TestShutdownGracefulSignalsBuild(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	reg := newOperationRegistry()
+	app.OperationRegistry = reg
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	// Process that exits when interrupted (sleep does this by default).
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sleep", "60")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+
+	op := reg.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Give process time to start.
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark registry as shutting down and terminate with generous timeout.
+	reg.setShuttingDown()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	startShutdown := time.Now()
+	reg.terminateAll(shutdownCtx)
+	shutdownDuration := time.Since(startShutdown)
+	cancel()
+
+	// Shutdown should complete within the timeout.
+	if shutdownDuration > 1500*time.Millisecond {
+		t.Errorf("shutdown took too long: %v", shutdownDuration)
+	}
+
+	// The operation should have completed (process killed by SIGTERM).
+	op.Wait()
+	if op.State != operationFailed {
+		t.Errorf("expected status 'failed', got %q", op.State)
+	}
+}
+
+// TestShutdownForceKillsIgnoringSignal tests that a process ignoring
+// graceful SIGTERM is force-killed after the deadline.
+func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	reg := newOperationRegistry()
+	app.OperationRegistry = reg
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	// Process that ignores SIGTERM and only exits after SIGKILL.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c",
+			"trap '' TERM; sleep 60")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+
+	op := reg.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Give process time to start.
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark registry as shutting down and terminate with short deadline.
+	reg.setShuttingDown()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	startShutdown := time.Now()
+	reg.terminateAll(shutdownCtx)
+	shutdownDuration := time.Since(startShutdown)
+	cancel()
+
+	// Shutdown should complete within the deadline (plus small buffer for kill).
+	if shutdownDuration > 1*time.Second {
+		t.Errorf("shutdown took too long: %v", shutdownDuration)
+	}
+
+	// The operation should have been force-killed.
+	op.Wait()
+	if op.State != operationFailed {
+		t.Errorf("expected status 'failed', got %q", op.State)
+	}
+}
+
+// TestShutdownOperationCompletionGoroutineReaps tests that the operation
+// completion goroutine properly reaps the process and closes op.done
+// even after force kill.
+func TestShutdownOperationCompletionGoroutineReaps(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	reg := newOperationRegistry()
+	app.OperationRegistry = reg
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sleep", "60")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+
+	op := reg.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Give process time to start.
+	time.Sleep(100 * time.Millisecond)
+
+	// Mark registry as shutting down and terminate with very short deadline.
+	reg.setShuttingDown()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	reg.terminateAll(shutdownCtx)
+	cancel()
+
+	// op.done should be closed by the completion goroutine.
+	select {
+	case <-op.done:
+		// Good - completion goroutine reaped the process.
+	case <-time.After(2 * time.Second):
+		t.Fatal("op.done was not closed - completion goroutine did not reap process")
+	}
+
+	// Verify operation state is failed.
+	if op.State != operationFailed {
+		t.Errorf("expected status 'failed', got %q", op.State)
+	}
+}
