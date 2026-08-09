@@ -939,6 +939,3 @@ Items discussed but not yet implemented:
 - launcher component;
 - RPM/DEB packaging;
 - token rotation command;
-- session revocation (soft delete via `revoked_at` — the column exists
-  in the database schema and is checked during token lookup, but the
-  current `DELETE /sessions/{id}` implementation performs a hard delete).

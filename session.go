@@ -40,7 +40,6 @@ type Session struct {
 	Workspace string
 	CreatedAt time.Time
 	ExpiresAt time.Time
-	RevokedAt *time.Time
 }
 
 type CreatedSession struct {
@@ -50,24 +49,18 @@ type CreatedSession struct {
 
 // scanSession scans the canonical session column order and converts
 // Unix-integer timestamps to time.Time.  The caller must query exactly
-// the columns: id, workspace, created_at, expires_at, revoked_at.
+// the columns: id, workspace, created_at, expires_at.
 func scanSession(s sqlScanner) (Session, error) {
 	var sess Session
 	var createdAt int64
 	var expiresAt int64
-	var revokedAt sql.NullInt64
 
-	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt, &revokedAt); err != nil {
+	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt); err != nil {
 		return sess, err
 	}
 
 	sess.CreatedAt = time.Unix(createdAt, 0)
 	sess.ExpiresAt = time.Unix(expiresAt, 0)
-
-	if revokedAt.Valid {
-		t := time.Unix(revokedAt.Int64, 0)
-		sess.RevokedAt = &t
-	}
 
 	return sess, nil
 }
@@ -124,8 +117,8 @@ func (a *App) createSession(workspace string) (*CreatedSession, error) {
 	expiresAt := now.Add(cfg.SessionTTL)
 
 	_, err = a.DB.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, NULL)`,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
 		sessionID,
 		tokenHashHex,
 		absWorkspace,
@@ -151,9 +144,9 @@ func (a *App) listSessions() ([]Session, error) {
 	now := time.Now().Unix()
 
 	rows, err := a.DB.Query(
-		`SELECT id, workspace, created_at, expires_at, revoked_at
+		`SELECT id, workspace, created_at, expires_at
 		 FROM sessions
-		 WHERE expires_at > ? AND revoked_at IS NULL
+		 WHERE expires_at > ?
 		 ORDER BY created_at ASC`,
 		now,
 	)
@@ -180,7 +173,7 @@ func (a *App) listSessions() ([]Session, error) {
 
 func (a *App) deleteSession(id string) (*Session, error) {
 	row := a.DB.QueryRow(
-		`SELECT id, workspace, created_at, expires_at, revoked_at
+		`SELECT id, workspace, created_at, expires_at
 		 FROM sessions WHERE id = ?`,
 		id,
 	)
@@ -220,9 +213,9 @@ func (a *App) findSessionByToken(token string) (*Session, error) {
 	now := time.Now().Unix()
 
 	row := a.DB.QueryRow(
-		`SELECT id, workspace, created_at, expires_at, revoked_at
+		`SELECT id, workspace, created_at, expires_at
 		 FROM sessions
-		 WHERE token_hash = ? AND expires_at > ? AND revoked_at IS NULL
+		 WHERE token_hash = ? AND expires_at > ?
 		 LIMIT 1`,
 		tokenHashHex,
 		now,

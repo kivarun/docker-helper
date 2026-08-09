@@ -37,8 +37,7 @@ func initializeDatabase(db *sql.DB) error {
 			token_hash TEXT NOT NULL UNIQUE,
 			workspace TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL,
-			revoked_at INTEGER
+			expires_at INTEGER NOT NULL
 		);
 	`)
 	if err != nil {
