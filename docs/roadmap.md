@@ -39,12 +39,9 @@ Verified against current implementation:
 
 ### 1. Async Docker operation model
 
-Current pull/build/run execution is synchronous and ties the HTTP request lifetime
-to the Docker subprocess.
+`pull` remains synchronous in Release 1.
 
-Release 1 should move long-running Docker execution to an operation model.
-
-Required capabilities to design and implement:
+`build` and `run` use an async operation lifecycle:
 
 - start a Docker operation and receive an `operation_id`;
 - query operation status later;
@@ -55,33 +52,54 @@ Required capabilities to design and implement:
   - duration;
   - Docker output/result metadata.
 
-Do not predefine database schema in the roadmap.
+**Operation registry is in-memory.** No SQLite operation persistence in Release 1.
 
-First define the API/lifecycle contract, then choose the minimum state storage
-required.
+**Restart recovery is outside Release 1.** Running operations do not need to
+survive daemon restart. Durable/recoverable operations may be considered in
+2.0 or later if needed; this is not currently a committed 2.0 feature.
 
-### 2. Operation lifecycle contract
+### 2. Log ownership
 
-This is the next design task, not something to invent casually in this roadmap.
+- **build:** helper-owned bounded in-memory log buffer;
+- **run:** Docker-owned logs via detached container + `docker logs`.
 
-The contract must decide:
-- operation states;
-- whether pull/build/run all share the same lifecycle;
-- retention of completed operations/logs;
-- behavior after daemon restart;
-- relationship between session lifetime and operation lifetime;
-- behavior when a session is deleted while an operation is running;
-- cleanup semantics.
+### 3. Operation lifecycle
 
-Cancellation must be listed as an explicit design decision:
-- determine during operation-lifecycle design whether it is required for 1.0;
-- do not assume a cancel endpoint until the lifecycle contract is agreed.
+- minimum operation states: `running`, `succeeded`, `failed`;
+- container non-zero exit is a successfully executed `run` operation with a
+  non-zero exit code;
+- Docker/launch failure is an operation failure;
+- session expiry/deletion does not terminate an already-started operation;
+- later operation access still requires the owning valid session;
+- no `cancelled` state;
+- client-initiated cancellation remains outside Release 1 unless a concrete
+  need appears.
 
-### 3. Process lifetime hardening
+### 4. Shutdown ownership
+
+docker-helper must not intentionally leave helper-owned active operations
+running after normal daemon shutdown.
+
+Shutdown direction:
+
+- stop accepting new operations;
+- HTTP drain and operation termination share one overall shutdown deadline;
+- build CLI receives graceful cancellation, with bounded forced termination
+  fallback;
+- running run containers receive graceful Docker stop, with force removal as
+  fallback;
+- retained completed run containers are removed before registry destruction;
+- cleanup failures are logged but must not hang shutdown indefinitely.
+
+The overall graceful-shutdown budget should become a configurable configuration
+field. The current 30-second default is retained for now.
+
+### 5. Process lifetime hardening
 
 Do this after the operation model exists, because process ownership depends on it.
 
 Revisit:
+
 - request/process context ownership;
 - cancellation;
 - shutdown behavior for running Docker processes;
@@ -91,11 +109,12 @@ Revisit:
 
 Do not implement generic worker pools or schedulers without a concrete requirement.
 
-### 4. Installation / service packaging
+### 6. Installation / service packaging
 
 Finish the operator installation path.
 
 Include:
+
 - final systemd user service;
 - installation locations;
 - config/state/runtime path behavior;
@@ -104,7 +123,7 @@ Include:
 Release 1 remains user-service oriented.
 Do not expand to system-wide/root daemon deployment unless separately decided.
 
-### 5. Release build and GitHub release
+### 7. Release build and GitHub release
 
 Add minimal release automation:
 
@@ -125,7 +144,7 @@ Git tag/release tag should be the authoritative release version source.
 
 Do not introduce generated version files.
 
-### 6. Clean-install acceptance test
+### 8. Clean-install acceptance test
 
 Before 1.0, test the project as a new operator would use it:
 
@@ -169,9 +188,11 @@ Record these so they do not accidentally expand Release 1 scope:
 Keep this short.
 
 Include:
+
 - evaluate cancellation if not included in 1.0;
 - richer log streaming if polling becomes insufficient;
 - remote/server-side deployment work;
+- durable/recoverable operations across daemon restart;
 - network/proxy capability as a separate tool/project;
 - notification helper with restricted DBus access;
 - packaging improvements.
@@ -185,6 +206,7 @@ Do not design their APIs here.
 Future administrative command, exact name TBD (`db doctor` or similar).
 
 Possible scope:
+
 - database integrity diagnostics;
 - database size/statistics;
 - maintenance recommendations;
