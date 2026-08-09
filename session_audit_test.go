@@ -395,6 +395,7 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 	app.handleDeleteSession(w, req)
 
@@ -434,6 +435,7 @@ func TestSessionDeleteAuditInvalidID(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/", nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 	app.handleDeleteSession(w, req)
 
@@ -463,6 +465,7 @@ func TestSessionDeleteAuditNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 	app.handleDeleteSession(w, req)
 
@@ -511,6 +514,7 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 	app.handleDeleteSession(w, req)
 

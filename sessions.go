@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -138,7 +137,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
+	id := r.PathValue("id")
 	if id == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeAuditWithRequestID(ctx, auditRecord{

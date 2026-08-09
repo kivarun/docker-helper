@@ -5,9 +5,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+// setSessionPathValue sets the "id" path value on the request from its URL path.
+// It is needed when calling handleDeleteSession directly (without the router).
+func setSessionPathValue(r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
+	r.SetPathValue("id", id)
+}
 
 func TestHTTPCreateSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
@@ -113,6 +121,7 @@ func TestHTTPDeleteSession(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
 	app.handleDeleteSession(w, req)
@@ -127,6 +136,7 @@ func TestHTTPDeleteSessionNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
 	app.handleDeleteSession(w, req)

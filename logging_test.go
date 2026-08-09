@@ -1070,6 +1070,7 @@ func TestDeleteSessionAuditContainsRequestID(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/nonexistent-id", nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
 	handler := withRequestID(app.handleDeleteSession)

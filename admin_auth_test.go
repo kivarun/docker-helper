@@ -64,6 +64,7 @@ func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
 	app.handleDeleteSession(w, req)

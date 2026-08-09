@@ -497,6 +497,7 @@ func TestDebugRequestLogParameterizedRoute(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	req.Pattern = "DELETE /sessions/{id}"
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
 	handler := withRequestID(withLogging(app.handleDeleteSession))

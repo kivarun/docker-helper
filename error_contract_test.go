@@ -510,6 +510,7 @@ func TestErrorContractDeleteSessionNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 	app.handleDeleteSession(w, req)
 
@@ -545,6 +546,7 @@ func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
+	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 	app.handleDeleteSession(w, req)
 
