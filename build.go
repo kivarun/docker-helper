@@ -94,8 +94,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	cmd.Stderr = op.LogBuffer
 
 	// Check if shutdown terminated this operation before we could start.
-	// terminateAll sets op.terminated and closes op.done for operations
-	// whose process hasn't started yet.
+	// terminateAll sets op.terminated for operations whose process hasn't started.
 	op.mu.Lock()
 	if op.terminated {
 		op.mu.Unlock()
@@ -127,6 +126,11 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// Mark process as started so terminateAll knows it's under shutdown control.
+	op.mu.Lock()
+	op.started = true
+	op.mu.Unlock()
 
 	// Start goroutine for process completion.
 	// cmd.Stdout/stderr write directly into op.LogBuffer (no pipes needed).

@@ -40,7 +40,8 @@ type buildOperation struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	doneOnce    sync.Once // ensures op.done is closed exactly once
-	terminated  bool      // set by terminateAll when op.cmd is nil (process not yet started)
+	terminated  bool      // set by terminateAll when process not yet started
+	started     bool      // set to true only after cmd.Start() succeeds
 }
 
 func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64) *buildOperation {
@@ -180,13 +181,13 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	}
 	r.mu.RUnlock()
 
-	// Phase 0: Mark operations that haven't started a process yet.
+	// Phase 0: Mark operations whose process has not started yet.
 	// These are operations registered before shutdown but whose cmd.Start()
 	// hasn't been called. Setting terminated prevents handleBuild from
 	// starting the process after shutdown has passed.
 	for _, op := range ops {
 		op.mu.Lock()
-		if op.cmd == nil {
+		if !op.started {
 			op.terminated = true
 		}
 		op.mu.Unlock()
