@@ -218,11 +218,8 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		if err := json.Unmarshal(v, &s); err != nil {
 			return fmt.Errorf("allowed_root must be a JSON string")
 		}
-		if s == "" {
-			return fmt.Errorf("allowed_root must be a non-empty absolute path")
-		}
-		if !filepath.IsAbs(s) {
-			return fmt.Errorf("allowed_root must be a non-empty absolute path")
+		if err := validateAllowedRootValue(s); err != nil {
+			return err
 		}
 	} else {
 		return fmt.Errorf("allowed_root is required")
@@ -234,12 +231,8 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		if err := json.Unmarshal(v, &s); err != nil {
 			return fmt.Errorf("session_ttl must be a JSON string")
 		}
-		d, err := time.ParseDuration(s)
-		if err != nil {
-			return fmt.Errorf("cannot parse session_ttl %q: %w", s, err)
-		}
-		if d <= 0 {
-			return fmt.Errorf("session_ttl must be a positive duration")
+		if _, err := parseSessionTTL(s); err != nil {
+			return err
 		}
 	} else {
 		return fmt.Errorf("session_ttl is required")

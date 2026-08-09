@@ -139,19 +139,13 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
 	}
 
-	if fc.AllowedRoot == "" {
-		return nil, fmt.Errorf("allowed_root must be a non-empty absolute path")
-	}
-	if !filepath.IsAbs(fc.AllowedRoot) {
-		return nil, fmt.Errorf("allowed_root must be a non-empty absolute path")
+	if err := validateAllowedRootValue(fc.AllowedRoot); err != nil {
+		return nil, err
 	}
 
-	ttl, err := time.ParseDuration(fc.SessionTTL)
+	ttl, err := parseSessionTTL(fc.SessionTTL)
 	if err != nil {
-		return nil, fmt.Errorf("cannot parse session_ttl %q: %w", fc.SessionTTL, err)
-	}
-	if ttl <= 0 {
-		return nil, fmt.Errorf("session_ttl must be a positive duration")
+		return nil, err
 	}
 
 	level := slog.LevelInfo
@@ -200,6 +194,31 @@ func resolveAuditEnabled(cfg *bool, level slog.Level) bool {
 		return *cfg
 	}
 	return level == slog.LevelDebug
+}
+
+// validateAllowedRootValue validates that the parsed allowed_root value
+// is non-empty and an absolute path.
+func validateAllowedRootValue(s string) error {
+	if s == "" {
+		return fmt.Errorf("allowed_root must be a non-empty absolute path")
+	}
+	if !filepath.IsAbs(s) {
+		return fmt.Errorf("allowed_root must be a non-empty absolute path")
+	}
+	return nil
+}
+
+// parseSessionTTL parses and validates the session_ttl value.
+// It returns an error if the value is not a valid positive duration.
+func parseSessionTTL(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("cannot parse session_ttl %q: %w", s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("session_ttl must be a positive duration")
+	}
+	return d, nil
 }
 
 func generateToken() (string, error) {
