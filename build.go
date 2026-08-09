@@ -87,20 +87,19 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	cmdCtx, cancel := context.WithCancel(context.Background())
 
-	cmd := a.newBuildCmd(cmdCtx, "docker", args...)
+	cmd := a.newOperationCmd(cmdCtx, "docker", args...)
 
-	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
-	// boundedBuffer implements io.Writer, so this works without pipes.
-	cmd.Stdout = op.LogBuffer
-	cmd.Stderr = op.LogBuffer
+	result := startOperationProcess(cmd, op, cancel, nil, func(err error) {
+		msg := fmt.Sprintf("cannot start build: %v", err)
+		op.fail("docker_build_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
+	})
 
-	// Start the process under op.mu so terminateAll can synchronize:
-	// either we start the process (started=true), or terminateAll marks
-	// it as terminated. There is no intermediate state.
-	op.mu.Lock()
-	if op.terminated {
-		op.mu.Unlock()
-		cancel()
+	if result.Terminated {
 		msg := "build cancelled: daemon is shutting down"
 		op.fail("docker_build_failed", msg, nil)
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -110,33 +109,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	startTime := time.Now()
-	op.StartedAt = &startTime
-	op.cmd = cmd
-
-	// cmd.Start() is called while holding op.mu so terminateAll cannot
-	// race between checking started and setting terminated.
-	err = cmd.Start()
-	op.started = err == nil
-	op.mu.Unlock()
-
-	if err != nil {
-		cancel()
-		msg := fmt.Sprintf("cannot start build: %v", err)
-		op.fail("docker_build_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
+	if !result.Started {
 		return
 	}
 
 	// Start goroutine for process completion.
-	// cmd.Stdout/stderr write directly into op.LogBuffer (no pipes needed).
 	go func() {
 		defer cancel()
-		a.waitBuildCompletion(op, startTime)
+		a.waitBuildCompletion(op, *op.StartedAt)
 	}()
 
 	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -146,14 +126,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// newBuildCmd creates a new exec.Cmd for build operations.
-// It uses ExecCommandContext if set (test seam), otherwise default.
+// newBuildCmd is an alias for newOperationCmd for build operations.
 func (a *App) newBuildCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
-	if a.ExecCommandContext != nil {
-		return a.ExecCommandContext(ctx, name, args...)
-	}
-	cmd := exec.CommandContext(ctx, name, args...)
-	return cmd
+	return a.newOperationCmd(ctx, name, args...)
 }
 
 // waitBuildCompletion waits for the build process to finish and transitions

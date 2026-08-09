@@ -423,3 +423,59 @@ func (op *operation) fail(resultCode, message string, exitCode *int, duration ..
 func (op *operation) Wait() {
 	<-op.done
 }
+
+// operationStartResult is returned by startOperationProcess.
+type operationStartResult struct {
+	Err        error // error from cmd.Start(), nil if successful
+	Started    bool  // true if cmd.Start() succeeded
+	Terminated bool  // true if operation was already terminated before start
+}
+
+// startOperationProcess is a shared helper for starting operation processes
+// (build/run). It assigns stdout/stderr to op.LogBuffer, performs synchronized
+// start under op.mu, and returns the result so the caller can handle
+// build/run-specific cleanup and completion logic.
+//
+// The caller must:
+// - set cmd.Stdout/Stderr to op.LogBuffer before calling
+// - handle start failure (Err != nil) with operation-specific result codes
+// - handle pre-start termination (Terminated == true) with operation-specific cleanup
+// - start the completion goroutine with operation-specific completion handler
+func startOperationProcess(cmd *exec.Cmd, op *operation, cancel context.CancelFunc, onTerminated func(), onStartFailure func(error)) operationStartResult {
+	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
+	cmd.Stdout = op.LogBuffer
+	cmd.Stderr = op.LogBuffer
+
+	// Start the process under op.mu so terminateAll can synchronize:
+	// either we start the process (started=true), or terminateAll marks
+	// it as terminated. There is no intermediate state.
+	op.mu.Lock()
+	if op.terminated {
+		op.mu.Unlock()
+		cancel()
+		if onTerminated != nil {
+			onTerminated()
+		}
+		return operationStartResult{Terminated: true}
+	}
+	startTime := time.Now()
+	op.StartedAt = &startTime
+	op.cmd = cmd
+
+	// cmd.Start() is called while holding op.mu so terminateAll cannot
+	// race between checking started and setting terminated.
+	err := cmd.Start()
+	started := err == nil
+	op.started = started
+	op.mu.Unlock()
+
+	if err != nil {
+		cancel()
+		if onStartFailure != nil {
+			onStartFailure(err)
+		}
+		return operationStartResult{Err: err, Started: false}
+	}
+
+	return operationStartResult{Started: true}
+}

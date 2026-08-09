@@ -322,18 +322,20 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	cmd := a.newRunCmd(cmdCtx, "docker", args...)
 
-	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
-	cmd.Stdout = op.LogBuffer
-	cmd.Stderr = op.LogBuffer
-
-	// Start the process under op.mu so terminateAll can synchronize:
-	// either we start the process (started=true), or terminateAll marks
-	// it as terminated. There is no intermediate state.
-	op.mu.Lock()
-	if op.terminated {
-		op.mu.Unlock()
-		cancel()
+	result := startOperationProcess(cmd, op, cancel, func() {
 		cleanupCidfile(op)
+	}, func(err error) {
+		cleanupCidfile(op)
+		msg := fmt.Sprintf("cannot start run: %v", err)
+		op.fail("docker_run_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
+	})
+
+	if result.Terminated {
 		msg := "run cancelled: daemon is shutting down"
 		op.fail("docker_run_failed", msg, nil)
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -343,33 +345,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	startTime := time.Now()
-	op.StartedAt = &startTime
-	op.cmd = cmd
-
-	// cmd.Start() is called while holding op.mu so terminateAll cannot
-	// race between checking started and setting terminated.
-	err := cmd.Start()
-	op.started = err == nil
-	op.mu.Unlock()
-
-	if err != nil {
-		cancel()
-		cleanupCidfile(op)
-		msg := fmt.Sprintf("cannot start run: %v", err)
-		op.fail("docker_run_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
+	if !result.Started {
 		return
 	}
 
 	// Start goroutine for process completion.
 	go func() {
 		defer cancel()
-		a.waitRunCompletion(op, startTime)
+		a.waitRunCompletion(op, *op.StartedAt)
 	}()
 
 	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -379,14 +362,19 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// newRunCmd creates a new exec.Cmd for run operations.
+// newOperationCmd creates a new exec.Cmd for operation processes.
 // It uses ExecCommandContext if set (test seam), otherwise default.
-func (a *App) newRunCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+func (a *App) newOperationCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 	if a.ExecCommandContext != nil {
 		return a.ExecCommandContext(ctx, name, args...)
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd
+}
+
+// newRunCmd is an alias for newOperationCmd for run operations.
+func (a *App) newRunCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return a.newOperationCmd(ctx, name, args...)
 }
 
 // waitRunCompletion waits for the run process to finish and transitions
