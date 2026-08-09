@@ -97,6 +97,17 @@ func validateNoReservedFields(data []byte) error {
 	return nil
 }
 
+// validateNoDeprecatedRawFields checks that no deprecated field appears in the raw config map.
+// It returns an error with a clear rename diagnostic.
+func validateNoDeprecatedRawFields(raw map[string]json.RawMessage) error {
+	for old, newField := range deprecatedConfigFields {
+		if _, ok := raw[old]; ok {
+			return fmt.Errorf("%s was renamed to %s", old, newField)
+		}
+	}
+	return nil
+}
+
 // validateNoDeprecatedFields checks that no deprecated field appears in the config JSON.
 // It returns an error with a clear rename diagnostic.
 func validateNoDeprecatedFields(data []byte) error {
@@ -104,12 +115,7 @@ func validateNoDeprecatedFields(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("cannot parse config: %w", err)
 	}
-	for field, newField := range deprecatedConfigFields {
-		if _, ok := raw[field]; ok {
-			return fmt.Errorf("%s was renamed to %s", field, newField)
-		}
-	}
-	return nil
+	return validateNoDeprecatedRawFields(raw)
 }
 
 func getConfigPath() string {

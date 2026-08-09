@@ -65,16 +65,6 @@ func isKnownField(name string) bool {
 	return false
 }
 
-// isDeprecatedField returns true if the field is a known deprecated config key.
-func isDeprecatedField(name string) bool {
-	for old := range deprecatedConfigFields {
-		if old == name {
-			return true
-		}
-	}
-	return false
-}
-
 // deprecatedFieldMessage returns the rename diagnostic for a deprecated field.
 func deprecatedFieldMessage(name string) string {
 	if newField, ok := deprecatedConfigFields[name]; ok {
@@ -256,8 +246,8 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 	}
 
 	// Reject deprecated config keys with a clear rename diagnostic.
-	if _, ok := raw["build_log_max_bytes"]; ok {
-		return fmt.Errorf("build_log_max_bytes was renamed to operation_log_max_bytes")
+	if err := validateNoDeprecatedRawFields(raw); err != nil {
+		return err
 	}
 
 	// Validate allowed_root: must exist as a non-empty absolute string.
@@ -461,8 +451,8 @@ func configShowAll(stdout, stderr io.Writer) int {
 }
 
 func configShowField(field string, stdout, stderr io.Writer) int {
-	if isDeprecatedField(field) {
-		fmt.Fprint(stderr, deprecatedFieldMessage(field))
+	if msg := deprecatedFieldMessage(field); msg != "" {
+		fmt.Fprint(stderr, msg)
 		return 2
 	}
 	if !isKnownField(field) {
@@ -604,8 +594,8 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 }
 
 func configSet(field, value string, stdout, stderr io.Writer) int {
-	if isDeprecatedField(field) {
-		fmt.Fprint(stderr, deprecatedFieldMessage(field))
+	if msg := deprecatedFieldMessage(field); msg != "" {
+		fmt.Fprint(stderr, msg)
 		return 2
 	}
 	if !isKnownField(field) {
@@ -734,8 +724,8 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 }
 
 func configUnset(field string, stdout, stderr io.Writer) int {
-	if isDeprecatedField(field) {
-		fmt.Fprint(stderr, deprecatedFieldMessage(field))
+	if msg := deprecatedFieldMessage(field); msg != "" {
+		fmt.Fprint(stderr, msg)
 		return 2
 	}
 	if !isKnownField(field) {
