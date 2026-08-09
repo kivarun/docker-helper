@@ -287,58 +287,6 @@ func TestPullImageRequired(t *testing.T) {
 	}
 }
 
-func TestPullImageInvalidName(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
-	}
-
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
-	}
-
-	reqBody := map[string]string{"image": "invalid image with spaces"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
-func TestPullImageNoTag(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
-	}
-
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
-	}
-
-	reqBody := map[string]string{"image": "alpine"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
 func TestPullInvalidJSON(t *testing.T) {
 	app := newTestAppWithAuth(t)
 

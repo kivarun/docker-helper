@@ -7,12 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
-
-var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`)
 
 var ErrInternal = errors.New("internal error")
 
@@ -128,10 +125,6 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 
 	if filepath.IsAbs(req.Dockerfile) {
 		return "", "", errors.New("dockerfile must be relative to context")
-	}
-
-	if !imagePattern.MatchString(req.Image) {
-		return "", "", errors.New("invalid image name or tag")
 	}
 
 	var err error

@@ -30,11 +30,6 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !imagePattern.MatchString(req.Image) {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
-		return
-	}
-
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:     "pull.start",
 		SessionID: session.ID,

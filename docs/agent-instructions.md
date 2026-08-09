@@ -111,7 +111,7 @@ curl --silent --show-error \
 
 Supported fields:
 
-* `image` — image name and tag.
+* `image` — image reference.
 * `entrypoint` — optional entrypoint string.
 * `command` — optional array of command arguments.
 * `workdir` — optional absolute path inside the new container.

@@ -136,11 +136,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !imagePattern.MatchString(req.Image) {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "invalid image name or tag")
-		return
-	}
-
 	if req.Workdir != "" {
 		if !filepath.IsAbs(req.Workdir) {
 			writeError(ctx, w, http.StatusBadRequest, "invalid_workdir", "workdir must be an absolute path")

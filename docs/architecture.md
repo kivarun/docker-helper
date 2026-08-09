@@ -405,7 +405,7 @@ Docker invocation
 ```
 
 Authentication validates the session token and returns the session.
-Request validation checks required fields, image name format, and
+Request validation checks required fields and
 dockerfile relativity. Canonical path resolution resolves the workspace
 and context through `EvalSymlinks`. Boundary validation ensures the
 context and dockerfile are inside the workspace and context respectively.
@@ -416,7 +416,6 @@ Validation details:
 - context may be relative (joined with workspace) or absolute (must be
   inside workspace);
 - dockerfile must be relative to context;
-- image name must match `^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`;
 - all paths are resolved through `EvalSymlinks` before `isInside` checks.
 
 ## Run pipeline
@@ -436,7 +435,7 @@ Docker invocation
 ```
 
 Authentication validates the session token. Request validation checks
-the image name. Workdir validation ensures the value is an absolute path
+that the image field is non-empty. Workdir validation ensures the value is an absolute path
 if provided. Environment validation ensures variable names match
 `^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
 against the workspace and checks for duplicate targets. Docker invocation
@@ -463,9 +462,14 @@ Docker invocation
 ```
 
 Authentication validates the session token. Request validation checks
-that the image name is present and matches
-`^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`. Docker invocation runs
-`docker pull` with the image name.
+that the image field is non-empty. Docker invocation runs
+`docker pull` with the image reference.
+
+Image reference syntax is delegated to Docker. The helper does not
+reimplement the Docker reference grammar; it only checks that the image
+field is non-empty. Docker CLI validates the reference when the command
+executes. If Docker rejects the reference, the endpoint returns its
+standard Docker failure response.
 
 ## Health endpoint
 
@@ -531,7 +535,7 @@ Current error codes:
 |------|----------|-----------|
 | `unauthorized` | all protected | missing/invalid token |
 | `invalid_build_context` | `POST /build` | context validation failure |
-| `invalid_image` | `POST /build`, `POST /run`, `POST /pull` | image name empty or invalid format |
+| `invalid_image` | `POST /build`, `POST /run`, `POST /pull` | image name is empty |
 | `invalid_mount` | `POST /run` | mount validation failure |
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
@@ -676,7 +680,7 @@ Emitted before a Docker build begins.
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
-| `image` | string | target image name with tag |
+| `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
 
@@ -689,7 +693,7 @@ Emitted after a Docker build completes (success or failure).
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
-| `image` | string | target image name with tag |
+| `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
 | `result` | string | `success` or `build_error` |
@@ -747,7 +751,7 @@ Emitted before a container starts.
 |-------|------|-------------|
 | `session_id` | string | session identifier |
 | `request_id` | string | request correlation ID |
-| `image` | string | container image name with tag |
+| `image` | string | container image reference |
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set; values are never logged) |
@@ -770,7 +774,7 @@ Emitted after a container run attempt completes.
 |-------|------|-------------|
 | `session_id` | string | session identifier |
 | `request_id` | string | request correlation ID |
-| `image` | string | container image name with tag |
+| `image` | string | container image reference |
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set) |
@@ -814,7 +818,7 @@ Emitted before a Docker pull begins.
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
-| `image` | string | image name with tag |
+| `image` | string | image reference |
 
 No `result` or `duration` field.
 
@@ -825,7 +829,7 @@ Emitted after a Docker pull completes (success or failure).
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
-| `image` | string | image name with tag |
+| `image` | string | image reference |
 | `result` | string | `success` or `pull_error` |
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | pull wall-clock time |

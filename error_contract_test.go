@@ -144,32 +144,6 @@ func TestErrorContractInvalidImage_PullEmpty(t *testing.T) {
 	}
 }
 
-func TestErrorContractInvalidImage_PullBadFormat(t *testing.T) {
-	app := newTestAppWithAuth(t)
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	reqBody, _ := json.Marshal(map[string]string{"image": "bad image!"})
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
-	}
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Code != "invalid_image" {
-		t.Errorf("expected code 'invalid_image', got %q", resp.Code)
-	}
-}
-
 func TestErrorContractInvalidImage_RunEmpty(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -722,26 +696,6 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 			}(),
 		},
 		{
-			name:    "invalid_image_run",
-			handler: func(w http.ResponseWriter, r *http.Request) { app.handleRun(w, r) },
-			req: func() *http.Request {
-				b, _ := json.Marshal(map[string]string{"image": ""})
-				r := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(b))
-				r.Header.Set("Authorization", "Bearer "+result.Token)
-				return r
-			}(),
-		},
-		{
-			name:    "invalid_image_pull",
-			handler: func(w http.ResponseWriter, r *http.Request) { app.handlePull(w, r) },
-			req: func() *http.Request {
-				b, _ := json.Marshal(map[string]string{"image": ""})
-				r := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(b))
-				r.Header.Set("Authorization", "Bearer "+result.Token)
-				return r
-			}(),
-		},
-		{
 			name:    "invalid_environment",
 			handler: func(w http.ResponseWriter, r *http.Request) { app.handleRun(w, r) },
 			req: func() *http.Request {
@@ -803,6 +757,184 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 }
 
 // ---------- Docker error logging ----------
+
+func TestImageReferenceNotRejectedByHelper_RegistryPort(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
+	defer logging.reset()
+
+	app := newTestAppWithAuth(t)
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// This image reference should pass through helper validation.
+	// Docker CLI is mocked to avoid requiring a real daemon.
+	reqBody, _ := json.Marshal(map[string]string{"image": "registry.example.com:5000/team/image:tag"})
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+
+	var stdout bytes.Buffer
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			t.Fatalf("unexpected command: %s", name)
+		}
+		// Verify the image argument is passed through unchanged.
+		for i, arg := range args {
+			if arg == "registry.example.com:5000/team/image:tag" {
+				stdout.WriteString("Pulled registry.example.com:5000/team/image:tag\n")
+				return stdout.Bytes(), nil
+			}
+			if i == 0 && arg == "pull" {
+				continue
+			}
+		}
+		t.Fatalf("image argument not found in args: %v", args)
+		return nil, nil
+	}
+
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestImageReferenceNotRejectedByHelper_Digest(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
+	defer logging.reset()
+
+	app := newTestAppWithAuth(t)
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Digest references should pass through helper validation.
+	reqBody, _ := json.Marshal(map[string]string{"image": "alpine@sha256:abc123def456"})
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+
+	var stdout bytes.Buffer
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			t.Fatalf("unexpected command: %s", name)
+		}
+		for i, arg := range args {
+			if arg == "alpine@sha256:abc123def456" {
+				stdout.WriteString("Pulled alpine@sha256:abc123def456\n")
+				return stdout.Bytes(), nil
+			}
+			if i == 0 && arg == "pull" {
+				continue
+			}
+		}
+		t.Fatalf("image argument not found in args: %v", args)
+		return nil, nil
+	}
+
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestImageReferenceNotRejectedByHelper_Untagged(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
+	defer logging.reset()
+
+	app := newTestAppWithAuth(t)
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Untagged references should pass through helper validation.
+	reqBody, _ := json.Marshal(map[string]string{"image": "alpine"})
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+
+	var stdout bytes.Buffer
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			t.Fatalf("unexpected command: %s", name)
+		}
+		for i, arg := range args {
+			if arg == "alpine" {
+				stdout.WriteString("Pulled alpine\n")
+				return stdout.Bytes(), nil
+			}
+			if i == 0 && arg == "pull" {
+				continue
+			}
+		}
+		t.Fatalf("image argument not found in args: %v", args)
+		return nil, nil
+	}
+
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestImageReferenceNotRejectedByHelper_LocalhostPort(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
+	defer logging.reset()
+
+	app := newTestAppWithAuth(t)
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Localhost with port should pass through helper validation.
+	reqBody, _ := json.Marshal(map[string]string{"image": "localhost:5000/image:tag"})
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+
+	var stdout bytes.Buffer
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+		if name != "docker" {
+			t.Fatalf("unexpected command: %s", name)
+		}
+		for i, arg := range args {
+			if arg == "localhost:5000/image:tag" {
+				stdout.WriteString("Pulled localhost:5000/image:tag\n")
+				return stdout.Bytes(), nil
+			}
+			if i == 0 && arg == "pull" {
+				continue
+			}
+		}
+		t.Fatalf("image argument not found in args: %v", args)
+		return nil, nil
+	}
+
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
 
 func TestDockerErrorLogBuild(t *testing.T) {
 	auditBuf := new(bytes.Buffer)
