@@ -336,15 +336,15 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-defaultConfig := fileConfig{
-		AllowedRoot:           allowedRoot,
-		SessionTTL:            "12h",
-		Level:                 "info",
-		ShutdownTimeout:       "30s",
-		OperationRetentionTTL: "10m",
-		OperationMaxCompleted: ptrOf(200),
-		OperationLogMaxBytes:  ptrOf(int64(4 * 1024 * 1024)),
-	}
+		defaultConfig := fileConfig{
+			AllowedRoot:           allowedRoot,
+			SessionTTL:            "12h",
+			Level:                 "info",
+			ShutdownTimeout:       "30s",
+			OperationRetentionTTL: "10m",
+			OperationMaxCompleted: ptrOf(200),
+			OperationLogMaxBytes:  ptrOf(int64(4 * 1024 * 1024)),
+		}
 
 		data, err := json.MarshalIndent(defaultConfig, "", "  ")
 		if err != nil {

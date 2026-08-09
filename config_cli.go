@@ -447,7 +447,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"shutdown_timeout":        fc.ShutdownTimeout,
 		"operation_retention_ttl": fc.OperationRetentionTTL,
 		"operation_max_completed": fc.OperationMaxCompleted,
-		"operation_log_max_bytes":     fc.OperationLogMaxBytes,
+		"operation_log_max_bytes": fc.OperationLogMaxBytes,
 	}
 
 	enc := json.NewEncoder(stdout)
