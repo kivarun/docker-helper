@@ -19,7 +19,10 @@ func TestServeErrorPathTerminatesOperations(t *testing.T) {
 
 	// Create a running operation that hasn't started a process yet.
 	op := newBuildOperation("test_session", "example:test", ".", "Dockerfile", 1024)
-	reg.create(op)
+	// Use tryCreate to register (gate is open, so it succeeds).
+	if !reg.tryCreate(op) {
+		t.Fatal("tryCreate should succeed when gate is open")
+	}
 	// op.started is false by default — simulate pre-start state.
 
 	// Create a server and listener.

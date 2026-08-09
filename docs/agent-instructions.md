@@ -72,6 +72,9 @@ curl --silent --show-error \
 
 ### Build
 
+`POST /build` starts an asynchronous Docker build and returns immediately.
+The build runs in the background.
+
 ```bash
 curl --silent --show-error \
   --unix-socket /run/docker-helper/docker-helper.sock \
@@ -86,6 +89,42 @@ curl --silent --show-error \
 * `dockerfile` must be relative to `context`.
 * Do not pass agent-container paths such as `/workspace/...` as build-context
   paths.
+
+**Build is asynchronous.** The response is HTTP 201 with an `operation_id`:
+
+```json
+{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
+```
+
+HTTP 201 does not mean the build finished. You must poll for completion.
+
+**Poll status** until `status` is `succeeded` or `failed`:
+
+```bash
+curl --silent --show-error \
+  --unix-socket /run/docker-helper/docker-helper.sock \
+  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  http://localhost/operations/op_abcdef1234567890
+```
+
+**Read incremental logs** using the `offset` parameter:
+
+```bash
+curl --silent --show-error \
+  --unix-socket /run/docker-helper/docker-helper.sock \
+  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
+```
+
+The logs response includes `next_offset` — use it as the `offset` for the
+next request. When `truncated` is `true`, older log data was evicted by
+the bounded retention limit.
+
+**Do not** start `/run` with the new image until the build status is
+`succeeded`. If the status is `failed`, inspect `result_code`, `exit_code`
+and the logs to diagnose the problem.
+
+Do not fall back to invoking Docker directly if the build fails.
 
 ### Run
 
@@ -163,23 +202,32 @@ Inspect both the HTTP status and the JSON response body. If you need the HTTP
 status code, obtain it explicitly with `curl --write-out "%{http_code}"` — do
 not infer it from the response body or curl's exit code.
 
-Four categories of responses:
+**POST /build (async)**
 
-**1. Success** — HTTP 200, `ok: true`.
+| HTTP | `ok` | `code` | Meaning |
+|------|------|--------|---------|
+| 201 | true | — | Build accepted; poll `/operations/{id}` |
+| 400 | false | `invalid_build_context` | Validation failed |
+| 401 | false | — | Missing or invalid session token |
+| 503 | false | `shutting_down` | Daemon is shutting down |
 
-**2. Validation error** — HTTP 400, `ok: false`, `code` describes the invalid
-input (for example `invalid_image`, `invalid_build_context`, `invalid_mount`,
-`invalid_workdir`). The request was rejected before the Docker operation was
-started.
+After 201, poll `GET /operations/{id}`:
 
-**3. Docker execution error** — HTTP 500, `ok: false`, `code` is
-`docker_pull_failed`, `docker_build_failed`, or `docker_run_failed`. The
-request passed helper validation, but the Docker operation failed.
+| `status` | Meaning |
+|----------|---------|
+| `running` | Build in progress; continue polling |
+| `succeeded` | Build complete; image is ready |
+| `failed` | Build failed; check `result_code`, `exit_code`, logs |
 
-**4. Container process failure** — HTTP 200, `ok: false`, `code` is
-`container_exit_nonzero`, `exit_code` contains the process exit code. The
-container started successfully but the process inside exited with a non-zero
-code. This is a container-process failure, not a Docker Helper transport failure.
+**POST /pull and POST /run (synchronous)**
+
+| HTTP | `ok` | `code` | Meaning |
+|------|------|--------|---------|
+| 200 | true | — | Success |
+| 400 | false | validation error | Request validation failed |
+| 401 | false | — | Missing or invalid session token |
+| 500 | false | `docker_pull_failed`, `docker_build_failed`, `docker_run_failed` | Docker operation failed |
+| 200 | false | `container_exit_nonzero` | Container exited with non-zero status |
 
 Do not retry failed helper operations by invoking Docker directly. Report the
 helper error and its response when it prevents completion of the task.

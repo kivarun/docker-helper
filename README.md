@@ -155,6 +155,10 @@ Configuration fields:
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
 | `audit_enabled` | boolean | Override audit behavior (default: derived from `log_level`) |
+| `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `30s`) |
+| `operation_retention_ttl` | duration | How long completed operations are kept (default: `1h`) |
+| `operation_max_completed` | int | Max completed operations retained in memory (default: `100`) |
+| `build_log_max_bytes` | int | Max bytes retained per build log (bounded buffer, default: `1048576`) |
 
 Only `log_level` and `audit_enabled` may be unset to restore defaults.
 
@@ -180,6 +184,10 @@ The following fields are applied at runtime:
 - `session_ttl`
 - `log_level`
 - `audit_enabled`
+- `shutdown_timeout`
+- `operation_retention_ttl`
+- `operation_max_completed`
+- `build_log_max_bytes`
 
 Runtime paths (socket, database, state) are not changed by reload.
 
@@ -312,6 +320,9 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 
 ### Build
 
+`POST /build` starts an asynchronous Docker build and returns immediately
+with an `operation_id`. The build runs in the background.
+
 ```bash
 curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -H "Content-Type: application/json" \
@@ -319,6 +330,32 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:v1"}' \
   http://localhost/build
 ```
+
+Response (HTTP 201):
+
+```json
+{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
+```
+
+**Poll status** until `status` is `succeeded` or `failed`:
+
+```bash
+curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  http://localhost/operations/op_abcdef1234567890
+```
+
+**Read incremental logs** using the `offset` parameter:
+
+```bash
+curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
+```
+
+The logs response includes `next_offset` (use it as the `offset` for the
+next request) and `truncated` (true when older log data was evicted by
+the bounded retention limit, `build_log_max_bytes`).
 
 ### Run
 
@@ -378,8 +415,8 @@ Note: `docker-helper config show` (without a field) displays
 - docker-helper is a highly trusted component because it has access to
   the Docker daemon, so a validation or command-construction bug may
   compromise the host.
-- Operations currently have no execution timeout, output-size limit, or
-  concurrency limit.
+- Build logs are bounded by `build_log_max_bytes`; older output is
+  evicted when the limit is reached.
 - Detached containers, custom networks, named volumes, and resource
   controls are not supported.
 
