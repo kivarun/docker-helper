@@ -669,7 +669,7 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, _, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+		_, _, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
 		serveDone <- serveDoneErr
 	}()
 
@@ -700,7 +700,7 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- runWithLock(lockPath, socketPath, func(listener net.Listener) error {
-			_, _, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+			_, _, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
 			return err
 		})
 	}()
@@ -740,7 +740,7 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, _, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+		_, _, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
 		serveDone <- serveDoneErr
 	}()
 
@@ -786,7 +786,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 		defer close(serverDone)
 		serverErr = runWithLock(lockPath, socketPath, func(listener net.Listener) error {
 			close(listenerReady)
-			_, _, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+			_, _, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
 			return err
 		})
 	}()
@@ -954,7 +954,7 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 
 	go func() {
 		defer close(serverDone)
-		_, _, serverErr = serveWithShutdown(signalCtx, server, listener, shutdownTimeout)
+		_, _, serverErr = serveWithShutdown(signalCtx, server, listener, shutdownTimeout, nil)
 	}()
 
 	// Create HTTP client that dials the Unix socket.

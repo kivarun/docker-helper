@@ -175,9 +175,9 @@ func runWithLock(lockPath, socketPath string, fn func(net.Listener) error) error
 
 // serveWithShutdown runs server.Serve(listener) in a background goroutine and
 // waits for either signalCtx cancellation (graceful shutdown) or a Serve error.
-// On signalCtx cancellation it creates a shutdown context with the given timeout
-// and calls server.Shutdown. If Shutdown exceeds the timeout, server.Close is
-// called and an error returned.
+// On signalCtx cancellation it invokes onSignal (if non-nil), creates a shutdown
+// context with the given timeout, and calls server.Shutdown. If Shutdown exceeds
+// the timeout, server.Close is called and an error returned.
 // Returns the shutdown context and its cancel func so the caller can reuse the
 // same absolute deadline for subsequent cleanup (e.g., operation termination).
 // The callback in runWithLock must not return until Shutdown completes so the
@@ -187,6 +187,7 @@ func serveWithShutdown(
 	server *http.Server,
 	listener net.Listener,
 	timeout time.Duration,
+	onSignal func(),
 ) (shutdownCtx context.Context, shutdownCancel func(), err error) {
 	serveDone := make(chan error, 1)
 	go func() {
@@ -195,6 +196,9 @@ func serveWithShutdown(
 
 	select {
 	case <-signalCtx.Done():
+		if onSignal != nil {
+			onSignal()
+		}
 		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
 
 		shutdownErr := server.Shutdown(shutdownCtx)
@@ -294,14 +298,12 @@ func runServe(stdout, stderr io.Writer) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		// Mark registry as shutting down immediately when signal arrives,
-		// before HTTP drain starts. This prevents new builds from being
-		// accepted during the entire shutdown sequence.
-		if app.OperationRegistry != nil {
-			app.OperationRegistry.setShuttingDown()
-		}
-
-		shutdownCtx, shutdownCancel, err := serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout)
+		shutdownCtx, shutdownCancel, err := serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout, func() {
+			// Signal received — close the operation gate before HTTP drain starts.
+			if app.OperationRegistry != nil {
+				app.OperationRegistry.setShuttingDown()
+			}
+		})
 
 		// Terminate running operations with the same absolute deadline used
 		// by HTTP drain. Time already spent in serveWithShutdown is naturally
