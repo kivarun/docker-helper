@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -744,9 +745,11 @@ func TestShutdownDoesNotProduceCancelledResultRun(t *testing.T) {
 	}
 }
 
-// TestCancelVsShutdownRace proves that the first termination reason wins
-// and is not overwritten by a concurrent shutdown.
-func TestCancelVsShutdownRace(t *testing.T) {
+// TestTerminationReasonOwnershipCancelFirst proves that when explicit cancel
+// sets the reason first, a subsequent shutdown attempt cannot overwrite it.
+// Uses a synchronization channel to deterministically control ordering:
+// terminateOne acquires op.mu and sets reason, then terminateAll runs.
+func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
@@ -755,53 +758,93 @@ func TestCancelVsShutdownRace(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024)
+	app.OperationRegistry.mu.Lock()
+	app.OperationRegistry.ops[op.ID] = op
+	app.OperationRegistry.mu.Unlock()
+
+	// Barrier: terminateAll waits until terminateOne has completed.
+	cancelDone := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Goroutine 1: explicit cancel (runs first).
+	go func() {
+		defer wg.Done()
+		_ = app.OperationRegistry.terminateOne(op.ID, app.killContainerBestEffort)
+		close(cancelDone)
+	}()
+
+	// Goroutine 2: shutdown (waits for cancel to finish).
+	go func() {
+		defer wg.Done()
+		<-cancelDone
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+	}()
+
+	wg.Wait()
+
+	// Verify: reason must still be cancelled, not overwritten by shutdown.
+	op.mu.Lock()
+	reason := op.reason
+	op.mu.Unlock()
+
+	if reason != terminationCancelled {
+		t.Errorf("reason = %d, want %d (terminationCancelled)", reason, terminationCancelled)
+	}
+}
+
+// TestTerminationReasonOwnershipShutdownFirst proves that when shutdown
+// sets the reason first, a subsequent explicit cancel cannot overwrite it.
+// Uses a synchronization channel to deterministically control ordering:
+// terminateAll acquires op.mu and sets reason, then terminateOne runs.
+func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "300")
-	}
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024)
+	app.OperationRegistry.mu.Lock()
+	app.OperationRegistry.ops[op.ID] = op
+	app.OperationRegistry.mu.Unlock()
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
+	// Barrier: terminateOne waits until terminateAll has completed.
+	shutdownDone := make(chan struct{})
 
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	op := app.OperationRegistry.get(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
+	// Goroutine 1: shutdown (runs first).
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+		close(shutdownDone)
+	}()
 
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
-		op.mu.Lock()
-		proc := op.cmd
-		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Goroutine 2: explicit cancel (waits for shutdown to finish).
+	go func() {
+		defer wg.Done()
+		<-shutdownDone
+		_ = app.OperationRegistry.terminateOne(op.ID, app.killContainerBestEffort)
+	}()
 
-	// Start explicit cancel.
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
-	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
-	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	wg.Wait()
 
-	// Verify the result IS cancelled.
-	var cancelResp map[string]any
-	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
-	if cancelResp["result_code"] != "cancelled" {
-		t.Errorf("expected result_code 'cancelled', got %v", cancelResp["result_code"])
+	// Verify: reason must still be shutdown, not overwritten by cancel.
+	op.mu.Lock()
+	reason := op.reason
+	op.mu.Unlock()
+
+	if reason != terminationShutdown {
+		t.Errorf("reason = %d, want %d (terminationShutdown)", reason, terminationShutdown)
 	}
 }
