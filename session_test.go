@@ -451,7 +451,7 @@ func TestSessionTableWithHistoricalRevokedAtColumn(t *testing.T) {
 	_, err = db.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)
 		 VALUES (?, ?, ?, ?, ?, NULL)`,
-		"dhs_old", "hash_old", dir, now, now+3600, nil,
+		"dhs_old", "hash_old", dir, now, now+3600,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert: %v", err)
