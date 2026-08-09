@@ -204,6 +204,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	bufSize := cfg.BuildLogMaxBytes
 
 	op := newRunOperation(session.ID, req.Image, bufSize)
+	op.auditCommandArgCount = cmdArgCount
+	op.auditMounts = mountAudit
+	op.auditEnvKeys = envNames
 
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
@@ -293,7 +296,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Start goroutine for process completion.
 	go func() {
 		defer cancel()
-		a.waitRunCompletion(op, startTime, cmdArgCount, mountAudit, envNames)
+		a.waitRunCompletion(op, startTime)
 	}()
 
 	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -315,7 +318,7 @@ func (a *App) newRunCmd(ctx context.Context, name string, args ...string) *exec.
 
 // waitRunCompletion waits for the run process to finish and transitions
 // the operation to succeeded or failed. It is the single owner of cmd.Wait().
-func (a *App) waitRunCompletion(op *operation, started time.Time, cmdArgCount *int, mounts []auditMount, envKeys []string) {
+func (a *App) waitRunCompletion(op *operation, started time.Time) {
 	err := op.cmd.Wait()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
@@ -326,32 +329,9 @@ func (a *App) waitRunCompletion(op *operation, started time.Time, cmdArgCount *i
 		if exitCode != nil && *exitCode != 125 {
 			resultCode = "container_exit_nonzero"
 		}
-		writeAuditWithRequestID(context.Background(), auditRecord{
-			Event:           "run.finish",
-			SessionID:       op.SessionID,
-			OperationID:     op.ID,
-			Image:           op.Image,
-			CommandArgCount: cmdArgCount,
-			Mounts:          mounts,
-			EnvKeys:         envKeys,
-			Result:          resultCode,
-			ExitCode:        exitCode,
-			Duration:        duration,
-		})
 		op.fail(resultCode, "docker run failed", exitCode, &duration)
-	} else {
-		writeAuditWithRequestID(context.Background(), auditRecord{
-			Event:           "run.finish",
-			SessionID:       op.SessionID,
-			OperationID:     op.ID,
-			Image:           op.Image,
-			CommandArgCount: cmdArgCount,
-			Mounts:          mounts,
-			EnvKeys:         envKeys,
-			Result:          "succeeded",
-			ExitCode:        exitCode,
-			Duration:        duration,
-		})
-		op.succeed(&duration)
+		return
 	}
+
+	op.succeed(&duration)
 }

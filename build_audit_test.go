@@ -131,8 +131,8 @@ func TestBuildFinishSuccess(t *testing.T) {
 	if finishRec.Event != "build.finish" {
 		t.Errorf("expected 'build.finish', got %q", finishRec.Event)
 	}
-	if finishRec.Result != "success" {
-		t.Errorf("expected result 'success', got %q", finishRec.Result)
+	if finishRec.Result != "succeeded" {
+		t.Errorf("expected result 'succeeded', got %q", finishRec.Result)
 	}
 	if finishRec.Duration == "" {
 		t.Error("expected duration to be set")
@@ -182,8 +182,8 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 	if finishRec.Event != "build.finish" {
 		t.Errorf("expected 'build.finish', got %q", finishRec.Event)
 	}
-	if finishRec.Result != "failure" {
-		t.Errorf("expected result 'failure', got %q", finishRec.Result)
+	if finishRec.Result != "docker_build_failed" {
+		t.Errorf("expected result 'docker_build_failed', got %q", finishRec.Result)
 	}
 	if finishRec.ExitCode == nil || *finishRec.ExitCode != 1 {
 		t.Errorf("expected exit_code 1, got %v", finishRec.ExitCode)
