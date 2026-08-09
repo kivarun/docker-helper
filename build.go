@@ -139,11 +139,6 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 	}
 
 	var err error
-	workspace, err = filepath.EvalSymlinks(workspace)
-	if err != nil {
-		return "", "", fmt.Errorf("cannot resolve workspace: %w: %w", err, ErrInternal)
-	}
-
 	var contextPath string
 
 	if filepath.IsAbs(req.Context) {
