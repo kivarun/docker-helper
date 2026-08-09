@@ -717,6 +717,7 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -739,9 +740,11 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	assertNoAuthFailure(t, auditBuf)
 }

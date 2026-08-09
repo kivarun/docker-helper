@@ -16,22 +16,30 @@ import (
 )
 
 type Config struct {
-	AllowedRoot    string
-	SessionTTL     time.Duration
-	LogLevel       slog.Level
-	AuditEnabled   bool
-	SocketPath     string
-	LockPath       string
-	StateDir       string
-	DatabasePath   string
-	AdminTokenPath string
+	AllowedRoot           string
+	SessionTTL            time.Duration
+	LogLevel              slog.Level
+	AuditEnabled          bool
+	SocketPath            string
+	LockPath              string
+	StateDir              string
+	DatabasePath          string
+	AdminTokenPath        string
+	ShutdownTimeout       time.Duration
+	OperationRetentionTTL time.Duration
+	OperationMaxCompleted int
+	BuildLogMaxBytes      int64
 }
 
 type fileConfig struct {
-	AllowedRoot  string `json:"allowed_root"`
-	SessionTTL   string `json:"session_ttl"`
-	Level        string `json:"log_level,omitempty"`
-	AuditEnabled *bool  `json:"audit_enabled,omitempty"`
+	AllowedRoot           string `json:"allowed_root"`
+	SessionTTL            string `json:"session_ttl"`
+	Level                 string `json:"log_level,omitempty"`
+	AuditEnabled          *bool  `json:"audit_enabled,omitempty"`
+	ShutdownTimeout       string `json:"shutdown_timeout,omitempty"`
+	OperationRetentionTTL string `json:"operation_retention_ttl,omitempty"`
+	OperationMaxCompleted *int   `json:"operation_max_completed,omitempty"`
+	BuildLogMaxBytes      *int64 `json:"build_log_max_bytes,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -47,6 +55,10 @@ func parseLogLevel(s string) (slog.Level, error) {
 	default:
 		return slog.LevelInfo, fmt.Errorf("invalid log_level %q: must be one of debug, info, warn, error", s)
 	}
+}
+
+func ptrOf[T any](v T) *T {
+	return &v
 }
 
 // reservedConfigFields are computed or read-only and must not appear in config.json.
@@ -158,6 +170,34 @@ func loadConfig() (*Config, error) {
 
 	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, level)
 
+	shutdownTimeout := 30 * time.Second
+	if fc.ShutdownTimeout != "" {
+		st, err := parseDurationPositive(fc.ShutdownTimeout, "shutdown_timeout")
+		if err != nil {
+			return nil, err
+		}
+		shutdownTimeout = st
+	}
+
+	opRetentionTTL := 10 * time.Minute
+	if fc.OperationRetentionTTL != "" {
+		ort, err := parseDurationPositive(fc.OperationRetentionTTL, "operation_retention_ttl")
+		if err != nil {
+			return nil, err
+		}
+		opRetentionTTL = ort
+	}
+
+	opMaxCompleted := 200
+	if fc.OperationMaxCompleted != nil {
+		opMaxCompleted = *fc.OperationMaxCompleted
+	}
+
+	buildLogMaxBytes := int64(4 * 1024 * 1024)
+	if fc.BuildLogMaxBytes != nil {
+		buildLogMaxBytes = *fc.BuildLogMaxBytes
+	}
+
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
 		return nil, err
@@ -177,15 +217,19 @@ func loadConfig() (*Config, error) {
 	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
 
 	return &Config{
-		AllowedRoot:    fc.AllowedRoot,
-		SessionTTL:     ttl,
-		LogLevel:       level,
-		AuditEnabled:   auditEnabled,
-		SocketPath:     socketPath,
-		LockPath:       socketPath + ".lock",
-		StateDir:       stateDir,
-		DatabasePath:   filepath.Join(stateDir, "docker-helper.db"),
-		AdminTokenPath: adminTokenPath,
+		AllowedRoot:           fc.AllowedRoot,
+		SessionTTL:            ttl,
+		LogLevel:              level,
+		AuditEnabled:          auditEnabled,
+		SocketPath:            socketPath,
+		LockPath:              socketPath + ".lock",
+		StateDir:              stateDir,
+		DatabasePath:          filepath.Join(stateDir, "docker-helper.db"),
+		AdminTokenPath:        adminTokenPath,
+		ShutdownTimeout:       shutdownTimeout,
+		OperationRetentionTTL: opRetentionTTL,
+		OperationMaxCompleted: opMaxCompleted,
+		BuildLogMaxBytes:      buildLogMaxBytes,
 	}, nil
 }
 
@@ -194,6 +238,19 @@ func resolveAuditEnabled(cfg *bool, level slog.Level) bool {
 		return *cfg
 	}
 	return level == slog.LevelDebug
+}
+
+// parseDurationPositive parses a Go duration string and returns an error if
+// the value is not a valid positive duration.
+func parseDurationPositive(s, name string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("cannot parse %s %q: %w", name, s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
+	}
+	return d, nil
 }
 
 // validateAllowedRootValue validates that the parsed allowed_root value
@@ -252,9 +309,13 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultConfig := fileConfig{
-			AllowedRoot: allowedRoot,
-			SessionTTL:  "12h",
-			Level:       "info",
+			AllowedRoot:           allowedRoot,
+			SessionTTL:            "12h",
+			Level:                 "info",
+			ShutdownTimeout:       "30s",
+			OperationRetentionTTL: "10m",
+			OperationMaxCompleted: ptrOf(200),
+			BuildLogMaxBytes:      ptrOf(int64(4 * 1024 * 1024)),
 		}
 
 		data, err := json.MarshalIndent(defaultConfig, "", "  ")

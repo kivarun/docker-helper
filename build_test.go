@@ -12,6 +12,7 @@ import (
 
 func TestBuildSessionAuthValidToken(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -40,9 +41,11 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 }
 
 func TestBuildSessionAuthMissingToken(t *testing.T) {
@@ -119,6 +122,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 
 func TestBuildContextDotUsesWorkspace(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -149,13 +153,15 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	// Check that context path is the workspace
 	found := false
-	for i, _ := range capturedArgs {
+	for i := range capturedArgs {
 		if i+1 < len(capturedArgs) && capturedArgs[i+1] == result.Session.Workspace {
 			found = true
 			break
@@ -169,6 +175,7 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 
 func TestBuildContextRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -207,13 +214,16 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 }
 
 func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -247,9 +257,11 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 }
 
 func TestBuildContextSiblingDirectoryRejected(t *testing.T) {
@@ -375,6 +387,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 
 func TestBuildWorkspaceIsSymlink(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	realDir := filepath.Join(app.Config.AllowedRoot, "real-dir")
 	if err := os.MkdirAll(realDir, 0755); err != nil {
@@ -413,13 +426,16 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 }
 
 func TestBuildDockerfileInsideContext(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -450,9 +466,11 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	// Check that --file contains the full dockerfile path
 	found := false
@@ -503,6 +521,7 @@ func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
 
 func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -533,9 +552,11 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	// Last arg should be the canonical context path
 	if len(capturedArgs) == 0 || capturedArgs[len(capturedArgs)-1] != result.Session.Workspace {

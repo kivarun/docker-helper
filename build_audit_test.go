@@ -11,10 +11,29 @@ import (
 	"testing"
 )
 
+// waitBuild waits for a build operation to complete.
+func waitBuild(t *testing.T, app *App, w *httptest.ResponseRecorder) {
+	t.Helper()
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode build response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatalf("operation %s not found in registry", opID)
+	}
+	op.Wait()
+}
+
 func TestBuildStartContainsFields(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -38,9 +57,11 @@ func TestBuildStartContainsFields(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
@@ -69,6 +90,7 @@ func TestBuildFinishSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -92,16 +114,18 @@ func TestBuildFinishSuccess(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
 
-	finishRec := records[1]
+	finishRec := records[len(records)-1]
 	if finishRec.Event != "build.finish" {
 		t.Errorf("expected 'build.finish', got %q", finishRec.Event)
 	}
@@ -117,6 +141,7 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -140,21 +165,23 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != 500 {
-		t.Fatalf("expected 500, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	if len(records) < 2 {
 		t.Fatalf("expected at least 2 audit records, got %d", len(records))
 	}
 
-	finishRec := records[1]
+	finishRec := records[len(records)-1]
 	if finishRec.Event != "build.finish" {
 		t.Errorf("expected 'build.finish', got %q", finishRec.Event)
 	}
-	if finishRec.Result != "build_error" {
-		t.Errorf("expected result 'build_error', got %q", finishRec.Result)
+	if finishRec.Result != "failure" {
+		t.Errorf("expected result 'failure', got %q", finishRec.Result)
 	}
 	if finishRec.ExitCode == nil || *finishRec.ExitCode != 1 {
 		t.Errorf("expected exit_code 1, got %v", finishRec.ExitCode)
@@ -167,6 +194,7 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 	const buildOutput = "Step 1/1 : FROM alpine\n ---> somehash\nSuccessfully built abc123\n"
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -189,6 +217,8 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 	}, result.Token)
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
+
+	waitBuild(t, app, w)
 
 	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
@@ -216,6 +246,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 	const buildOutput = "ERROR: failed to solve: something went wrong\n"
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -239,6 +270,8 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
+	waitBuild(t, app, w)
+
 	rawLines := auditRawLinesBySession(auditBuf, result.Session.ID)
 	if len(rawLines) < 2 {
 		t.Fatalf("expected at least 2 audit lines, got %d", len(rawLines))
@@ -261,6 +294,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 
 func TestBuildDockerArgsUnchanged(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -286,9 +320,11 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	waitBuild(t, app, w)
 
 	expectedArgs := []string{
 		"build",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,11 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	ctx := withSessionID(r.Context(), session.ID)
 
+	if a.OperationRegistry != nil && a.OperationRegistry.isShuttingDown() {
+		writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
+		return
+	}
+
 	var req buildRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
@@ -48,16 +54,41 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cfg := a.getConfig()
+	bufSize := cfg.BuildLogMaxBytes
+
+	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize)
+
+	if a.OperationRegistry != nil {
+		a.OperationRegistry.create(op)
+		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+	}
+
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:      "build.start",
-		SessionID:  session.ID,
-		Image:      req.Image,
-		Context:    req.Context,
-		Dockerfile: req.Dockerfile,
+		Event:       "build.start",
+		SessionID:   session.ID,
+		OperationID: op.ID,
+		Image:       req.Image,
+		Context:     req.Context,
+		Dockerfile:  req.Dockerfile,
 	})
 
-	started := time.Now()
+	go func() {
+		a.executeBuild(op, contextPath, dockerfilePath, req)
+	}()
 
+	op.mu.Lock()
+	status := op.State
+	op.mu.Unlock()
+
+	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+		"ok":           true,
+		"operation_id": op.ID,
+		"status":       status,
+	})
+}
+
+func (a *App) executeBuild(op *buildOperation, contextPath, dockerfilePath string, req buildRequest) {
 	args := []string{
 		"build",
 		"--pull",
@@ -68,54 +99,150 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		contextPath,
 	}
 
-	buildCmd := a.ExecCommand
-	if buildCmd == nil {
-		buildCmd = defaultExecCommand
+	started := time.Now()
+	startTime := started
+	op.mu.Lock()
+	op.StartedAt = &startTime
+	op.mu.Unlock()
+
+	execCmd := a.ExecCommand
+	if execCmd == nil {
+		execCmd = defaultExecCommand
 	}
 
-	output, err := buildCmd("docker", args...)
-	duration := time.Since(started).Round(time.Millisecond).String()
-
-	var result string
-	var exitCode *int
+	output, err := execCmd("docker", args...)
 
 	if err != nil {
-		exitCode = extractExitCode(err)
-		result = "build_error"
+		duration := time.Since(started).Round(time.Millisecond).String()
+		exitCode := extractExitCode(err)
 
-		opLog(ctx).Error("docker build error",
-			slog.String("operation", "build"),
-			slog.String("error", err.Error()),
-		)
+		op.LogBuffer.Write(output)
 
-		writeJSON(ctx, w, http.StatusInternalServerError, response{
-			OK:       false,
-			Code:     "docker_build_failed",
-			Message:  "docker build failed",
-			Output:   string(output),
-			Duration: duration,
-		})
-	} else {
-		result = "success"
+		op.mu.Lock()
+		op.Duration = &duration
+		op.mu.Unlock()
 
-		writeJSON(ctx, w, http.StatusOK, response{
-			OK:       true,
-			Message:  "image built successfully",
-			Output:   string(output),
-			Duration: duration,
-		})
+		op.fail("docker_build_failed", "docker build failed", exitCode)
+		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
-		Event:      "build.finish",
-		SessionID:  session.ID,
-		Image:      req.Image,
-		Context:    req.Context,
-		Dockerfile: req.Dockerfile,
-		Result:     result,
-		ExitCode:   exitCode,
-		Duration:   duration,
-	})
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	op.LogBuffer.Write(output)
+	op.succeed(&duration)
+}
+
+func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
+	session, ok := a.requireSession(w, r)
+	if !ok {
+		return
+	}
+
+	ctx := withSessionID(r.Context(), session.ID)
+	opID := r.PathValue("id")
+
+	if a.OperationRegistry == nil {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	op := a.OperationRegistry.get(opID)
+	if op == nil {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	if op.SessionID != session.ID {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	cfg := a.getConfig()
+	if a.OperationRegistry != nil {
+		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+	}
+
+	op.mu.Lock()
+	resp := map[string]any{
+		"ok":           true,
+		"operation_id": op.ID,
+		"status":       op.State,
+		"created_at":   op.CreatedAt,
+	}
+	if op.StartedAt != nil {
+		resp["started_at"] = *op.StartedAt
+	}
+	if op.CompletedAt != nil {
+		resp["completed_at"] = *op.CompletedAt
+	}
+	if op.Duration != nil {
+		resp["duration"] = *op.Duration
+	}
+	if op.ExitCode != nil {
+		resp["exit_code"] = *op.ExitCode
+	}
+	if op.ResultCode != nil {
+		resp["result_code"] = *op.ResultCode
+	}
+	op.mu.Unlock()
+
+	writeJSONRaw(ctx, w, http.StatusOK, resp)
+}
+
+func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
+	session, ok := a.requireSession(w, r)
+	if !ok {
+		return
+	}
+
+	ctx := withSessionID(r.Context(), session.ID)
+	opID := r.PathValue("id")
+
+	if a.OperationRegistry == nil {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	op := a.OperationRegistry.get(opID)
+	if op == nil {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	if op.SessionID != session.ID {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	offset := parseOffset(r.URL.Query().Get("offset"))
+
+	data, nextOffset, truncated := op.LogBuffer.Range(offset)
+
+	resp := map[string]any{
+		"ok":           true,
+		"operation_id": opID,
+		"offset":       offset,
+		"next_offset":  nextOffset,
+		"truncated":    truncated,
+		"logs":         string(data),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		opLog(ctx).Error("encode operation logs",
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+func parseOffset(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	var offset int64
+	fmt.Sscanf(s, "%d", &offset)
+	return offset
 }
 
 func validateBuildRequest(workspace string, req buildRequest) (string, string, error) {

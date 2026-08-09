@@ -23,7 +23,16 @@ var configCommand = &Command{
 }
 
 var (
-	writableFields = []string{"allowed_root", "session_ttl", "log_level", "audit_enabled"}
+	writableFields = []string{
+		"allowed_root",
+		"session_ttl",
+		"log_level",
+		"audit_enabled",
+		"shutdown_timeout",
+		"operation_retention_ttl",
+		"operation_max_completed",
+		"build_log_max_bytes",
+	}
 	requiredFields = map[string]bool{"allowed_root": true, "session_ttl": true}
 	allFields      = []string{
 		"allowed_root",
@@ -40,6 +49,10 @@ var (
 		"database_path",
 		"admin_token_path",
 		"admin_token",
+		"shutdown_timeout",
+		"operation_retention_ttl",
+		"operation_max_completed",
+		"build_log_max_bytes",
 	}
 )
 
@@ -98,7 +111,11 @@ Fields:
   state_dir
   database_path
   admin_token_path
-  admin_token`,
+  admin_token
+  shutdown_timeout
+  operation_retention_ttl
+  operation_max_completed
+  build_log_max_bytes`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -119,10 +136,14 @@ var configSetCommand = &Command{
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Writable fields:
-  allowed_root    non-empty absolute path (required)
-  session_ttl     positive Go duration, for example 30m or 12h (required)
-  log_level       debug, info, warn, or error
-  audit_enabled   true or false
+  allowed_root            non-empty absolute path (required)
+  session_ttl             positive Go duration, for example 30m or 12h (required)
+  log_level               debug, info, warn, or error
+  audit_enabled           true or false
+  shutdown_timeout        positive Go duration, for example 30s (default 30s)
+  operation_retention_ttl positive Go duration, for example 10m (default 10m)
+  operation_max_completed positive integer (default 200)
+  build_log_max_bytes     positive integer, bytes (default 4194304 = 4 MiB)
 
 A successful command reports either "updated" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -145,8 +166,12 @@ var configUnsetCommand = &Command{
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	Help: `Unsettable fields:
-  log_level       removing it restores the effective default info
-  audit_enabled   removing it restores behavior derived from log_level
+  log_level               removing it restores the effective default info
+  audit_enabled           removing it restores behavior derived from log_level
+  shutdown_timeout        removing it restores the default 30s
+  operation_retention_ttl removing it restores the default 10m
+  operation_max_completed removing it restores the default 200
+  build_log_max_bytes     removing it restores the default 4 MiB
 
 A successful command reports either "unset" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -258,6 +283,50 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		_ = b
 	}
 
+	// Validate shutdown_timeout if present.
+	if v, ok := raw["shutdown_timeout"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("shutdown_timeout must be a JSON string")
+		}
+		if _, err := parseDurationPositive(s, "shutdown_timeout"); err != nil {
+			return err
+		}
+	}
+
+	// Validate operation_retention_ttl if present.
+	if v, ok := raw["operation_retention_ttl"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("operation_retention_ttl must be a JSON string")
+		}
+		if _, err := parseDurationPositive(s, "operation_retention_ttl"); err != nil {
+			return err
+		}
+	}
+
+	// Validate operation_max_completed if present.
+	if v, ok := raw["operation_max_completed"]; ok {
+		var n int
+		if err := json.Unmarshal(v, &n); err != nil {
+			return fmt.Errorf("operation_max_completed must be a JSON integer")
+		}
+		if n <= 0 {
+			return fmt.Errorf("operation_max_completed must be a positive integer")
+		}
+	}
+
+	// Validate build_log_max_bytes if present.
+	if v, ok := raw["build_log_max_bytes"]; ok {
+		var n int64
+		if err := json.Unmarshal(v, &n); err != nil {
+			return fmt.Errorf("build_log_max_bytes must be a JSON integer")
+		}
+		if n <= 0 {
+			return fmt.Errorf("build_log_max_bytes must be a positive integer")
+		}
+	}
+
 	return nil
 }
 
@@ -338,20 +407,24 @@ func configShowAll(stdout, stderr io.Writer) int {
 	}
 
 	result := map[string]any{
-		"allowed_root":         fc.AllowedRoot,
-		"session_ttl":          fc.SessionTTL,
-		"log_level":            levelStr,
-		"audit_enabled":        auditEnabled,
-		"audit_enabled_source": auditSource,
-		"config_path":          configPath,
-		"config_dir":           configDir,
-		"runtime_dir":          runtimeDir,
-		"socket_path":          socketPath,
-		"lock_path":            lockPath,
-		"state_dir":            stateDir,
-		"database_path":        databasePath,
-		"admin_token_path":     adminTokenPath,
-		"admin_token":          "<redacted>",
+		"allowed_root":            fc.AllowedRoot,
+		"session_ttl":             fc.SessionTTL,
+		"log_level":               levelStr,
+		"audit_enabled":           auditEnabled,
+		"audit_enabled_source":    auditSource,
+		"config_path":             configPath,
+		"config_dir":              configDir,
+		"runtime_dir":             runtimeDir,
+		"socket_path":             socketPath,
+		"lock_path":               lockPath,
+		"state_dir":               stateDir,
+		"database_path":           databasePath,
+		"admin_token_path":        adminTokenPath,
+		"admin_token":             "<redacted>",
+		"shutdown_timeout":        fc.ShutdownTimeout,
+		"operation_retention_ttl": fc.OperationRetentionTTL,
+		"operation_max_completed": fc.OperationMaxCompleted,
+		"build_log_max_bytes":     fc.BuildLogMaxBytes,
 	}
 
 	enc := json.NewEncoder(stdout)
@@ -472,6 +545,30 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, stateDir)
 	case "database_path":
 		fmt.Fprintln(stdout, filepath.Join(stateDir, "docker-helper.db"))
+	case "shutdown_timeout":
+		st := fc.ShutdownTimeout
+		if st == "" {
+			st = "30s"
+		}
+		fmt.Fprintln(stdout, st)
+	case "operation_retention_ttl":
+		ort := fc.OperationRetentionTTL
+		if ort == "" {
+			ort = "10m"
+		}
+		fmt.Fprintln(stdout, ort)
+	case "operation_max_completed":
+		omc := fc.OperationMaxCompleted
+		if omc == nil {
+			omc = ptrOf(200)
+		}
+		fmt.Fprintln(stdout, *omc)
+	case "build_log_max_bytes":
+		blmb := fc.BuildLogMaxBytes
+		if blmb == nil {
+			blmb = ptrOf(int64(4 * 1024 * 1024))
+		}
+		fmt.Fprintln(stdout, *blmb)
 	default:
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
@@ -514,6 +611,28 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: audit_enabled must be true or false\n")
 			return 2
 		}
+	case "shutdown_timeout":
+		if _, err := parseDurationPositive(value, "shutdown_timeout"); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 2
+		}
+	case "operation_retention_ttl":
+		if _, err := parseDurationPositive(value, "operation_retention_ttl"); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 2
+		}
+	case "operation_max_completed":
+		var n int
+		if _, err := fmt.Sscanf(value, "%d", &n); err != nil || n <= 0 {
+			fmt.Fprintf(stderr, "error: operation_max_completed must be a positive integer\n")
+			return 2
+		}
+	case "build_log_max_bytes":
+		var n int64
+		if _, err := fmt.Sscanf(value, "%d", &n); err != nil || n <= 0 {
+			fmt.Fprintf(stderr, "error: build_log_max_bytes must be a positive integer\n")
+			return 2
+		}
 	}
 
 	raw, configPath, err := loadRawConfig()
@@ -533,6 +652,18 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		newValue, _ = json.Marshal(value)
 	case "audit_enabled":
 		newValue, _ = json.Marshal(value == "true")
+	case "shutdown_timeout":
+		newValue, _ = json.Marshal(value)
+	case "operation_retention_ttl":
+		newValue, _ = json.Marshal(value)
+	case "operation_max_completed":
+		var n int
+		fmt.Sscanf(value, "%d", &n)
+		newValue, _ = json.Marshal(n)
+	case "build_log_max_bytes":
+		var n int64
+		fmt.Sscanf(value, "%d", &n)
+		newValue, _ = json.Marshal(n)
 	}
 
 	// Compare with the existing explicit JSON member.

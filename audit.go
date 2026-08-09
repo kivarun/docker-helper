@@ -8,6 +8,7 @@ type auditRecord struct {
 	Path            string       `json:"path,omitempty"`
 	SessionID       string       `json:"session_id,omitempty"`
 	RequestID       string       `json:"request_id,omitempty"`
+	OperationID     string       `json:"operation_id,omitempty"`
 	Image           string       `json:"image,omitempty"`
 	CommandArgCount *int         `json:"command_arg_count,omitempty"`
 	Mounts          []auditMount `json:"mounts,omitempty"`

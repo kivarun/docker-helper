@@ -78,6 +78,10 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 			slog.String("session_ttl", newCfg.SessionTTL.String()),
 			slog.String("log_level", newCfg.LogLevel.String()),
 			slog.Bool("audit_enabled", newCfg.AuditEnabled),
+			slog.String("shutdown_timeout", newCfg.ShutdownTimeout.String()),
+			slog.String("operation_retention_ttl", newCfg.OperationRetentionTTL.String()),
+			slog.Int("operation_max_completed", newCfg.OperationMaxCompleted),
+			slog.Int64("build_log_max_bytes", newCfg.BuildLogMaxBytes),
 		)
 	}
 

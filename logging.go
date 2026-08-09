@@ -54,6 +54,7 @@ type loggingState struct {
 	opWriter     io.Writer
 	auditWriter  io.Writer
 	auditEnabled bool
+	auditMu      sync.Mutex
 }
 
 // logging is the package-level logging state.
@@ -182,7 +183,9 @@ func writeAudit(record auditRecord) {
 	}
 
 	data = append(data, '\n')
+	logging.auditMu.Lock()
 	if _, err := aw.Write(data); err != nil {
+		logging.auditMu.Unlock()
 		if logger != nil {
 			l := logger.With(
 				slog.String("operation", "audit_write"),
@@ -196,6 +199,8 @@ func writeAudit(record auditRecord) {
 			}
 			l.Error("audit: cannot write record")
 		}
+	} else {
+		logging.auditMu.Unlock()
 	}
 }
 

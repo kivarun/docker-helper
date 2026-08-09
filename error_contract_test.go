@@ -277,6 +277,7 @@ func TestErrorContractMountErrorNoPathLeak(t *testing.T) {
 
 func TestErrorContractDockerBuildFailed(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -286,7 +287,6 @@ func TestErrorContractDockerBuildFailed(t *testing.T) {
 	if err := os.WriteFile(dfPath, []byte("FROM scratch"), 0644); err != nil {
 		t.Fatalf("cannot write Dockerfile: %v", err)
 	}
-
 	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("build output here\n"), &mockExitError{code: 1, msg: "exit status 1"}
 	}
@@ -301,22 +301,69 @@ func TestErrorContractDockerBuildFailed(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
 
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	// Extract operation_id from response.
+	var createResp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&createResp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Code != "docker_build_failed" {
-		t.Errorf("expected code 'docker_build_failed', got %q", resp.Code)
+	opID, ok := createResp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatalf("expected operation_id in response")
 	}
-	if resp.Message != "docker build failed" {
-		t.Errorf("unexpected message: %q", resp.Message)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatalf("operation %s not found in registry", opID)
 	}
-	if resp.Output != "build output here\n" {
-		t.Errorf("expected output preserved, got %q", resp.Output)
+	op.Wait()
+
+	// Check operation status for failure.
+	opReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID, nil)
+	opReq.SetPathValue("id", opID)
+	opReq.Header.Set("Authorization", "Bearer "+result.Token)
+	opW := httptest.NewRecorder()
+	app.handleOperationStatus(opW, opReq)
+
+	if opW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from operation status, got %d, body: %s", opW.Code, opW.Body.String())
+	}
+
+	var opResp map[string]any
+	if err := json.NewDecoder(opW.Body).Decode(&opResp); err != nil {
+		t.Fatalf("decode operation status: %v", err)
+	}
+	if opResp["status"] != "failed" {
+		t.Errorf("expected status 'failed', got %v", opResp["status"])
+	}
+	if opResp["result_code"] != "docker_build_failed" {
+		t.Errorf("expected result_code 'docker_build_failed', got %v", opResp["result_code"])
+	}
+	if exitCode, ok := opResp["exit_code"].(float64); !ok || exitCode != 1 {
+		t.Errorf("expected exit_code 1, got %v", opResp["exit_code"])
+	}
+
+	// Check logs contain build output.
+	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
+	logsReq.SetPathValue("id", opID)
+	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
+	logsW := httptest.NewRecorder()
+	app.handleOperationLogs(logsW, logsReq)
+
+	if logsW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
+	}
+
+	var logsResp map[string]any
+	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
+		t.Fatalf("decode operation logs: %v", err)
+	}
+	logs, _ := logsResp["logs"].(string)
+	if !strings.Contains(logs, "build output here") {
+		t.Errorf("expected build output in logs, got %q", logs)
 	}
 }
 
@@ -944,6 +991,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -970,37 +1018,72 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	raw := opBuf.String()
-
-	// Error marker is logged
-	if !strings.Contains(raw, errMarker) {
-		t.Errorf("expected error marker %q in log, got:\n%s", errMarker, raw)
-	}
-	// Docker output not logged
-	if strings.Contains(raw, dockerOutput) {
-		t.Error("Docker output must not appear in log")
-	}
-	// Token not logged
-	if strings.Contains(raw, result.Token) {
-		t.Error("session token must not appear in log")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
 
-	// Client response
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+	// Extract operation_id from response.
+	var createResp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&createResp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected status 500, got %d", w.Code)
+	opID, ok := createResp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatalf("expected operation_id in response")
 	}
-	if resp.Code != "docker_build_failed" {
-		t.Errorf("expected code 'docker_build_failed', got %q", resp.Code)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatalf("operation %s not found in registry", opID)
 	}
-	if resp.Message != "docker build failed" {
-		t.Errorf("unexpected message: %q", resp.Message)
+	op.Wait()
+
+	// Check operation status for failure.
+	opReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID, nil)
+	opReq.SetPathValue("id", opID)
+	opReq.Header.Set("Authorization", "Bearer "+result.Token)
+	opW := httptest.NewRecorder()
+	app.handleOperationStatus(opW, opReq)
+
+	if opW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from operation status, got %d", opW.Code)
 	}
-	if resp.Output != dockerOutput+"\n" {
-		t.Errorf("expected output preserved, got %q", resp.Output)
+
+	var opResp map[string]any
+	if err := json.NewDecoder(opW.Body).Decode(&opResp); err != nil {
+		t.Fatalf("decode operation status: %v", err)
+	}
+	if opResp["result_code"] != "docker_build_failed" {
+		t.Errorf("expected result_code 'docker_build_failed', got %v", opResp["result_code"])
+	}
+
+	// Check logs contain build output.
+	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
+	logsReq.SetPathValue("id", opID)
+	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
+	logsW := httptest.NewRecorder()
+	app.handleOperationLogs(logsW, logsReq)
+
+	if logsW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
+	}
+
+	var logsResp map[string]any
+	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
+		t.Fatalf("decode operation logs: %v", err)
+	}
+	logs, _ := logsResp["logs"].(string)
+	if !strings.Contains(logs, dockerOutput) {
+		t.Errorf("expected build output in operation logs, got %q", logs)
+	}
+
+	// Verify docker output is NOT in the operational log.
+	raw := opBuf.String()
+	if strings.Contains(raw, dockerOutput) {
+		t.Error("Docker output must not appear in operational log")
+	}
+	if strings.Contains(raw, result.Token) {
+		t.Error("session token must not appear in log")
 	}
 }
 

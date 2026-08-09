@@ -28,12 +28,16 @@ func newTestApp(t *testing.T) *App {
 
 	allowedRoot := dir
 	cfg := &Config{
-		AllowedRoot:    allowedRoot,
-		SessionTTL:     24 * time.Hour,
-		SocketPath:     filepath.Join(dir, "test.sock"),
-		StateDir:       dir,
-		DatabasePath:   dbPath,
-		AdminTokenPath: filepath.Join(dir, "admin.token"),
+		AllowedRoot:           allowedRoot,
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		BuildLogMaxBytes:      4 * 1024 * 1024,
 	}
 
 	return &App{

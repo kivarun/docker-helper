@@ -7,11 +7,12 @@ import (
 )
 
 type App struct {
-	mu             sync.RWMutex
-	Config         *Config
-	DB             *sql.DB
-	AdminTokenHash [sha256.Size]byte
-	ExecCommand    func(string, ...string) ([]byte, error)
+	mu                sync.RWMutex
+	Config            *Config
+	DB                *sql.DB
+	AdminTokenHash    [sha256.Size]byte
+	ExecCommand       func(string, ...string) ([]byte, error)
+	OperationRegistry *operationRegistry
 }
 
 // getConfig returns a snapshot copy of the current configuration under a read lock.

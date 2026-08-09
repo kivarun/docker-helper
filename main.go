@@ -18,8 +18,6 @@ import (
 
 var version = "dev"
 
-const shutdownTimeout = 30 * time.Second
-
 func loadAdminToken(path string) ([sha256.Size]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -258,9 +256,10 @@ func runServe(stdout, stderr io.Writer) error {
 		}
 
 		app := &App{
-			Config:         cfg,
-			DB:             db,
-			AdminTokenHash: adminHash,
+			Config:            cfg,
+			DB:                db,
+			AdminTokenHash:    adminHash,
+			OperationRegistry: newOperationRegistry(),
 		}
 
 		mux := http.NewServeMux()
@@ -272,6 +271,8 @@ func runServe(stdout, stderr io.Writer) error {
 		mux.HandleFunc("GET /sessions", withRequestID(withLogging(app.handleListSessions)))
 		mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 		mux.HandleFunc("POST /reload", withRequestID(withLogging(app.handleReload)))
+		mux.HandleFunc("GET /operations/{id}", withRequestID(withLogging(app.handleOperationStatus)))
+		mux.HandleFunc("GET /operations/{id}/logs", withRequestID(withLogging(app.handleOperationLogs)))
 
 		server := &http.Server{
 			Handler:           mux,
@@ -289,7 +290,17 @@ func runServe(stdout, stderr io.Writer) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		err = serveWithShutdown(ctx, server, listener, shutdownTimeout)
+		err = serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout)
+
+		// Mark registry as shutting down so no new operations are accepted.
+		if app.OperationRegistry != nil {
+			app.OperationRegistry.setShuttingDown()
+
+			// Give running operations time to finish.
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+			app.OperationRegistry.terminateAll(shutdownCtx)
+			shutdownCancel()
+		}
 
 		logger = logging.snapshotLogger()
 
