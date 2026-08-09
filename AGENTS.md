@@ -282,6 +282,8 @@ modify code, stop after the analysis and do not edit files or create commits.
     go vet ./...
     git diff --check
 
+Text files must end with a newline.
+
 Review the final diff for unrelated changes.
 
 19. Commits.
