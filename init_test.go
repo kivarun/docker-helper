@@ -108,6 +108,25 @@ func TestInitHelpContainsAllowedRoot(t *testing.T) {
 	}
 }
 
+func TestInitHelpDescribesInteractiveBehavior(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init --help exited %d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"prompted",
+		"current working directory",
+		"default",
+		"non-interactive",
+	} {
+		if !strings.Contains(strings.ToLower(out), strings.ToLower(want)) {
+			t.Errorf("init --help should mention %q, got:\n%s", want, out)
+		}
+	}
+}
+
 func TestResolveAllowedRootEmptyUsesCWD(t *testing.T) {
 	dir := t.TempDir()
 	cwd, _ := os.Getwd()
@@ -167,6 +186,53 @@ func TestResolveAllowedRootNotDirectory(t *testing.T) {
 	}
 }
 
+func TestResolveAllowedRootTildeExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+
+	resolved, err := resolveAllowedRoot("~")
+	if err != nil {
+		t.Fatalf("resolveAllowedRoot(\"~\") = error: %v", err)
+	}
+	if resolved != home {
+		t.Errorf("resolveAllowedRoot(\"~\") = %q, want %q", resolved, home)
+	}
+}
+
+func TestResolveAllowedRootTildeSubdirExpansion(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+
+	resolved, err := resolveAllowedRoot("~/..")
+	if err != nil {
+		t.Fatalf("resolveAllowedRoot(\"~/..\") = error: %v", err)
+	}
+	expected, _ := filepath.EvalSymlinks(filepath.Join(home, ".."))
+	if resolved != expected {
+		t.Errorf("resolveAllowedRoot(\"~/..\") = %q, want %q", resolved, expected)
+	}
+}
+
+func TestExpandTildeNoExpansion(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"/absolute/path", "/absolute/path"},
+		{"relative/path", "relative/path"},
+		{"~nottilde", "~nottilde"},
+	}
+	for _, tt := range tests {
+		got := expandTilde(tt.input)
+		if got != tt.want {
+			t.Errorf("expandTilde(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestPromptAllowedRootEmptyInput(t *testing.T) {
 	input := strings.NewReader("\n")
 	var buf bytes.Buffer
@@ -203,5 +269,68 @@ func TestPromptOutputGoesToStderr(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "/default") {
 		t.Error("prompt should show default value")
+	}
+}
+
+func TestResolveAllowedRootForInitWithFlag(t *testing.T) {
+	dir := t.TempDir()
+	allowedRoot := filepath.Join(dir, "workspaces")
+	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := resolveAllowedRootForInit(allowedRoot, nil, nil, false)
+	if err != nil {
+		t.Fatalf("resolveAllowedRootForInit = error: %v", err)
+	}
+	if resolved != allowedRoot {
+		t.Errorf("resolveAllowedRootForInit = %q, want %q", resolved, allowedRoot)
+	}
+}
+
+func TestResolveAllowedRootForInitNoFlagNonTerminal(t *testing.T) {
+	_, err := resolveAllowedRootForInit("", nil, nil, false)
+	if err == nil {
+		t.Error("expected error for non-interactive mode without flag")
+	}
+	if !strings.Contains(err.Error(), "non-interactive") {
+		t.Errorf("expected non-interactive error, got: %v", err)
+	}
+}
+
+func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
+	dir := t.TempDir()
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	input := strings.NewReader("\n")
+	var buf bytes.Buffer
+	resolved, err := resolveAllowedRootForInit("", input, &buf, true)
+	if err != nil {
+		t.Fatalf("resolveAllowedRootForInit = error: %v", err)
+	}
+	if resolved != dir {
+		t.Errorf("resolveAllowedRootForInit = %q, want %q (CWD default)", resolved, dir)
+	}
+}
+
+func TestResolveAllowedRootForInitTerminalCustomInput(t *testing.T) {
+	dir := t.TempDir()
+	allowedRoot := filepath.Join(dir, "custom-workspaces")
+	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	input := strings.NewReader(allowedRoot + "\n")
+	var buf bytes.Buffer
+	resolved, err := resolveAllowedRootForInit("", input, &buf, true)
+	if err != nil {
+		t.Fatalf("resolveAllowedRootForInit = error: %v", err)
+	}
+	if resolved != allowedRoot {
+		t.Errorf("resolveAllowedRootForInit = %q, want %q", resolved, allowedRoot)
 	}
 }

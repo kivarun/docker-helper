@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -265,6 +266,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 
 // resolveAllowedRoot resolves the user-provided allowed root path.
 // If the path is empty, it falls back to the default (current working directory).
+// Paths starting with ~/ are expanded against the user's home directory.
 // The resulting path is validated: it must be absolute, exist, and be a directory.
 func resolveAllowedRoot(path string) (string, error) {
 	if path == "" {
@@ -274,6 +276,8 @@ func resolveAllowedRoot(path string) (string, error) {
 		}
 		path = cwd
 	}
+
+	path = expandTilde(path)
 
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -298,6 +302,22 @@ func resolveAllowedRoot(path string) (string, error) {
 	}
 
 	return cleaned, nil
+}
+
+// expandTilde expands a path starting with ~/ to the user's home directory.
+// It does not perform shell expansion, environment-variable expansion, or globbing.
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~/") && path != "~" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // promptAllowedRoot prompts the user for an allowed root directory.

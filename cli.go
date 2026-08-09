@@ -277,12 +277,23 @@ var initCommand = &Command{
 	Name:    "init",
 	Summary: "Initialize configuration and admin token",
 	Usage:   "docker-helper init [--allowed-root PATH]",
+	Help: `Initialize docker-helper configuration and admin token.
+
+If --allowed-root is provided, it is used directly.
+
+Without --allowed-root and when running interactively (stdin is a
+terminal), you will be prompted for the allowed root directory.
+The current working directory is used as the default.
+
+In non-interactive mode (stdin is not a terminal), --allowed-root
+is required.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		allowedRoot := fs.String("allowed-root", "", "Allowed root directory for agent workspaces")
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				resolved, err := resolveAllowedRootForInit(*allowedRoot, os.Stdin, stderr)
+				isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
+				resolved, err := resolveAllowedRootForInit(*allowedRoot, os.Stdin, stderr, isTerminal)
 				if err != nil {
 					fmt.Fprintln(stderr, err)
 					return 2
@@ -299,15 +310,15 @@ var initCommand = &Command{
 }
 
 // resolveAllowedRootForInit resolves the allowed root for the init command.
-// If --allowed-root is provided, it is validated and returned.
-// If not provided and stdin is a terminal, the user is prompted interactively.
-// If not provided and stdin is not a terminal, an error is returned.
-func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writer) (string, error) {
+// If flagValue is provided, it is validated and returned.
+// If not provided and isTerminal is true, the user is prompted interactively.
+// If not provided and isTerminal is false, an error is returned.
+func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writer, isTerminal bool) (string, error) {
 	if flagValue != "" {
 		return resolveAllowedRoot(flagValue)
 	}
 
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !isTerminal {
 		return "", errors.New("--allowed-root is required in non-interactive mode")
 	}
 
