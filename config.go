@@ -23,6 +23,7 @@ type Config struct {
 	SocketPath            string
 	LockPath              string
 	StateDir              string
+	RuntimeDir            string
 	DatabasePath          string
 	AdminTokenPath        string
 	ShutdownTimeout       time.Duration
@@ -224,6 +225,7 @@ func loadConfig() (*Config, error) {
 		SocketPath:            socketPath,
 		LockPath:              socketPath + ".lock",
 		StateDir:              stateDir,
+		RuntimeDir:            runtimeDir,
 		DatabasePath:          filepath.Join(stateDir, "docker-helper.db"),
 		AdminTokenPath:        adminTokenPath,
 		ShutdownTimeout:       shutdownTimeout,

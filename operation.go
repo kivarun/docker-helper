@@ -41,6 +41,11 @@ type operation struct {
 	doneOnce    sync.Once // ensures op.done is closed exactly once
 	terminated  bool      // set by terminateAll when process not yet started
 	started     bool      // set to true only after cmd.Start() succeeds
+	// cidfile is the path to the Docker --cidfile for run operations.
+	// It is created before cmd.Start() and removed after the operation completes.
+	// During force shutdown, the container ID is read from this file to perform
+	// daemon-side cleanup before killing the docker run CLI process.
+	cidfile string
 	// audit metadata for finish event, set by operation-specific factory.
 	auditCommandArgCount *int
 	auditMounts          []auditMount
@@ -230,6 +235,20 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 		select {
 		case <-op.done:
 		case <-time.After(time.Until(deadline)):
+			// Deadline exceeded: perform daemon-side cleanup before killing CLI.
+			// For run operations, the docker run CLI may be dead but the
+			// container can survive. Read the container ID from the cidfile
+			// and kill it at the daemon level before force-killing the CLI.
+			// This bounded cleanup context (3s) exists after the main deadline
+			// because docker kill is a fast API call; we do not want to block
+			// shutdown for long, but we need enough time for the daemon to
+			// actually stop the container.
+			if op.cidfile != "" {
+				containerID := readContainerIDFromCidfile(op.cidfile)
+				if containerID != "" {
+					killContainerBestEffort(containerID)
+				}
+			}
 			op.mu.Lock()
 			if op.cmd != nil && op.cmd.Process != nil {
 				op.cmd.Process.Kill()

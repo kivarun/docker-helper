@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,6 +24,47 @@ func extractExitCode(err error) *int {
 		return &code
 	}
 	return nil
+}
+
+// readContainerIDFromCidfile reads the container ID from a Docker --cidfile.
+// Returns empty string if the file doesn't exist, is empty, or is malformed.
+func readContainerIDFromCidfile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return ""
+	}
+	return id
+}
+
+// killContainerBestEffort attempts to kill a Docker container by ID.
+// This is a bounded, best-effort operation used during force shutdown.
+// If the container is already gone or the command fails, the error is
+// logged but not propagated — "container already gone" is a success.
+func killContainerBestEffort(containerID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// 3-second bounded context: docker kill is a fast API call.
+	// We do not want to block shutdown for long after the main deadline,
+	// but we need enough time for the daemon to actually stop the container.
+	cmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+	if err := cmd.Run(); err != nil {
+		// Container already gone or docker not available — acceptable.
+		// Do not log the container ID to avoid unnecessary traceability.
+		slog.Warn("daemon-side container cleanup failed", "error", err)
+	}
+}
+
+// cleanupCidfile removes the cidfile for a run operation.
+// This is called when the operation fails before the process starts
+// or when the process completes normally.
+func cleanupCidfile(op *operation) {
+	if op.cidfile != "" {
+		os.Remove(op.cidfile)
+	}
 }
 
 // defaultExecCommand is the default Docker subprocess executor.
@@ -199,6 +241,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	op.auditMounts = mountAudit
 	op.auditEnvKeys = envNames
 
+	// Create a unique cidfile for daemon-side container lifecycle management.
+	// The path is in the helper-owned runtime directory, never user-controlled.
+	if cfg.RuntimeDir != "" {
+		op.cidfile = filepath.Join(cfg.RuntimeDir, op.ID+".cid")
+	}
+
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
 			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
@@ -223,6 +271,10 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		"--rm",
 		"--security-opt", "label=disable",
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+	}
+
+	if op.cidfile != "" {
+		args = append(args, "--cidfile", op.cidfile)
 	}
 
 	if req.Entrypoint != "" {
@@ -263,6 +315,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if op.terminated {
 		op.mu.Unlock()
 		cancel()
+		cleanupCidfile(op)
 		msg := "run cancelled: daemon is shutting down"
 		op.fail("docker_run_failed", msg, nil)
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -284,6 +337,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		cancel()
+		cleanupCidfile(op)
 		msg := fmt.Sprintf("cannot start run: %v", err)
 		op.fail("docker_run_failed", msg, nil)
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -321,6 +375,12 @@ func (a *App) newRunCmd(ctx context.Context, name string, args ...string) *exec.
 // the operation to succeeded or failed. It is the single owner of cmd.Wait().
 func (a *App) waitRunCompletion(op *operation, started time.Time) {
 	err := op.cmd.Wait()
+
+	// Clean up the cidfile regardless of outcome.
+	// The container is already handled by --rm (normal exit) or
+	// daemon-side kill (force shutdown), so the cidfile is no longer needed.
+	cleanupCidfile(op)
+
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	exitCode := extractExitCode(err)

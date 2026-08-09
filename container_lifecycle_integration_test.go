@@ -211,17 +211,16 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 	}
 
 	// Check: container should be completely gone (--rm should have removed it).
-	state := containerState(t, envFilter)
-	if state != "" {
-		t.Logf("container state after graceful shutdown: %s (expected gone)", state)
+	anyID := findAnyContainerIDByEnv(t, envFilter)
+	if anyID != "" {
+		t.Errorf("container trace remains after graceful shutdown: %s", anyID)
 	}
 }
 
-// TestContainerLifecycleForcedKill verifies what happens to the Docker container
-// when the docker run CLI process is force-killed (SIGKILL) after the shutdown
-// deadline expires.
-//
-// Key question: can the container survive the force-kill of the docker run CLI?
+// TestContainerLifecycleForcedKill verifies that when the docker run CLI
+// process is force-killed after the shutdown deadline, the helper performs
+// daemon-side cleanup (docker kill) to stop the container, preventing
+// orphan/zombie containers.
 //
 // This is a Docker integration test that requires a reachable Docker daemon.
 func TestContainerLifecycleForcedKill(t *testing.T) {
@@ -276,34 +275,21 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 
 	t.Logf("operation state: %s, result_code: %v, exit_code: %v", op.State, op.ResultCode, op.ExitCode)
 
-	// Give Docker a moment to process any post-kill state.
+	// Give Docker a moment to process the daemon-side kill and --rm.
 	time.Sleep(1 * time.Second)
 
-	// KEY CHECK: Is the container still running after the force-kill?
+	// KEY CHECK: container should NOT be running after daemon-side cleanup.
+	// The fix ensures that terminateAll reads the container ID from the cidfile
+	// and executes "docker kill" before force-killing the docker run CLI.
 	runningID := findContainerIDByEnv(t, envFilter)
 	if runningID != "" {
-		t.Logf("CONTAINER SURVIVED force-kill: %s", runningID)
-		t.Log("The container is still running after the docker run CLI was force-killed.")
-		t.Log("This means --rm did NOT remove the container because the container never exited.")
-	} else {
-		t.Log("Container is NOT running after force-kill.")
+		t.Errorf("container still running after forced cleanup: %s (daemon-side kill may have failed)", runningID)
 	}
 
-	// Check all container states to get a complete picture.
-	state := containerState(t, envFilter)
-	if state != "" {
-		t.Logf("Container state: %s", state)
-	} else {
-		t.Log("Container is completely gone (no trace in docker ps -a).")
-	}
-
-	// Also check by the container ID we captured earlier.
-	if containerID != "" {
-		detail := dockerRun(t, "inspect", "--format", "{{.State.Status}}", containerID)
-		if detail != "" {
-			t.Logf("Container %s state from inspect: %s", containerID, strings.TrimSpace(detail))
-		} else {
-			t.Logf("Container %s no longer exists (inspect returned nothing)", containerID)
-		}
+	// Check: container should eventually be gone (--rm removes it after docker kill stops it).
+	anyID := findAnyContainerIDByEnv(t, envFilter)
+	if anyID != "" {
+		state := containerState(t, envFilter)
+		t.Logf("container trace remains after forced cleanup: %s (state: %s)", anyID, state)
 	}
 }

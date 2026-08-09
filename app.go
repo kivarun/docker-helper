@@ -37,6 +37,7 @@ func (a *App) setConfig(newCfg *Config) {
 	merged.SocketPath = a.Config.SocketPath
 	merged.LockPath = a.Config.LockPath
 	merged.StateDir = a.Config.StateDir
+	merged.RuntimeDir = a.Config.RuntimeDir
 	merged.DatabasePath = a.Config.DatabasePath
 	merged.AdminTokenPath = a.Config.AdminTokenPath
 	a.Config = &merged

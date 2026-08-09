@@ -27,11 +27,16 @@ func newTestApp(t *testing.T) *App {
 	}
 
 	allowedRoot := dir
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("cannot create runtime dir: %v", err)
+	}
 	cfg := &Config{
 		AllowedRoot:           allowedRoot,
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
 		DatabasePath:          dbPath,
 		AdminTokenPath:        filepath.Join(dir, "admin.token"),
 		ShutdownTimeout:       30 * time.Second,

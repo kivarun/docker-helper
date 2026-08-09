@@ -347,14 +347,29 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	}
 	op.Wait()
 
-	expectedOrder := []string{"run", "--rm", "--security-opt", "label=disable", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
-	if len(capturedArgs) != len(expectedOrder) {
-		t.Fatalf("expected %d args, got %d: %v", len(expectedOrder), len(capturedArgs), capturedArgs)
+	// --cidfile is inserted after --user, before other options.
+	baseArgs := []string{"run", "--rm", "--security-opt", "label=disable", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+	for i, expected := range baseArgs {
+		if capturedArgs[i] != expected {
+			t.Fatalf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])
+		}
+	}
+	if len(capturedArgs) < 6 || capturedArgs[6] != "--cidfile" {
+		t.Fatalf("expected --cidfile at arg[6], got %v", capturedArgs)
+	}
+	if len(capturedArgs) < 7 || capturedArgs[7] == "" {
+		t.Fatalf("expected cidfile path at arg[7], got %v", capturedArgs)
+	}
+	// Skip the cidfile args for the rest of the comparison.
+	remainingArgs := capturedArgs[8:]
+	expectedRemaining := []string{"--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
+	if len(remainingArgs) != len(expectedRemaining) {
+		t.Fatalf("expected %d remaining args, got %d: %v", len(expectedRemaining), len(remainingArgs), remainingArgs)
 	}
 
-	for i, expected := range expectedOrder {
-		if capturedArgs[i] != expected {
-			t.Errorf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])
+	for i, expected := range expectedRemaining {
+		if remainingArgs[i] != expected {
+			t.Errorf("remaining arg[%d]: expected %q, got %q", i, expected, remainingArgs[i])
 		}
 	}
 }
