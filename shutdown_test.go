@@ -50,7 +50,7 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 
 	op := startBuild(t, app, token)
 
-	// Wait for the process to signal readiness (installed TERM trap).
+	// Wait for the process to signal readiness (installed SIGTERM ignore).
 	waitProcessReady(t, readyFile)
 
 	// Mark registry as shutting down and terminate with short deadline.
@@ -61,6 +61,11 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 	reg.terminateAll(shutdownCtx)
 	shutdownDuration := time.Since(startShutdown)
 	cancel()
+
+	// terminateAll should not return immediately (graceful phase ran).
+	if shutdownDuration < 400*time.Millisecond {
+		t.Errorf("terminateAll returned too quickly: %v (graceful phase may not have run)", shutdownDuration)
+	}
 
 	// Shutdown should complete within the deadline plus a small buffer for Kill().
 	// terminateAll must NOT add a separate fixed wait beyond the deadline.

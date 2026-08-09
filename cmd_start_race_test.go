@@ -94,7 +94,7 @@ func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
 
 	op := startBuild(t, app, token)
 
-	// Wait for the process to signal readiness (installed TERM trap).
+	// Wait for the process to signal readiness (installed SIGTERM ignore).
 	waitProcessReady(t, readyFile)
 
 	// Trigger shutdown with short deadline.
@@ -104,6 +104,12 @@ func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
 	reg.terminateAll(shutdownCtx)
 	elapsed := time.Since(start)
 	cancel()
+
+	// terminateAll should not return immediately (graceful phase ran).
+	// Allow some tolerance for timing jitter.
+	if elapsed < 400*time.Millisecond {
+		t.Errorf("terminateAll returned too quickly: %v (graceful phase may not have run)", elapsed)
+	}
 
 	// terminateAll should not exceed the deadline significantly.
 	if elapsed > 1*time.Second {

@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -187,7 +187,7 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 			op.terminated = true
 			terminated = append(terminated, op)
 		} else if op.cmd != nil && op.cmd.Process != nil {
-			op.cmd.Process.Signal(os.Interrupt)
+			op.cmd.Process.Signal(syscall.SIGTERM)
 		}
 		op.mu.Unlock()
 	}

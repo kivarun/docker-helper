@@ -20,5 +20,9 @@ func main() {
 	}
 
 	// Block indefinitely until killed.
-	select {}
+	// Use syscall.pause() which blocks until a signal is received.
+	// Since SIGTERM is ignored, the process will only exit on SIGKILL.
+	for {
+		syscall.Pause()
+	}
 }
