@@ -174,26 +174,28 @@ func runWithLock(lockPath, socketPath string, fn func(net.Listener) error) error
 }
 
 // serveWithShutdown runs server.Serve(listener) in a background goroutine and
-// waits for either ctx cancellation (graceful shutdown) or a Serve error.
-// On ctx cancellation it calls server.Shutdown with the given timeout.
-// If Shutdown exceeds the timeout, server.Close is called and an error returned.
+// waits for either signalCtx cancellation (graceful shutdown) or a Serve error.
+// On signalCtx cancellation it creates a shutdown context with the given timeout
+// and calls server.Shutdown. If Shutdown exceeds the timeout, server.Close is
+// called and an error returned.
+// Returns the shutdown context and its cancel func so the caller can reuse the
+// same absolute deadline for subsequent cleanup (e.g., operation termination).
 // The callback in runWithLock must not return until Shutdown completes so the
 // lock stays held during the entire drain.
 func serveWithShutdown(
-	ctx context.Context,
+	signalCtx context.Context,
 	server *http.Server,
 	listener net.Listener,
 	timeout time.Duration,
-) error {
+) (shutdownCtx context.Context, shutdownCancel func(), err error) {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- server.Serve(listener)
 	}()
 
 	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
+	case <-signalCtx.Done():
+		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
 
 		shutdownErr := server.Shutdown(shutdownCtx)
 
@@ -203,12 +205,14 @@ func serveWithShutdown(
 
 		if shutdownErr == context.DeadlineExceeded {
 			server.Close()
-			return fmt.Errorf("graceful shutdown timeout after %v", timeout)
+			err = fmt.Errorf("graceful shutdown timeout after %v", timeout)
+		} else {
+			err = shutdownErr
 		}
-		return shutdownErr
+		return
 
 	case err := <-serveDone:
-		return err
+		return nil, func() {}, err
 	}
 }
 
@@ -290,19 +294,15 @@ func runServe(stdout, stderr io.Writer) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		err = serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout)
+		shutdownCtx, shutdownCancel, err := serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout)
+		shutdownCancel() // always clean up
 
-		// Mark registry as shutting down so no new operations are accepted.
+		// Mark registry as shutting down and terminate running operations.
+		// shutdownCtx carries the same absolute deadline used by HTTP drain,
+		// so time already spent in serveWithShutdown is naturally accounted for.
 		if app.OperationRegistry != nil {
 			app.OperationRegistry.setShuttingDown()
-
-			// Operation termination shares the same shutdown budget as HTTP drain.
-			// We've already spent some time in serveWithShutdown, so use remaining time.
-			if deadline, ok := ctx.Deadline(); ok {
-				shutdownCtx, shutdownCancel := context.WithDeadline(context.Background(), deadline)
-				app.OperationRegistry.terminateAll(shutdownCtx)
-				shutdownCancel()
-			}
+			app.OperationRegistry.terminateAll(shutdownCtx)
 		}
 
 		logger = logging.snapshotLogger()

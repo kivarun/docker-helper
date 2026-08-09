@@ -659,7 +659,7 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	mux := http.NewServeMux()
 	server := &http.Server{Handler: mux}
-	ctx, cancel := context.WithCancel(context.Background())
+	signalCtx, signalCancel := context.WithCancel(context.Background())
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -669,11 +669,12 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- serveWithShutdown(ctx, server, listener, 30*time.Second)
+		_, _, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+		serveDone <- serveDoneErr
 	}()
 
 	// Initiate shutdown before any connections.
-	cancel()
+	signalCancel()
 
 	err = <-serveDone
 	if err != nil {
@@ -694,17 +695,18 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 
 	mux := http.NewServeMux()
 	server := &http.Server{Handler: mux}
-	ctx, cancel := context.WithCancel(context.Background())
+	signalCtx, signalCancel := context.WithCancel(context.Background())
 
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- runWithLock(lockPath, socketPath, func(listener net.Listener) error {
-			return serveWithShutdown(ctx, server, listener, 30*time.Second)
+			_, _, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+			return err
 		})
 	}()
 
 	// Initiate shutdown before any connections.
-	cancel()
+	signalCancel()
 
 	err := <-serveDone
 	if err != nil {
@@ -727,8 +729,8 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	mux := http.NewServeMux()
 	server := &http.Server{Handler: mux}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	defer signalCancel()
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -738,7 +740,8 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- serveWithShutdown(ctx, server, listener, 30*time.Second)
+		_, _, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+		serveDone <- serveDoneErr
 	}()
 
 	// Close listener to force Serve error.
@@ -770,7 +773,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 
 	mux := http.NewServeMux()
 	server := &http.Server{Handler: mux}
-	ctx, cancel := context.WithCancel(context.Background())
+	signalCtx, signalCancel := context.WithCancel(context.Background())
 
 	mux.HandleFunc("POST /drain", func(w http.ResponseWriter, r *http.Request) {
 		close(handlerStarted)
@@ -783,7 +786,8 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 		defer close(serverDone)
 		serverErr = runWithLock(lockPath, socketPath, func(listener net.Listener) error {
 			close(listenerReady)
-			return serveWithShutdown(ctx, server, listener, 30*time.Second)
+			_, _, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second)
+			return err
 		})
 	}()
 
@@ -834,7 +838,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			release()
-			cancel()
+			signalCancel()
 			_ = server.Close()
 			transport.CloseIdleConnections()
 		})
@@ -854,7 +858,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 	}
 
 	// Initiate shutdown.
-	cancel()
+	signalCancel()
 
 	// Wait for shutdown to take effect: listener must stop accepting new connections.
 	listenerClosed := false
@@ -926,7 +930,8 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 
 	mux := http.NewServeMux()
 	server := &http.Server{Handler: mux}
-	ctx, cancel := context.WithCancel(context.Background())
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	defer signalCancel()
 
 	handlerStarted := make(chan struct{})
 	handlerDone := make(chan struct{})
@@ -949,7 +954,7 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 
 	go func() {
 		defer close(serverDone)
-		serverErr = serveWithShutdown(ctx, server, listener, shutdownTimeout)
+		_, _, serverErr = serveWithShutdown(signalCtx, server, listener, shutdownTimeout)
 	}()
 
 	// Create HTTP client that dials the Unix socket.
@@ -987,7 +992,7 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	var cleanupOnce sync.Once
 	cleanup := func() {
 		cleanupOnce.Do(func() {
-			cancel()
+			signalCancel()
 			cancelRequest()
 			_ = server.Close()
 			_ = listener.Close()
@@ -1008,7 +1013,7 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	}
 
 	// Initiate shutdown — Shutdown will hit its deadline.
-	cancel()
+	signalCancel()
 
 	// Wait for serveWithShutdown to return.
 	select {
