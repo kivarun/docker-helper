@@ -26,7 +26,7 @@ func TestRunNonZeroExit(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("container output\n"), &mockExitError{code: 7, msg: "exit status 7"}
 	}
 
@@ -82,7 +82,7 @@ func TestRunNonZeroExitCodeZero(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), &mockExitError{code: 0, msg: "exit status 0"}
 	}
 
@@ -128,7 +128,7 @@ func TestRunDockerErrorStill500(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("docker: not found\n"), errors.New("exec: \"docker\": executable file not found in $PATH")
 	}
 
@@ -171,7 +171,7 @@ func TestRunSuccessNoExitCode(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("success"), nil
 	}
 
@@ -230,7 +230,7 @@ func TestRunNonZeroExitCode125(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("image not found\n"), &mockExitError{code: 125, msg: "exit status 125"}
 	}
 

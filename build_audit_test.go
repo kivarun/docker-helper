@@ -26,7 +26,7 @@ func TestBuildStartContainsFields(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -80,7 +80,7 @@ func TestBuildFinishSuccess(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -128,7 +128,7 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("build failed"), &mockExitError{code: 1, msg: "exit status 1"}
 	}
 
@@ -178,7 +178,7 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(buildOutput), nil
 	}
 
@@ -227,7 +227,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(buildOutput), &mockExitError{code: 1, msg: "exit status 1"}
 	}
 
@@ -273,7 +273,7 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}

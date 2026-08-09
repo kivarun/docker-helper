@@ -739,7 +739,7 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -770,7 +770,7 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 		t.Fatalf("cannot write Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 

@@ -17,7 +17,7 @@ func TestRunWorkdirPassedToDocker(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -60,7 +60,7 @@ func TestRunNoWorkdir(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -96,8 +96,8 @@ func TestRunRelativeWorkdirRejected(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
-		t.Fatal("RunCommand should not be called for relative workdir")
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+		t.Fatal("ExecCommand should not be called for relative workdir")
 		return nil, nil
 	}
 

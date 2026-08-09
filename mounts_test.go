@@ -21,7 +21,7 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -77,7 +77,7 @@ func TestMountRelativeSubdir(t *testing.T) {
 		t.Fatalf("cannot create inner: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -113,7 +113,7 @@ func TestMountRegularFile(t *testing.T) {
 		t.Fatalf("cannot create test file: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -145,7 +145,7 @@ func TestMountReadOnly(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -192,7 +192,7 @@ func TestMountSameSourceDifferentTargets(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -443,7 +443,7 @@ func TestMountTargetRoot(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -491,7 +491,7 @@ func TestMountsPreserveOrder(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -541,7 +541,7 @@ func TestDockerSecurityOpt(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -581,7 +581,7 @@ func TestDockerUser(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -625,7 +625,7 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 	}
 
 	called := false
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		called = true
 		return []byte("ok"), nil
 	}
@@ -649,7 +649,7 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 	}
 
 	if called {
-		t.Error("RunCommand should not be called with invalid mount")
+		t.Error("ExecCommand should not be called with invalid mount")
 	}
 }
 
@@ -698,7 +698,7 @@ func TestMountCommaInTarget(t *testing.T) {
 	}
 
 	called := false
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		called = true
 		return []byte("ok"), nil
 	}
@@ -731,7 +731,7 @@ func TestMountCommaInTarget(t *testing.T) {
 	}
 
 	if called {
-		t.Error("RunCommand should not be called with comma in target")
+		t.Error("ExecCommand should not be called with comma in target")
 	}
 }
 
@@ -749,7 +749,7 @@ func TestMountCommaInSource(t *testing.T) {
 	}
 
 	called := false
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		called = true
 		return []byte("ok"), nil
 	}
@@ -782,7 +782,7 @@ func TestMountCommaInSource(t *testing.T) {
 	}
 
 	if called {
-		t.Error("RunCommand should not be called with comma in source")
+		t.Error("ExecCommand should not be called with comma in source")
 	}
 }
 
@@ -795,7 +795,7 @@ func TestMountDuplicateTargetAfterClean(t *testing.T) {
 	}
 
 	called := false
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		called = true
 		return []byte("ok"), nil
 	}
@@ -829,7 +829,7 @@ func TestMountDuplicateTargetAfterClean(t *testing.T) {
 	}
 
 	if called {
-		t.Error("RunCommand should not be called with duplicate targets")
+		t.Error("ExecCommand should not be called with duplicate targets")
 	}
 }
 
@@ -842,7 +842,7 @@ func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}

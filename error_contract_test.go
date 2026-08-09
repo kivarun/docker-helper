@@ -313,7 +313,7 @@ func TestErrorContractDockerBuildFailed(t *testing.T) {
 		t.Fatalf("cannot write Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("build output here\n"), &mockExitError{code: 1, msg: "exit status 1"}
 	}
 
@@ -353,7 +353,7 @@ func TestErrorContractDockerPullFailed(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("pull error output\n"), &mockExitError{code: 1, msg: "exit status 1"}
 	}
 
@@ -389,7 +389,7 @@ func TestErrorContractDockerRunFailed(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("run error output\n"), &mockExitError{code: 125, msg: "exit status 125"}
 	}
 
@@ -630,7 +630,7 @@ func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("container output\n"), &mockExitError{code: 7, msg: "exit status 7"}
 	}
 
@@ -821,7 +821,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 
 	const errMarker = "test_build_error_marker_abc123"
 	const dockerOutput = "build-output-secret-xyz"
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(dockerOutput + "\n"), &mockExitError{code: 1, msg: errMarker}
 	}
 
@@ -887,7 +887,7 @@ func TestDockerErrorLogPull(t *testing.T) {
 
 	const errMarker = "test_pull_error_marker_def456"
 	const dockerOutput = "pull-output-secret-xyz"
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(dockerOutput + "\n"), &mockExitError{code: 1, msg: errMarker}
 	}
 
@@ -950,7 +950,7 @@ func TestDockerErrorLogRun(t *testing.T) {
 	const errMarker = "test_run_error_marker_ghi789"
 	const dockerOutput = "run-output-secret-xyz"
 	const envValue = "env-secret-value-abc"
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(dockerOutput + "\n"), &mockExitError{code: 125, msg: errMarker}
 	}
 

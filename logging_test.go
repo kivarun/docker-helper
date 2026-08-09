@@ -289,7 +289,7 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -336,7 +336,7 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("error"), io.EOF
 	}
 
@@ -394,7 +394,7 @@ func TestNoCommandInAuditStream(t *testing.T) {
 
 	const secretArg = "UNIQUE_SECRET_CMD_ARG_98765"
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -440,7 +440,7 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 
 	const secretEnv = "UNIQUE_SECRET_ENV_VALUE_54321"
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -486,7 +486,7 @@ func TestAuditRecordHasRequestID(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -1086,7 +1086,7 @@ func TestResponseEncodingErrorThroughHandler(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 

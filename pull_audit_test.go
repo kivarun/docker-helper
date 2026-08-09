@@ -19,7 +19,7 @@ func TestPullStartContainsFields(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -60,7 +60,7 @@ func TestPullFinishSuccess(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -101,7 +101,7 @@ func TestPullFinishErrorWithExitCode(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("pull failed"), &mockExitError{code: 1, msg: "exit status 1"}
 	}
 
@@ -144,7 +144,7 @@ func TestPullAuditNoPullOutput(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(pullOutput), nil
 	}
 
@@ -186,7 +186,7 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(pullErrorOutput), &mockExitError{code: 1, msg: "exit status 1"}
 	}
 
@@ -227,7 +227,7 @@ func TestPullDockerArgsUnchanged(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}

@@ -17,7 +17,7 @@ func TestPullSessionAuthValidToken(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -115,7 +115,7 @@ func TestPullSessionAuthExpiredSession(t *testing.T) {
 		t.Fatalf("cannot update expires_at: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -149,7 +149,7 @@ func TestPullSessionAuthDeletedSession(t *testing.T) {
 		t.Fatal("expected session to be deleted")
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -208,7 +208,7 @@ func TestPullSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	called := false
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		called = true
 		return []byte("ok"), nil
 	}
@@ -227,14 +227,14 @@ func TestPullSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	}
 
 	if called {
-		t.Error("PullCommand should not be called with invalid token")
+		t.Error("ExecCommand should not be called with invalid token")
 	}
 }
 
 func TestPullSessionAuthAdminTokenRejected(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -260,7 +260,7 @@ func TestPullImageRequired(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -295,7 +295,7 @@ func TestPullImageInvalidName(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -321,7 +321,7 @@ func TestPullImageNoTag(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -366,7 +366,7 @@ func TestPullUnknownFieldsRejected(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -392,7 +392,7 @@ func TestPullSuccessResponse(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("pull output"), nil
 	}
 
@@ -436,7 +436,7 @@ func TestPullErrorResponse(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("error output"), &mockExitError{code: 1, msg: "exit status 1"}
 	}
 
@@ -475,7 +475,7 @@ func TestPullDockerArgs(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.PullCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}

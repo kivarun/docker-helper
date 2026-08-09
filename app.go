@@ -11,9 +11,7 @@ type App struct {
 	Config         *Config
 	DB             *sql.DB
 	AdminTokenHash [sha256.Size]byte
-	RunCommand     func(string, ...string) ([]byte, error)
-	BuildCommand   func(string, ...string) ([]byte, error)
-	PullCommand    func(string, ...string) ([]byte, error)
+	ExecCommand    func(string, ...string) ([]byte, error)
 }
 
 // getConfig returns a snapshot copy of the current configuration under a read lock.

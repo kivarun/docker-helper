@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -22,11 +21,6 @@ type buildRequest struct {
 	Context    string `json:"context"`
 	Dockerfile string `json:"dockerfile"`
 	Image      string `json:"image"`
-}
-
-func defaultBuildCommand(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	return cmd.CombinedOutput()
 }
 
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
@@ -81,9 +75,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		contextPath,
 	}
 
-	buildCmd := a.BuildCommand
+	buildCmd := a.ExecCommand
 	if buildCmd == nil {
-		buildCmd = defaultBuildCommand
+		buildCmd = defaultExecCommand
 	}
 
 	output, err := buildCmd("docker", args...)

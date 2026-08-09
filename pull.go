@@ -4,17 +4,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"os/exec"
 	"time"
 )
 
 type pullRequest struct {
 	Image string `json:"image"`
-}
-
-func defaultPullCommand(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	return cmd.CombinedOutput()
 }
 
 func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
@@ -55,9 +49,9 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	args := []string{"pull", req.Image}
 
-	pullCmd := a.PullCommand
+	pullCmd := a.ExecCommand
 	if pullCmd == nil {
-		pullCmd = defaultPullCommand
+		pullCmd = defaultExecCommand
 	}
 
 	output, err := pullCmd("docker", args...)

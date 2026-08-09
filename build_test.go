@@ -23,7 +23,7 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -90,7 +90,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	called := false
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		called = true
 		return []byte("ok"), nil
 	}
@@ -113,7 +113,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	}
 
 	if called {
-		t.Error("BuildCommand should not be called with invalid token")
+		t.Error("ExecCommand should not be called with invalid token")
 	}
 }
 
@@ -131,7 +131,7 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -190,7 +190,7 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -230,7 +230,7 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -396,7 +396,7 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -432,7 +432,7 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -515,7 +515,7 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.BuildCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}

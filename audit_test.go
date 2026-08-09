@@ -72,7 +72,7 @@ func TestRunStartAndFinish(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -127,7 +127,7 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 
 	const secretValue = "super-secret-token-12345"
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -192,7 +192,7 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 
 	const secretValue = "my-password-do-not-log"
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -232,7 +232,7 @@ func TestAuditNonZeroExit(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("error output"), &mockExitError{code: 7, msg: "exit status 7"}
 	}
 
@@ -274,7 +274,7 @@ func TestAuditDockerError(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("docker not found"), errors.New("exec: docker not found")
 	}
 
@@ -309,7 +309,7 @@ func TestAuditDockerExit125HasExitCode(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("image not found"), &mockExitError{code: 125, msg: "exit status 125"}
 	}
 
@@ -347,7 +347,7 @@ func TestAuditMountsRelativeSource(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -396,7 +396,7 @@ func TestAuditNoContainerOutput(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte(containerOutput), nil
 	}
 
@@ -425,7 +425,7 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -457,7 +457,7 @@ func TestAuditCommandArgCount(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -497,7 +497,7 @@ func TestAuditNoCommandInRecord(t *testing.T) {
 
 	const secretCmd = "SECRET_CMD_ARG_UNIQUE_12345"
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 

@@ -26,6 +26,12 @@ func extractExitCode(err error) *int {
 	return nil
 }
 
+// defaultExecCommand is the default Docker subprocess executor.
+func defaultExecCommand(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	return cmd.CombinedOutput()
+}
+
 type runRequest struct {
 	Image       string            `json:"image"`
 	Entrypoint  string            `json:"entrypoint,omitempty"`
@@ -45,11 +51,6 @@ type resolvedMount struct {
 	HostPath string
 	Target   string
 	ReadOnly bool
-}
-
-func defaultRunCommand(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	return cmd.CombinedOutput()
 }
 
 func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) {
@@ -239,9 +240,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	args = append(args, req.Image)
 	args = append(args, req.Command...)
 
-	runCmd := a.RunCommand
+	runCmd := a.ExecCommand
 	if runCmd == nil {
-		runCmd = defaultRunCommand
+		runCmd = defaultExecCommand
 	}
 
 	output, err := runCmd("docker", args...)

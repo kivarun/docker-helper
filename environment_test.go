@@ -19,7 +19,7 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -64,7 +64,7 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -109,7 +109,7 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}
@@ -262,7 +262,7 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		capturedArgs = args
 		return []byte("ok"), nil
 	}

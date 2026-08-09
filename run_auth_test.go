@@ -18,7 +18,7 @@ func TestRunSessionAuthValidToken(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -116,7 +116,7 @@ func TestRunSessionAuthExpiredSession(t *testing.T) {
 		t.Fatalf("cannot update expires_at: %v", err)
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -150,7 +150,7 @@ func TestRunSessionAuthDeletedSession(t *testing.T) {
 		t.Fatal("expected session to be deleted")
 	}
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
@@ -209,7 +209,7 @@ func TestRunSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	called := false
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		called = true
 		return []byte("ok"), nil
 	}
@@ -228,14 +228,14 @@ func TestRunSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	}
 
 	if called {
-		t.Error("RunCommand should not be called with invalid token")
+		t.Error("ExecCommand should not be called with invalid token")
 	}
 }
 
 func TestRunSessionAuthAdminTokenRejected(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	app.RunCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
 		return []byte("ok"), nil
 	}
 
