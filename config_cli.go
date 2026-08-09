@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -371,12 +372,13 @@ func configShowAll(stdout, stderr io.Writer) int {
 	databasePath := filepath.Join(stateDir, "docker-helper.db")
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
-	level := fc.Level
-	if level == "" {
-		level = "info"
+	levelStr := fc.Level
+	if levelStr == "" {
+		levelStr = "info"
 	}
 
-	auditEnabled := resolveAuditEnabledForShow(fc.AuditEnabled, level)
+	slogLevel, _ := parseLogLevel(levelStr)
+	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel)
 	auditSource := "log_level"
 	if fc.AuditEnabled != nil {
 		auditSource = "explicit"
@@ -385,7 +387,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 	result := map[string]any{
 		"allowed_root":         fc.AllowedRoot,
 		"session_ttl":          fc.SessionTTL,
-		"log_level":            level,
+		"log_level":            levelStr,
 		"audit_enabled":        auditEnabled,
 		"audit_enabled_source": auditSource,
 		"config_path":          configPath,
@@ -407,29 +409,6 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-func slogLevelFromString(s string) int {
-	switch s {
-	case "debug":
-		return -4
-	case "info":
-		return 0
-	case "warn":
-		return 4
-	case "error":
-		return 8
-	default:
-		return 0
-	}
-}
-
-func resolveAuditEnabledForShow(cfg *bool, levelStr string) bool {
-	level := slogLevelFromString(levelStr)
-	if cfg != nil {
-		return *cfg
-	}
-	return level == -4
 }
 
 // validateConfigJSON reads config.json, checks it is a valid JSON object,
@@ -547,11 +526,12 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, level)
 	case "audit_enabled":
-		level := fc.Level
-		if level == "" {
-			level = "info"
+		levelStr := fc.Level
+		if levelStr == "" {
+			levelStr = "info"
 		}
-		auditEnabled := resolveAuditEnabledForShow(fc.AuditEnabled, level)
+		slogLevel, _ := parseLogLevel(levelStr)
+		auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel)
 		fmt.Fprintln(stdout, auditEnabled)
 	case "audit_enabled_source":
 		if fc.AuditEnabled != nil {
