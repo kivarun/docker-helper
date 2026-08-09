@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -199,8 +199,21 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		EnvKeys:         envNames,
 	})
 
-	started := time.Now()
+	// Create run operation and register it.
+	cfg := a.getConfig()
+	bufSize := cfg.BuildLogMaxBytes
 
+	op := newRunOperation(session.ID, req.Image, bufSize)
+
+	if a.OperationRegistry != nil {
+		if !a.OperationRegistry.tryCreate(op) {
+			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
+			return
+		}
+		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+	}
+
+	// Build docker run command.
 	args := []string{
 		"run",
 		"--rm",
@@ -231,68 +244,114 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	args = append(args, req.Image)
 	args = append(args, req.Command...)
 
-	runCmd := a.ExecCommand
-	if runCmd == nil {
-		runCmd = defaultExecCommand
+	cmdCtx, cancel := context.WithCancel(context.Background())
+
+	cmd := a.newRunCmd(cmdCtx, "docker", args...)
+
+	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
+	cmd.Stdout = op.LogBuffer
+	cmd.Stderr = op.LogBuffer
+
+	// Start the process under op.mu so terminateAll can synchronize:
+	// either we start the process (started=true), or terminateAll marks
+	// it as terminated. There is no intermediate state.
+	op.mu.Lock()
+	if op.terminated {
+		op.mu.Unlock()
+		cancel()
+		msg := "run cancelled: daemon is shutting down"
+		op.fail("docker_run_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
+		return
 	}
+	startTime := time.Now()
+	op.StartedAt = &startTime
+	op.cmd = cmd
 
-	output, err := runCmd("docker", args...)
-
-	duration := time.Since(started).Round(time.Millisecond).String()
-
-	var result string
-	var exitCode *int
+	// cmd.Start() is called while holding op.mu so terminateAll cannot
+	// race between checking started and setting terminated.
+	err := cmd.Start()
+	op.started = err == nil
+	op.mu.Unlock()
 
 	if err != nil {
-		if ec := extractExitCode(err); ec != nil && *ec != 125 {
-			exitCode = ec
-			result = "container_exit_nonzero"
-
-			writeJSON(ctx, w, http.StatusOK, response{
-				OK:       false,
-				Code:     "container_exit_nonzero",
-				Message:  "container exited with non-zero status",
-				Output:   string(output),
-				Duration: duration,
-				ExitCode: exitCode,
-			})
-		} else {
-			exitCode = extractExitCode(err)
-			result = "docker_error"
-
-			opLog(ctx).Error("docker run error",
-				slog.String("operation", "run"),
-				slog.String("error", err.Error()),
-			)
-
-			writeJSON(ctx, w, http.StatusInternalServerError, response{
-				OK:       false,
-				Code:     "docker_run_failed",
-				Message:  "docker run failed",
-				Output:   string(output),
-				Duration: duration,
-			})
-		}
-	} else {
-		result = "success"
-
-		writeJSON(ctx, w, http.StatusOK, response{
-			OK:       true,
-			Message:  "container finished successfully",
-			Output:   string(output),
-			Duration: duration,
+		cancel()
+		msg := fmt.Sprintf("cannot start run: %v", err)
+		op.fail("docker_run_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
 		})
+		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
-		Event:           "run.finish",
-		SessionID:       session.ID,
-		Image:           req.Image,
-		CommandArgCount: cmdArgCount,
-		Mounts:          mountAudit,
-		EnvKeys:         envNames,
-		Result:          result,
-		ExitCode:        exitCode,
-		Duration:        duration,
+	// Start goroutine for process completion.
+	go func() {
+		defer cancel()
+		a.waitRunCompletion(op, startTime, cmdArgCount, mountAudit, envNames)
+	}()
+
+	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+		"ok":           true,
+		"operation_id": op.ID,
+		"status":       operationRunning,
 	})
+}
+
+// newRunCmd creates a new exec.Cmd for run operations.
+// It uses ExecCommandContext if set (test seam), otherwise default.
+func (a *App) newRunCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if a.ExecCommandContext != nil {
+		return a.ExecCommandContext(ctx, name, args...)
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd
+}
+
+// waitRunCompletion waits for the run process to finish and transitions
+// the operation to succeeded or failed. It is the single owner of cmd.Wait().
+func (a *App) waitRunCompletion(op *operation, started time.Time, cmdArgCount *int, mounts []auditMount, envKeys []string) {
+	err := op.cmd.Wait()
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	exitCode := extractExitCode(err)
+
+	if err != nil {
+		resultCode := "docker_run_failed"
+		if exitCode != nil && *exitCode != 125 {
+			resultCode = "container_exit_nonzero"
+		}
+		writeAuditWithRequestID(context.Background(), auditRecord{
+			Event:           "run.finish",
+			SessionID:       op.SessionID,
+			OperationID:     op.ID,
+			Image:           op.Image,
+			CommandArgCount: cmdArgCount,
+			Mounts:          mounts,
+			EnvKeys:         envKeys,
+			Result:          resultCode,
+			ExitCode:        exitCode,
+			Duration:        duration,
+		})
+		op.fail(resultCode, "docker run failed", exitCode, &duration)
+	} else {
+		writeAuditWithRequestID(context.Background(), auditRecord{
+			Event:           "run.finish",
+			SessionID:       op.SessionID,
+			OperationID:     op.ID,
+			Image:           op.Image,
+			CommandArgCount: cmdArgCount,
+			Mounts:          mounts,
+			EnvKeys:         envKeys,
+			Result:          "succeeded",
+			ExitCode:        exitCode,
+			Duration:        duration,
+		})
+		op.succeed(&duration)
+	}
 }

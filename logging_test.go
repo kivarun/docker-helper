@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -248,14 +249,15 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{
@@ -266,9 +268,23 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
 
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	rid := w.Header().Get("X-Request-ID")
 	if rid == "" {
@@ -291,14 +307,15 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("error"), io.EOF
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
 	}
 
 	req := newRunRequest(map[string]any{
@@ -309,27 +326,50 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
 
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
+
 	rid := w.Header().Get("X-Request-ID")
 	if rid == "" {
 		t.Fatal("X-Request-ID header should be set")
 	}
 
-	opOutput := opBuf.String()
-	if opOutput == "" {
-		t.Fatal("operational output is empty")
+	// With async model, request_id and session_id are in audit records.
+	auditOutput := auditBuf.String()
+	if auditOutput == "" {
+		t.Fatal("audit output is empty")
 	}
 
-	// Parse as JSON and assert both fields.
-	var m map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(opOutput)), &m); err != nil {
-		t.Fatalf("cannot parse operational record: %v: %s", err, opOutput)
+	// Parse audit records and verify request_id and session_id.
+	for _, line := range strings.Split(strings.TrimSpace(auditOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		if m["request_id"] == rid && m["session_id"] == result.Session.ID {
+			return
+		}
 	}
-	if m["request_id"] != rid {
-		t.Errorf("expected request_id=%q, got %v", rid, m["request_id"])
-	}
-	if m["session_id"] != result.Session.ID {
-		t.Errorf("expected session_id=%q, got %v", result.Session.ID, m["session_id"])
-	}
+
+	t.Errorf("no audit record contained both request_id=%q and session_id=%q", rid, result.Session.ID)
 }
 
 // TestNoCommandInAuditStream verifies that neither the complete command
@@ -343,6 +383,7 @@ func TestNoCommandInAuditStream(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -351,8 +392,8 @@ func TestNoCommandInAuditStream(t *testing.T) {
 
 	const secretArg = "UNIQUE_SECRET_CMD_ARG_98765"
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{
@@ -363,6 +404,24 @@ func TestNoCommandInAuditStream(t *testing.T) {
 
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	auditOutput := auditBuf.String()
 	opOutput := opBuf.String()
@@ -385,6 +444,7 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -393,8 +453,8 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 
 	const secretEnv = "UNIQUE_SECRET_ENV_VALUE_54321"
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{
@@ -407,6 +467,24 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	auditOutput := auditBuf.String()
 	opOutput := opBuf.String()
@@ -429,14 +507,15 @@ func TestAuditRecordHasRequestID(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{
@@ -446,6 +525,24 @@ func TestAuditRecordHasRequestID(t *testing.T) {
 
 	handler := withRequestID(app.handleRun)
 	handler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	for _, line := range strings.Split(strings.TrimSpace(auditBuf.String()), "\n") {
 		if line == "" {
@@ -993,14 +1090,15 @@ func TestResponseEncodingErrorThroughHandler(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newRunRequest(map[string]any{

@@ -2,24 +2,27 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"testing"
 	"time"
 )
 
 func TestRunSessionAuthValidToken(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -31,8 +34,8 @@ func TestRunSessionAuthValidToken(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 }
 
@@ -116,10 +119,6 @@ func TestRunSessionAuthExpiredSession(t *testing.T) {
 		t.Fatalf("cannot update expires_at: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
-	}
-
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
 
@@ -148,10 +147,6 @@ func TestRunSessionAuthDeletedSession(t *testing.T) {
 	}
 	if deleted == nil {
 		t.Fatal("expected session to be deleted")
-	}
-
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
 	}
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -209,9 +204,9 @@ func TestRunSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	called := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		called = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -228,16 +223,12 @@ func TestRunSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	}
 
 	if called {
-		t.Error("ExecCommand should not be called with invalid token")
+		t.Error("ExecCommandContext should not be called with invalid token")
 	}
 }
 
 func TestRunSessionAuthAdminTokenRejected(t *testing.T) {
 	app := newTestAppWithAuth(t)
-
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
-	}
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)

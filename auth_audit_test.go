@@ -693,14 +693,15 @@ func TestAuthAuditNoFailureOnValidAdminAuth_DeleteSession(t *testing.T) {
 func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
@@ -708,9 +709,23 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	assertNoAuthFailure(t, auditBuf)
 }

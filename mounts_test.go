@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,9 +23,9 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -40,8 +42,8 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	found := false
@@ -77,8 +79,8 @@ func TestMountRelativeSubdir(t *testing.T) {
 		t.Fatalf("cannot create inner: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -95,8 +97,8 @@ func TestMountRelativeSubdir(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 }
 
@@ -113,8 +115,8 @@ func TestMountRegularFile(t *testing.T) {
 		t.Fatalf("cannot create test file: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -131,8 +133,8 @@ func TestMountRegularFile(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 }
 
@@ -145,9 +147,9 @@ func TestMountReadOnly(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -164,8 +166,8 @@ func TestMountReadOnly(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	found := false
@@ -192,9 +194,9 @@ func TestMountSameSourceDifferentTargets(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -212,8 +214,8 @@ func TestMountSameSourceDifferentTargets(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	mountCount := 0
@@ -443,9 +445,9 @@ func TestMountTargetRoot(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -462,8 +464,8 @@ func TestMountTargetRoot(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	found := false
@@ -491,9 +493,9 @@ func TestMountsPreserveOrder(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -512,8 +514,8 @@ func TestMountsPreserveOrder(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	mountSpecs := []string{}
@@ -541,9 +543,9 @@ func TestDockerSecurityOpt(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{"image": "alpine:latest"}
@@ -555,8 +557,8 @@ func TestDockerSecurityOpt(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	found := false
@@ -581,9 +583,9 @@ func TestDockerUser(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{"image": "alpine:latest"}
@@ -595,8 +597,8 @@ func TestDockerUser(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	uid := os.Getuid()
@@ -625,9 +627,9 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 	}
 
 	called := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		called = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -698,9 +700,9 @@ func TestMountCommaInTarget(t *testing.T) {
 	}
 
 	called := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		called = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -749,9 +751,9 @@ func TestMountCommaInSource(t *testing.T) {
 	}
 
 	called := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		called = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -795,9 +797,9 @@ func TestMountDuplicateTargetAfterClean(t *testing.T) {
 	}
 
 	called := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		called = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -842,9 +844,9 @@ func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -861,8 +863,8 @@ func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
 	found := false

@@ -2,16 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"testing"
 )
 
 func TestRunEnvironmentSingleVar(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -19,9 +22,9 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -38,9 +41,23 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	found := false
 	for i, arg := range capturedArgs {
@@ -57,6 +74,7 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 
 func TestRunEnvironmentMultipleVars(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -64,9 +82,9 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -84,9 +102,23 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	envCount := 0
 	for _, arg := range capturedArgs {
@@ -102,6 +134,7 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 
 func TestRunEnvironmentEmptyValue(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -109,9 +142,9 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -128,9 +161,23 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	found := false
 	for i, arg := range capturedArgs {
@@ -255,6 +302,7 @@ func TestRunEnvironmentNameWithDash(t *testing.T) {
 
 func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -262,9 +310,9 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]any{
@@ -281,9 +329,23 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 
 	app.handleRun(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	opID, ok := resp["operation_id"].(string)
+	if !ok || opID == "" {
+		t.Fatal("expected operation_id in response")
+	}
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
 
 	expectedOrder := []string{"run", "--rm", "--security-opt", "label=disable", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
 	if len(capturedArgs) != len(expectedOrder) {

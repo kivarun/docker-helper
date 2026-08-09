@@ -60,6 +60,21 @@ func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int
 	}
 }
 
+func newRunOperation(sessionID, image string, bufSize int64) *operation {
+	opID := generateOperationID()
+	now := time.Now()
+	return &operation{
+		ID:        opID,
+		SessionID: sessionID,
+		Kind:      "run",
+		State:     operationRunning,
+		CreatedAt: now,
+		Image:     image,
+		LogBuffer: newBoundedBuffer(bufSize),
+		done:      make(chan struct{}),
+	}
+}
+
 func generateOperationID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -314,20 +329,23 @@ func (op *operation) succeed(duration *string) {
 	}
 	op.mu.Unlock()
 
-	dur := ""
-	if duration != nil {
-		dur = *duration
+	// Run operations have their finish audit written by waitRunCompletion.
+	if op.Kind != "run" {
+		dur := ""
+		if duration != nil {
+			dur = *duration
+		}
+		writeAuditWithRequestID(context.Background(), auditRecord{
+			Event:       op.Kind + ".finish",
+			SessionID:   op.SessionID,
+			OperationID: op.ID,
+			Image:       op.Image,
+			Context:     op.Context,
+			Dockerfile:  op.Dockerfile,
+			Result:      "success",
+			Duration:    dur,
+		})
 	}
-	writeAuditWithRequestID(context.Background(), auditRecord{
-		Event:       op.Kind + ".finish",
-		SessionID:   op.SessionID,
-		OperationID: op.ID,
-		Image:       op.Image,
-		Context:     op.Context,
-		Dockerfile:  op.Dockerfile,
-		Result:      "success",
-		Duration:    dur,
-	})
 	op.doneOnce.Do(func() { close(op.done) })
 }
 
@@ -345,21 +363,24 @@ func (op *operation) fail(resultCode, message string, exitCode *int, duration ..
 	}
 	op.mu.Unlock()
 
-	dur := ""
-	if len(duration) > 0 && duration[0] != nil {
-		dur = *duration[0]
+	// Run operations have their finish audit written by waitRunCompletion.
+	if op.Kind != "run" {
+		dur := ""
+		if len(duration) > 0 && duration[0] != nil {
+			dur = *duration[0]
+		}
+		writeAuditWithRequestID(context.Background(), auditRecord{
+			Event:       op.Kind + ".finish",
+			SessionID:   op.SessionID,
+			OperationID: op.ID,
+			Image:       op.Image,
+			Context:     op.Context,
+			Dockerfile:  op.Dockerfile,
+			Result:      "failure",
+			ExitCode:    exitCode,
+			Duration:    dur,
+		})
 	}
-	writeAuditWithRequestID(context.Background(), auditRecord{
-		Event:       op.Kind + ".finish",
-		SessionID:   op.SessionID,
-		OperationID: op.ID,
-		Image:       op.Image,
-		Context:     op.Context,
-		Dockerfile:  op.Dockerfile,
-		Result:      "failure",
-		ExitCode:    exitCode,
-		Duration:    dur,
-	})
 	op.doneOnce.Do(func() { close(op.done) })
 }
 
