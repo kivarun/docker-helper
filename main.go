@@ -294,16 +294,22 @@ func runServe(stdout, stderr io.Writer) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		shutdownCtx, shutdownCancel, err := serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout)
-		shutdownCancel() // always clean up
-
-		// Mark registry as shutting down and terminate running operations.
-		// shutdownCtx carries the same absolute deadline used by HTTP drain,
-		// so time already spent in serveWithShutdown is naturally accounted for.
+		// Mark registry as shutting down immediately when signal arrives,
+		// before HTTP drain starts. This prevents new builds from being
+		// accepted during the entire shutdown sequence.
 		if app.OperationRegistry != nil {
 			app.OperationRegistry.setShuttingDown()
+		}
+
+		shutdownCtx, shutdownCancel, err := serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout)
+
+		// Terminate running operations with the same absolute deadline used
+		// by HTTP drain. Time already spent in serveWithShutdown is naturally
+		// accounted for since shutdownCtx carries the same deadline.
+		if app.OperationRegistry != nil {
 			app.OperationRegistry.terminateAll(shutdownCtx)
 		}
+		shutdownCancel()
 
 		logger = logging.snapshotLogger()
 

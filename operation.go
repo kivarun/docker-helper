@@ -39,6 +39,8 @@ type buildOperation struct {
 	cmd         *exec.Cmd
 	cancel      context.CancelFunc
 	done        chan struct{}
+	doneOnce    sync.Once // ensures op.done is closed exactly once
+	terminated  bool      // set by terminateAll when op.cmd is nil (process not yet started)
 }
 
 func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64) *buildOperation {
@@ -178,6 +180,18 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	}
 	r.mu.RUnlock()
 
+	// Phase 0: Mark operations that haven't started a process yet.
+	// These are operations registered before shutdown but whose cmd.Start()
+	// hasn't been called. Setting terminated prevents handleBuild from
+	// starting the process after shutdown has passed.
+	for _, op := range ops {
+		op.mu.Lock()
+		if op.cmd == nil {
+			op.terminated = true
+		}
+		op.mu.Unlock()
+	}
+
 	// Phase 1: Send graceful SIGTERM to all running operations.
 	// Do NOT call cancel() here - that would immediately kill the process.
 	for _, op := range ops {
@@ -196,6 +210,12 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	}
 
 	for _, op := range ops {
+		op.mu.Lock()
+		wasTerminated := op.terminated
+		op.mu.Unlock()
+		if wasTerminated {
+			continue // already handled in Phase 0
+		}
 		select {
 		case <-op.done:
 			// Operation completed gracefully within the deadline.
@@ -321,7 +341,7 @@ func (op *buildOperation) succeed(duration *string) {
 		Result:      "success",
 		Duration:    dur,
 	})
-	close(op.done)
+	op.doneOnce.Do(func() { close(op.done) })
 }
 
 func (op *buildOperation) fail(resultCode, message string, exitCode *int, duration ...*string) {
@@ -353,7 +373,7 @@ func (op *buildOperation) fail(resultCode, message string, exitCode *int, durati
 		ExitCode:    exitCode,
 		Duration:    dur,
 	})
-	close(op.done)
+	op.doneOnce.Do(func() { close(op.done) })
 }
 
 func (op *buildOperation) Wait() {

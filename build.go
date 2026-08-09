@@ -93,10 +93,24 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	cmd.Stdout = op.LogBuffer
 	cmd.Stderr = op.LogBuffer
 
-	// Start the process synchronously.
+	// Check if shutdown terminated this operation before we could start.
+	// terminateAll sets op.terminated and closes op.done for operations
+	// whose process hasn't started yet.
+	op.mu.Lock()
+	if op.terminated {
+		op.mu.Unlock()
+		cancel()
+		msg := "build cancelled: daemon is shutting down"
+		op.fail("docker_build_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
+		return
+	}
 	started := time.Now()
 	startTime := started
-	op.mu.Lock()
 	op.StartedAt = &startTime
 	op.cancel = cancel
 	op.cmd = cmd
