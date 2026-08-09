@@ -139,9 +139,13 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start goroutine for streaming output capture.
+	// Start goroutines for concurrent stdout/stderr capture.
+	// Both write to the same thread-safe LogBuffer.
 	go func() {
-		io.Copy(op.LogBuffer, io.MultiReader(stdout, stderr))
+		io.Copy(op.LogBuffer, stdout)
+	}()
+	go func() {
+		io.Copy(op.LogBuffer, stderr)
 	}()
 
 	// Start goroutine for process completion.

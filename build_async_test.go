@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -356,5 +357,81 @@ func TestAuditFinishEmittedOnce(t *testing.T) {
 
 	if finishCount != 1 {
 		t.Errorf("expected exactly 1 build.finish audit record, got %d", finishCount)
+	}
+}
+
+// TestBuildStdoutStderrNoDeadlock proves that concurrent stdout/stderr
+// capture does not deadlock when both streams produce output before
+// the process exits. This is a regression test for the old
+// io.MultiReader(stdout, stderr) approach which could block.
+func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	// Write substantial data to both stdout and stderr before exiting.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c",
+			"for i in 1 2 3 4 5; do echo \"stdout-$i\"; echo \"stderr-$i\" >&2; done")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	op.Wait()
+
+	if op.State != operationSucceeded {
+		t.Fatalf("expected status 'succeeded', got %q", op.State)
+	}
+
+	// Fetch all logs.
+	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
+	logsReq.SetPathValue("id", opID)
+	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
+	logsW := httptest.NewRecorder()
+	app.handleOperationLogs(logsW, logsReq)
+
+	var logsResp map[string]any
+	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
+		t.Fatalf("decode logs: %v", err)
+	}
+	logs, ok := logsResp["logs"].(string)
+	if !ok {
+		t.Fatal("expected logs field")
+	}
+
+	// Both stdout and stderr lines must be present.
+	for i := 1; i <= 5; i++ {
+		if !strings.Contains(logs, "stdout-"+string(rune('0'+i))) {
+			t.Errorf("missing stdout-%d in logs", i)
+		}
+		if !strings.Contains(logs, "stderr-"+string(rune('0'+i))) {
+			t.Errorf("missing stderr-%d in logs", i)
+		}
 	}
 }
