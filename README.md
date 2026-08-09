@@ -65,7 +65,8 @@ docker-helper init
 ```
 
 Creates configuration and state directories, writes `config.json` with
-`allowed_root` and `session_ttl`, and generates an admin token. The
+`allowed_root`, `session_ttl`, and `log_level` (default `info`), and
+generates an admin token. The
 token is printed once and stored beside the config file.
 
 If running interactively and `--allowed-root` is not provided, you will

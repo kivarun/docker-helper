@@ -189,7 +189,8 @@ Root command. Without arguments, prints help and exits 0.
 docker-helper <command>
 ```
 
-Available commands: `serve`, `init`, `session`, `version`, `help`.
+Available commands: `serve`, `init`, `config`, `reload`, `session`,
+`version`, `help`.
 
 ### `docker-helper help`
 
@@ -206,6 +207,35 @@ Initializes configuration and admin token.
 ### `docker-helper version`
 
 Prints the current version.
+
+### `docker-helper config <subcommand>`
+
+Inspect and modify configuration. Requires a subcommand.
+
+Subcommands: `show`, `set`, `unset`.
+
+`docker-helper config show [FIELD]` — without FIELD, prints the complete
+effective configuration as JSON (admin_token redacted). With FIELD, prints
+only that field's scalar value.
+
+`docker-helper config set FIELD VALUE` — sets a writable field
+(`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`). Reports
+`updated` or `unchanged`. If the daemon is running, the change is applied
+immediately.
+
+`docker-helper config unset FIELD` — removes an optional field
+(`log_level`, `audit_enabled`) to restore its default. Reports `unset` or
+`unchanged`. If the daemon is running, the change is applied immediately.
+
+### `docker-helper reload`
+
+Ask the running daemon to re-read `config.json` and apply changes without
+restarting. Only configurable fields are applied at runtime
+(`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`). Computed
+paths (socket, database, state) are not changed. If the daemon is not
+running, the command fails with a non-zero exit code. If the new
+configuration is invalid, the daemon keeps its current configuration and
+the command returns an error.
 
 ### `docker-helper session <subcommand>`
 
@@ -674,6 +704,7 @@ Result codes:
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside `AllowedRoot` |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
+| `unknown_error` | unexpected error not classified above |
 
 #### session.delete
 
@@ -694,6 +725,7 @@ Result codes:
 | `invalid_session_id` | session ID is empty in the URL |
 | `not_found` | no session with the given ID |
 | `database_error` | SQLite failure during delete |
+| `unknown_error` | unexpected error not classified above |
 
 #### run.start
 
@@ -865,8 +897,11 @@ arguments themselves.
 
 ### Container security
 
-docker-helper applies a fixed security policy when running containers.
-The specific Docker flags used are an implementation detail.
+docker-helper applies a fixed security policy when running containers:
+
+- `--rm` — remove the container on exit;
+- `--security-opt label=disable` — disable SELinux/MacAppLabel confinement;
+- `--user <uid>:<gid>` — run as the helper process's own UID and GID.
 
 ## Design principles
 
