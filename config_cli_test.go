@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setupConfigTest(t *testing.T) string {
@@ -2216,5 +2220,299 @@ func TestConfigHelpPositionalArgsStillRejected(t *testing.T) {
 				t.Errorf("expected exit code 2, got %d", code)
 			}
 		})
+	}
+}
+
+func TestLoadConfigRejectsMissingAllowedRoot(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"session_ttl":"12h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error for missing allowed_root")
+	}
+	if !strings.Contains(err.Error(), "allowed_root") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfigRejectsEmptyAllowedRoot(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"","session_ttl":"12h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error for empty allowed_root")
+	}
+}
+
+func TestLoadConfigRejectsRelativeAllowedRoot(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"relative/path","session_ttl":"12h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error for relative allowed_root")
+	}
+}
+
+func TestLoadConfigRejectsMissingSessionTTL(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error for missing session_ttl")
+	}
+	if !strings.Contains(err.Error(), "session_ttl") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfigRejectsZeroSessionTTL(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp","session_ttl":"0s"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error for zero session_ttl")
+	}
+}
+
+func TestLoadConfigRejectsNegativeSessionTTL(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp","session_ttl":"-1h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected error for negative session_ttl")
+	}
+}
+
+func TestLoadConfigAcceptsValidConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	cfg := map[string]any{
+		"allowed_root": "/tmp/work",
+		"session_ttl":  "12h",
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := loadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.AllowedRoot != "/tmp/work" {
+		t.Errorf("AllowedRoot = %q, want /tmp/work", c.AllowedRoot)
+	}
+}
+
+func TestReloadRejectsInvalidAllowedRoot(t *testing.T) {
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Write invalid config with empty allowed_root
+	configPath := getConfigPath()
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"","session_ttl":"12h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("expected reload to reject empty allowed_root")
+	}
+}
+
+func TestReloadRejectsNegativeSessionTTL(t *testing.T) {
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Write invalid config with negative session_ttl
+	configPath := getConfigPath()
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp/work","session_ttl":"-1h"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("expected reload to reject negative session_ttl")
 	}
 }

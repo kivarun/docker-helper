@@ -139,9 +139,19 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
 	}
 
+	if fc.AllowedRoot == "" {
+		return nil, fmt.Errorf("allowed_root must be a non-empty absolute path")
+	}
+	if !filepath.IsAbs(fc.AllowedRoot) {
+		return nil, fmt.Errorf("allowed_root must be a non-empty absolute path")
+	}
+
 	ttl, err := time.ParseDuration(fc.SessionTTL)
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse session_ttl %q: %w", fc.SessionTTL, err)
+	}
+	if ttl <= 0 {
+		return nil, fmt.Errorf("session_ttl must be a positive duration")
 	}
 
 	level := slog.LevelInfo
