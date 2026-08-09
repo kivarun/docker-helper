@@ -30,6 +30,11 @@ func classifyCreateSessionError(err error) string {
 	}
 }
 
+// sqlScanner is satisfied by *sql.Row and *sql.Rows.
+type sqlScanner interface {
+	Scan(dest ...any) error
+}
+
 type Session struct {
 	ID        string
 	Workspace string
@@ -41,6 +46,30 @@ type Session struct {
 type CreatedSession struct {
 	Session Session
 	Token   string
+}
+
+// scanSession scans the canonical session column order and converts
+// Unix-integer timestamps to time.Time.  The caller must query exactly
+// the columns: id, workspace, created_at, expires_at, revoked_at.
+func scanSession(s sqlScanner) (Session, error) {
+	var sess Session
+	var createdAt int64
+	var expiresAt int64
+	var revokedAt sql.NullInt64
+
+	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt, &revokedAt); err != nil {
+		return sess, err
+	}
+
+	sess.CreatedAt = time.Unix(createdAt, 0)
+	sess.ExpiresAt = time.Unix(expiresAt, 0)
+
+	if revokedAt.Valid {
+		t := time.Unix(revokedAt.Int64, 0)
+		sess.RevokedAt = &t
+	}
+
+	return sess, nil
 }
 
 func (a *App) createSession(workspace string) (*CreatedSession, error) {
@@ -135,23 +164,10 @@ func (a *App) listSessions() ([]Session, error) {
 
 	var sessions []Session
 	for rows.Next() {
-		var s Session
-		var createdAt int64
-		var expiresAt int64
-		var revokedAt sql.NullInt64
-
-		if err := rows.Scan(&s.ID, &s.Workspace, &createdAt, &expiresAt, &revokedAt); err != nil {
+		s, err := scanSession(rows)
+		if err != nil {
 			return nil, fmt.Errorf("cannot scan session: %w", err)
 		}
-
-		s.CreatedAt = time.Unix(createdAt, 0)
-		s.ExpiresAt = time.Unix(expiresAt, 0)
-
-		if revokedAt.Valid {
-			t := time.Unix(revokedAt.Int64, 0)
-			s.RevokedAt = &t
-		}
-
 		sessions = append(sessions, s)
 	}
 
@@ -164,30 +180,18 @@ func (a *App) listSessions() ([]Session, error) {
 
 func (a *App) deleteSession(id string) (*Session, error) {
 	// First get the session data before deleting
-	var s Session
-	var createdAt int64
-	var expiresAt int64
-	var revokedAt sql.NullInt64
-
-	err := a.DB.QueryRow(
+	row := a.DB.QueryRow(
 		`SELECT id, workspace, created_at, expires_at, revoked_at
 		 FROM sessions WHERE id = ?`,
 		id,
-	).Scan(&s.ID, &s.Workspace, &createdAt, &expiresAt, &revokedAt)
+	)
 
+	s, err := scanSession(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
 		}
 		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
-	}
-
-	s.CreatedAt = time.Unix(createdAt, 0)
-	s.ExpiresAt = time.Unix(expiresAt, 0)
-
-	if revokedAt.Valid {
-		t := time.Unix(revokedAt.Int64, 0)
-		s.RevokedAt = &t
 	}
 
 	// Now delete the session
@@ -216,33 +220,21 @@ func (a *App) findSessionByToken(token string) (*Session, error) {
 
 	now := time.Now().Unix()
 
-	var s Session
-	var createdAt int64
-	var expiresAt int64
-	var revokedAt sql.NullInt64
-
-	err := a.DB.QueryRow(
+	row := a.DB.QueryRow(
 		`SELECT id, workspace, created_at, expires_at, revoked_at
 		 FROM sessions
 		 WHERE token_hash = ? AND expires_at > ? AND revoked_at IS NULL
 		 LIMIT 1`,
 		tokenHashHex,
 		now,
-	).Scan(&s.ID, &s.Workspace, &createdAt, &expiresAt, &revokedAt)
+	)
 
+	s, err := scanSession(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrSessionNotFound
 		}
 		return nil, fmt.Errorf("cannot find session by token: %w", err)
-	}
-
-	s.CreatedAt = time.Unix(createdAt, 0)
-	s.ExpiresAt = time.Unix(expiresAt, 0)
-
-	if revokedAt.Valid {
-		t := time.Unix(revokedAt.Int64, 0)
-		s.RevokedAt = &t
 	}
 
 	return &s, nil
