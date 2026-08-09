@@ -438,7 +438,7 @@ type operationStartResult struct {
 // - handle pre-start termination (Terminated == true) with operation-specific cleanup
 // - handle start failure (Err != nil) with operation-specific result codes
 // - start the completion goroutine with operation-specific completion handler
-func startOperationProcess(cmd *exec.Cmd, op *operation, cancel context.CancelFunc) operationStartResult {
+func startOperationProcess(cmd *exec.Cmd, op *operation) operationStartResult {
 	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
 	cmd.Stdout = op.LogBuffer
 	cmd.Stderr = op.LogBuffer
@@ -449,7 +449,6 @@ func startOperationProcess(cmd *exec.Cmd, op *operation, cancel context.CancelFu
 	op.mu.Lock()
 	if op.terminated {
 		op.mu.Unlock()
-		cancel()
 		return operationStartResult{Terminated: true}
 	}
 	startTime := time.Now()
@@ -464,7 +463,6 @@ func startOperationProcess(cmd *exec.Cmd, op *operation, cancel context.CancelFu
 	op.mu.Unlock()
 
 	if err != nil {
-		cancel()
 		return operationStartResult{Err: err}
 	}
 

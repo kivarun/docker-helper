@@ -88,7 +88,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	cmd := a.newOperationCmd(cmdCtx, "docker", args...)
 
-	result := startOperationProcess(cmd, op, cancel)
+	result := startOperationProcess(cmd, op)
 
 	if result.Terminated {
 		cancel()
