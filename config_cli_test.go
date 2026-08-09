@@ -38,20 +38,6 @@ func setupConfigTestWithData(t *testing.T, data []byte) string {
 	return configPath
 }
 
-func setupConfigTestWithRuntime(t *testing.T, data []byte) string {
-	t.Helper()
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	adminTokenPath := filepath.Join(dir, "admin.token")
-	runtimeDir := filepath.Join(dir, "runtime")
-	os.MkdirAll(runtimeDir, 0700)
-	os.WriteFile(configPath, data, 0600)
-	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	return configPath
-}
-
 func readConfigJSON(t *testing.T, path string) map[string]json.RawMessage {
 	t.Helper()
 	data, err := os.ReadFile(path)
