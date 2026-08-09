@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestBuildStartFailureReturns201WithFailedOperation proves that when
@@ -86,9 +85,14 @@ func TestBuildLiveOutput(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
+	readyFile := filepath.Join(t.TempDir(), "ready")
+
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// Write output, signal readiness via file, then block briefly.
+		// The readiness file ensures the test only checks logs after
+		// the process has produced output.
 		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"echo line1; echo line2; sleep 0.5; echo line3")
+			"echo line1; echo line2; touch "+readyFile+"; sleep 0.5")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -109,35 +113,48 @@ func TestBuildLiveOutput(t *testing.T) {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	// Poll for output while the build is still running.
-	foundOutput := false
-	for i := 0; i < 50; i++ {
-		logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-		logsReq.SetPathValue("id", opID)
-		logsReq.Header.Set("Authorization", "Bearer "+result.Token)
-		logsW := httptest.NewRecorder()
-		app.handleOperationLogs(logsW, logsReq)
-
-		var logsResp map[string]any
-		if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		logs, _ := logsResp["logs"].(string)
-		if len(logs) > 0 {
-			foundOutput = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if !foundOutput {
-		t.Fatal("no output became available while build was running")
-	}
-
-	// Wait for build to complete.
 	op := app.OperationRegistry.get(opID)
-	op.Wait()
+	if op == nil {
+		t.Fatalf("operation %s not found in registry", opID)
+	}
+
+	// Wait for the process to signal that it has produced output.
+	waitProcessReady(t, readyFile)
+
+	// Read logs while the operation is still running.
+	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
+	logsReq.SetPathValue("id", opID)
+	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
+	logsW := httptest.NewRecorder()
+	app.handleOperationLogs(logsW, logsReq)
+
+	var logsResp map[string]any
+	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
+		t.Fatalf("decode logs: %v", err)
+	}
+	logs, _ := logsResp["logs"].(string)
+	if logs == "" {
+		t.Fatal("expected output in logs while build was running")
+	}
+
+	// Verify operation is still running.
+	op.mu.Lock()
+	status := op.State
+	op.mu.Unlock()
+	if status != operationRunning {
+		t.Fatalf("expected operation to be running, got %s", status)
+	}
+
+	// Wait for normal completion (process will finish after sleep 0.5).
+	<-op.done
+
+	// Verify final state.
+	op.mu.Lock()
+	finalStatus := op.State
+	op.mu.Unlock()
+	if finalStatus != operationSucceeded {
+		t.Fatalf("expected operation to succeed, got %s", finalStatus)
+	}
 }
 
 // TestBuildSuccessTransition proves running -> succeeded transition.

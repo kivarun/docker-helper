@@ -547,7 +547,8 @@ evicted data.
 
 ## Retention
 
-Completed operations are retained in memory for cleanup:
+Completed operations are retained in memory. Cleanup is opportunistic and
+runs on access:
 
 - `operation_retention_ttl` — operations older than this are removed;
 - `operation_max_completed` — when more completed operations exist than
@@ -555,7 +556,9 @@ Completed operations are retained in memory for cleanup:
 - `build_log_max_bytes` — per-operation log buffer size; older output
   is evicted when exceeded.
 
-Cleanup runs periodically during operation status queries.
+Cleanup is invoked during operation creation (`POST /build`) and operation
+status access (`GET /operations/{id}`). There is no background retention
+worker or periodic ticker.
 
 ## Filesystem policy
 
