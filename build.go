@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -91,32 +90,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	cmd := a.newBuildCmd(cmdCtx, "docker", args...)
 
-	// Attach stdout/stderr capture into bounded buffer.
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		msg := fmt.Sprintf("cannot create stdout pipe: %v", err)
-		op.fail("docker_build_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
-		return
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		msg := fmt.Sprintf("cannot create stderr pipe: %v", err)
-		op.fail("docker_build_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
-		return
-	}
+	// Assign LogBuffer directly to stdout/stderr for thread-safe capture.
+	// boundedBuffer implements io.Writer, so this works without pipes.
+	cmd.Stdout = op.LogBuffer
+	cmd.Stderr = op.LogBuffer
 
 	// Start the process synchronously.
 	started := time.Now()
@@ -139,16 +116,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start goroutines for concurrent stdout/stderr capture.
-	// Both write to the same thread-safe LogBuffer.
-	go func() {
-		io.Copy(op.LogBuffer, stdout)
-	}()
-	go func() {
-		io.Copy(op.LogBuffer, stderr)
-	}()
-
 	// Start goroutine for process completion.
+	// cmd.Stdout/stderr write directly into op.LogBuffer (no pipes needed).
 	go func() {
 		a.waitBuildCompletion(op, started)
 	}()
