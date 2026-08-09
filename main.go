@@ -252,7 +252,7 @@ func runServe(stdout, stderr io.Writer) error {
 			return err
 		}
 
-		if err := cleanupExpiredSessions(db); err != nil {
+		if _, err := cleanupExpiredSessions(db); err != nil {
 			serveStartupError(err, "")
 			return err
 		}

@@ -47,13 +47,18 @@ func initializeDatabase(db *sql.DB) error {
 	return nil
 }
 
-func cleanupExpiredSessions(db *sql.DB) error {
+func cleanupExpiredSessions(db *sql.DB) (int, error) {
 	now := time.Now().Unix()
 
-	_, err := db.Exec("DELETE FROM sessions WHERE expires_at <= ?", now)
+	result, err := db.Exec("DELETE FROM sessions WHERE expires_at <= ?", now)
 	if err != nil {
-		return fmt.Errorf("cannot clean up expired sessions: %w", err)
+		return 0, fmt.Errorf("cannot clean up expired sessions: %w", err)
 	}
 
-	return nil
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("cannot check cleanup result: %w", err)
+	}
+
+	return int(n), nil
 }

@@ -243,6 +243,7 @@ func TestBlackBoxExactUsageStrings(t *testing.T) {
 		{"session list help", []string{"session", "list", "--help"}, "Usage: docker-helper session list [--json]"},
 		{"session create help", []string{"session", "create", "--help"}, "Usage: docker-helper session create --workspace PATH [--json]"},
 		{"session delete help", []string{"session", "delete", "--help"}, "Usage: docker-helper session delete --id SESSION_ID [--json]"},
+		{"session cleanup help", []string{"session", "cleanup", "--help"}, "Usage: docker-helper session cleanup"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -297,6 +298,7 @@ func TestBlackBoxExactlyOneFlagsSection(t *testing.T) {
 		{"session list help", []string{"session", "list", "--help"}},
 		{"session create help", []string{"session", "create", "--help"}},
 		{"session delete help", []string{"session", "delete", "--help"}},
+		{"session cleanup help", []string{"session", "cleanup", "--help"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -339,8 +341,8 @@ func TestBlackBoxSessionMissingSubcommand(t *testing.T) {
 	if code != 2 {
 		t.Errorf("expected exit code 2, got %d", code)
 	}
-	if !strings.Contains(stderr.String(), "session subcommand required (create, list, delete)") {
-		t.Errorf("expected 'session subcommand required (create, list, delete)', got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "session subcommand required") {
+		t.Errorf("expected 'session subcommand required', got: %s", stderr.String())
 	}
 }
 

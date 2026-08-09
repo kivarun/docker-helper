@@ -179,6 +179,18 @@ Flags:
 Permanently removes the session. Subsequent requests with the session's
 token will receive 401 Unauthorized.
 
+### docker-helper session cleanup
+
+Remove expired sessions from the local state database. Does not require
+a running daemon or admin token.
+
+```
+docker-helper session cleanup
+```
+
+Deletes rows whose `expires_at` has passed. Active sessions are
+untouched. Reports the number of removed rows.
+
 ## CLI reference
 
 ### `docker-helper <command>`

@@ -278,6 +278,19 @@ docker-helper session delete --id dhs_...
 Permanently removes the session. Subsequent requests with its token
 receive 401 Unauthorized.
 
+### Clean up expired sessions
+
+```bash
+docker-helper session cleanup
+```
+
+Removes expired session rows from the local state database. Active
+sessions are untouched. Expired sessions are already rejected for
+authentication and excluded from session lists by their `expires_at`
+value; this command is useful for explicitly reclaiming storage during
+long daemon uptimes. The daemon also removes expired sessions
+automatically at startup. No running daemon or admin token is required.
+
 ## Using the HTTP API
 
 The `curl` examples below are host-side smoke tests. A containerized

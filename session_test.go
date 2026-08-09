@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -386,7 +387,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 		t.Fatalf("cannot insert active session: %v", err)
 	}
 
-	if err := cleanupExpiredSessions(app.DB); err != nil {
+	if _, err := cleanupExpiredSessions(app.DB); err != nil {
 		t.Fatalf("cleanupExpiredSessions() error: %v", err)
 	}
 
@@ -465,5 +466,221 @@ func TestSessionTableWithHistoricalRevokedAtColumn(t *testing.T) {
 	}
 	if s.ID != "dhs_old" {
 		t.Errorf("ID = %q, want %q", s.ID, "dhs_old")
+	}
+}
+
+// --- cleanupExpiredSessions tests ---
+
+func TestCleanupExpiredSessionsDeletesExpired(t *testing.T) {
+	app := newTestApp(t)
+
+	now := time.Now().Unix()
+
+	// Insert an expired session.
+	_, err := app.DB.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhs_expired", "hash_expired", app.Config.AllowedRoot, now-7200, now-3600,
+	)
+	if err != nil {
+		t.Fatalf("cannot insert expired: %v", err)
+	}
+
+	// Insert an active session.
+	_, err = app.DB.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhs_active", "hash_active", app.Config.AllowedRoot, now, now+3600,
+	)
+	if err != nil {
+		t.Fatalf("cannot insert active: %v", err)
+	}
+
+	n, err := cleanupExpiredSessions(app.DB)
+	if err != nil {
+		t.Fatalf("cleanupExpiredSessions() error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 deleted, got %d", n)
+	}
+
+	// Verify expired is gone.
+	var count int
+	err = app.DB.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'dhs_expired'").Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot query expired: %v", err)
+	}
+	if count != 0 {
+		t.Error("expired session should be deleted")
+	}
+
+	// Verify active remains.
+	err = app.DB.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'dhs_active'").Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot query active: %v", err)
+	}
+	if count != 1 {
+		t.Error("active session should remain")
+	}
+}
+
+func TestCleanupExpiredSessionsBoundaryEqualsNow(t *testing.T) {
+	app := newTestApp(t)
+
+	now := time.Now().Unix()
+
+	// Insert a session with expires_at == now (boundary: should be deleted).
+	_, err := app.DB.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhs_boundary", "hash_boundary", app.Config.AllowedRoot, now-3600, now,
+	)
+	if err != nil {
+		t.Fatalf("cannot insert boundary: %v", err)
+	}
+
+	n, err := cleanupExpiredSessions(app.DB)
+	if err != nil {
+		t.Fatalf("cleanupExpiredSessions() error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 deleted, got %d", n)
+	}
+}
+
+func TestCleanupExpiredSessionsEmpty(t *testing.T) {
+	app := newTestApp(t)
+
+	n, err := cleanupExpiredSessions(app.DB)
+	if err != nil {
+		t.Fatalf("cleanupExpiredSessions() error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 deleted, got %d", n)
+	}
+}
+
+// --- CLI cleanup tests ---
+
+func TestSessionCleanupCLI(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "docker-helper.db")
+	stateDir := filepath.Join(dir, "state", "docker-helper")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+	db.Close()
+
+	// Symlink the test db to where the config expects it.
+	if err := os.Symlink(dbPath, filepath.Join(stateDir, "docker-helper.db")); err != nil {
+		t.Fatal(err)
+	}
+
+	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
+	configPath := filepath.Join(dir, "config.json")
+	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	defer os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
+
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}` + "\n")
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("cannot write config: %v", err)
+	}
+
+	// Insert an expired session directly.
+	db, err = openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	now := time.Now().Unix()
+	db.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhs_cli_expired", "hash_cli", dir, now-7200, now-3600,
+	)
+	db.Close()
+
+	// Run the cleanup command.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "cleanup"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "removed 1 expired sessions") {
+		t.Errorf("expected 'removed 1 expired sessions' in stdout, got: %s", out)
+	}
+}
+
+func TestSessionCleanupCLINoneExpired(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "docker-helper.db")
+	stateDir := filepath.Join(dir, "state", "docker-helper")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+	db.Close()
+
+	if err := os.Symlink(dbPath, filepath.Join(stateDir, "docker-helper.db")); err != nil {
+		t.Fatal(err)
+	}
+
+	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
+	configPath := filepath.Join(dir, "config.json")
+	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	defer os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
+
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}` + "\n")
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("cannot write config: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "cleanup"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "removed 0 expired sessions") {
+		t.Errorf("expected 'removed 0 expired sessions' in stdout, got: %s", out)
+	}
+}
+
+func TestSessionCleanupCLIDatabaseError(t *testing.T) {
+	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
+	os.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/config.json")
+	defer os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "cleanup"}, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected non-zero exit code for database error")
+	}
+	if stderr.Len() == 0 {
+		t.Error("expected error on stderr")
 	}
 }

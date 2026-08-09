@@ -16,6 +16,7 @@ var sessionCommand = &Command{
 		sessionCreateCommand,
 		sessionListCommand,
 		sessionDeleteCommand,
+		sessionCleanupCommand,
 	},
 }
 
@@ -188,4 +189,54 @@ func printSessionsTable(w io.Writer, sessions []sessionJSON) {
 	}
 
 	tw.Flush()
+}
+
+var sessionCleanupCommand = &Command{
+	Name:    "cleanup",
+	Summary: "Remove expired sessions from the database",
+	Usage:   "docker-helper session cleanup",
+	Help: `Remove expired sessions from the local state database.
+
+Only sessions whose expires_at has passed are removed.
+Active sessions are untouched.
+
+This operates directly on the local SQLite database; no running
+daemon or API connection is required. No admin or session token is needed.
+
+Expired sessions are already rejected for authentication and excluded
+from session lists by their expires_at value. This command is useful
+for explicitly reclaiming storage during long daemon uptimes.
+
+The daemon also removes expired sessions automatically at startup.`,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				return runSessionCleanup(stdout, stderr)
+			},
+		}
+	},
+}
+
+func runSessionCleanup(stdout, stderr io.Writer) int {
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	n, err := cleanupExpiredSessions(db)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+	return 0
 }
