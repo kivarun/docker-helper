@@ -161,6 +161,9 @@ func assertNoSecrets(t *testing.T, raw string, m map[string]any, token, adminTok
 // the injected error text (full string, not just the result field).
 func assertNoInjectedError(t *testing.T, raw string, injected string) {
 	t.Helper()
+	if injected == "" {
+		return
+	}
 	if strings.Contains(raw, injected) {
 		t.Errorf("audit leaks injected error text %q in raw JSON", injected)
 	}

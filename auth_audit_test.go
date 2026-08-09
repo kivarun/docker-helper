@@ -114,15 +114,6 @@ func findAuthFailureRawLines(buf *bytes.Buffer) []string {
 	return lines
 }
 
-func parseRawAudit(t *testing.T, raw string) map[string]any {
-	t.Helper()
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		t.Fatalf("cannot parse audit JSON: %v: %s", err, raw)
-	}
-	return m
-}
-
 // validateAuthFailureRaw checks every required property on the raw audit JSON
 // for an auth.failure event.
 //
@@ -137,7 +128,7 @@ func parseRawAudit(t *testing.T, raw string) map[string]any {
 func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPath, expectedResult, injectedToken, injectedErrText, authHeader, headerMarker, bodyMarker string) {
 	t.Helper()
 
-	m := parseRawAudit(t, raw)
+	m := parseAuditMap(t, raw)
 
 	// --- required fields ---
 	if m["event"] != "auth.failure" {
@@ -158,18 +149,8 @@ func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPa
 		t.Error("session_id key must not be present in auth.failure audit record")
 	}
 
-	// --- no token / authorization keys (any case) ---
-	for key := range m {
-		lower := strings.ToLower(key)
-		if lower == "token" || lower == "authorization" {
-			t.Errorf("unexpected secret key %q in audit record", key)
-		}
-	}
-
-	// --- no actual token value in raw JSON ---
-	if injectedToken != "" && strings.Contains(raw, injectedToken) {
-		t.Errorf("raw JSON contains token value %q", injectedToken)
-	}
+	// --- generic secret-leak checks ---
+	assertNoSecrets(t, raw, m, injectedToken, "")
 
 	// --- no full Authorization header value ---
 	if authHeader != "" && strings.Contains(raw, authHeader) {
@@ -177,9 +158,7 @@ func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPa
 	}
 
 	// --- no injected error text ---
-	if injectedErrText != "" && strings.Contains(raw, injectedErrText) {
-		t.Errorf("raw JSON contains injected error text %q", injectedErrText)
-	}
+	assertNoInjectedError(t, raw, injectedErrText)
 
 	// --- no internal error text ---
 	for _, text := range []string{
