@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -205,10 +204,10 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 // bytes when the configured maximum size is exceeded.
 type boundedBuffer struct {
 	mu       sync.RWMutex
-	buf      bytes.Buffer
+	buf      []byte
 	maxSize  int64
-	offset   int64
-	totalLen int64
+	offset   int64 // start of retained range
+	totalLen int64 // total bytes ever written
 }
 
 func newBoundedBuffer(maxSize int64) *boundedBuffer {
@@ -223,22 +222,16 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 
 	n := len(p)
 	b.totalLen += int64(n)
+	b.buf = append(b.buf, p...)
 
-	if b.buf.Len()+n > int(b.maxSize) {
-		keep := int(b.maxSize) - b.buf.Len() + n
-		if keep < 0 {
-			keep = 0
-		}
-		truncated := b.buf.Len() - keep
-		if truncated > 0 {
-			b.offset += int64(truncated)
-			data := b.buf.Bytes()
-			b.buf.Reset()
-			b.buf.Write(data[truncated:])
-		}
+	// Trim oldest data if retained range exceeds maxSize.
+	retainedLen := int64(len(b.buf))
+	if retainedLen > b.maxSize {
+		trim := retainedLen - b.maxSize
+		b.offset += trim
+		b.buf = b.buf[trim:]
 	}
 
-	b.buf.Write(p)
 	return n, nil
 }
 
@@ -264,31 +257,29 @@ func (b *boundedBuffer) Range(offset int64) (data []byte, nextOffset int64, trun
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	data = b.buf.Bytes()
+	nextOffset = b.totalLen
 
-	if offset < b.offset {
-		trim := int(b.offset - offset)
-		if trim > len(data) {
-			trim = len(data)
-		}
-		data = data[trim:]
-		truncated = true
+	if offset >= b.totalLen {
+		return nil, nextOffset, false
 	}
 
-	nextOffset = b.totalLen
-	return data, nextOffset, truncated
-}
+	// retained range is [b.offset, b.totalLen).
+	// data in b.buf corresponds to that range.
+	if offset < b.offset {
+		// offset is older than retained data.
+		data = make([]byte, len(b.buf))
+		copy(data, b.buf)
+		return data, nextOffset, true
+	}
 
-func (b *boundedBuffer) currentOffset() int64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.offset
-}
-
-func (b *boundedBuffer) totalWritten() int64 {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.totalLen
+	// offset is inside retained range.
+	idx := int(offset - b.offset)
+	if idx > len(b.buf) {
+		idx = len(b.buf)
+	}
+	data = make([]byte, len(b.buf)-idx)
+	copy(data, b.buf[idx:])
+	return data, nextOffset, false
 }
 
 func (op *buildOperation) succeed(duration *string) {
