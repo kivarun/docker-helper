@@ -25,31 +25,7 @@ var configCommand = &Command{
 var (
 	writableFields = []string{"allowed_root", "session_ttl", "log_level", "audit_enabled"}
 	requiredFields = map[string]bool{"allowed_root": true, "session_ttl": true}
-	computedFields = map[string]bool{
-		"audit_enabled_source": true,
-		"config_path":          true,
-		"config_dir":           true,
-		"runtime_dir":          true,
-		"socket_path":          true,
-		"lock_path":            true,
-		"state_dir":            true,
-		"database_path":        true,
-		"admin_token_path":     true,
-		"admin_token":          true,
-	}
-	readOnlyFields = map[string]bool{
-		"audit_enabled_source": true,
-		"config_path":          true,
-		"config_dir":           true,
-		"runtime_dir":          true,
-		"socket_path":          true,
-		"lock_path":            true,
-		"state_dir":            true,
-		"database_path":        true,
-		"admin_token_path":     true,
-		"admin_token":          true,
-	}
-	allFields = []string{
+	allFields      = []string{
 		"allowed_root",
 		"session_ttl",
 		"log_level",
@@ -69,15 +45,6 @@ var (
 
 func isKnownField(name string) bool {
 	for _, f := range allFields {
-		if f == name {
-			return true
-		}
-	}
-	return false
-}
-
-func isWritable(name string) bool {
-	for _, f := range writableFields {
 		if f == name {
 			return true
 		}
@@ -215,7 +182,7 @@ func loadRawConfig() (map[string]json.RawMessage, string, error) {
 
 	// Reject reserved fields that must not appear in config.json.
 	for field := range raw {
-		if readOnlyFields[field] {
+		if reservedConfigFields[field] {
 			return nil, "", fmt.Errorf("%s is computed and cannot be configured", field)
 		}
 	}
@@ -524,7 +491,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	if readOnlyFields[field] {
+	if reservedConfigFields[field] {
 		fmt.Fprintf(stderr, "error: field %q is read-only\n", field)
 		return 2
 	}
@@ -616,7 +583,7 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	if readOnlyFields[field] {
+	if reservedConfigFields[field] {
 		fmt.Fprintf(stderr, "error: field %q is read-only\n", field)
 		return 2
 	}
