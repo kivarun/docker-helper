@@ -196,38 +196,9 @@ will apply on the next start.`,
 	},
 }
 
-// loadFileConfig reads and parses config.json into a fileConfig.
-// Returns an error if the top-level JSON value is not an object.
-func loadFileConfig() (*fileConfig, string, error) {
-	configPath := getConfigPath()
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, "", err
-	}
-
-	// Check that the top-level value is a JSON object.
-	var check any
-	if err := json.Unmarshal(data, &check); err != nil {
-		return nil, "", err
-	}
-	if _, ok := check.(map[string]any); !ok {
-		return nil, "", fmt.Errorf("configuration is not a JSON object")
-	}
-
-	// Reject reserved fields that must not appear in config.json.
-	if err := validateNoReservedFields(data); err != nil {
-		return nil, "", err
-	}
-
-	var fc fileConfig
-	if err := json.Unmarshal(data, &fc); err != nil {
-		return nil, "", err
-	}
-	return &fc, configPath, nil
-}
-
-// loadRawConfig reads config.json as a raw JSON map to preserve unknown members.
-// Returns an error if the top-level JSON value is not an object.
+// loadRawConfig reads config.json from disk as a raw JSON map.
+// It requires a top-level JSON object and rejects reserved/read-only fields.
+// Returns the raw map, the config file path, and any error.
 func loadRawConfig() (map[string]json.RawMessage, string, error) {
 	configPath := getConfigPath()
 	data, err := os.ReadFile(configPath)
@@ -251,6 +222,20 @@ func loadRawConfig() (map[string]json.RawMessage, string, error) {
 	}
 
 	return raw, configPath, nil
+}
+
+// decodeFileConfig decodes a raw config map into a fileConfig struct.
+// It does not perform disk I/O.
+func decodeFileConfig(raw map[string]json.RawMessage) (*fileConfig, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var fc fileConfig
+	if err := json.Unmarshal(data, &fc); err != nil {
+		return nil, err
+	}
+	return &fc, nil
 }
 
 // validateRawConfig validates the known fields in a raw config map.
@@ -354,7 +339,16 @@ func getRuntimeDirSafe() string {
 }
 
 func configShowAll(stdout, stderr io.Writer) int {
-	fc, configPath, err := loadFileConfig()
+	raw, configPath, err := loadRawConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fc, err := decodeFileConfig(raw)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -411,35 +405,6 @@ func configShowAll(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// validateConfigJSON reads config.json, checks it is a valid JSON object,
-// rejects reserved fields, and validates known field types/values.
-// It does not require XDG_RUNTIME_DIR and does not create directories.
-func validateConfigJSON() error {
-	configPath := getConfigPath()
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return err
-	}
-
-	var check any
-	if err := json.Unmarshal(data, &check); err != nil {
-		return err
-	}
-	if _, ok := check.(map[string]any); !ok {
-		return fmt.Errorf("configuration is not a JSON object")
-	}
-
-	if err := validateNoReservedFields(data); err != nil {
-		return err
-	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	return validateRawConfig(raw)
-}
-
 func configShowField(field string, stdout, stderr io.Writer) int {
 	if !isKnownField(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
@@ -481,8 +446,13 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// All other fields must validate config.json first.
-	if err := validateConfigJSON(); err != nil {
+	// All other fields: single read of config.json.
+	raw, _, err := loadRawConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := validateRawConfig(raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
@@ -505,8 +475,8 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	// Config-backed fields: parse config.json (already validated above).
-	fc, configPath, err := loadFileConfig()
+	// Config-backed fields: decode from raw (already validated above).
+	fc, err := decodeFileConfig(raw)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -547,7 +517,6 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	_ = configPath
 	return 0
 }
 
