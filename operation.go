@@ -42,9 +42,12 @@ type operation struct {
 	terminated  bool      // set by terminateAll when process not yet started
 	started     bool      // set to true only after cmd.Start() succeeds
 	// cidfile is the path to the Docker --cidfile for run operations.
-	// It is created before cmd.Start() and removed after the operation completes.
-	// During force shutdown, the container ID is read from this file to perform
-	// daemon-side cleanup before killing the docker run CLI process.
+	// The helper determines this path before cmd.Start(); Docker CLI
+	// publishes the container ID into the file after the daemon creates
+	// the container. During force shutdown, the container ID is read
+	// from this file to perform daemon-side cleanup before killing the
+	// docker run CLI process. The file is removed after the operation
+	// completes regardless of outcome.
 	cidfile string
 	// audit metadata for finish event, set by operation-specific factory.
 	auditCommandArgCount *int
@@ -235,19 +238,24 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 		select {
 		case <-op.done:
 		case <-time.After(time.Until(deadline)):
-			// Deadline exceeded: perform daemon-side cleanup before killing CLI.
-			// For run operations, the docker run CLI may be dead but the
-			// container can survive. Read the container ID from the cidfile
-			// and kill it at the daemon level before force-killing the CLI.
-			// This bounded cleanup context (3s) exists after the main deadline
-			// because docker kill is a fast API call; we do not want to block
-			// shutdown for long, but we need enough time for the daemon to
-			// actually stop the container.
+			// Deadline exceeded: perform bounded daemon-side cleanup
+			// before force-killing the docker run CLI.
+			//
+			// The cidfile may not yet be populated because Docker daemon
+			// publishes the container ID asynchronously after cmd.Start().
+			// We use a single bounded cleanup context that covers both
+			// waiting for the cidfile and the docker kill itself.
 			if op.cidfile != "" {
-				containerID := readContainerIDFromCidfile(op.cidfile)
+				// Single bounded context for the entire cleanup phase:
+				// up to 3 seconds total for cidfile polling + docker kill.
+				cleanupCtx, cleanupCancel := context.WithTimeout(
+					context.Background(), 3*time.Second,
+				)
+				containerID := waitForContainerID(cleanupCtx, op)
 				if containerID != "" {
-					killContainerBestEffort(containerID)
+					killContainerFunc(cleanupCtx, containerID)
 				}
+				cleanupCancel()
 			}
 			op.mu.Lock()
 			if op.cmd != nil && op.cmd.Process != nil {

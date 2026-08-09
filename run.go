@@ -40,16 +40,34 @@ func readContainerIDFromCidfile(path string) string {
 	return id
 }
 
+// waitForContainerID polls the cidfile until the container ID appears or the
+// context expires. This handles the race where Docker daemon publishes the
+// container ID asynchronously after cmd.Start().
+// Returns empty string if the context expires before the ID is available.
+func waitForContainerID(ctx context.Context, op *operation) string {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// Context expired; try one final read before giving up.
+			return readContainerIDFromCidfile(op.cidfile)
+		case <-op.done:
+			// Operation completed while we were waiting — no cleanup needed.
+			return ""
+		case <-ticker.C:
+			if id := readContainerIDFromCidfile(op.cidfile); id != "" {
+				return id
+			}
+		}
+	}
+}
+
 // killContainerBestEffort attempts to kill a Docker container by ID.
 // This is a bounded, best-effort operation used during force shutdown.
 // If the container is already gone or the command fails, the error is
 // logged but not propagated — "container already gone" is a success.
-func killContainerBestEffort(containerID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	// 3-second bounded context: docker kill is a fast API call.
-	// We do not want to block shutdown for long after the main deadline,
-	// but we need enough time for the daemon to actually stop the container.
+func killContainerBestEffort(ctx context.Context, containerID string) {
 	cmd := exec.CommandContext(ctx, "docker", "kill", containerID)
 	if err := cmd.Run(); err != nil {
 		// Container already gone or docker not available — acceptable.
@@ -57,6 +75,10 @@ func killContainerBestEffort(containerID string) {
 		slog.Warn("daemon-side container cleanup failed", "error", err)
 	}
 }
+
+// killContainerFunc is the function used by killContainerBestEffort.
+// It can be overridden in tests to control docker kill behavior.
+var killContainerFunc = killContainerBestEffort
 
 // cleanupCidfile removes the cidfile for a run operation.
 // This is called when the operation fails before the process starts
