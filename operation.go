@@ -22,6 +22,14 @@ const (
 
 const resultCancelled = "cancelled"
 
+type terminationReason uint8
+
+const (
+	terminationNone terminationReason = iota
+	terminationShutdown
+	terminationCancelled
+)
+
 type operation struct {
 	mu          sync.Mutex
 	ID          string         `json:"operation_id"`
@@ -42,8 +50,8 @@ type operation struct {
 	done        chan struct{}
 	doneOnce    sync.Once // ensures op.done is closed exactly once
 	terminated  bool      // set by terminateAll/terminateOne when process not yet started
-	cancelled   bool      // set by explicit cancel or shutdown to distinguish from docker failure
-	started     bool      // set to true only after cmd.Start() succeeds
+	reason      terminationReason
+	started     bool // set to true only after cmd.Start() succeeds
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
 	// publishes the container ID into the file after the daemon creates
@@ -202,7 +210,7 @@ func (r *operationRegistry) setShuttingDown() {
 // that have a cidfile, to perform daemon-side container cleanup before
 // force-killing the CLI process.
 func (r *operationRegistry) terminateAll(ctx context.Context, killContainer func(context.Context, string)) {
-	r.terminateAllOps(ctx, nil, killContainer)
+	r.terminateAllOps(ctx, nil, killContainer, terminationShutdown)
 }
 
 // terminateOne cancels a single operation by ID.
@@ -224,7 +232,7 @@ func (r *operationRegistry) terminateOne(id string, killContainer func(context.C
 	}
 	op.mu.Unlock()
 
-	r.terminateAllOps(context.Background(), op, killContainer)
+	r.terminateAllOps(context.Background(), op, killContainer, terminationCancelled)
 	return nil
 }
 
@@ -232,7 +240,8 @@ func (r *operationRegistry) terminateOne(id string, killContainer func(context.C
 // terminateAll (shutdown) and terminateOne (explicit cancel).
 // If targetOp is nil, all operations are terminated (shutdown).
 // If targetOp is non-nil, only that operation is terminated (cancel).
-func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *operation, killContainer func(context.Context, string)) {
+// reason distinguishes shutdown from explicit cancel for result semantics.
+func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *operation, killContainer func(context.Context, string), reason terminationReason) {
 	r.mu.RLock()
 	var ops []*operation
 	if targetOp != nil {
@@ -252,12 +261,13 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 	var terminated []*operation
 	for _, op := range ops {
 		op.mu.Lock()
+		if op.reason == terminationNone {
+			op.reason = reason
+		}
 		if !op.started {
 			op.terminated = true
-			op.cancelled = true
 			terminated = append(terminated, op)
 		} else if op.cmd != nil && op.cmd.Process != nil {
-			op.cancelled = true
 			op.cmd.Process.Signal(syscall.SIGTERM)
 		}
 		op.mu.Unlock()

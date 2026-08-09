@@ -328,7 +328,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		cleanupCidfile(op)
 		msg := "run cancelled: daemon is shutting down"
-		if op.cancelled {
+		if op.reason == terminationCancelled {
+			msg = "run cancelled"
 			op.fail(resultCancelled, msg, nil)
 		} else {
 			op.fail("docker_run_failed", msg, nil)
@@ -389,7 +390,7 @@ func (a *App) waitRunCompletion(op *operation, started time.Time) {
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	op.mu.Lock()
-	wasCancelled := op.cancelled
+	wasCancelled := op.reason == terminationCancelled
 	op.mu.Unlock()
 
 	exitCode := extractExitCode(err)

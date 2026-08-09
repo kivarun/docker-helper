@@ -611,6 +611,197 @@ func TestCancelPreservesExitCode(t *testing.T) {
 	if cancelResp["result_code"] != "cancelled" {
 		t.Errorf("expected result_code 'cancelled', got %v", cancelResp["result_code"])
 	}
-	// Exit code may be present if the process exited before SIGTERM took effect.
-	// The important thing is result_code=cancelled.
+}
+
+// TestShutdownDoesNotProduceCancelledResult proves that daemon shutdown
+// does not produce result_code=cancelled for build operations.
+func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	var buildResp map[string]any
+	json.NewDecoder(w.Body).Decode(&buildResp)
+	opID := buildResp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Wait for the process to start.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		proc := op.cmd
+		op.mu.Unlock()
+		if proc != nil && proc.Process != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Simulate daemon shutdown by calling terminateAll directly.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+
+	// Wait for the operation to complete.
+	op.Wait()
+
+	// Verify the result is NOT cancelled.
+	op.mu.Lock()
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	op.mu.Unlock()
+
+	if rc == "cancelled" {
+		t.Errorf("shutdown should not produce result_code 'cancelled', got %q", rc)
+	}
+}
+
+// TestShutdownDoesNotProduceCancelledResultRun proves that daemon shutdown
+// does not produce result_code=cancelled for run operations.
+func TestShutdownDoesNotProduceCancelledResultRun(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+
+	runReq := newRunRequest(map[string]any{
+		"image": "alpine:3.24",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, runReq)
+
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Wait for the process to start.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		proc := op.cmd
+		op.mu.Unlock()
+		if proc != nil && proc.Process != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Simulate daemon shutdown by calling terminateAll directly.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+
+	// Wait for the operation to complete.
+	op.Wait()
+
+	// Verify the result is NOT cancelled.
+	op.mu.Lock()
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	op.mu.Unlock()
+
+	if rc == "cancelled" {
+		t.Errorf("shutdown should not produce result_code 'cancelled', got %q", rc)
+	}
+}
+
+// TestCancelVsShutdownRace proves that the first termination reason wins
+// and is not overwritten by a concurrent shutdown.
+func TestCancelVsShutdownRace(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	var buildResp map[string]any
+	json.NewDecoder(w.Body).Decode(&buildResp)
+	opID := buildResp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Wait for the process to start.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		proc := op.cmd
+		op.mu.Unlock()
+		if proc != nil && proc.Process != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Start explicit cancel.
+	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
+	cancelW := httptest.NewRecorder()
+	app.handleOperationCancel(cancelW, cancelReq)
+
+	// Verify the result IS cancelled.
+	var cancelResp map[string]any
+	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
+	if cancelResp["result_code"] != "cancelled" {
+		t.Errorf("expected result_code 'cancelled', got %v", cancelResp["result_code"])
+	}
 }

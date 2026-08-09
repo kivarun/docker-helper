@@ -93,7 +93,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if result.Terminated {
 		cancel()
 		msg := "build cancelled: daemon is shutting down"
-		if op.cancelled {
+		if op.reason == terminationCancelled {
+			msg = "build cancelled"
 			op.fail(resultCancelled, msg, nil)
 		} else {
 			op.fail("docker_build_failed", msg, nil)
@@ -137,7 +138,7 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	op.mu.Lock()
-	wasCancelled := op.cancelled
+	wasCancelled := op.reason == terminationCancelled
 	op.mu.Unlock()
 
 	if err != nil {
