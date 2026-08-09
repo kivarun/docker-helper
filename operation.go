@@ -20,6 +20,8 @@ const (
 	operationFailed    operationState = "failed"
 )
 
+const resultCancelled = "cancelled"
+
 type operation struct {
 	mu          sync.Mutex
 	ID          string         `json:"operation_id"`
@@ -39,7 +41,8 @@ type operation struct {
 	cmd         *exec.Cmd
 	done        chan struct{}
 	doneOnce    sync.Once // ensures op.done is closed exactly once
-	terminated  bool      // set by terminateAll when process not yet started
+	terminated  bool      // set by terminateAll/terminateOne when process not yet started
+	cancelled   bool      // set by explicit cancel or shutdown to distinguish from docker failure
 	started     bool      // set to true only after cmd.Start() succeeds
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
@@ -199,10 +202,45 @@ func (r *operationRegistry) setShuttingDown() {
 // that have a cidfile, to perform daemon-side container cleanup before
 // force-killing the CLI process.
 func (r *operationRegistry) terminateAll(ctx context.Context, killContainer func(context.Context, string)) {
+	r.terminateAllOps(ctx, nil, killContainer)
+}
+
+// terminateOne cancels a single operation by ID.
+// Returns nil if the operation was found and cancellation initiated.
+// Returns "not_found" if the operation does not exist.
+// Returns "already_terminal" if the operation is already completed.
+func (r *operationRegistry) terminateOne(id string, killContainer func(context.Context, string)) error {
+	r.mu.RLock()
+	op, ok := r.ops[id]
+	r.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("not_found")
+	}
+
+	op.mu.Lock()
+	if op.CompletedAt != nil {
+		op.mu.Unlock()
+		return fmt.Errorf("already_terminal")
+	}
+	op.mu.Unlock()
+
+	r.terminateAllOps(context.Background(), op, killContainer)
+	return nil
+}
+
+// terminateAllOps is the shared termination primitive used by both
+// terminateAll (shutdown) and terminateOne (explicit cancel).
+// If targetOp is nil, all operations are terminated (shutdown).
+// If targetOp is non-nil, only that operation is terminated (cancel).
+func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *operation, killContainer func(context.Context, string)) {
 	r.mu.RLock()
 	var ops []*operation
-	for _, op := range r.ops {
-		ops = append(ops, op)
+	if targetOp != nil {
+		ops = []*operation{targetOp}
+	} else {
+		for _, op := range r.ops {
+			ops = append(ops, op)
+		}
 	}
 	r.mu.RUnlock()
 
@@ -216,8 +254,10 @@ func (r *operationRegistry) terminateAll(ctx context.Context, killContainer func
 		op.mu.Lock()
 		if !op.started {
 			op.terminated = true
+			op.cancelled = true
 			terminated = append(terminated, op)
 		} else if op.cmd != nil && op.cmd.Process != nil {
+			op.cancelled = true
 			op.cmd.Process.Signal(syscall.SIGTERM)
 		}
 		op.mu.Unlock()

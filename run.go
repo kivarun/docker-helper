@@ -328,7 +328,11 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		cleanupCidfile(op)
 		msg := "run cancelled: daemon is shutting down"
-		op.fail("docker_run_failed", msg, nil)
+		if op.cancelled {
+			op.fail(resultCancelled, msg, nil)
+		} else {
+			op.fail("docker_run_failed", msg, nil)
+		}
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
 			"ok":           true,
 			"operation_id": op.ID,
@@ -384,9 +388,17 @@ func (a *App) waitRunCompletion(op *operation, started time.Time) {
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 
+	op.mu.Lock()
+	wasCancelled := op.cancelled
+	op.mu.Unlock()
+
 	exitCode := extractExitCode(err)
 
 	if err != nil {
+		if wasCancelled {
+			op.fail(resultCancelled, "run cancelled", exitCode, &duration)
+			return
+		}
 		resultCode := "docker_run_failed"
 		if exitCode != nil && *exitCode != 125 {
 			resultCode = "container_exit_nonzero"

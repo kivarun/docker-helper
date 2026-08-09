@@ -93,7 +93,11 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if result.Terminated {
 		cancel()
 		msg := "build cancelled: daemon is shutting down"
-		op.fail("docker_build_failed", msg, nil)
+		if op.cancelled {
+			op.fail(resultCancelled, msg, nil)
+		} else {
+			op.fail("docker_build_failed", msg, nil)
+		}
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
 			"ok":           true,
 			"operation_id": op.ID,
@@ -132,8 +136,16 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 	err := op.cmd.Wait()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
+	op.mu.Lock()
+	wasCancelled := op.cancelled
+	op.mu.Unlock()
+
 	if err != nil {
 		exitCode := extractExitCode(err)
+		if wasCancelled {
+			op.fail(resultCancelled, "build cancelled", exitCode, &duration)
+			return
+		}
 		op.fail("docker_build_failed", "docker build failed", exitCode, &duration)
 		return
 	}
@@ -149,6 +161,13 @@ func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 
 	ctx := withSessionID(r.Context(), session.ID)
 	opID := r.PathValue("id")
+	if opID == "" {
+		// Fallback for unit tests that call the handler directly.
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) >= 3 && parts[1] == "operations" {
+			opID = parts[2]
+		}
+	}
 
 	if a.OperationRegistry == nil {
 		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
@@ -206,6 +225,13 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 
 	ctx := withSessionID(r.Context(), session.ID)
 	opID := r.PathValue("id")
+	if opID == "" {
+		// Fallback for unit tests that call the handler directly.
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) >= 4 && parts[1] == "operations" && parts[3] == "logs" {
+			opID = parts[2]
+		}
+	}
 
 	if a.OperationRegistry == nil {
 		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
@@ -261,6 +287,97 @@ func parseOffset(s string) (int64, error) {
 		return 0, errors.New("negative offset")
 	}
 	return v, nil
+}
+
+func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
+	session, ok := a.requireSession(w, r)
+	if !ok {
+		return
+	}
+
+	ctx := withSessionID(r.Context(), session.ID)
+	opID := r.PathValue("id")
+	if opID == "" {
+		// Fallback for unit tests that call the handler directly.
+		// Parse /operations/{id}/cancel from the URL path.
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) >= 4 && parts[1] == "operations" && parts[3] == "cancel" {
+			opID = parts[2]
+		}
+	}
+
+	if a.OperationRegistry == nil {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	op := a.OperationRegistry.get(opID)
+	if op == nil {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	if op.SessionID != session.ID {
+		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+		return
+	}
+
+	// Check if operation is already terminal.
+	op.mu.Lock()
+	if op.CompletedAt != nil {
+		state := op.State
+		rc := ""
+		if op.ResultCode != nil {
+			rc = *op.ResultCode
+		}
+		op.mu.Unlock()
+		writeJSONRaw(ctx, w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       state,
+			"result_code":  rc,
+		})
+		return
+	}
+	op.mu.Unlock()
+
+	// Initiate cancellation and wait for completion.
+	if err := a.OperationRegistry.terminateOne(opID, a.killContainerBestEffort); err != nil {
+		if err.Error() == "not_found" {
+			writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
+			return
+		}
+		if err.Error() == "already_terminal" {
+			writeJSONRaw(ctx, w, http.StatusOK, map[string]any{
+				"ok":           true,
+				"operation_id": op.ID,
+				"status":       op.State,
+			})
+			return
+		}
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	// Wait for the operation to complete.
+	op.Wait()
+
+	// Return terminal state.
+	op.mu.Lock()
+	resp := map[string]any{
+		"ok":           true,
+		"operation_id": op.ID,
+		"status":       op.State,
+	}
+	if op.ResultCode != nil {
+		resp["result_code"] = *op.ResultCode
+	}
+	if op.ExitCode != nil {
+		resp["exit_code"] = *op.ExitCode
+	}
+	op.mu.Unlock()
+
+	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }
 
 func validateBuildRequest(workspace string, req buildRequest) (string, string, error) {
