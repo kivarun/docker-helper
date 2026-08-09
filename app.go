@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
+	"os/exec"
 	"sync"
 )
 
 type App struct {
-	mu                sync.RWMutex
-	Config            *Config
-	DB                *sql.DB
-	AdminTokenHash    [sha256.Size]byte
-	ExecCommand       func(string, ...string) ([]byte, error)
-	OperationRegistry *operationRegistry
+	mu                 sync.RWMutex
+	Config             *Config
+	DB                 *sql.DB
+	AdminTokenHash     [sha256.Size]byte
+	ExecCommand        func(string, ...string) ([]byte, error)
+	ExecCommandContext func(context.Context, string, ...string) *exec.Cmd
+	OperationRegistry  *operationRegistry
 }
 
 // getConfig returns a snapshot copy of the current configuration under a read lock.

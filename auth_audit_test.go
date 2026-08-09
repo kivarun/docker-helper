@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -730,8 +731,8 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 		t.Fatalf("cannot write Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(

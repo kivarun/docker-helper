@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,8 +47,8 @@ func TestBuildStartContainsFields(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -102,8 +104,8 @@ func TestBuildFinishSuccess(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -153,8 +155,8 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("build failed"), &mockExitError{code: 1, msg: "exit status 1"}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -206,8 +208,8 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(buildOutput), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+buildOutput+"'")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -258,8 +260,8 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(buildOutput), &mockExitError{code: 1, msg: "exit status 1"}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+buildOutput+"' >&2; exit 1")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -307,9 +309,9 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	req := newBuildRequest(map[string]any{

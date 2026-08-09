@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -73,22 +76,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		Dockerfile:  req.Dockerfile,
 	})
 
-	go func() {
-		a.executeBuild(op, contextPath, dockerfilePath, req)
-	}()
-
-	op.mu.Lock()
-	status := op.State
-	op.mu.Unlock()
-
-	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-		"ok":           true,
-		"operation_id": op.ID,
-		"status":       status,
-	})
-}
-
-func (a *App) executeBuild(op *buildOperation, contextPath, dockerfilePath string, req buildRequest) {
+	// Build the command synchronously and start it.
 	args := []string{
 		"build",
 		"--pull",
@@ -99,36 +87,97 @@ func (a *App) executeBuild(op *buildOperation, contextPath, dockerfilePath strin
 		contextPath,
 	}
 
+	cmdCtx, cancel := context.WithCancel(context.Background())
+
+	cmd := a.newBuildCmd(cmdCtx, "docker", args...)
+
+	// Attach stdout/stderr capture into bounded buffer.
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		msg := fmt.Sprintf("cannot create stdout pipe: %v", err)
+		op.fail("docker_build_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
+		return
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		msg := fmt.Sprintf("cannot create stderr pipe: %v", err)
+		op.fail("docker_build_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
+		return
+	}
+
+	// Start the process synchronously.
 	started := time.Now()
 	startTime := started
 	op.mu.Lock()
 	op.StartedAt = &startTime
+	op.cancel = cancel
+	op.cmd = cmd
 	op.mu.Unlock()
 
-	execCmd := a.ExecCommand
-	if execCmd == nil {
-		execCmd = defaultExecCommand
-	}
-
-	output, err := execCmd("docker", args...)
-
-	if err != nil {
-		duration := time.Since(started).Round(time.Millisecond).String()
-		exitCode := extractExitCode(err)
-
-		op.LogBuffer.Write(output)
-
-		op.mu.Lock()
-		op.Duration = &duration
-		op.mu.Unlock()
-
-		op.fail("docker_build_failed", "docker build failed", exitCode)
+	if err := cmd.Start(); err != nil {
+		cancel()
+		msg := fmt.Sprintf("cannot start build: %v", err)
+		op.fail("docker_build_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
 		return
 	}
 
+	// Start goroutine for streaming output capture.
+	go func() {
+		io.Copy(op.LogBuffer, io.MultiReader(stdout, stderr))
+	}()
+
+	// Start goroutine for process completion.
+	go func() {
+		a.waitBuildCompletion(op, started)
+	}()
+
+	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+		"ok":           true,
+		"operation_id": op.ID,
+		"status":       operationRunning,
+	})
+}
+
+// newBuildCmd creates a new exec.Cmd for build operations.
+// It uses ExecCommandContext if set (test seam), otherwise default.
+func (a *App) newBuildCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if a.ExecCommandContext != nil {
+		return a.ExecCommandContext(ctx, name, args...)
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd
+}
+
+// waitBuildCompletion waits for the build process to finish and transitions
+// the operation to succeeded or failed. It is the single owner of cmd.Wait().
+func (a *App) waitBuildCompletion(op *buildOperation, started time.Time) {
+	err := op.cmd.Wait()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
-	op.LogBuffer.Write(output)
+	if err != nil {
+		exitCode := extractExitCode(err)
+		op.fail("docker_build_failed", "docker build failed", exitCode, &duration)
+		return
+	}
+
 	op.succeed(&duration)
 }
 

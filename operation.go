@@ -157,43 +157,46 @@ func (r *operationRegistry) setShuttingDown() {
 
 func (r *operationRegistry) terminateAll(ctx context.Context) {
 	r.mu.RLock()
-	var cmds []*buildOperation
+	var ops []*buildOperation
 	for _, op := range r.ops {
-		op.mu.Lock()
-		if op.State == operationRunning && op.cmd != nil {
-			cmds = append(cmds, op)
-		}
-		op.mu.Unlock()
+		ops = append(ops, op)
 	}
 	r.mu.RUnlock()
 
-	for _, op := range cmds {
+	// Phase 1: Cancel and signal all running operations.
+	for _, op := range ops {
+		op.mu.Lock()
 		if op.cancel != nil {
 			op.cancel()
 		}
 		if op.cmd != nil && op.cmd.Process != nil {
 			op.cmd.Process.Signal(os.Interrupt)
 		}
+		op.mu.Unlock()
 	}
 
-	for _, op := range cmds {
-		if op.cmd != nil {
-			op.cmd.Wait()
-		}
+	// Phase 2: Wait for operations to complete with context deadline.
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		deadline = time.Now().Add(5 * time.Second)
 	}
 
-	deadline, _ := ctx.Deadline()
-	timeout := time.Until(deadline)
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	for _, op := range cmds {
+	for _, op := range ops {
 		select {
-		case <-time.After(timeout):
+		case <-op.done:
+			// Operation completed normally.
+		case <-time.After(time.Until(deadline)):
+			// Timeout: force kill.
+			op.mu.Lock()
 			if op.cmd != nil && op.cmd.Process != nil {
 				op.cmd.Process.Kill()
 			}
-		default:
+			op.mu.Unlock()
+			// Wait for the killed process to be reaped by the completion goroutine.
+			select {
+			case <-op.done:
+			case <-time.After(2 * time.Second):
+			}
 		}
 	}
 }
@@ -290,19 +293,15 @@ func (b *boundedBuffer) totalWritten() int64 {
 
 func (op *buildOperation) succeed(duration *string) {
 	op.mu.Lock()
-	defer op.mu.Unlock()
-
 	now := time.Now()
 	op.State = operationSucceeded
 	op.CompletedAt = &now
 	op.Duration = duration
-
-	if op.ResultCode != nil {
-		close(op.done)
-		return
+	if op.ResultCode == nil {
+		rc := "succeeded"
+		op.ResultCode = &rc
 	}
-	rc := "succeeded"
-	op.ResultCode = &rc
+	op.mu.Unlock()
 
 	dur := ""
 	if duration != nil {
@@ -321,16 +320,24 @@ func (op *buildOperation) succeed(duration *string) {
 	close(op.done)
 }
 
-func (op *buildOperation) fail(resultCode, message string, exitCode *int) {
+func (op *buildOperation) fail(resultCode, message string, exitCode *int, duration ...*string) {
 	op.mu.Lock()
-	defer op.mu.Unlock()
-
 	now := time.Now()
 	op.State = operationFailed
 	op.CompletedAt = &now
 	op.ExitCode = exitCode
-	op.ResultCode = &resultCode
+	if op.ResultCode == nil {
+		op.ResultCode = &resultCode
+	}
+	if len(duration) > 0 && duration[0] != nil {
+		op.Duration = duration[0]
+	}
+	op.mu.Unlock()
 
+	dur := ""
+	if len(duration) > 0 && duration[0] != nil {
+		dur = *duration[0]
+	}
 	writeAuditWithRequestID(context.Background(), auditRecord{
 		Event:       "build.finish",
 		SessionID:   op.SessionID,
@@ -340,6 +347,7 @@ func (op *buildOperation) fail(resultCode, message string, exitCode *int) {
 		Dockerfile:  op.Dockerfile,
 		Result:      "failure",
 		ExitCode:    exitCode,
+		Duration:    dur,
 	})
 	close(op.done)
 }

@@ -2,13 +2,36 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+// testBuildCmd creates a test command that writes output and exits with the given code.
+func testBuildCmd(ctx context.Context, output string, exitCode int) func(context.Context, string, ...string) *exec.Cmd {
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		script := "/bin/sh"
+		var cmdArgs []string
+		if exitCode == 0 {
+			cmdArgs = []string{"-c", "printf '%s' '" + output + "'"}
+		} else {
+			cmdArgs = []string{"-c", "printf '%s' '" + output + "' >&2; exit " + itoa(exitCode)}
+		}
+		return exec.CommandContext(ctx, script, cmdArgs...)
+	}
+}
+
+func itoa(n int) string {
+	if n < 10 {
+		return string(rune('0' + n))
+	}
+	return string(rune('0'+n/10)) + string(rune('0'+n%10))
+}
 
 func TestBuildSessionAuthValidToken(t *testing.T) {
 	app := newTestAppWithAuth(t)
@@ -24,9 +47,7 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
-	}
+	app.ExecCommandContext = testBuildCmd(context.Background(), "ok", 0)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -93,9 +114,9 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	called := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		called = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, name, args...)
 	}
 
 	reqBody := map[string]string{
@@ -116,7 +137,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	}
 
 	if called {
-		t.Error("ExecCommand should not be called with invalid token")
+		t.Error("ExecCommandContext should not be called with invalid token")
 	}
 }
 
@@ -135,9 +156,9 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{
@@ -197,8 +218,8 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{
@@ -240,8 +261,8 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{
@@ -409,8 +430,8 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{
@@ -448,9 +469,9 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{
@@ -534,9 +555,9 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "/bin/true")
 	}
 
 	reqBody := map[string]string{

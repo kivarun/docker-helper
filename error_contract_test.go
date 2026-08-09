@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -287,8 +289,8 @@ func TestErrorContractDockerBuildFailed(t *testing.T) {
 	if err := os.WriteFile(dfPath, []byte("FROM scratch"), 0644); err != nil {
 		t.Fatalf("cannot write Dockerfile: %v", err)
 	}
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("build output here\n"), &mockExitError{code: 1, msg: "exit status 1"}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'build output here\\n'; exit 1")
 	}
 
 	reqBody, _ := json.Marshal(map[string]any{
@@ -1004,8 +1006,8 @@ func TestDockerErrorLogBuild(t *testing.T) {
 
 	const errMarker = "test_build_error_marker_abc123"
 	const dockerOutput = "build-output-secret-xyz"
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(dockerOutput + "\n"), &mockExitError{code: 1, msg: errMarker}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+dockerOutput+"\\n'; exit 1")
 	}
 
 	reqBody, _ := json.Marshal(map[string]any{
