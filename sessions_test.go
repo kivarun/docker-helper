@@ -5,17 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
-
-// setSessionPathValue sets the "id" path value on the request from its URL path.
-// It is needed when calling handleDeleteSession directly (without the router).
-func setSessionPathValue(r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
-	r.SetPathValue("id", id)
-}
 
 func TestHTTPCreateSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
@@ -119,12 +111,14 @@ func TestHTTPDeleteSession(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
 		t.Errorf("expected status %d, got %d", http.StatusNoContent, w.Code)
@@ -134,12 +128,14 @@ func TestHTTPDeleteSession(t *testing.T) {
 func TestHTTPDeleteSessionNotFound(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected status %d, got %d", http.StatusNotFound, w.Code)

@@ -508,11 +508,13 @@ func TestErrorContractListSessionsInternalError(t *testing.T) {
 func TestErrorContractDeleteSessionNotFound(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
@@ -544,11 +546,13 @@ func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 	app.DB = newFailExecDB(t, dbPath, sql.ErrTxDone)
 	defer app.DB.Close()
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)

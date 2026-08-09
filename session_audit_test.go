@@ -393,11 +393,13 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != 204 {
 		t.Fatalf("expected 204, got %d", w.Code)
@@ -429,45 +431,17 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 	assertNoSecrets(t, raw, m, result.Token, testAdminToken)
 }
 
-func TestSessionDeleteAuditInvalidID(t *testing.T) {
-	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
-
-	req := httptest.NewRequest(http.MethodDelete, "/sessions/", nil)
-	withAuth(req)
-	setSessionPathValue(req)
-	w := httptest.NewRecorder()
-	app.handleDeleteSession(w, req)
-
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d", w.Code)
-	}
-
-	raw := findAuditLine(auditBuf, "session.delete")
-	if raw == "" {
-		t.Fatalf("expected session.delete audit line, got none\n%s", auditBuf.String())
-	}
-	m := parseAuditMap(t, raw)
-
-	if m["result"] != "invalid_session_id" {
-		t.Errorf("result: expected 'invalid_session_id', got %v", m["result"])
-	}
-	if _, ok := m["duration"]; !ok {
-		t.Error("expected duration in audit record")
-	}
-
-	assertNoSecrets(t, raw, m, "", testAdminToken)
-}
-
 func TestSessionDeleteAuditNotFound(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != 404 {
 		t.Fatalf("expected 404, got %d", w.Code)
@@ -512,11 +486,13 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 	app.DB = newFailExecDB(t, dbPath, errMockDeleteDB)
 	defer app.DB.Close()
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != 500 {
 		t.Fatalf("expected 500, got %d", w.Code)

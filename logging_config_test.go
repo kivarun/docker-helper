@@ -494,14 +494,14 @@ func TestDebugRequestLogParameterizedRoute(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
-	req.Pattern = "DELETE /sessions/{id}"
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
-	handler := withRequestID(withLogging(app.handleDeleteSession))
-	handler(w, req)
+	mux.ServeHTTP(w, req)
 
 	opOutput := opBuf.String()
 	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {

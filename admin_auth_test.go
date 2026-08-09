@@ -62,12 +62,14 @@ func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
-	app.handleDeleteSession(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
 		t.Errorf("expected status %d, got %d", http.StatusNoContent, w.Code)

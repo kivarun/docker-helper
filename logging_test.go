@@ -1068,13 +1068,14 @@ func TestDeleteSessionAuditContainsRequestID(t *testing.T) {
 
 	app := newTestAppWithAuth(t)
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(app.handleDeleteSession))
+
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/nonexistent-id", nil)
 	withAuth(req)
-	setSessionPathValue(req)
 	w := httptest.NewRecorder()
 
-	handler := withRequestID(app.handleDeleteSession)
-	handler(w, req)
+	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
