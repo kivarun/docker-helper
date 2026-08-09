@@ -85,6 +85,19 @@ func (r *operationRegistry) create(op *buildOperation) {
 	r.ops[op.ID] = op
 }
 
+// tryCreate atomically checks the shutting-down gate and registers the operation.
+// Returns true if the operation was registered, false if the registry is shutting down.
+// The caller must not start a build process if tryCreate returns false.
+func (r *operationRegistry) tryCreate(op *buildOperation) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.shutting.Load() {
+		return false
+	}
+	r.ops[op.ID] = op
+	return true
+}
+
 func (r *operationRegistry) get(id string) *buildOperation {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

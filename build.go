@@ -30,11 +30,6 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	ctx := withSessionID(r.Context(), session.ID)
 
-	if a.OperationRegistry != nil && a.OperationRegistry.isShuttingDown() {
-		writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
-		return
-	}
-
 	var req buildRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
@@ -62,7 +57,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize)
 
 	if a.OperationRegistry != nil {
-		a.OperationRegistry.create(op)
+		if !a.OperationRegistry.tryCreate(op) {
+			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
+			return
+		}
 		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
 
