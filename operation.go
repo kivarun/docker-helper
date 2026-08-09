@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -70,7 +69,7 @@ func generateOperationID() string {
 type operationRegistry struct {
 	mu       sync.RWMutex
 	ops      map[string]*buildOperation
-	shutting atomic.Bool
+	shutting bool
 }
 
 func newOperationRegistry() *operationRegistry {
@@ -91,7 +90,7 @@ func (r *operationRegistry) create(op *buildOperation) {
 func (r *operationRegistry) tryCreate(op *buildOperation) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.shutting.Load() {
+	if r.shutting {
 		return false
 	}
 	r.ops[op.ID] = op
@@ -160,11 +159,15 @@ func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int
 }
 
 func (r *operationRegistry) isShuttingDown() bool {
-	return r.shutting.Load()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.shutting
 }
 
 func (r *operationRegistry) setShuttingDown() {
-	r.shutting.Store(true)
+	r.mu.Lock()
+	r.shutting = true
+	r.mu.Unlock()
 }
 
 func (r *operationRegistry) terminateAll(ctx context.Context) {

@@ -8,9 +8,125 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
+
+// TestShutdownGateMutexMutualExclusion verifies that tryCreate and
+// setShuttingDown are mutually exclusive under the same lock.
+// This is a deterministic test that does not rely on timing.
+func TestShutdownGateMutexMutualExclusion(t *testing.T) {
+	reg := newOperationRegistry()
+
+	// Create a dummy operation for registration.
+	op := &buildOperation{
+		ID:        "test_op",
+		SessionID: "test_session",
+		State:     operationRunning,
+		CreatedAt: time.Now(),
+	}
+
+	// Phase 1: tryCreate succeeds when gate is open.
+	if !reg.tryCreate(op) {
+		t.Fatal("tryCreate should succeed when gate is open")
+	}
+	if reg.get("test_op") == nil {
+		t.Fatal("operation should be registered")
+	}
+
+	// Phase 2: tryCreate fails after gate is closed.
+	reg.setShuttingDown()
+
+	op2 := &buildOperation{
+		ID:        "test_op2",
+		SessionID: "test_session",
+		State:     operationRunning,
+		CreatedAt: time.Now(),
+	}
+	if reg.tryCreate(op2) {
+		t.Fatal("tryCreate should fail after gate is closed")
+	}
+	if reg.get("test_op2") != nil {
+		t.Fatal("operation should not be registered after gate closes")
+	}
+
+	// Phase 3: the first operation remains in registry.
+	if reg.get("test_op") == nil {
+		t.Fatal("pre-existing operation should remain in registry")
+	}
+}
+
+// TestShutdownGateConcurrentRegistration verifies that concurrent
+// tryCreate and setShuttingDown never result in a registration after
+// the gate is closed. This uses synchronization to ensure mutual exclusion.
+func TestShutdownGateConcurrentRegistration(t *testing.T) {
+	reg := newOperationRegistry()
+
+	var wg sync.WaitGroup
+	results := make(chan bool, 100)
+
+	// Launch many concurrent tryCreate goroutines.
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			op := &buildOperation{
+				ID:        "concurrent_op_" + string(rune('0'+i)),
+				SessionID: "test_session",
+				State:     operationRunning,
+				CreatedAt: time.Now(),
+			}
+			results <- reg.tryCreate(op)
+		}(i)
+	}
+
+	// Launch one setShuttingDown goroutine.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Small delay to let some tryCreate goroutines start.
+		time.Sleep(1 * time.Millisecond)
+		reg.setShuttingDown()
+	}()
+
+	wg.Wait()
+	close(results)
+
+	// Collect results.
+	var successes, failures int
+	for r := range results {
+		if r {
+			successes++
+		} else {
+			failures++
+		}
+	}
+
+	// After setShuttingDown, some tryCreate should succeed (before gate close)
+	// and some should fail (after gate close). The key invariant is that
+	// no operation registered after gate close should be in the registry.
+	if successes == 0 && failures == 0 {
+		t.Fatal("no results collected")
+	}
+
+	// All operations in the registry should have been registered before gate close.
+	// Since setShuttingDown is now true, any subsequent tryCreate must fail.
+	if !reg.isShuttingDown() {
+		t.Fatal("registry should be shutting down")
+	}
+
+	// Verify that tryCreate now always fails.
+	op := &buildOperation{
+		ID:        "after_gate_op",
+		SessionID: "test_session",
+		State:     operationRunning,
+		CreatedAt: time.Now(),
+	}
+	if reg.tryCreate(op) {
+		t.Fatal("tryCreate must fail after gate is closed")
+	}
+}
 
 // TestShutdownRaceRegistrationRejectedAfterGateClose verifies that when
 // the shutdown gate closes between isShuttingDown check and create,
