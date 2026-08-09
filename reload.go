@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -98,9 +97,11 @@ type reloadClient struct {
 	client *apiClient
 }
 
+var reloadTimeout = 5 * time.Second
+
 func newReloadClient(socketPath string, tokenSource func() (string, error)) *reloadClient {
 	return &reloadClient{
-		client: newUnixAPIClientWithTimeout(socketPath, tokenSource, 5*time.Second),
+		client: newUnixAPIClient(socketPath, tokenSource, &reloadTimeout),
 	}
 }
 
@@ -111,19 +112,8 @@ func (c *reloadClient) reload() error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("cannot read response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var result map[string]any
-		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil {
-			if msg, ok := result["message"].(string); ok {
-				return fmt.Errorf("%s", msg)
-			}
-		}
-		return fmt.Errorf("API error: status %d", resp.StatusCode)
+	if err := c.client.decodeError(resp); err != nil {
+		return err
 	}
 
 	return nil

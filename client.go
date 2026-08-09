@@ -14,13 +14,30 @@ import (
 	"time"
 )
 
+// apiError is a structured client-side error for non-2xx daemon responses.
+type apiError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *apiError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("API error (status %d, code %s): %s", e.Status, e.Code, e.Message)
+	}
+	return fmt.Sprintf("API error: status %d", e.Status)
+}
+
 type apiClient struct {
 	httpClient  *http.Client
 	baseURL     string
 	tokenSource func() (string, error)
 }
 
-func newUnixAPIClient(socketPath string, tokenSource func() (string, error)) *apiClient {
+// newUnixAPIClient creates a Unix-socket HTTP client.
+// If timeout is nil, no client-level timeout is set.
+// If timeout is non-nil, it is applied as http.Client.Timeout.
+func newUnixAPIClient(socketPath string, tokenSource func() (string, error), timeout *time.Duration) *apiClient {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var dialer net.Dialer
@@ -28,26 +45,52 @@ func newUnixAPIClient(socketPath string, tokenSource func() (string, error)) *ap
 		},
 	}
 
+	client := &http.Client{Transport: transport}
+	if timeout != nil {
+		client.Timeout = *timeout
+	}
+
 	return &apiClient{
-		httpClient:  &http.Client{Transport: transport},
+		httpClient:  client,
 		baseURL:     "http://localhost",
 		tokenSource: tokenSource,
 	}
 }
 
-func newUnixAPIClientWithTimeout(socketPath string, tokenSource func() (string, error), timeout time.Duration) *apiClient {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var dialer net.Dialer
-			return dialer.DialContext(ctx, "unix", socketPath)
-		},
+// parseApiError returns an apiError for the given non-2xx status and body.
+// It attempts to extract the daemon's structured code and message; on
+// malformed or empty bodies it falls back to a stable error that retains
+// the HTTP status.
+func parseApiError(status int, body []byte) *apiError {
+	var envelope struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
 	}
+	if json.Unmarshal(body, &envelope) == nil && envelope.Message != "" {
+		return &apiError{
+			Status:  status,
+			Code:    envelope.Code,
+			Message: envelope.Message,
+		}
+	}
+	return &apiError{
+		Status:  status,
+		Message: fmt.Sprintf("API error: status %d", status),
+	}
+}
 
-	return &apiClient{
-		httpClient:  &http.Client{Transport: transport, Timeout: timeout},
-		baseURL:     "http://localhost",
-		tokenSource: tokenSource,
+// decodeError reads the response body and returns an apiError for non-2xx
+// status codes.  It is used by methods that do not need the response body
+// on success (e.g. delete, reload).
+func (c *apiClient) decodeError(resp *http.Response) error {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("cannot read response: %w", err)
 	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	return parseApiError(resp.StatusCode, body)
 }
 
 func readAdminTokenPlain(path string) (string, error) {
@@ -99,7 +142,7 @@ func (c *apiClient) listSessions() (*listSessionsResponse, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API error: status %d", resp.StatusCode)
+		return nil, parseApiError(resp.StatusCode, body)
 	}
 
 	var result listSessionsResponse
@@ -128,7 +171,7 @@ func (c *apiClient) createSession(workspace string) (*createSessionResponse, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API error: status %d", resp.StatusCode)
+		return nil, parseApiError(resp.StatusCode, respBody)
 	}
 
 	var result createSessionResponse
@@ -147,7 +190,7 @@ func (c *apiClient) deleteSession(id string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("API error: status %d", resp.StatusCode)
+		return c.decodeError(resp)
 	}
 
 	return nil

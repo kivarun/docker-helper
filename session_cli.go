@@ -43,7 +43,7 @@ var sessionCreateCommand = &Command{
 
 				client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
 					return readAdminTokenPlain(cfg.AdminTokenPath)
-				})
+				}, nil)
 
 				result, err := client.createSession(*workspace)
 				if err != nil {
@@ -96,7 +96,7 @@ var sessionListCommand = &Command{
 
 				client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
 					return readAdminTokenPlain(cfg.AdminTokenPath)
-				})
+				}, nil)
 
 				result, err := client.listSessions()
 				if err != nil {
@@ -145,7 +145,7 @@ var sessionDeleteCommand = &Command{
 
 				client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
 					return readAdminTokenPlain(cfg.AdminTokenPath)
-				})
+				}, nil)
 
 				if err := client.deleteSession(*id); err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)

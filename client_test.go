@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -55,7 +56,7 @@ func TestListSessionsSuccess(t *testing.T) {
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
 		return readAdminTokenPlain(tokenPath)
-	})
+	}, nil)
 
 	result, err := client.listSessions()
 	if err != nil {
@@ -93,7 +94,7 @@ func TestListSessionsAuthHeader(t *testing.T) {
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
 		return readAdminTokenPlain(tokenPath)
-	})
+	}, nil)
 
 	if _, err := client.listSessions(); err != nil {
 		t.Fatalf("listSessions: %v", err)
@@ -120,7 +121,7 @@ func TestListSessionsAuthError(t *testing.T) {
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
 		return readAdminTokenPlain(tokenPath)
-	})
+	}, nil)
 
 	_, err := client.listSessions()
 	if err == nil {
@@ -134,7 +135,7 @@ func TestListSessionsAuthError(t *testing.T) {
 func TestListSessionsConnectionError(t *testing.T) {
 	client := newUnixAPIClient("/nonexistent/path.sock", func() (string, error) {
 		return "token", nil
-	})
+	}, nil)
 
 	_, err := client.listSessions()
 	if err == nil {
@@ -411,7 +412,7 @@ func TestCreateSessionRequest(t *testing.T) {
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
 		return readAdminTokenPlain(tokenPath)
-	})
+	}, nil)
 
 	result, err := client.createSession("/home/user/proj")
 	if err != nil {
@@ -839,7 +840,7 @@ func TestDeleteSessionRequest(t *testing.T) {
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
 		return readAdminTokenPlain(tokenPath)
-	})
+	}, nil)
 
 	if err := client.deleteSession("dhs_001"); err != nil {
 		t.Fatalf("deleteSession: %v", err)
@@ -881,7 +882,7 @@ func TestDeleteSessionEscapedID(t *testing.T) {
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
 		return readAdminTokenPlain(tokenPath)
-	})
+	}, nil)
 
 	if err := client.deleteSession(testID); err != nil {
 		t.Fatalf("deleteSession: %v", err)
@@ -1163,5 +1164,221 @@ func TestSessionDeleteHelpNoAPI(t *testing.T) {
 
 	if !strings.Contains(stdout.String(), "delete") {
 		t.Errorf("expected help text: %s", stdout.String())
+	}
+}
+
+// ---------- apiError structured error ----------
+
+func TestApiErrorStructured(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      false,
+			"code":    "invalid_config",
+			"message": "invalid configuration",
+		})
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	_, err := client.listSessions()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *apiError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", apiErr.Status)
+	}
+	if apiErr.Code != "invalid_config" {
+		t.Errorf("expected code 'invalid_config', got %q", apiErr.Code)
+	}
+	if apiErr.Message != "invalid configuration" {
+		t.Errorf("expected message 'invalid configuration', got %q", apiErr.Message)
+	}
+	// Error string should contain "API error" for test compatibility
+	if !strings.Contains(apiErr.Error(), "API error") {
+		t.Errorf("expected 'API error' in error string, got: %s", apiErr.Error())
+	}
+}
+
+func TestApiErrorMalformedBody(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "not-json-at-all")
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	_, err := client.listSessions()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *apiError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", apiErr.Status)
+	}
+	if apiErr.Code != "" {
+		t.Errorf("expected empty code for malformed body, got %q", apiErr.Code)
+	}
+	if !strings.Contains(apiErr.Error(), "API error") {
+		t.Errorf("expected 'API error' in error string, got: %s", apiErr.Error())
+	}
+	// Raw body must not leak
+	if strings.Contains(apiErr.Error(), "not-json-at-all") {
+		t.Error("raw body must not appear in error")
+	}
+}
+
+func TestApiErrorEmptyBody(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	_, err := client.listSessions()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *apiError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusUnauthorized {
+		t.Errorf("expected status 401, got %d", apiErr.Status)
+	}
+	if apiErr.Code != "" {
+		t.Errorf("expected empty code for empty body, got %q", apiErr.Code)
+	}
+}
+
+// ---------- delete 204 ----------
+
+func TestDeleteSession204Success(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	if err := client.deleteSession("dhs_001"); err != nil {
+		t.Fatalf("deleteSession: %v", err)
+	}
+}
+
+// ---------- reload uses common decoder ----------
+
+func TestReloadErrorStructured(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      false,
+			"code":    "invalid_config",
+			"message": "invalid configuration",
+		})
+	})
+
+	client := newReloadClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	})
+
+	err := client.reload()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *apiError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", apiErr.Status)
+	}
+	if apiErr.Code != "invalid_config" {
+		t.Errorf("expected code 'invalid_config', got %q", apiErr.Code)
+	}
+	if apiErr.Message != "invalid configuration" {
+		t.Errorf("expected message 'invalid configuration', got %q", apiErr.Message)
+	}
+}
+
+// ---------- transport error remains distinguishable ----------
+
+func TestTransportErrorNotApiError(t *testing.T) {
+	client := newUnixAPIClient("/nonexistent/path.sock", func() (string, error) {
+		return "token", nil
+	}, nil)
+
+	_, err := client.listSessions()
+	if err == nil {
+		t.Fatal("expected error for nonexistent socket")
+	}
+
+	var apiErr *apiError
+	if errors.As(err, &apiErr) {
+		t.Errorf("transport error should not be *apiError, got: %v", apiErr)
+	}
+	// Should contain "request failed" from doAuthenticatedRequest
+	if !strings.Contains(err.Error(), "request failed") {
+		t.Errorf("expected 'request failed' in transport error, got: %v", err)
 	}
 }
