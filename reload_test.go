@@ -1035,3 +1035,114 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestReloadInvalidConfigNoLeak verifies that when loadConfig fails during
+// reload, the HTTP response contains only a stable public message while the
+// full internal error is preserved in operational logging.
+func TestReloadInvalidConfigNoLeak(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	// Capture operational logs
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Write invalid config that will produce a descriptive internal error
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root": "not-absolute"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %s", body)
+	}
+
+	// Verify stable public response
+	if code, ok := result["code"].(string); !ok || code != "invalid_config" {
+		t.Fatalf("expected code=invalid_config, got: %s", body)
+	}
+	if msg, ok := result["message"].(string); !ok || msg != "invalid configuration" {
+		t.Fatalf("expected message='invalid configuration', got: %s", body)
+	}
+
+	// Verify no internal details leaked into the response
+	if strings.Contains(strings.ToLower(string(body)), "not-absolute") {
+		t.Error("response body must not contain the raw invalid value from config")
+	}
+	if strings.Contains(string(body), configPath) {
+		t.Error("response body must not contain the config file path")
+	}
+
+	// Verify full error is in operational log
+	opLog := opBuf.String()
+	if !strings.Contains(opLog, "allowed_root must be a non-empty absolute path") {
+		t.Errorf("expected operational log to contain the full error detail, got:\n%s", opLog)
+	}
+}

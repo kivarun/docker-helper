@@ -53,9 +53,13 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 
 	newCfg, err := loadConfig()
 	if err != nil {
+		opLog(r.Context()).Error("reload config error",
+			slog.String("operation", "reload"),
+			slog.String("error", err.Error()),
+		)
 		writeError(r.Context(), w, http.StatusBadRequest,
 			"invalid_config",
-			fmt.Sprintf("cannot load configuration: %v", err),
+			"invalid configuration",
 		)
 		return
 	}
