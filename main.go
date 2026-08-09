@@ -216,7 +216,11 @@ func serveWithShutdown(
 		return
 
 	case err := <-serveDone:
-		return nil, func() {}, err
+		// Serve returned an error without a shutdown signal.
+		// Create a bounded cleanup context so terminateAll can still
+		// shut down running operations without panicking on nil ctx.
+		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
+		return shutdownCtx, shutdownCancel, err
 	}
 }
 
