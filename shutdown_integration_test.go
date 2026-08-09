@@ -61,8 +61,16 @@ func TestShutdownIntegrationRunningOpIsTerminated(t *testing.T) {
 		t.Fatal("operation not found")
 	}
 
-	// Give process time to start.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the process to start by polling op.started.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		started := op.started
+		op.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Verify operation is running before shutdown.
 	if op.State != operationRunning {

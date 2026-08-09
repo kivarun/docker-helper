@@ -136,14 +136,20 @@ func TestCmdStartRaceStartBeforeShutdown(t *testing.T) {
 		t.Fatal("operation should be in registry")
 	}
 
-	// Wait for process to start.
-	time.Sleep(200 * time.Millisecond)
-
-	// Verify started flag.
+	// Wait for the process to be started by polling op.started.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		started := op.started
+		op.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	op.mu.Lock()
 	if !op.started {
 		op.mu.Unlock()
-		t.Fatal("started should be true")
+		t.Fatal("process did not start in time")
 	}
 	op.mu.Unlock()
 
@@ -182,8 +188,16 @@ func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
+	// Use a readiness marker: the process writes to a temp file when it has
+	// installed the TERM trap. The test waits for this file before triggering
+	// shutdown, eliminating timing assumptions.
+	readyFile := filepath.Join(app.Config.AllowedRoot, ".process_ready")
+	defer os.Remove(readyFile)
+
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "trap '' TERM; sleep 60")
+		// Process ignores TERM and writes readiness marker.
+		return exec.CommandContext(ctx, "/bin/sh", "-c",
+			"trap '' TERM; touch '"+readyFile+"'; sleep 60")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -208,8 +222,16 @@ func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
 		t.Fatal("operation should be in registry")
 	}
 
-	// Wait for process to start.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the process to signal readiness (installed TERM trap).
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(readyFile); err != nil {
+		t.Fatal("process did not become ready in time")
+	}
 
 	// Trigger shutdown with short deadline.
 	reg.setShuttingDown()

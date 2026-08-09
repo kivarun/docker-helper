@@ -141,12 +141,20 @@ func TestLifecycleRaceProcessAlreadyStartedBeforeShutdown(t *testing.T) {
 		t.Fatal("operation should be in registry")
 	}
 
-	// Wait for the process to actually start.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the process to actually start by polling op.started.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		started := op.started
+		op.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 
 	// Verify the process is running.
 	op.mu.Lock()
-	if op.cmd == nil || op.cmd.Process == nil {
+	if !op.started || op.cmd == nil || op.cmd.Process == nil {
 		op.mu.Unlock()
 		t.Fatal("process should be running")
 	}
