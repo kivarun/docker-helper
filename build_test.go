@@ -619,3 +619,107 @@ func TestBuildContextErrorContainsCode(t *testing.T) {
 		t.Errorf("expected code 'invalid_build_context', got %q", resp.Code)
 	}
 }
+
+func TestParseOffset(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    int64
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"0", 0, false},
+		{"1", 1, false},
+		{"100", 100, false},
+		{"9223372036854775807", 9223372036854775807, false},
+		{"-1", 0, true},
+		{"-100", 0, true},
+		{"abc", 0, true},
+		{"12foo", 0, true},
+		{"foo12", 0, true},
+		{"9223372036854775808", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := parseOffset(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseOffset(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("parseOffset(%q) = %d, want %d", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleOperationLogsInvalidOffset(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	reqBody := map[string]string{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode build response: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatalf("operation %s not found in registry", opID)
+	}
+	op.Wait()
+
+	cases := []string{"-1", "abc", "12foo"}
+	for _, offset := range cases {
+		t.Run(offset, func(t *testing.T) {
+			logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs?offset="+offset, nil)
+			logsReq.SetPathValue("id", opID)
+			logsReq.Header.Set("Authorization", "Bearer "+result.Token)
+			logsW := httptest.NewRecorder()
+			app.handleOperationLogs(logsW, logsReq)
+
+			if logsW.Code != http.StatusBadRequest {
+				t.Errorf("expected status %d, got %d", http.StatusBadRequest, logsW.Code)
+			}
+
+			var errResp response
+			if err := json.NewDecoder(logsW.Body).Decode(&errResp); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if errResp.Code != "invalid_offset" {
+				t.Errorf("expected code 'invalid_offset', got %q", errResp.Code)
+			}
+		})
+	}
+}

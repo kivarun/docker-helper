@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -252,7 +253,11 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	offset := parseOffset(r.URL.Query().Get("offset"))
+	offset, err := parseOffset(r.URL.Query().Get("offset"))
+	if err != nil {
+		writeError(ctx, w, http.StatusBadRequest, "invalid_offset", "invalid offset parameter")
+		return
+	}
 
 	data, nextOffset, truncated := op.LogBuffer.Range(offset)
 
@@ -274,13 +279,18 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func parseOffset(s string) int64 {
+func parseOffset(s string) (int64, error) {
 	if s == "" {
-		return 0
+		return 0, nil
 	}
-	var offset int64
-	fmt.Sscanf(s, "%d", &offset)
-	return offset
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if v < 0 {
+		return 0, errors.New("negative offset")
+	}
+	return v, nil
 }
 
 func validateBuildRequest(workspace string, req buildRequest) (string, string, error) {
