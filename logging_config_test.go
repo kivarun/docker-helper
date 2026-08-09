@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -197,7 +198,7 @@ func TestInitOmitsAuditEnabled(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
 
-	if err := runInit(); err != nil {
+	if err := runInit(dir, io.Discard, io.Discard); err != nil {
 		t.Fatalf("runInit: %v", err)
 	}
 

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -197,7 +199,7 @@ func generateToken() (string, error) {
 	return "dht_" + hex.EncodeToString(b), nil
 }
 
-func runInit() error {
+func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	configPath := getConfigPath()
 	configDir := filepath.Dir(configPath)
 	stateDir := getStateDir()
@@ -212,7 +214,7 @@ func runInit() error {
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultConfig := fileConfig{
-			AllowedRoot: "/home/michael/work/git",
+			AllowedRoot: allowedRoot,
 			SessionTTL:  "12h",
 			Level:       "info",
 		}
@@ -231,10 +233,10 @@ func runInit() error {
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
 	if _, err := os.Stat(adminTokenPath); err == nil {
-		fmt.Fprintln(os.Stderr, "admin.token already exists at:")
-		fmt.Fprintln(os.Stderr, adminTokenPath)
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Will not overwrite. Use a future token rotation command to replace it.")
+		fmt.Fprintln(stderr, "admin.token already exists at:")
+		fmt.Fprintln(stderr, adminTokenPath)
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Will not overwrite. Use a future token rotation command to replace it.")
 		return errors.New("admin.token already exists")
 	}
 
@@ -247,16 +249,71 @@ func runInit() error {
 		return fmt.Errorf("cannot write admin token: %w", err)
 	}
 
-	fmt.Println("Docker Helper initialized successfully.")
-	fmt.Println()
-	fmt.Println("Admin token:")
-	fmt.Println(token)
-	fmt.Println()
-	fmt.Println("Stored at:")
-	fmt.Println(adminTokenPath)
-	fmt.Println()
-	fmt.Println("Configuration:")
-	fmt.Println(configPath)
+	fmt.Fprintln(stdout, "Docker Helper initialized successfully.")
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Admin token:")
+	fmt.Fprintln(stdout, token)
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Stored at:")
+	fmt.Fprintln(stdout, adminTokenPath)
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Configuration:")
+	fmt.Fprintln(stdout, configPath)
 
 	return nil
+}
+
+// resolveAllowedRoot resolves the user-provided allowed root path.
+// If the path is empty, it falls back to the default (current working directory).
+// The resulting path is validated: it must be absolute, exist, and be a directory.
+func resolveAllowedRoot(path string) (string, error) {
+	if path == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine current working directory: %w", err)
+		}
+		path = cwd
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("allowed root must be an absolute path: %w", err)
+	}
+
+	cleaned, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve allowed root path: %w", err)
+	}
+
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("allowed root does not exist: %s", cleaned)
+		}
+		return "", fmt.Errorf("cannot stat allowed root: %w", err)
+	}
+
+	if !info.IsDir() {
+		return "", fmt.Errorf("allowed root is not a directory: %s", cleaned)
+	}
+
+	return cleaned, nil
+}
+
+// promptAllowedRoot prompts the user for an allowed root directory.
+// It uses the provided default value and reads from stdin.
+func promptAllowedRoot(defaultPath string, stdin io.Reader, stderr io.Writer) (string, error) {
+	fmt.Fprintf(stderr, "Enter allowed root directory:\n")
+	fmt.Fprintf(stderr, "[%s]:\n", defaultPath)
+
+	scanner := bufio.NewScanner(stdin)
+	if !scanner.Scan() {
+		return "", errors.New("failed to read input")
+	}
+
+	input := scanner.Text()
+	if input == "" {
+		return defaultPath, nil
+	}
+	return input, nil
 }

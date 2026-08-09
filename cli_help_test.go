@@ -238,7 +238,7 @@ func TestBlackBoxExactUsageStrings(t *testing.T) {
 		expected string
 	}{
 		{"serve help", []string{"serve", "--help"}, "Usage: docker-helper serve"},
-		{"init help", []string{"init", "--help"}, "Usage: docker-helper init"},
+		{"init help", []string{"init", "--help"}, "Usage: docker-helper init [--allowed-root PATH]"},
 		{"version help", []string{"version", "--help"}, "Usage: docker-helper version"},
 		{"session list help", []string{"session", "list", "--help"}, "Usage: docker-helper session list [--json]"},
 		{"session create help", []string{"session", "create", "--help"}, "Usage: docker-helper session create --workspace PATH [--json]"},

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 type Invocation struct {
@@ -273,11 +276,19 @@ var serveCommand = &Command{
 var initCommand = &Command{
 	Name:    "init",
 	Summary: "Initialize configuration and admin token",
-	Usage:   "docker-helper init",
+	Usage:   "docker-helper init [--allowed-root PATH]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		allowedRoot := fs.String("allowed-root", "", "Allowed root directory for agent workspaces")
+
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				if err := runInit(); err != nil {
+				resolved, err := resolveAllowedRootForInit(*allowedRoot, os.Stdin, stderr)
+				if err != nil {
+					fmt.Fprintln(stderr, err)
+					return 2
+				}
+
+				if err := runInit(resolved, stdout, stderr); err != nil {
 					fmt.Fprintln(stderr, err)
 					return 1
 				}
@@ -285,6 +296,32 @@ var initCommand = &Command{
 			},
 		}
 	},
+}
+
+// resolveAllowedRootForInit resolves the allowed root for the init command.
+// If --allowed-root is provided, it is validated and returned.
+// If not provided and stdin is a terminal, the user is prompted interactively.
+// If not provided and stdin is not a terminal, an error is returned.
+func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writer) (string, error) {
+	if flagValue != "" {
+		return resolveAllowedRoot(flagValue)
+	}
+
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return "", errors.New("--allowed-root is required in non-interactive mode")
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine current working directory: %w", err)
+	}
+
+	input, err := promptAllowedRoot(cwd, stdin, stderr)
+	if err != nil {
+		return "", err
+	}
+
+	return resolveAllowedRoot(input)
 }
 
 var versionCommand = &Command{

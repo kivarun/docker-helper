@@ -1478,7 +1478,7 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
 	// 1) Run init - should create files at DOCKER_HELPER_CONFIG, not XDG_CONFIG_HOME
-	if err := runInit(); err != nil {
+	if err := runInit(dir, io.Discard, io.Discard); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 

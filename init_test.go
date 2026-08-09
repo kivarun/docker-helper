@@ -1,0 +1,207 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestInitExplicitAllowedRoot(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	allowedRoot := filepath.Join(dir, "workspaces")
+	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--allowed-root", allowedRoot}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init exited %d, stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var fc fileConfig
+	if err := json.Unmarshal(data, &fc); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if fc.AllowedRoot != allowedRoot {
+		t.Errorf("allowed_root = %q, want %q", fc.AllowedRoot, allowedRoot)
+	}
+}
+
+func TestInitNonInteractiveNoFlag(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "--allowed-root is required in non-interactive mode") {
+		t.Errorf("expected non-interactive error, got: %s", stderr.String())
+	}
+}
+
+func TestInitInvalidAllowedRootNonExistent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--allowed-root", filepath.Join(dir, "no-such-dir")}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "does not exist") {
+		t.Errorf("expected 'does not exist' error, got: %s", stderr.String())
+	}
+}
+
+func TestInitInvalidAllowedRootNotDirectory(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	file := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--allowed-root", file}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "not a directory") {
+		t.Errorf("expected 'not a directory' error, got: %s", stderr.String())
+	}
+}
+
+func TestInitHelpContainsAllowedRoot(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init --help exited %d", code)
+	}
+	if !strings.Contains(stdout.String(), "--allowed-root") {
+		t.Error("init --help should contain --allowed-root flag")
+	}
+}
+
+func TestResolveAllowedRootEmptyUsesCWD(t *testing.T) {
+	dir := t.TempDir()
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	resolved, err := resolveAllowedRoot("")
+	if err != nil {
+		t.Fatalf("resolveAllowedRoot(\"\") = error: %v", err)
+	}
+	if resolved != dir {
+		t.Errorf("resolveAllowedRoot(\"\") = %q, want %q", resolved, dir)
+	}
+}
+
+func TestResolveAllowedRootRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(cwd)
+
+	resolved, err := resolveAllowedRoot("sub")
+	if err != nil {
+		t.Fatalf("resolveAllowedRoot(\"sub\") = error: %v", err)
+	}
+	if resolved != subdir {
+		t.Errorf("resolveAllowedRoot(\"sub\") = %q, want %q", resolved, subdir)
+	}
+}
+
+func TestResolveAllowedRootNonExistent(t *testing.T) {
+	_, err := resolveAllowedRoot("/no/such/path/that/exists/nowhere")
+	if err == nil {
+		t.Error("expected error for non-existent path")
+	}
+}
+
+func TestResolveAllowedRootNotDirectory(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveAllowedRoot(file)
+	if err == nil {
+		t.Error("expected error for non-directory path")
+	}
+}
+
+func TestPromptAllowedRootEmptyInput(t *testing.T) {
+	input := strings.NewReader("\n")
+	var buf bytes.Buffer
+	result, err := promptAllowedRoot("/default", input, &buf)
+	if err != nil {
+		t.Fatalf("promptAllowedRoot error: %v", err)
+	}
+	if result != "/default" {
+		t.Errorf("promptAllowedRoot = %q, want %q", result, "/default")
+	}
+}
+
+func TestPromptAllowedRootCustomInput(t *testing.T) {
+	input := strings.NewReader("/custom/path\n")
+	var buf bytes.Buffer
+	result, err := promptAllowedRoot("/default", input, &buf)
+	if err != nil {
+		t.Fatalf("promptAllowedRoot error: %v", err)
+	}
+	if result != "/custom/path" {
+		t.Errorf("promptAllowedRoot = %q, want %q", result, "/custom/path")
+	}
+}
+
+func TestPromptOutputGoesToStderr(t *testing.T) {
+	input := strings.NewReader("\n")
+	var buf bytes.Buffer
+	_, err := promptAllowedRoot("/default", input, &buf)
+	if err != nil {
+		t.Fatalf("promptAllowedRoot error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Enter allowed root directory") {
+		t.Error("prompt should write to stderr")
+	}
+	if !strings.Contains(buf.String(), "/default") {
+		t.Error("prompt should show default value")
+	}
+}

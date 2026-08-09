@@ -68,6 +68,17 @@ Creates configuration and state directories, writes `config.json` with
 `allowed_root` and `session_ttl`, and generates an admin token. The
 token is printed once and stored beside the config file.
 
+If running interactively and `--allowed-root` is not provided, you will
+be prompted for the allowed root directory. The current working directory
+is used as the default.
+
+```bash
+docker-helper init --allowed-root /path/to/workspaces
+```
+
+In non-interactive environments (CI, scripts), `--allowed-root` is
+required.
+
 By default, the config file is at:
 
 ```
