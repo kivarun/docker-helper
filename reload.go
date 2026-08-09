@@ -112,9 +112,6 @@ func (c *reloadClient) reload() error {
 	}
 	defer resp.Body.Close()
 
-	if err := c.client.decodeError(resp); err != nil {
-		return err
-	}
-
-	return nil
+	_, err = c.client.readResponseBody(resp)
+	return err
 }

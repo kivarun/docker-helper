@@ -57,6 +57,19 @@ func newUnixAPIClient(socketPath string, tokenSource func() (string, error), tim
 	}
 }
 
+// readResponseBody reads the full response body and returns the bytes.
+// If the status is non-2xx it returns a structured apiError instead.
+func (c *apiClient) readResponseBody(resp *http.Response) ([]byte, error) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, parseApiError(resp.StatusCode, body)
+	}
+	return body, nil
+}
+
 // parseApiError returns an apiError for the given non-2xx status and body.
 // It attempts to extract the daemon's structured code and message; on
 // malformed or empty bodies it falls back to a stable error that retains
@@ -74,23 +87,8 @@ func parseApiError(status int, body []byte) *apiError {
 		}
 	}
 	return &apiError{
-		Status:  status,
-		Message: fmt.Sprintf("API error: status %d", status),
+		Status: status,
 	}
-}
-
-// decodeError reads the response body and returns an apiError for non-2xx
-// status codes.  It is used by methods that do not need the response body
-// on success (e.g. delete, reload).
-func (c *apiClient) decodeError(resp *http.Response) error {
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("cannot read response: %w", err)
-	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	return parseApiError(resp.StatusCode, body)
 }
 
 func readAdminTokenPlain(path string) (string, error) {
@@ -136,13 +134,9 @@ func (c *apiClient) listSessions() (*listSessionsResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := c.readResponseBody(resp)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseApiError(resp.StatusCode, body)
+		return nil, err
 	}
 
 	var result listSessionsResponse
@@ -165,13 +159,9 @@ func (c *apiClient) createSession(workspace string) (*createSessionResponse, err
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := c.readResponseBody(resp)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseApiError(resp.StatusCode, respBody)
+		return nil, err
 	}
 
 	var result createSessionResponse
@@ -189,9 +179,6 @@ func (c *apiClient) deleteSession(id string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.decodeError(resp)
-	}
-
-	return nil
+	_, err = c.readResponseBody(resp)
+	return err
 }
