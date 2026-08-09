@@ -284,21 +284,21 @@ func resolveAllowedRoot(path string) (string, error) {
 		return "", fmt.Errorf("allowed root must be an absolute path: %w", err)
 	}
 
-	cleaned, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", fmt.Errorf("cannot resolve allowed root path: %w", err)
-	}
-
-	info, err := os.Stat(cleaned)
+	info, err := os.Stat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("allowed root does not exist: %s", cleaned)
+			return "", fmt.Errorf("allowed root does not exist: %s", abs)
 		}
 		return "", fmt.Errorf("cannot stat allowed root: %w", err)
 	}
 
 	if !info.IsDir() {
-		return "", fmt.Errorf("allowed root is not a directory: %s", cleaned)
+		return "", fmt.Errorf("allowed root is not a directory: %s", abs)
+	}
+
+	cleaned, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve allowed root path: %w", err)
 	}
 
 	return cleaned, nil

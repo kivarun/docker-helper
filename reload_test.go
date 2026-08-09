@@ -751,10 +751,10 @@ func TestReloadRuntimeAuditEnabled(t *testing.T) {
 	// Update config to enable audit
 	configPath := getConfigPath()
 	newCfg := map[string]any{
-		"allowed_root":    "/tmp/work",
-		"session_ttl":     "12h",
-		"log_level":       "info",
-		"audit_enabled":   true,
+		"allowed_root":  "/tmp/work",
+		"session_ttl":   "12h",
+		"log_level":     "info",
+		"audit_enabled": true,
 	}
 	data, err := json.MarshalIndent(newCfg, "", "  ")
 	if err != nil {
@@ -1011,10 +1011,10 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 				return
 			default:
 				newCfg := map[string]any{
-					"allowed_root":    "/tmp/work",
-					"session_ttl":     "12h",
-					"log_level":       "debug",
-					"audit_enabled":   true,
+					"allowed_root":  "/tmp/work",
+					"session_ttl":   "12h",
+					"log_level":     "debug",
+					"audit_enabled": true,
 				}
 				data, _ := json.MarshalIndent(newCfg, "", "  ")
 				os.WriteFile(configPath, data, 0600)
