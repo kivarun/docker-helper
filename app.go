@@ -15,7 +15,6 @@ type App struct {
 	AdminTokenHash     [sha256.Size]byte
 	ExecCommand        func(string, ...string) ([]byte, error)
 	ExecCommandContext func(context.Context, string, ...string) *exec.Cmd
-	KillContainer      func(context.Context, string) // daemon-side container cleanup
 	OperationRegistry  *operationRegistry
 }
 

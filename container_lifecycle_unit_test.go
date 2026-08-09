@@ -263,8 +263,8 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	var killContainerID string
 	var mu sync.Mutex
 
-	// Override the kill seam on the App instance.
-	app.KillContainer = func(ctx context.Context, id string) {
+	// Fake kill callback passed directly to terminateAll.
+	fakeKill := func(ctx context.Context, id string) {
 		mu.Lock()
 		killCalled++
 		killContainerID = id
@@ -338,7 +338,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	}()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx, app.KillContainer)
+	reg.terminateAll(shutdownCtx, fakeKill)
 	cancel()
 
 	// Wait for operation to complete.
