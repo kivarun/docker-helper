@@ -117,15 +117,19 @@ func makeSleepCmd() func(context.Context, string, ...string) *exec.Cmd {
 }
 
 // makeIgnoringSignalCmd returns an ExecCommandContext that creates a process
-// ignoring SIGTERM. If readyFile is non-empty, the process writes to it after
-// installing the trap, providing deterministic readiness signaling.
-func makeIgnoringSignalCmd(readyFile string) func(context.Context, string, ...string) *exec.Cmd {
+// ignoring SIGTERM. It uses a pre-built helper binary that ignores SIGTERM,
+// signals readiness via a file, then blocks.
+func makeIgnoringSignalCmd(t *testing.T, readyFile string) func(context.Context, string, ...string) *exec.Cmd {
+	// Build the helper binary once per test.
+	helperBin := filepath.Join(t.TempDir(), "helper")
+	if err := exec.Command("go", "build", "-o", helperBin, "testhelper_ignore_sigterm.go").Run(); err != nil {
+		t.Fatalf("failed to build helper binary: %v", err)
+	}
+
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if readyFile != "" {
-			return exec.CommandContext(ctx, "/bin/sh", "-c",
-				"trap '' TERM; touch '"+readyFile+"'; sleep 60")
-		}
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "trap '' TERM; sleep 60")
+		cmd := exec.CommandContext(ctx, helperBin)
+		cmd.Env = append(os.Environ(), "READY_FILE="+readyFile)
+		return cmd
 	}
 }
 
