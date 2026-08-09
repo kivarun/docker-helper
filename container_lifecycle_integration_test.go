@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,18 +52,6 @@ func isContainerRunning(t *testing.T, containerID string) bool {
 	t.Helper()
 	status := dockerInspectField(t, containerID, "{{.State.Running}}")
 	return status == "true"
-}
-
-// containerExists returns true if the container exists (any state).
-func containerExists(t *testing.T, containerID string) bool {
-	t.Helper()
-	_ = dockerInspectField(t, containerID, "{{.ID}}")
-	// docker inspect returns empty string on error (not found).
-	// We need to check the actual error.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := exec.CommandContext(ctx, "docker", "inspect", containerID).CombinedOutput()
-	return err == nil
 }
 
 // containerInspectError returns the error from docker inspect, or nil if the
@@ -123,6 +113,20 @@ func cleanupContainerByID(t *testing.T, containerID string) {
 	if containerID != "" {
 		dockerRun(t, "rm", "-f", containerID)
 	}
+}
+
+// waitReadyFile polls for a file to appear, bounded by timeout.
+// Returns true if the file exists within the timeout.
+func waitReadyFile(t *testing.T, path string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 // startRunOperation starts a /run operation and returns the operation.
@@ -240,11 +244,26 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
+	// Create a readiness marker directory inside the session workspace
+	// so it can be bind-mounted into the container.
+	readyDir := filepath.Join(app.Config.AllowedRoot, "test_ready")
+	if err := os.MkdirAll(readyDir, 0755); err != nil {
+		t.Fatalf("cannot create ready dir: %v", err)
+	}
+	readyFile := filepath.Join(readyDir, "ready")
+
 	// Start a container that ignores SIGTERM so the graceful phase cannot stop it.
+	// The shell command:
+	// 1. Installs trap to ignore SIGTERM
+	// 2. Touches the readiness file to signal the trap is installed
+	// 3. Enters long-running sleep
 	op := startRunOperation(t, app, result.Token, map[string]any{
 		"image":      "alpine:latest",
 		"entrypoint": "/bin/sh",
-		"command":    []string{"-c", "trap '' TERM; exec sleep 300"},
+		"command":    []string{"-c", "trap '' TERM; touch /ready/ready; exec sleep 300"},
+		"mounts": []map[string]any{
+			{"source": "test_ready", "target": "/ready", "read_only": false},
+		},
 	})
 
 	// Get the cidfile from the operation and wait for the container ID.
@@ -266,9 +285,12 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 	}
 	t.Logf("container is running: %s", containerID)
 
-	// Give the container a moment to install the SIGTERM trap.
-	// This is a bounded readiness check, not an arbitrary sleep.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the readiness marker — deterministic handshake proving
+	// the SIGTERM trap is installed, no arbitrary sleep needed.
+	if !waitReadyFile(t, readyFile, 10*time.Second) {
+		t.Fatal("container did not signal readiness within timeout")
+	}
+	t.Log("container SIGTERM trap confirmed via readiness marker")
 
 	// Trigger shutdown with a short deadline so the force-kill path is exercised.
 	app.OperationRegistry.setShuttingDown()
