@@ -140,9 +140,10 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 	shutdownDuration := time.Since(startShutdown)
 	cancel()
 
-	// Shutdown should complete within the deadline (plus small buffer for kill).
-	if shutdownDuration > 1*time.Second {
-		t.Errorf("shutdown took too long: %v", shutdownDuration)
+	// Shutdown should complete within the deadline plus a small buffer for Kill().
+	// terminateAll must NOT add a separate fixed wait beyond the deadline.
+	if shutdownDuration > 750*time.Millisecond {
+		t.Errorf("terminateAll exceeded shutdown budget: took %v (deadline 500ms)", shutdownDuration)
 	}
 
 	// The operation should have been force-killed.

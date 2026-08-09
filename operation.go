@@ -172,7 +172,7 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 		op.mu.Unlock()
 	}
 
-	// Phase 2: Wait for operations to complete with context deadline.
+	// Phase 2: Wait for operations to complete until the shared deadline.
 	// The completion goroutine owns cmd.Wait() and will close op.done.
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
@@ -182,20 +182,17 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	for _, op := range ops {
 		select {
 		case <-op.done:
-			// Operation completed normally (or was killed by completion goroutine).
+			// Operation completed gracefully within the deadline.
 		case <-time.After(time.Until(deadline)):
-			// Timeout: force kill the process.
-			// The completion goroutine will still call cmd.Wait() and close op.done.
+			// Deadline exceeded: force kill the process.
 			op.mu.Lock()
 			if op.cmd != nil && op.cmd.Process != nil {
 				op.cmd.Process.Kill()
 			}
 			op.mu.Unlock()
-			// Wait for the completion goroutine to reap the killed process.
-			select {
-			case <-op.done:
-			case <-time.After(2 * time.Second):
-			}
+			// Do NOT wait for op.done here. The completion goroutine will
+			// reap the killed process asynchronously. terminateAll must not
+			// add extra time beyond the shared shutdown budget.
 		}
 	}
 }
