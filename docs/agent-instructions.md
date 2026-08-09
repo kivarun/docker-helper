@@ -128,6 +128,9 @@ Do not fall back to invoking Docker directly if the build fails.
 
 ### Run
 
+`POST /run` starts an asynchronous container run and returns immediately.
+The container runs in the background.
+
 ```bash
 curl --silent --show-error \
   --unix-socket /run/docker-helper/docker-helper.sock \
@@ -174,6 +177,47 @@ Environment rules:
   `FOO`, `MY_VAR`, or `VALUE_1`.
 * Environment values are strings.
 
+**Run is asynchronous.** The response is HTTP 201 with an `operation_id`:
+
+```json
+{"ok":true,"operation_id":"op_abcdef1234567890","status":"running"}
+```
+
+HTTP 201 does not mean the container finished. You must poll for completion.
+
+**Poll status** until `status` is `succeeded` or `failed`:
+
+```bash
+curl --silent --show-error \
+  --unix-socket /run/docker-helper/docker-helper.sock \
+  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  http://localhost/operations/op_abcdef1234567890
+```
+
+**Read incremental logs** using the `offset` parameter:
+
+```bash
+curl --silent --show-error \
+  --unix-socket /run/docker-helper/docker-helper.sock \
+  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  'http://localhost/operations/op_abcdef1234567890/logs?offset=0'
+```
+
+The logs response includes `next_offset` — use it as the `offset` for the
+next request. When `truncated` is `true`, older log data was evicted by
+the bounded retention limit.
+
+Run-specific result codes:
+
+- `succeeded` — container exited with status 0;
+- `docker_run_failed` — Docker failed to start the container;
+- `container_exit_nonzero` — container exited with a non-zero status.
+
+If the status is `failed`, inspect `result_code`, `exit_code`
+and the logs to diagnose the problem.
+
+Do not fall back to invoking Docker directly if the run fails.
+
 ### Workspace path model
 
 There are two different filesystem namespaces:
@@ -219,15 +263,38 @@ After 201, poll `GET /operations/{id}`:
 | `succeeded` | Build complete; image is ready |
 | `failed` | Build failed; check `result_code`, `exit_code`, logs |
 
-**POST /pull and POST /run (synchronous)**
+**POST /pull (synchronous)**
 
 | HTTP | `ok` | `code` | Meaning |
 |------|------|--------|---------|
 | 200 | true | — | Success |
 | 400 | false | validation error | Request validation failed |
 | 401 | false | — | Missing or invalid session token |
-| 500 | false | `docker_pull_failed`, `docker_build_failed`, `docker_run_failed` | Docker operation failed |
-| 200 | false | `container_exit_nonzero` | Container exited with non-zero status |
+| 500 | false | `docker_pull_failed` | Docker operation failed |
+
+**POST /build and POST /run (asynchronous)**
+
+| HTTP | `ok` | `code` | Meaning |
+|------|------|--------|---------|
+| 201 | true | — | Operation accepted; poll `/operations/{id}` |
+| 400 | false | validation error | Request validation failed |
+| 401 | false | — | Missing or invalid session token |
+| 503 | false | `shutting_down` | Daemon is shutting down |
+
+After 201, poll `GET /operations/{id}`:
+
+| `status` | Meaning |
+|----------|---------|
+| `running` | Operation in progress; continue polling |
+| `succeeded` | Operation complete |
+| `failed` | Operation failed; check `result_code`, `exit_code`, logs |
+
+Run-specific `result_code` values on failure:
+
+| `result_code` | Meaning |
+|---------------|---------|
+| `docker_run_failed` | Docker failed to start the container |
+| `container_exit_nonzero` | Container exited with non-zero status |
 
 Do not retry failed helper operations by invoking Docker directly. Report the
 helper error and its response when it prevents completion of the task.

@@ -101,7 +101,12 @@ POST /build or POST /run  (session token)
     ├── looks up session by token hash
     ├── checks not expired, not revoked
     ├── validates request against session workspace
-    └── executes docker command
+    ├── registers operation (tryCreate — atomic with shutdown gate)
+    ├── starts async process (cmd.Start under op.mu)
+    ├── captures stdout/stderr into bounded LogBuffer
+    ├── completion goroutine owns cmd.Wait()
+    ├── transitions operation to succeeded/failed
+    └── status/logs available via operation endpoints
     │
 DELETE /sessions/{id}  (admin token)
     │
@@ -291,15 +296,18 @@ manager environment.
 
 docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 
-- the operation admission gate closes immediately (no new builds accepted);
+- the operation admission gate closes immediately (no new operations accepted);
 - HTTP drain and operation termination share one `shutdown_timeout` budget;
 - in-flight HTTP requests are drained;
-- running builds receive graceful SIGTERM;
+- running build/run processes receive graceful SIGTERM;
+- for run, helper-owned containers are cleaned up via cidfile before
+  force-killing the Docker CLI process;
 - after the deadline, still-running processes are force-killed;
 - the completion goroutine owns `cmd.Wait()` and reaps each process;
 - the lock is held during the entire drain so a second instance cannot
   start until the first fully stops;
-- helper-owned build processes are never left unmanaged after shutdown.
+- helper-owned build/run processes and containers are never left unmanaged
+  after shutdown.
 
 After `TimeoutStopSec=30s`, systemd sends SIGKILL if any processes
 remain.
@@ -424,7 +432,7 @@ daemon is shutting down, registration is rejected with 503.
 
 The build process starts asynchronously. `cmd.Start()` is called under
 `op.mu` to synchronize with shutdown termination. stdout and stderr are
-captured directly into a thread-safe bounded buffer (`build_log_max_bytes`).
+captured directly into a thread-safe bounded buffer (`operation_log_max_bytes`).
 
 A completion goroutine owns `cmd.Wait()` and transitions the operation
 to `succeeded` or `failed` when the process exits.
@@ -449,15 +457,42 @@ Environment validation
     │
 Mount resolution
     │
-Docker invocation
+Operation registration (tryCreate — atomic with shutdown gate)
+    │
+Async docker run process start (cmd.Start under op.mu)
+    │
+Incremental bounded log capture (cmd.Stdout/stderr → boundedBuffer)
+    │
+Completion goroutine (cmd.Wait → status transition)
+    │
+Retention cleanup
 ```
 
 Authentication validates the session token. Request validation checks
-that the image field is non-empty. Workdir validation ensures the value is an absolute path
-if provided. Environment validation ensures variable names match
-`^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each source path
-against the workspace and checks for duplicate targets. Docker invocation
-runs `docker run` with fixed security policy.
+that the image field is non-empty. Workdir validation ensures the value
+is an absolute path if provided. Environment validation ensures variable
+names match `^[A-Za-z_][A-Za-z0-9_]*$`. Mount resolution resolves each
+source path against the workspace and checks for duplicate targets.
+
+Operation registration uses `tryCreate`, which atomically checks the
+shutdown gate and registers the operation under the same mutex. If the
+daemon is shutting down, registration is rejected with 503.
+
+The run process starts asynchronously. `cmd.Start()` is called under
+`op.mu` to synchronize with shutdown termination. stdout and stderr are
+captured directly into a thread-safe bounded buffer (`operation_log_max_bytes`).
+
+A completion goroutine owns `cmd.Wait()` and transitions the operation
+to `succeeded` or `failed` when the process exits.
+
+**Container lifecycle:**
+
+- `--rm` — container is removed on exit;
+- helper-owned `--cidfile` — records container ID for lifecycle management;
+- graceful shutdown — Docker CLI receives SIGTERM;
+- force fallback — daemon-side `docker kill` by CID, then CLI process
+  force-kill/reap if needed;
+- helper-owned containers are never left orphan after shutdown.
 
 Validation details:
 
@@ -497,8 +532,8 @@ intended for liveness probes and does not perform any audit logging.
 
 ## Operation endpoints
 
-`POST /build` returns HTTP 201 with an `operation_id`. The client uses
-the operation endpoints to track progress.
+`POST /build` and `POST /run` return HTTP 201 with an `operation_id`.
+The client uses the operation endpoints to track progress.
 
 ### GET /operations/{id}
 
@@ -521,7 +556,7 @@ Response fields:
 
 ### GET /operations/{id}/logs
 
-Returns incremental build output. Requires the session token.
+Returns incremental operation output. Requires the session token.
 
 Query parameters:
 
@@ -540,10 +575,10 @@ Response fields:
 | `truncated` | boolean | true if older data was evicted |
 | `logs` | string | log data from the requested offset |
 
-Log retention: each build log is stored in a bounded buffer of
-`build_log_max_bytes`. When the limit is exceeded, the oldest data is
-evicted. `truncated` is true when the requested offset refers to
-evicted data.
+Logs are a mixed stdout/stderr byte stream. Retention: each operation
+log is stored in a bounded buffer of `operation_log_max_bytes`. When the
+limit is exceeded, the oldest data is evicted. `truncated` is true when
+the requested offset refers to evicted data.
 
 ## Retention
 
@@ -553,10 +588,10 @@ runs on access:
 - `operation_retention_ttl` — operations older than this are removed;
 - `operation_max_completed` — when more completed operations exist than
   this limit, the oldest are removed;
-- `build_log_max_bytes` — per-operation log buffer size; older output
+- `operation_log_max_bytes` — per-operation log buffer size; older output
   is evicted when exceeded.
 
-Cleanup is invoked during operation creation (`POST /build`) and operation
+Cleanup is invoked during operation creation (`POST /build`, `POST /run`) and operation
 status access (`GET /operations/{id}`). There is no background retention
 worker or periodic ticker.
 
@@ -609,14 +644,14 @@ The API returns JSON errors with a stable `code` field. Clients can
 distinguish error types programmatically. The `duration` field reports
 wall-clock time.
 
-`POST /build` returns HTTP 201 with an `operation_id` when the build is
+`POST /build` and `POST /run` return HTTP 201 with an `operation_id` when
 accepted. Execution result (success, failure, exit code, logs) appears
 through the operation endpoints:
 
 - `GET /operations/{id}` — status, timestamps, exit code, result code;
-- `GET /operations/{id}/logs?offset=N` — incremental build output.
+- `GET /operations/{id}/logs?offset=N` — incremental operation output.
 
-`POST /pull` and `POST /run` remain synchronous and return the execution
+`POST /pull` remains synchronous and returns the execution
 result directly in the response.
 
 Current error codes:
