@@ -206,7 +206,7 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 	// Trigger graceful shutdown with generous timeout.
 	app.OperationRegistry.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	app.OperationRegistry.terminateAll(shutdownCtx)
+	app.OperationRegistry.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// Wait for the operation to complete.
@@ -295,7 +295,7 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 	// Trigger shutdown with a short deadline so the force-kill path is exercised.
 	app.OperationRegistry.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	app.OperationRegistry.terminateAll(shutdownCtx)
+	app.OperationRegistry.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// Wait for the operation to complete.

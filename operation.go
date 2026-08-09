@@ -193,7 +193,12 @@ func (r *operationRegistry) setShuttingDown() {
 	r.mu.Unlock()
 }
 
-func (r *operationRegistry) terminateAll(ctx context.Context) {
+// terminateAll sends SIGTERM to all running operations, waits for them
+// to complete until the shared deadline, then force-kills any that remain.
+// The killContainer callback (may be nil) is called for run operations
+// that have a cidfile, to perform daemon-side container cleanup before
+// force-killing the CLI process.
+func (r *operationRegistry) terminateAll(ctx context.Context, killContainer func(context.Context, string)) {
 	r.mu.RLock()
 	var ops []*operation
 	for _, op := range r.ops {
@@ -252,8 +257,8 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 					context.Background(), 3*time.Second,
 				)
 				containerID := waitForContainerID(cleanupCtx, op)
-				if containerID != "" {
-					killContainerFunc(cleanupCtx, containerID)
+				if containerID != "" && killContainer != nil {
+					killContainer(cleanupCtx, containerID)
 				}
 				cleanupCancel()
 			}

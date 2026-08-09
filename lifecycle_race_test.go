@@ -37,7 +37,7 @@ func TestLifecycleRaceProcessNotStartedAfterShutdown(t *testing.T) {
 	// Trigger shutdown: the operation is registered but cmd is nil.
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// Unblock the handler — it should detect op.terminated and not start.
@@ -67,7 +67,7 @@ func TestLifecycleRaceProcessAlreadyStartedBeforeShutdown(t *testing.T) {
 	// Trigger shutdown.
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// Wait for the completion goroutine to reap the process.

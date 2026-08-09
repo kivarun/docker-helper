@@ -58,7 +58,7 @@ func TestServeErrorPathTerminatesOperations(t *testing.T) {
 
 	// terminateAll should not panic with the returned context.
 	reg.setShuttingDown()
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 
 	// The operation should have been handled (no panic).
 	// Since op.cmd is nil, terminateAll marks it as terminated.

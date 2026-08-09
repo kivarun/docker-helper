@@ -67,7 +67,7 @@ func waitForContainerID(ctx context.Context, op *operation) string {
 // This is a bounded, best-effort operation used during force shutdown.
 // If the container is already gone or the command fails, the error is
 // logged but not propagated — "container already gone" is a success.
-func killContainerBestEffort(ctx context.Context, containerID string) {
+func (a *App) killContainerBestEffort(ctx context.Context, containerID string) {
 	cmd := exec.CommandContext(ctx, "docker", "kill", containerID)
 	if err := cmd.Run(); err != nil {
 		// Container already gone or docker not available — acceptable.
@@ -75,10 +75,6 @@ func killContainerBestEffort(ctx context.Context, containerID string) {
 		slog.Warn("daemon-side container cleanup failed", "error", err)
 	}
 }
-
-// killContainerFunc is the function used by killContainerBestEffort.
-// It can be overridden in tests to control docker kill behavior.
-var killContainerFunc = killContainerBestEffort
 
 // cleanupCidfile removes the cidfile for a run operation.
 // This is called when the operation fails before the process starts

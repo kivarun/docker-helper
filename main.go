@@ -313,7 +313,7 @@ func runServe(stdout, stderr io.Writer) error {
 		// by HTTP drain. Time already spent in serveWithShutdown is naturally
 		// accounted for since shutdownCtx carries the same deadline.
 		if app.OperationRegistry != nil {
-			app.OperationRegistry.terminateAll(shutdownCtx)
+			app.OperationRegistry.terminateAll(shutdownCtx, app.KillContainer)
 		}
 		shutdownCancel()
 

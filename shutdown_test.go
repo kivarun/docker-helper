@@ -22,7 +22,7 @@ func TestShutdownGracefulSignalsBuild(t *testing.T) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	startShutdown := time.Now()
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	shutdownDuration := time.Since(startShutdown)
 	cancel()
 
@@ -58,7 +58,7 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	startShutdown := time.Now()
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	shutdownDuration := time.Since(startShutdown)
 	cancel()
 
@@ -93,7 +93,7 @@ func TestShutdownOperationCompletionGoroutineReaps(t *testing.T) {
 	reg.setShuttingDown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// op.done should be closed by the completion goroutine.

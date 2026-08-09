@@ -189,10 +189,11 @@ func TestKillContainerBestEffortDoesNotPanicOnMissingDocker(t *testing.T) {
 		}
 	}()
 
-	// This should not panic even if docker is not available.
+	// Use a minimal App to test the method.
+	app := &App{}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	killContainerBestEffort(ctx, "nonexistent_container_id")
+	app.killContainerBestEffort(ctx, "nonexistent_container_id")
 }
 
 func TestTerminateAllWithMissingCidfileDoesNotPanic(t *testing.T) {
@@ -204,7 +205,7 @@ func TestTerminateAllWithMissingCidfileDoesNotPanic(t *testing.T) {
 	// Simulate force shutdown with short deadline.
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// Wait for operation to complete.
@@ -262,15 +263,13 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	var killContainerID string
 	var mu sync.Mutex
 
-	// Override the kill seam before starting the operation.
-	origKill := killContainerFunc
-	killContainerFunc = func(ctx context.Context, id string) {
+	// Override the kill seam on the App instance.
+	app.KillContainer = func(ctx context.Context, id string) {
 		mu.Lock()
 		killCalled++
 		killContainerID = id
 		mu.Unlock()
 	}
-	t.Cleanup(func() { killContainerFunc = origKill })
 
 	// Use a readiness marker so we know the process is running.
 	readyFile := filepath.Join(app.Config.AllowedRoot, ".race_ready")
@@ -339,7 +338,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	}()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, app.KillContainer)
 	cancel()
 
 	// Wait for operation to complete.
@@ -407,7 +406,7 @@ func TestCidfileRaceOperationCompletesDuringWait(t *testing.T) {
 	// Now trigger shutdown — the operation is already done, so no docker kill.
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	if atomic.LoadInt32(&killCalled) != 0 {
@@ -453,7 +452,7 @@ func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	startTime := time.Now()
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 	elapsed := time.Since(startTime)
 
@@ -519,7 +518,7 @@ func TestCidfileRaceDockerKillFailureDoesNotBlockCLICleanup(t *testing.T) {
 	// Start shutdown with short deadline.
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// Wait for operation to complete.

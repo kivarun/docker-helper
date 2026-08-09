@@ -38,7 +38,7 @@ func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
 	// Trigger shutdown while handler is blocked.
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	// Unblock the handler — it should see terminated and not start.
@@ -67,7 +67,7 @@ func TestCmdStartRaceStartBeforeShutdown(t *testing.T) {
 
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
 	select {
@@ -101,7 +101,7 @@ func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
 	reg.setShuttingDown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	start := time.Now()
-	reg.terminateAll(shutdownCtx)
+	reg.terminateAll(shutdownCtx, nil)
 	elapsed := time.Since(start)
 	cancel()
 
