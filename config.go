@@ -230,6 +230,14 @@ func generateToken() (string, error) {
 }
 
 func runInit(allowedRoot string, stdout, stderr io.Writer) error {
+	if allowedRoot == "" {
+		var err error
+		allowedRoot, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("cannot determine current working directory: %w", err)
+		}
+	}
+
 	configPath := getConfigPath()
 	configDir := filepath.Dir(configPath)
 	stateDir := getStateDir()
@@ -296,15 +304,10 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 // resolveAllowedRoot normalizes and validates an allowed-root path.
 // It expands ~/ prefixes, resolves to an absolute canonical path,
 // and verifies that the path exists and is a directory.
-// When called from the init command with an empty path, it falls back
-// to the current working directory.
+// The caller must provide a non-empty path.
 func resolveAllowedRoot(path string) (string, error) {
 	if path == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("cannot determine current working directory: %w", err)
-		}
-		path = cwd
+		return "", fmt.Errorf("allowed root must be a non-empty absolute path")
 	}
 
 	path = expandTilde(path)

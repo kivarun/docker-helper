@@ -127,20 +127,10 @@ func TestInitHelpDescribesInteractiveBehavior(t *testing.T) {
 	}
 }
 
-func TestResolveAllowedRootEmptyUsesCWD(t *testing.T) {
-	dir := t.TempDir()
-	cwd, _ := os.Getwd()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(cwd)
-
-	resolved, err := resolveAllowedRoot("")
-	if err != nil {
-		t.Fatalf("resolveAllowedRoot(\"\") = error: %v", err)
-	}
-	if resolved != dir {
-		t.Errorf("resolveAllowedRoot(\"\") = %q, want %q", resolved, dir)
+func TestResolveAllowedRootEmptyRejected(t *testing.T) {
+	_, err := resolveAllowedRoot("")
+	if err == nil {
+		t.Fatal("expected error for empty path")
 	}
 }
 
