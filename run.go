@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -127,10 +126,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	var req runRequest
 
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}

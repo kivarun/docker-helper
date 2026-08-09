@@ -6,10 +6,38 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 )
+
+const maxRequestBody = 16 * 1024
+
+// decodeJSONRequest decodes exactly one JSON value from the request body
+// into target.  It enforces a body size limit, rejects unknown fields,
+// and requires EOF (after optional whitespace) following the first value.
+func decodeJSONRequest(r *http.Request, target any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxRequestBody))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+
+	// Verify no trailing content after the first JSON value.
+	// A successful decode means another JSON value follows.
+	// io.EOF means only whitespace remained (acceptable).
+	// Any other error means non-JSON garbage follows.
+	var dummy struct{}
+	if err := decoder.Decode(&dummy); err != nil {
+		if err == io.EOF {
+			return nil
+		}
+		return errors.New("trailing data after JSON value")
+	}
+	return errors.New("trailing data after JSON value")
+}
 
 type response struct {
 	OK       bool   `json:"ok"`

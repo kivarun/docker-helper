@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -51,10 +50,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	var req sessionRequest
 
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&req); err != nil {
+	if err := decodeJSONRequest(r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:    "session.create",
