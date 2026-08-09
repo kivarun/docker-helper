@@ -111,7 +111,6 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	startTime := time.Now()
 	op.StartedAt = &startTime
-	op.cancel = cancel
 	op.cmd = cmd
 
 	// cmd.Start() is called while holding op.mu so terminateAll cannot
@@ -135,6 +134,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// Start goroutine for process completion.
 	// cmd.Stdout/stderr write directly into op.LogBuffer (no pipes needed).
 	go func() {
+		defer cancel()
 		a.waitBuildCompletion(op, startTime)
 	}()
 

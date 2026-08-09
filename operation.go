@@ -37,7 +37,6 @@ type buildOperation struct {
 	Dockerfile  string         `json:"dockerfile,omitempty"`
 	LogBuffer   *boundedBuffer `json:"-"`
 	cmd         *exec.Cmd
-	cancel      context.CancelFunc
 	done        chan struct{}
 	doneOnce    sync.Once // ensures op.done is closed exactly once
 	terminated  bool      // set by terminateAll when process not yet started
