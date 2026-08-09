@@ -158,7 +158,7 @@ func (a *App) newBuildCmd(ctx context.Context, name string, args ...string) *exe
 
 // waitBuildCompletion waits for the build process to finish and transitions
 // the operation to succeeded or failed. It is the single owner of cmd.Wait().
-func (a *App) waitBuildCompletion(op *buildOperation, started time.Time) {
+func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 	err := op.cmd.Wait()
 	duration := time.Since(started).Round(time.Millisecond).String()
 

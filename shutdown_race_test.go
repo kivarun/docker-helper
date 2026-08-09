@@ -15,7 +15,7 @@ import (
 func TestShutdownGateMutexMutualExclusion(t *testing.T) {
 	reg := newOperationRegistry()
 
-	op := &buildOperation{
+	op := &operation{
 		ID:        "test_op",
 		SessionID: "test_session",
 		State:     operationRunning,
@@ -31,7 +31,7 @@ func TestShutdownGateMutexMutualExclusion(t *testing.T) {
 
 	reg.setShuttingDown()
 
-	op2 := &buildOperation{
+	op2 := &operation{
 		ID:        "test_op2",
 		SessionID: "test_session",
 		State:     operationRunning,
@@ -62,7 +62,7 @@ func TestShutdownGateConcurrentRegistration(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			op := &buildOperation{
+			op := &operation{
 				ID:        "concurrent_op_" + string(rune('0'+i)),
 				SessionID: "test_session",
 				State:     operationRunning,
@@ -99,7 +99,7 @@ func TestShutdownGateConcurrentRegistration(t *testing.T) {
 		t.Fatal("registry should be shutting down")
 	}
 
-	op := &buildOperation{
+	op := &operation{
 		ID:        "after_gate_op",
 		SessionID: "test_session",
 		State:     operationRunning,

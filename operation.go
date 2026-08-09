@@ -20,7 +20,7 @@ const (
 	operationFailed    operationState = "failed"
 )
 
-type buildOperation struct {
+type operation struct {
 	mu          sync.Mutex
 	ID          string         `json:"operation_id"`
 	SessionID   string         `json:"session_id"`
@@ -43,10 +43,10 @@ type buildOperation struct {
 	started     bool      // set to true only after cmd.Start() succeeds
 }
 
-func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64) *buildOperation {
+func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64) *operation {
 	opID := generateOperationID()
 	now := time.Now()
-	return &buildOperation{
+	return &operation{
 		ID:         opID,
 		SessionID:  sessionID,
 		Kind:       "build",
@@ -70,20 +70,20 @@ func generateOperationID() string {
 
 type operationRegistry struct {
 	mu       sync.RWMutex
-	ops      map[string]*buildOperation
+	ops      map[string]*operation
 	shutting bool
 }
 
 func newOperationRegistry() *operationRegistry {
 	return &operationRegistry{
-		ops: make(map[string]*buildOperation),
+		ops: make(map[string]*operation),
 	}
 }
 
 // tryCreate atomically checks the shutting-down gate and registers the operation.
 // Returns true if the operation was registered, false if the registry is shutting down.
 // The caller must not start a build process if tryCreate returns false.
-func (r *operationRegistry) tryCreate(op *buildOperation) bool {
+func (r *operationRegistry) tryCreate(op *operation) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.shutting {
@@ -93,7 +93,7 @@ func (r *operationRegistry) tryCreate(op *buildOperation) bool {
 	return true
 }
 
-func (r *operationRegistry) get(id string) *buildOperation {
+func (r *operationRegistry) get(id string) *operation {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.ops[id]
@@ -110,7 +110,7 @@ func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int
 	defer r.mu.Unlock()
 
 	now := time.Now()
-	var completed []*buildOperation
+	var completed []*operation
 	for _, op := range r.ops {
 		op.mu.Lock()
 		state := op.State
@@ -128,7 +128,7 @@ func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int
 	}
 
 	if len(completed) > maxCompleted {
-		sorted := make([]*buildOperation, 0, len(completed))
+		sorted := make([]*operation, 0, len(completed))
 		for _, op := range completed {
 			op.mu.Lock()
 			completedAt := op.CompletedAt
@@ -168,7 +168,7 @@ func (r *operationRegistry) setShuttingDown() {
 
 func (r *operationRegistry) terminateAll(ctx context.Context) {
 	r.mu.RLock()
-	var ops []*buildOperation
+	var ops []*operation
 	for _, op := range r.ops {
 		ops = append(ops, op)
 	}
@@ -179,7 +179,7 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	// If started: send graceful SIGTERM.
 	// This single lock acquisition eliminates the race between checking
 	// started and setting terminated.
-	var terminated []*buildOperation
+	var terminated []*operation
 	for _, op := range ops {
 		op.mu.Lock()
 		if !op.started {
@@ -199,7 +199,7 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 		deadline = time.Now().Add(5 * time.Second)
 	}
 
-	terminatedSet := make(map[*buildOperation]struct{}, len(terminated))
+	terminatedSet := make(map[*operation]struct{}, len(terminated))
 	for _, op := range terminated {
 		terminatedSet[op] = struct{}{}
 	}
@@ -302,7 +302,7 @@ func (b *boundedBuffer) Range(offset int64) (data []byte, nextOffset int64, trun
 	return data, nextOffset, false
 }
 
-func (op *buildOperation) succeed(duration *string) {
+func (op *operation) succeed(duration *string) {
 	op.mu.Lock()
 	now := time.Now()
 	op.State = operationSucceeded
@@ -319,7 +319,7 @@ func (op *buildOperation) succeed(duration *string) {
 		dur = *duration
 	}
 	writeAuditWithRequestID(context.Background(), auditRecord{
-		Event:       "build.finish",
+		Event:       op.Kind + ".finish",
 		SessionID:   op.SessionID,
 		OperationID: op.ID,
 		Image:       op.Image,
@@ -331,7 +331,7 @@ func (op *buildOperation) succeed(duration *string) {
 	op.doneOnce.Do(func() { close(op.done) })
 }
 
-func (op *buildOperation) fail(resultCode, message string, exitCode *int, duration ...*string) {
+func (op *operation) fail(resultCode, message string, exitCode *int, duration ...*string) {
 	op.mu.Lock()
 	now := time.Now()
 	op.State = operationFailed
@@ -350,7 +350,7 @@ func (op *buildOperation) fail(resultCode, message string, exitCode *int, durati
 		dur = *duration[0]
 	}
 	writeAuditWithRequestID(context.Background(), auditRecord{
-		Event:       "build.finish",
+		Event:       op.Kind + ".finish",
 		SessionID:   op.SessionID,
 		OperationID: op.ID,
 		Image:       op.Image,
@@ -363,6 +363,6 @@ func (op *buildOperation) fail(resultCode, message string, exitCode *int, durati
 	op.doneOnce.Do(func() { close(op.done) })
 }
 
-func (op *buildOperation) Wait() {
+func (op *operation) Wait() {
 	<-op.done
 }

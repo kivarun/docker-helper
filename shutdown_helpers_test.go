@@ -34,7 +34,7 @@ func setupBuildTest(t *testing.T) (*App, *operationRegistry, string) {
 
 // startBuild starts a build request and returns the operation.
 // The handler is called synchronously.
-func startBuild(t *testing.T, app *App, token string) *buildOperation {
+func startBuild(t *testing.T, app *App, token string) *operation {
 	t.Helper()
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -63,7 +63,7 @@ func startBuild(t *testing.T, app *App, token string) *buildOperation {
 
 // startBuildConcurrent starts a build request in a goroutine and returns
 // the wait group and response recorder for synchronization.
-func startBuildConcurrent(t *testing.T, app *App, token string) (*httptest.ResponseRecorder, chan *buildOperation, func() *buildOperation) {
+func startBuildConcurrent(t *testing.T, app *App, token string) (*httptest.ResponseRecorder, chan *operation, func() *operation) {
 	t.Helper()
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -72,7 +72,7 @@ func startBuildConcurrent(t *testing.T, app *App, token string) (*httptest.Respo
 	}, token)
 	w := httptest.NewRecorder()
 
-	opCh := make(chan *buildOperation, 1)
+	opCh := make(chan *operation, 1)
 	go func() {
 		app.handleBuild(w, req)
 		var resp map[string]any
@@ -83,7 +83,7 @@ func startBuildConcurrent(t *testing.T, app *App, token string) (*httptest.Respo
 		}
 	}()
 
-	return w, opCh, func() *buildOperation {
+	return w, opCh, func() *operation {
 		select {
 		case op := <-opCh:
 			return op
