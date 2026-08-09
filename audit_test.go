@@ -707,6 +707,52 @@ func TestAuditNoCommandInRecord(t *testing.T) {
 	}
 }
 
+func TestRunShutdownGateNoStartAudit(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	// Close the admission gate before the request.
+	app.OperationRegistry.setShuttingDown()
+
+	called := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		called = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newRunRequest(map[string]any{
+		"image":   "alpine:latest",
+		"command": []string{"echo", "hello"},
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected %d, got %d", http.StatusServiceUnavailable, w.Code)
+	}
+
+	if called {
+		t.Error("executor must not be called when admission gate is closed")
+	}
+
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	for _, rec := range records {
+		if rec.Event == "run.start" {
+			t.Error("run.start must not be written when operation is rejected by shutdown gate")
+		}
+		if rec.Event == "run.finish" {
+			t.Error("run.finish must not be written when operation is rejected by shutdown gate")
+		}
+	}
+}
+
 // setupTestLogging initializes the logging infrastructure with test buffers.
 // Returns the audit buffer and operational buffer.
 func setupTestLogging(t *testing.T) (*bytes.Buffer, *bytes.Buffer) {

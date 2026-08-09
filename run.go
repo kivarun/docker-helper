@@ -190,15 +190,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cmdArgCount = &n
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
-		Event:           "run.start",
-		SessionID:       session.ID,
-		Image:           req.Image,
-		CommandArgCount: cmdArgCount,
-		Mounts:          mountAudit,
-		EnvKeys:         envNames,
-	})
-
 	// Create run operation and register it.
 	cfg := a.getConfig()
 	bufSize := cfg.BuildLogMaxBytes
@@ -215,6 +206,16 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
+
+	writeAuditWithRequestID(ctx, auditRecord{
+		Event:           "run.start",
+		SessionID:       session.ID,
+		OperationID:     op.ID,
+		Image:           req.Image,
+		CommandArgCount: cmdArgCount,
+		Mounts:          mountAudit,
+		EnvKeys:         envNames,
+	})
 
 	// Build docker run command.
 	args := []string{
