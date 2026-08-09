@@ -668,7 +668,7 @@ Current error codes:
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `docker_build_failed` | `POST /build` | docker build returned non-zero |
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero |
-| `docker_run_failed` | `POST /run` | docker run failed (exit 125 or other error) |
+| `docker_run_failed` | `POST /run` | Docker run operation failed |
 | `container_exit_nonzero` | `POST /run` | container exited with non-zero status (not 125) |
 
 Planned:

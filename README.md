@@ -397,7 +397,7 @@ Track progress using the same operation workflow as build:
 Run-specific result codes:
 
 - `succeeded` — container exited with status 0;
-- `docker_run_failed` — Docker failed to start the container;
+- `docker_run_failed` — Docker run operation failed;
 - `container_exit_nonzero` — container exited with a non-zero status.
 
 ### Health check

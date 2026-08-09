@@ -210,7 +210,7 @@ the bounded retention limit.
 Run-specific result codes:
 
 - `succeeded` — container exited with status 0;
-- `docker_run_failed` — Docker failed to start the container;
+- `docker_run_failed` — Docker run operation failed;
 - `container_exit_nonzero` — container exited with a non-zero status.
 
 If the status is `failed`, inspect `result_code`, `exit_code`
@@ -246,23 +246,6 @@ Inspect both the HTTP status and the JSON response body. If you need the HTTP
 status code, obtain it explicitly with `curl --write-out "%{http_code}"` — do
 not infer it from the response body or curl's exit code.
 
-**POST /build (async)**
-
-| HTTP | `ok` | `code` | Meaning |
-|------|------|--------|---------|
-| 201 | true | — | Build accepted; poll `/operations/{id}` |
-| 400 | false | `invalid_build_context` | Validation failed |
-| 401 | false | — | Missing or invalid session token |
-| 503 | false | `shutting_down` | Daemon is shutting down |
-
-After 201, poll `GET /operations/{id}`:
-
-| `status` | Meaning |
-|----------|---------|
-| `running` | Build in progress; continue polling |
-| `succeeded` | Build complete; image is ready |
-| `failed` | Build failed; check `result_code`, `exit_code`, logs |
-
 **POST /pull (synchronous)**
 
 | HTTP | `ok` | `code` | Meaning |
@@ -293,7 +276,7 @@ Run-specific `result_code` values on failure:
 
 | `result_code` | Meaning |
 |---------------|---------|
-| `docker_run_failed` | Docker failed to start the container |
+| `docker_run_failed` | Docker run operation failed |
 | `container_exit_nonzero` | Container exited with non-zero status |
 
 Do not retry failed helper operations by invoking Docker directly. Report the
