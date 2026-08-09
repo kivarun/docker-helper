@@ -284,6 +284,26 @@ modify code, stop after the analysis and do not edit files or create commits.
 
 Text files must end with a newline.
 
+Operational policy values must be configurable and have documented
+reasonable defaults.
+
+This applies to values such as:
+- timeouts;
+- retention periods;
+- resource/count limits;
+- log/output size limits.
+
+It does NOT mean every implementation constant belongs in configuration.
+
+Architectural/protocol invariants and implementation constants such as:
+- HTTP status codes;
+- operation state names;
+- ID formats/internal constants;
+- fixed protocol semantics
+
+should remain in code unless there is a concrete operational reason to make
+them configurable.
+
 Review the final diff for unrelated changes.
 
 19. Commits.
