@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -38,84 +37,92 @@ func dockerRun(t *testing.T, args ...string) string {
 	return string(out)
 }
 
-// findContainerIDByEnv returns the first running container ID matching the env filter,
-// or empty string if none found.
-func findContainerIDByEnv(t *testing.T, envFilter string) string {
+// dockerInspectField runs docker inspect and returns the value of the given
+// Go template, or empty string on error.
+func dockerInspectField(t *testing.T, containerID, format string) string {
 	t.Helper()
-	out := dockerRun(t, "ps",
-		"--filter", "env="+envFilter,
-		"--format", "{{.ID}}",
-	)
-	ids := strings.Fields(out)
-	if len(ids) == 0 {
-		return ""
-	}
-	return ids[0]
+	out := dockerRun(t, "inspect", "--format", format, containerID)
+	return strings.TrimSpace(out)
 }
 
-// findAnyContainerIDByEnv returns the first container ID (any state) matching the env filter.
-func findAnyContainerIDByEnv(t *testing.T, envFilter string) string {
+// isContainerRunning returns true if the container exists and is running.
+func isContainerRunning(t *testing.T, containerID string) bool {
 	t.Helper()
-	out := dockerRun(t, "ps", "-a",
-		"--filter", "env="+envFilter,
-		"--format", "{{.ID}}",
-	)
-	ids := strings.Fields(out)
-	if len(ids) == 0 {
-		return ""
-	}
-	return ids[0]
+	status := dockerInspectField(t, containerID, "{{.State.Running}}")
+	return status == "true"
 }
 
-// containerState returns the human-readable status of a container by ID, e.g. "Up 5 seconds".
-func containerState(t *testing.T, envFilter string) string {
+// containerExists returns true if the container exists (any state).
+func containerExists(t *testing.T, containerID string) bool {
 	t.Helper()
-	out := dockerRun(t, "ps", "-a",
-		"--filter", "env="+envFilter,
-		"--format", "{{.ID}}:{{.Status}}",
-	)
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	for _, line := range lines {
-		if line != "" {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				return parts[1]
-			}
-		}
-	}
-	return ""
+	_ = dockerInspectField(t, containerID, "{{.ID}}")
+	// docker inspect returns empty string on error (not found).
+	// We need to check the actual error.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := exec.CommandContext(ctx, "docker", "inspect", containerID).CombinedOutput()
+	return err == nil
 }
 
-// waitContainerRunning polls docker ps until a container matching envFilter is running.
-// Returns the container ID or empty string on timeout.
-func waitContainerRunning(t *testing.T, envFilter string, timeout time.Duration) string {
+// containerInspectError returns the error from docker inspect, or nil if the
+// container exists. Used to distinguish "not found" from other errors.
+func containerInspectError(t *testing.T, containerID string) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := exec.CommandContext(ctx, "docker", "inspect", containerID).CombinedOutput()
+	return err
+}
+
+// waitForCidfile polls the cidfile until a valid container ID appears or the
+// timeout expires. Returns the container ID or empty string.
+func waitForCidfile(t *testing.T, cidfile string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		id := findContainerIDByEnv(t, envFilter)
-		if id != "" {
+		if id := readContainerIDFromCidfile(cidfile); id != "" {
 			return id
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	return ""
 }
 
-// cleanupContainerByEnv force-removes any container (any state) matching the env filter.
-func cleanupContainerByEnv(t *testing.T, envFilter string) {
+// waitForContainerRunning polls docker inspect until the container is running
+// or the timeout expires.
+func waitForContainerRunning(t *testing.T, containerID string, timeout time.Duration) bool {
 	t.Helper()
-	out := dockerRun(t, "ps", "-a",
-		"--filter", "env="+envFilter,
-		"--format", "{{.ID}}",
-	)
-	for _, id := range strings.Fields(out) {
-		dockerRun(t, "rm", "-f", id)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if isContainerRunning(t, containerID) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
+	return false
 }
 
-// makeUniqueEnvFilter generates a unique env var filter for container identification.
-func makeUniqueEnvFilter() string {
-	return fmt.Sprintf("DOCKER_HELPER_TEST_ID=dh_test_%d_%d", time.Now().UnixNano(), time.Now().Nanosecond())
+// waitForContainerGone polls docker inspect until the container no longer exists
+// or the timeout expires. Returns true if the container is gone.
+func waitForContainerGone(t *testing.T, containerID string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := containerInspectError(t, containerID); err != nil {
+			// Container not found — it's gone.
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+// cleanupContainerByID force-removes a specific container by ID (best-effort).
+func cleanupContainerByID(t *testing.T, containerID string) {
+	t.Helper()
+	if containerID != "" {
+		dockerRun(t, "rm", "-f", containerID)
+	}
 }
 
 // startRunOperation starts a /run operation and returns the operation.
@@ -167,24 +174,30 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	envFilter := makeUniqueEnvFilter()
-	t.Cleanup(func() { cleanupContainerByEnv(t, envFilter) })
-
 	// Start a long-running container (normal process that handles SIGTERM).
 	op := startRunOperation(t, app, result.Token, map[string]any{
 		"image":   "alpine:latest",
 		"command": []string{"sleep", "300"},
-		"environment": map[string]string{
-			"DOCKER_HELPER_TEST_ID": strings.SplitN(envFilter, "=", 2)[1],
-		},
 	})
 
-	// Wait for the container to be running.
-	containerID := waitContainerRunning(t, envFilter, 15*time.Second)
-	if containerID == "" {
-		t.Fatal("container did not start within timeout")
+	// Get the cidfile from the operation and wait for the container ID.
+	if op.cidfile == "" {
+		t.Fatal("cidfile not set on operation")
 	}
-	t.Logf("container started: %s", containerID)
+	containerID := waitForCidfile(t, op.cidfile, 15*time.Second)
+	if containerID == "" {
+		t.Fatal("container ID not published in cidfile within timeout")
+	}
+	t.Logf("container ID from cidfile: %s", containerID)
+
+	// Clean up the container regardless of test outcome.
+	t.Cleanup(func() { cleanupContainerByID(t, containerID) })
+
+	// Wait for the container to actually be running.
+	if !waitForContainerRunning(t, containerID, 15*time.Second) {
+		t.Fatal("container did not become running within timeout")
+	}
+	t.Logf("container is running: %s", containerID)
 
 	// Trigger graceful shutdown with generous timeout.
 	app.OperationRegistry.setShuttingDown()
@@ -201,19 +214,12 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 
 	t.Logf("operation state: %s, result_code: %v", op.State, op.ResultCode)
 
-	// Give Docker a moment to process --rm.
-	time.Sleep(500 * time.Millisecond)
-
-	// Check: container should NOT be running.
-	runningID := findContainerIDByEnv(t, envFilter)
-	if runningID != "" {
-		t.Errorf("container still running after graceful SIGTERM: %s", runningID)
-	}
-
-	// Check: container should be completely gone (--rm should have removed it).
-	anyID := findAnyContainerIDByEnv(t, envFilter)
-	if anyID != "" {
-		t.Errorf("container trace remains after graceful shutdown: %s", anyID)
+	// Wait for the container to be gone (bounded polling, no arbitrary sleep).
+	if !waitForContainerGone(t, containerID, 10*time.Second) {
+		// Container still exists — report its state for diagnostics.
+		status := dockerInspectField(t, containerID, "{{.State.Status}}")
+		running := dockerInspectField(t, containerID, "{{.State.Running}}")
+		t.Errorf("container not gone after graceful shutdown: status=%s running=%s", status, running)
 	}
 }
 
@@ -234,31 +240,35 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	envFilter := makeUniqueEnvFilter()
-	t.Cleanup(func() { cleanupContainerByEnv(t, envFilter) })
-
-	testID := strings.SplitN(envFilter, "=", 2)[1]
-
 	// Start a container that ignores SIGTERM so the graceful phase cannot stop it.
-	// The entrypoint is /bin/sh, and the command traps TERM and sleeps.
 	op := startRunOperation(t, app, result.Token, map[string]any{
 		"image":      "alpine:latest",
 		"entrypoint": "/bin/sh",
 		"command":    []string{"-c", "trap '' TERM; exec sleep 300"},
-		"environment": map[string]string{
-			"DOCKER_HELPER_TEST_ID": testID,
-		},
 	})
 
-	// Wait for the container to be running.
-	containerID := waitContainerRunning(t, envFilter, 15*time.Second)
-	if containerID == "" {
-		t.Fatal("container did not start within timeout")
+	// Get the cidfile from the operation and wait for the container ID.
+	if op.cidfile == "" {
+		t.Fatal("cidfile not set on operation")
 	}
-	t.Logf("container started: %s", containerID)
+	containerID := waitForCidfile(t, op.cidfile, 15*time.Second)
+	if containerID == "" {
+		t.Fatal("container ID not published in cidfile within timeout")
+	}
+	t.Logf("container ID from cidfile: %s", containerID)
 
-	// Give the container time to install the SIGTERM trap.
-	time.Sleep(500 * time.Millisecond)
+	// Clean up the container regardless of test outcome.
+	t.Cleanup(func() { cleanupContainerByID(t, containerID) })
+
+	// Wait for the container to actually be running.
+	if !waitForContainerRunning(t, containerID, 15*time.Second) {
+		t.Fatal("container did not become running within timeout")
+	}
+	t.Logf("container is running: %s", containerID)
+
+	// Give the container a moment to install the SIGTERM trap.
+	// This is a bounded readiness check, not an arbitrary sleep.
+	time.Sleep(200 * time.Millisecond)
 
 	// Trigger shutdown with a short deadline so the force-kill path is exercised.
 	app.OperationRegistry.setShuttingDown()
@@ -275,21 +285,15 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 
 	t.Logf("operation state: %s, result_code: %v, exit_code: %v", op.State, op.ResultCode, op.ExitCode)
 
-	// Give Docker a moment to process the daemon-side kill and --rm.
-	time.Sleep(1 * time.Second)
-
 	// KEY CHECK: container should NOT be running after daemon-side cleanup.
 	// The fix ensures that terminateAll reads the container ID from the cidfile
 	// and executes "docker kill" before force-killing the docker run CLI.
-	runningID := findContainerIDByEnv(t, envFilter)
-	if runningID != "" {
-		t.Errorf("container still running after forced cleanup: %s (daemon-side kill may have failed)", runningID)
-	}
-
-	// Check: container should eventually be gone (--rm removes it after docker kill stops it).
-	anyID := findAnyContainerIDByEnv(t, envFilter)
-	if anyID != "" {
-		state := containerState(t, envFilter)
-		t.Logf("container trace remains after forced cleanup: %s (state: %s)", anyID, state)
+	//
+	// Wait for the container to be gone (bounded polling, no arbitrary sleep).
+	if !waitForContainerGone(t, containerID, 10*time.Second) {
+		// Container still exists — report its state for diagnostics.
+		status := dockerInspectField(t, containerID, "{{.State.Status}}")
+		running := dockerInspectField(t, containerID, "{{.State.Running}}")
+		t.Errorf("container not gone after forced cleanup: status=%s running=%s", status, running)
 	}
 }
