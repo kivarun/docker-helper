@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -89,17 +88,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	cmd := a.newOperationCmd(cmdCtx, "docker", args...)
 
-	result := startOperationProcess(cmd, op, cancel, nil, func(err error) {
-		msg := fmt.Sprintf("cannot start build: %v", err)
-		op.fail("docker_build_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
-	})
+	result := startOperationProcess(cmd, op, cancel)
 
 	if result.Terminated {
+		cancel()
 		msg := "build cancelled: daemon is shutting down"
 		op.fail("docker_build_failed", msg, nil)
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -109,7 +101,15 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !result.Started {
+	if result.Err != nil {
+		cancel()
+		msg := fmt.Sprintf("cannot start build: %v", result.Err)
+		op.fail("docker_build_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
 		return
 	}
 
@@ -124,11 +124,6 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		"operation_id": op.ID,
 		"status":       operationRunning,
 	})
-}
-
-// newBuildCmd is an alias for newOperationCmd for build operations.
-func (a *App) newBuildCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return a.newOperationCmd(ctx, name, args...)
 }
 
 // waitBuildCompletion waits for the build process to finish and transitions

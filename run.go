@@ -320,22 +320,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	cmdCtx, cancel := context.WithCancel(context.Background())
 
-	cmd := a.newRunCmd(cmdCtx, "docker", args...)
+	cmd := a.newOperationCmd(cmdCtx, "docker", args...)
 
-	result := startOperationProcess(cmd, op, cancel, func() {
-		cleanupCidfile(op)
-	}, func(err error) {
-		cleanupCidfile(op)
-		msg := fmt.Sprintf("cannot start run: %v", err)
-		op.fail("docker_run_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
-	})
+	result := startOperationProcess(cmd, op, cancel)
 
 	if result.Terminated {
+		cancel()
+		cleanupCidfile(op)
 		msg := "run cancelled: daemon is shutting down"
 		op.fail("docker_run_failed", msg, nil)
 		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
@@ -345,7 +336,16 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !result.Started {
+	if result.Err != nil {
+		cancel()
+		cleanupCidfile(op)
+		msg := fmt.Sprintf("cannot start run: %v", result.Err)
+		op.fail("docker_run_failed", msg, nil)
+		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+			"ok":           true,
+			"operation_id": op.ID,
+			"status":       op.State,
+		})
 		return
 	}
 
@@ -370,11 +370,6 @@ func (a *App) newOperationCmd(ctx context.Context, name string, args ...string) 
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd
-}
-
-// newRunCmd is an alias for newOperationCmd for run operations.
-func (a *App) newRunCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return a.newOperationCmd(ctx, name, args...)
 }
 
 // waitRunCompletion waits for the run process to finish and transitions
