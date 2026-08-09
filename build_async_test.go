@@ -85,8 +85,9 @@ func TestBuildLiveOutput(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	readyFile := filepath.Join(t.TempDir(), "ready")
-	releaseFile := filepath.Join(t.TempDir(), "release")
+	syncDir := t.TempDir()
+	readyFile := filepath.Join(syncDir, "ready")
+	releaseFile := filepath.Join(syncDir, "release")
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		// Write output, signal readiness, then block until release file appears.
