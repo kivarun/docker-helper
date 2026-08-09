@@ -93,8 +93,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	cmd.Stdout = op.LogBuffer
 	cmd.Stderr = op.LogBuffer
 
-	// Check if shutdown terminated this operation before we could start.
-	// terminateAll sets op.terminated for operations whose process hasn't started.
+	// Start the process under op.mu so terminateAll can synchronize:
+	// either we start the process (started=true), or terminateAll marks
+	// it as terminated. There is no intermediate state.
 	op.mu.Lock()
 	if op.terminated {
 		op.mu.Unlock()
@@ -108,14 +109,18 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	started := time.Now()
-	startTime := started
+	startTime := time.Now()
 	op.StartedAt = &startTime
 	op.cancel = cancel
 	op.cmd = cmd
+
+	// cmd.Start() is called while holding op.mu so terminateAll cannot
+	// race between checking started and setting terminated.
+	err = cmd.Start()
+	op.started = err == nil
 	op.mu.Unlock()
 
-	if err := cmd.Start(); err != nil {
+	if err != nil {
 		cancel()
 		msg := fmt.Sprintf("cannot start build: %v", err)
 		op.fail("docker_build_failed", msg, nil)
@@ -127,15 +132,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark process as started so terminateAll knows it's under shutdown control.
-	op.mu.Lock()
-	op.started = true
-	op.mu.Unlock()
-
 	// Start goroutine for process completion.
 	// cmd.Stdout/stderr write directly into op.LogBuffer (no pipes needed).
 	go func() {
-		a.waitBuildCompletion(op, started)
+		a.waitBuildCompletion(op, startTime)
 	}()
 
 	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{

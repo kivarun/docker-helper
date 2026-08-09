@@ -181,55 +181,48 @@ func (r *operationRegistry) terminateAll(ctx context.Context) {
 	}
 	r.mu.RUnlock()
 
-	// Phase 0: Mark operations whose process has not started yet.
-	// These are operations registered before shutdown but whose cmd.Start()
-	// hasn't been called. Setting terminated prevents handleBuild from
-	// starting the process after shutdown has passed.
+	// Phase 0+1: For each operation, atomically decide its fate under op.mu.
+	// If not started: mark terminated (blocks cmd.Start from proceeding).
+	// If started: send graceful SIGTERM.
+	// This single lock acquisition eliminates the race between checking
+	// started and setting terminated.
+	var terminated []*buildOperation
 	for _, op := range ops {
 		op.mu.Lock()
 		if !op.started {
 			op.terminated = true
-		}
-		op.mu.Unlock()
-	}
-
-	// Phase 1: Send graceful SIGTERM to all running operations.
-	// Do NOT call cancel() here - that would immediately kill the process.
-	for _, op := range ops {
-		op.mu.Lock()
-		if op.cmd != nil && op.cmd.Process != nil {
+			terminated = append(terminated, op)
+		} else if op.cmd != nil && op.cmd.Process != nil {
 			op.cmd.Process.Signal(os.Interrupt)
 		}
 		op.mu.Unlock()
 	}
 
-	// Phase 2: Wait for operations to complete until the shared deadline.
-	// The completion goroutine owns cmd.Wait() and will close op.done.
+	// Phase 2: Wait for non-terminated operations to complete until the
+	// shared deadline. Terminated operations will be cleaned up by the
+	// handler detecting op.terminated before cmd.Start.
 	deadline, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		deadline = time.Now().Add(5 * time.Second)
 	}
 
+	terminatedSet := make(map[*buildOperation]struct{}, len(terminated))
+	for _, op := range terminated {
+		terminatedSet[op] = struct{}{}
+	}
+
 	for _, op := range ops {
-		op.mu.Lock()
-		wasTerminated := op.terminated
-		op.mu.Unlock()
-		if wasTerminated {
-			continue // already handled in Phase 0
+		if _, ok := terminatedSet[op]; ok {
+			continue
 		}
 		select {
 		case <-op.done:
-			// Operation completed gracefully within the deadline.
 		case <-time.After(time.Until(deadline)):
-			// Deadline exceeded: force kill the process.
 			op.mu.Lock()
 			if op.cmd != nil && op.cmd.Process != nil {
 				op.cmd.Process.Kill()
 			}
 			op.mu.Unlock()
-			// Do NOT wait for op.done here. The completion goroutine will
-			// reap the killed process asynchronously. terminateAll must not
-			// add extra time beyond the shared shutdown budget.
 		}
 	}
 }
