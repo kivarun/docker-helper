@@ -86,13 +86,16 @@ func TestBuildLiveOutput(t *testing.T) {
 	}
 
 	readyFile := filepath.Join(t.TempDir(), "ready")
+	releaseFile := filepath.Join(t.TempDir(), "release")
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Write output, signal readiness via file, then block briefly.
-		// The readiness file ensures the test only checks logs after
-		// the process has produced output.
+		// Write output, signal readiness, then block until release file appears.
+		// This creates an explicit handshake: the test controls when the
+		// process is allowed to complete, ensuring it stays running while
+		// we verify logs and operation state.
 		return exec.CommandContext(ctx, "/bin/sh", "-c",
-			"echo line1; echo line2; touch "+readyFile+"; sleep 0.5")
+			"echo line1; echo line2; touch "+readyFile+
+				"; while [ ! -f "+releaseFile+" ]; do sleep 0.1; done")
 	}
 
 	req := newBuildRequest(map[string]any{
@@ -145,7 +148,12 @@ func TestBuildLiveOutput(t *testing.T) {
 		t.Fatalf("expected operation to be running, got %s", status)
 	}
 
-	// Wait for normal completion (process will finish after sleep 0.5).
+	// Release the child process so it can complete.
+	if err := os.WriteFile(releaseFile, nil, 0644); err != nil {
+		t.Fatalf("create release file: %v", err)
+	}
+
+	// Wait for normal completion.
 	<-op.done
 
 	// Verify final state.
