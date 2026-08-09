@@ -33,6 +33,39 @@ func startTestServer(t *testing.T, socketPath string, handler http.HandlerFunc) 
 	return listener
 }
 
+func setupCLITestEnv(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "runtime")
+	xdgConfigHome := dir
+	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
+	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
+	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+
+	return socketPath
+}
+
 func TestListSessionsSuccess(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
@@ -187,29 +220,7 @@ func TestPrintSessionsTableNoToken(t *testing.T) {
 }
 
 func TestSessionListJSONOutput(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir // XDG_CONFIG_HOME → dir, so config dir = dir/docker-helper
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	// Socket path derived by loadConfig: XDG_RUNTIME_DIR/docker-helper/docker-helper.sock
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	expectedSessions := []sessionJSON{
 		{ID: "dhs_001", Workspace: "/home/user/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
@@ -223,11 +234,6 @@ func TestSessionListJSONOutput(t *testing.T) {
 			Sessions: expectedSessions,
 		})
 	})
-
-	// Set environment variables so loadConfig resolves to our test paths.
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "list", "--json"}, &stdout, &stderr)
@@ -262,28 +268,7 @@ func TestSessionListJSONOutput(t *testing.T) {
 }
 
 func TestSessionListJSONFlag(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	expectedSessions := []sessionJSON{
 		{ID: "dhs_001", Workspace: "/home/user/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
@@ -297,10 +282,6 @@ func TestSessionListJSONFlag(t *testing.T) {
 			Sessions: expectedSessions,
 		})
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "list", "--json"}, &stdout, &stderr)
@@ -328,28 +309,7 @@ func TestSessionListUnknownFlag(t *testing.T) {
 }
 
 func TestSessionListNoFlags(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -359,10 +319,6 @@ func TestSessionListNoFlags(t *testing.T) {
 			Sessions: []sessionJSON{},
 		})
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "list"}, &stdout, &stderr)
@@ -446,28 +402,7 @@ func TestCreateSessionRequest(t *testing.T) {
 }
 
 func TestSessionCreateJSONOutput(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	expectedSession := sessionJSON{
 		ID:        "dhs_001",
@@ -485,10 +420,6 @@ func TestSessionCreateJSONOutput(t *testing.T) {
 			Token:   "dht_session_token",
 		})
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -524,28 +455,7 @@ func TestSessionCreateJSONOutput(t *testing.T) {
 }
 
 func TestSessionCreateTextOutput(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -561,10 +471,6 @@ func TestSessionCreateTextOutput(t *testing.T) {
 			Token: "dht_session_token",
 		})
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -596,38 +502,12 @@ func TestSessionCreateTextOutput(t *testing.T) {
 }
 
 func TestSessionCreateTokenNotInStderr(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, `{"token":"dht_must_not_leak"}`)
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -672,36 +552,11 @@ func TestSessionCreateUnknownFlag(t *testing.T) {
 }
 
 func TestSessionCreateHTTPError(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -739,28 +594,7 @@ func (errorWriter) Write(p []byte) (int, error) {
 }
 
 func TestSessionCreateStdoutWriteError(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -776,10 +610,6 @@ func TestSessionCreateStdoutWriteError(t *testing.T) {
 			Token: "dht_secret_token",
 		})
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -904,36 +734,11 @@ func TestDeleteSessionEscapedID(t *testing.T) {
 }
 
 func TestSessionDeleteJSONOutput(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -962,36 +767,11 @@ func TestSessionDeleteJSONOutput(t *testing.T) {
 }
 
 func TestSessionDeleteTextOutput(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -1057,37 +837,12 @@ func TestSessionDeleteUnknownFlag(t *testing.T) {
 }
 
 func TestSessionDeleteHTTPError(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprint(w, `{"secret":"dht_must_not_leak"}`)
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters(
@@ -1108,36 +863,11 @@ func TestSessionDeleteHTTPError(t *testing.T) {
 }
 
 func TestSessionDeleteStdoutWriteError(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "runtime")
-	xdgConfigHome := dir
-	tokenPath := filepath.Join(xdgConfigHome, "docker-helper", "admin.token")
-	configPath := filepath.Join(xdgConfigHome, "docker-helper", "config.json")
-	socketPath := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(configPath, configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	socketPath := setupCLITestEnv(t)
 
 	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
 
 	var stderr bytes.Buffer
 	code := runCommandWithWriters(
