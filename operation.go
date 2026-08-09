@@ -458,14 +458,12 @@ func startOperationProcess(cmd *exec.Cmd, op *operation) operationStartResult {
 	// cmd.Start() is called while holding op.mu so terminateAll cannot
 	// race between checking started and setting terminated.
 	err := cmd.Start()
-	started := err == nil
-	op.started = started
+	op.started = err == nil
 	op.mu.Unlock()
 
 	if err != nil {
 		return operationStartResult{Err: err}
 	}
 
-	_ = started // suppress unused variable warning
 	return operationStartResult{}
 }
