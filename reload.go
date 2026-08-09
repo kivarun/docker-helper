@@ -81,7 +81,7 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 			slog.String("shutdown_timeout", newCfg.ShutdownTimeout.String()),
 			slog.String("operation_retention_ttl", newCfg.OperationRetentionTTL.String()),
 			slog.Int("operation_max_completed", newCfg.OperationMaxCompleted),
-			slog.Int64("build_log_max_bytes", newCfg.BuildLogMaxBytes),
+			slog.Int64("operation_log_max_bytes", newCfg.OperationLogMaxBytes),
 		)
 	}
 

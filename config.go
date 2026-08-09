@@ -29,7 +29,7 @@ type Config struct {
 	ShutdownTimeout       time.Duration
 	OperationRetentionTTL time.Duration
 	OperationMaxCompleted int
-	BuildLogMaxBytes      int64
+	OperationLogMaxBytes  int64
 }
 
 type fileConfig struct {
@@ -40,7 +40,7 @@ type fileConfig struct {
 	ShutdownTimeout       string `json:"shutdown_timeout,omitempty"`
 	OperationRetentionTTL string `json:"operation_retention_ttl,omitempty"`
 	OperationMaxCompleted *int   `json:"operation_max_completed,omitempty"`
-	BuildLogMaxBytes      *int64 `json:"build_log_max_bytes,omitempty"`
+	OperationLogMaxBytes  *int64 `json:"operation_log_max_bytes,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -194,9 +194,9 @@ func loadConfig() (*Config, error) {
 		opMaxCompleted = *fc.OperationMaxCompleted
 	}
 
-	buildLogMaxBytes := int64(4 * 1024 * 1024)
-	if fc.BuildLogMaxBytes != nil {
-		buildLogMaxBytes = *fc.BuildLogMaxBytes
+	operationLogMaxBytes := int64(4 * 1024 * 1024)
+	if fc.OperationLogMaxBytes != nil {
+		operationLogMaxBytes = *fc.OperationLogMaxBytes
 	}
 
 	runtimeDir, err := getRuntimeDir()
@@ -231,7 +231,7 @@ func loadConfig() (*Config, error) {
 		ShutdownTimeout:       shutdownTimeout,
 		OperationRetentionTTL: opRetentionTTL,
 		OperationMaxCompleted: opMaxCompleted,
-		BuildLogMaxBytes:      buildLogMaxBytes,
+		OperationLogMaxBytes:  operationLogMaxBytes,
 	}, nil
 }
 
@@ -310,15 +310,15 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		defaultConfig := fileConfig{
-			AllowedRoot:           allowedRoot,
-			SessionTTL:            "12h",
-			Level:                 "info",
-			ShutdownTimeout:       "30s",
-			OperationRetentionTTL: "10m",
-			OperationMaxCompleted: ptrOf(200),
-			BuildLogMaxBytes:      ptrOf(int64(4 * 1024 * 1024)),
-		}
+defaultConfig := fileConfig{
+		AllowedRoot:           allowedRoot,
+		SessionTTL:            "12h",
+		Level:                 "info",
+		ShutdownTimeout:       "30s",
+		OperationRetentionTTL: "10m",
+		OperationMaxCompleted: ptrOf(200),
+		OperationLogMaxBytes:  ptrOf(int64(4 * 1024 * 1024)),
+	}
 
 		data, err := json.MarshalIndent(defaultConfig, "", "  ")
 		if err != nil {

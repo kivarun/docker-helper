@@ -252,7 +252,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Create run operation and register it.
 	cfg := a.getConfig()
-	bufSize := cfg.BuildLogMaxBytes
+	bufSize := cfg.OperationLogMaxBytes
 
 	op := newRunOperation(session.ID, req.Image, bufSize)
 	op.auditCommandArgCount = cmdArgCount

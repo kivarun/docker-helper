@@ -42,7 +42,7 @@ func newTestApp(t *testing.T) *App {
 		ShutdownTimeout:       30 * time.Second,
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
-		BuildLogMaxBytes:      4 * 1024 * 1024,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
 	}
 
 	return &App{

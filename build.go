@@ -52,7 +52,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := a.getConfig()
-	bufSize := cfg.BuildLogMaxBytes
+	bufSize := cfg.OperationLogMaxBytes
 
 	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize)
 

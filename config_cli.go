@@ -31,7 +31,7 @@ var (
 		"shutdown_timeout",
 		"operation_retention_ttl",
 		"operation_max_completed",
-		"build_log_max_bytes",
+		"operation_log_max_bytes",
 	}
 	requiredFields = map[string]bool{"allowed_root": true, "session_ttl": true}
 	allFields      = []string{
@@ -52,7 +52,7 @@ var (
 		"shutdown_timeout",
 		"operation_retention_ttl",
 		"operation_max_completed",
-		"build_log_max_bytes",
+		"operation_log_max_bytes",
 	}
 )
 
@@ -115,7 +115,7 @@ Fields:
   shutdown_timeout
   operation_retention_ttl
   operation_max_completed
-  build_log_max_bytes`,
+  operation_log_max_bytes`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -143,7 +143,7 @@ var configSetCommand = &Command{
   shutdown_timeout        positive Go duration, for example 30s (default 30s)
   operation_retention_ttl positive Go duration, for example 10m (default 10m)
   operation_max_completed positive integer (default 200)
-  build_log_max_bytes     positive integer, bytes (default 4194304 = 4 MiB)
+  operation_log_max_bytes     positive integer, bytes (default 4194304 = 4 MiB)
 
 A successful command reports either "updated" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -171,7 +171,7 @@ var configUnsetCommand = &Command{
   shutdown_timeout        removing it restores the default 30s
   operation_retention_ttl removing it restores the default 10m
   operation_max_completed removing it restores the default 200
-  build_log_max_bytes     removing it restores the default 4 MiB
+  operation_log_max_bytes     removing it restores the default 4 MiB
 
 A successful command reports either "unset" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -316,14 +316,14 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		}
 	}
 
-	// Validate build_log_max_bytes if present.
-	if v, ok := raw["build_log_max_bytes"]; ok {
+	// Validate operation_log_max_bytes if present.
+	if v, ok := raw["operation_log_max_bytes"]; ok {
 		var n int64
 		if err := json.Unmarshal(v, &n); err != nil {
-			return fmt.Errorf("build_log_max_bytes must be a JSON integer")
+			return fmt.Errorf("operation_log_max_bytes must be a JSON integer")
 		}
 		if n <= 0 {
-			return fmt.Errorf("build_log_max_bytes must be a positive integer")
+			return fmt.Errorf("operation_log_max_bytes must be a positive integer")
 		}
 	}
 
@@ -424,7 +424,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"shutdown_timeout":        fc.ShutdownTimeout,
 		"operation_retention_ttl": fc.OperationRetentionTTL,
 		"operation_max_completed": fc.OperationMaxCompleted,
-		"build_log_max_bytes":     fc.BuildLogMaxBytes,
+		"operation_log_max_bytes":     fc.OperationLogMaxBytes,
 	}
 
 	enc := json.NewEncoder(stdout)
@@ -563,12 +563,12 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 			omc = ptrOf(200)
 		}
 		fmt.Fprintln(stdout, *omc)
-	case "build_log_max_bytes":
-		blmb := fc.BuildLogMaxBytes
-		if blmb == nil {
-			blmb = ptrOf(int64(4 * 1024 * 1024))
+	case "operation_log_max_bytes":
+		olmb := fc.OperationLogMaxBytes
+		if olmb == nil {
+			olmb = ptrOf(int64(4 * 1024 * 1024))
 		}
-		fmt.Fprintln(stdout, *blmb)
+		fmt.Fprintln(stdout, *olmb)
 	default:
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
@@ -627,10 +627,10 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: operation_max_completed must be a positive integer\n")
 			return 2
 		}
-	case "build_log_max_bytes":
+	case "operation_log_max_bytes":
 		var n int64
 		if _, err := fmt.Sscanf(value, "%d", &n); err != nil || n <= 0 {
-			fmt.Fprintf(stderr, "error: build_log_max_bytes must be a positive integer\n")
+			fmt.Fprintf(stderr, "error: operation_log_max_bytes must be a positive integer\n")
 			return 2
 		}
 	}
@@ -660,7 +660,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		var n int
 		fmt.Sscanf(value, "%d", &n)
 		newValue, _ = json.Marshal(n)
-	case "build_log_max_bytes":
+	case "operation_log_max_bytes":
 		var n int64
 		fmt.Sscanf(value, "%d", &n)
 		newValue, _ = json.Marshal(n)
