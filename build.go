@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -257,13 +256,7 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 		"logs":         string(data),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		opLog(ctx).Error("encode operation logs",
-			slog.String("error", err.Error()),
-		)
-	}
+	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }
 
 func parseOffset(s string) (int64, error) {
