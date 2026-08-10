@@ -9,7 +9,8 @@ A stable standalone Docker capability for sandboxed agents, with:
 - audit and operational logging;
 - local SQLite state;
 - usable CLI/config/session management;
-- installable/releasable artifacts.
+- installable/releasable artifacts;
+- a first-class agent-facing integration.
 
 docker-helper remains a narrow policy-enforcing daemon, not a generic agent control plane.
 
@@ -161,7 +162,22 @@ issues before release.
 agent workflows and directly driven usability fixes in async operations, CLI,
 help/documentation, logging, and private-registry handling.
 
-### 7. Clean-install acceptance test
+### 7. First-class agent integration
+
+Ship a reusable agent-facing integration rather than requiring every deployment
+to reproduce hand-written curl instructions.
+
+Use dogfood to choose the smallest useful form:
+
+- a reusable agent skill;
+- a tool integration;
+- or both only if both provide demonstrated value.
+
+Do not build a mandatory shared runtime or control plane around this integration.
+The goal is discoverability and reliable use of docker-helper by agents while
+keeping docker-helper standalone.
+
+### 8. Clean-install acceptance test
 
 Before 1.0, test the project as a new operator would use it:
 
@@ -174,6 +190,7 @@ Before 1.0, test the project as a new operator would use it:
 - pull;
 - build;
 - run;
+- use the supported agent integration;
 - inspect logs/audit;
 - reload configuration;
 - session cleanup;
@@ -182,7 +199,7 @@ Before 1.0, test the project as a new operator would use it:
 
 This is an end-to-end release acceptance pass, not another unit-test framework.
 
-### 8. Final hardening and documentation
+### 9. Final hardening and documentation
 
 Address any remaining edge cases, race conditions, or documentation gaps
 discovered during integration testing and acceptance.
@@ -205,6 +222,8 @@ Record these so they do not accidentally expand Release 1 scope:
 - system-wide/root daemon deployment;
 - multi-user daemon deployment;
 - native `.deb`/`.rpm` packaging;
+- distribution repository publishing;
+- Unix man pages;
 - Fedora/RHEL-specific distribution support;
 - WebSocket/SSE log streaming unless polling proves insufficient.
 
@@ -215,7 +234,6 @@ Keep this short.
 Include:
 
 - richer log streaming if polling becomes insufficient;
-- remote/server-side deployment work;
 - durable/recoverable operations across daemon restart;
 - network/proxy capability as a separate tool/project;
 - notification helper with restricted DBus access.
@@ -261,19 +279,36 @@ Expected scope:
 
 Do not predesign the exact multi-user authorization API during Release 1.
 
-### Distribution packaging and platform expansion
+### Distribution packaging, delivery, and platform expansion
 
-Move native distribution packaging out of Release 1.
+Move native distribution packaging and repository delivery out of Release 1.
+Release 2 should make docker-helper behave like a normal system package, not
+merely produce `.deb` and `.rpm` files as CI artifacts.
 
 Expected scope:
 
 - native `.deb` packaging;
 - native `.rpm` packaging;
+- publish packages through appropriate selected distribution/package-repository
+  channels so normal package-manager install and upgrade workflows work;
+- openSUSE and Ubuntu remain important targets;
 - RHEL-family support is the likely RPM enterprise target rather than Fedora;
-- exact RHEL-family target(s) and distro-specific security integration should be
-  selected when this work starts.
+- exact RHEL-family target(s), publication channels, and distro-specific
+  security integration should be selected when this work starts.
 
 Fedora is not currently a committed target.
+
+### Unix manual pages
+
+Provide proper system documentation as part of the native/system package
+experience.
+
+At minimum:
+
+- `docker-helper(1)` for CLI/operator usage;
+- `docker-helper-config(5)` for configuration format and semantics.
+
+Add further sections only when the actual installed interfaces justify them.
 
 ### Database doctor / maintenance CLI
 
@@ -291,8 +326,17 @@ Do not define the command/API now.
 `session cleanup` remains a narrow expired-session command and is not replaced by
 this future feature.
 
+## 3.0+
+
+Development after 2.0 is explicitly use-case driven. Do not invent a generic
+platform roadmap in advance. New capabilities should be justified by observed
+operator/agent workflows; a demonstrated use case from a single real operator
+is sufficient evidence to investigate a problem.
+
 ## Architectural constraints
 
+- docker-helper is a capability service using Docker as a backend, not a
+  restricted Docker API or socket proxy;
 - one tool — one capability;
 - standalone first;
 - integration optional;
@@ -301,8 +345,12 @@ this future feature.
 - do not predesign future helpers;
 - prefer the smallest implementation that solves a demonstrated problem.
 
+See `docs/manifesto.md` for the project-level rationale behind these constraints.
+
 ## Documentation ownership
 
+- `docs/manifesto.md` = project purpose, product boundary, and long-lived design
+  principles;
 - `docs/roadmap.md` = planned work and release scope;
 - `docs/architecture.md` = current architecture/invariants/rationale;
 - `README.md` = operator quickstart;
