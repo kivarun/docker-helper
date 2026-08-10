@@ -4,17 +4,93 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// maxShmSize is the hard-coded maximum shm_size for Release 1.
+// This is an implementation constant, not a configurable value.
+const maxShmSize = 2 * 1024 * 1024 * 1024 // 2 GiB
+
+// validateShmSize parses and validates an shm_size string.
+// Accepted formats: N (bytes), Nk, Nm, Ng (case-insensitive unit).
+// Returns the validated size in bytes, or an error if the value is
+// invalid, zero, negative, or exceeds maxShmSize.
+func validateShmSize(raw string) (int64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+
+	// Must start with a digit.
+	if len(raw) == 0 || raw[0] < '0' || raw[0] > '9' {
+		return 0, fmt.Errorf("invalid shm size")
+	}
+
+	// Determine the unit suffix (last character, if alphabetic).
+	var unit string
+	var numStr string
+	if len(raw) > 1 && (raw[len(raw)-1] >= 'a' && raw[len(raw)-1] <= 'z' || raw[len(raw)-1] >= 'A' && raw[len(raw)-1] <= 'Z') {
+		unit = strings.ToLower(string(raw[len(raw)-1]))
+		numStr = raw[:len(raw)-1]
+	} else {
+		numStr = raw
+	}
+
+	// numStr must not be empty.
+	if numStr == "" {
+		return 0, fmt.Errorf("invalid shm size")
+	}
+
+	// Parse the numeric part. Reject anything that isn't a plain integer.
+	num, err := strconv.ParseUint(numStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid shm size")
+	}
+
+	// Apply the unit multiplier.
+	var multiplier uint64
+	switch unit {
+	case "":
+		multiplier = 1
+	case "k":
+		multiplier = 1024
+	case "m":
+		multiplier = 1024 * 1024
+	case "g":
+		multiplier = 1024 * 1024 * 1024
+	default:
+		return 0, fmt.Errorf("invalid shm size")
+	}
+
+	// Check for overflow before multiplication.
+	if multiplier > 0 && num > math.MaxUint64/multiplier {
+		return 0, fmt.Errorf("invalid shm size")
+	}
+
+	total := num * multiplier
+
+	// Must be > 0.
+	if total == 0 {
+		return 0, fmt.Errorf("invalid shm size")
+	}
+
+	// Must not exceed the hard limit.
+	if total > maxShmSize {
+		return 0, fmt.Errorf("invalid shm size")
+	}
+
+	return int64(total), nil
+}
 
 func extractExitCode(err error) *int {
 	var exitCoder interface{ ExitCode() int }
@@ -97,6 +173,7 @@ type runRequest struct {
 	Command     []string          `json:"command,omitempty"`
 	Environment map[string]string `json:"environment,omitempty"`
 	Mounts      []mountRequest    `json:"mounts,omitempty"`
+	ShmSize     string            `json:"shm_size,omitempty"`
 }
 
 type mountRequest struct {
@@ -209,6 +286,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	shmSizeBytes, err := validateShmSize(req.ShmSize)
+	if err != nil {
+		writeError(ctx, w, http.StatusBadRequest, "invalid_shm_size", "invalid shm size")
+		return
+	}
+
 	envNames := make([]string, 0, len(req.Environment))
 	for name := range req.Environment {
 		envNames = append(envNames, name)
@@ -257,6 +340,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	op.auditCommandArgCount = cmdArgCount
 	op.auditMounts = mountAudit
 	op.auditEnvKeys = envNames
+	if shmSizeBytes > 0 {
+		op.auditShmSize = req.ShmSize
+	}
 
 	// Create a unique cidfile for daemon-side container lifecycle management.
 	// The path is in the helper-owned runtime directory, never user-controlled.
@@ -280,6 +366,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		CommandArgCount: cmdArgCount,
 		Mounts:          mountAudit,
 		EnvKeys:         envNames,
+		ShmSize:         op.auditShmSize,
 	})
 
 	// Build docker run command.
@@ -312,6 +399,10 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			mountSpec += ",readonly"
 		}
 		args = append(args, "--mount", mountSpec)
+	}
+
+	if shmSizeBytes > 0 {
+		args = append(args, "--shm-size", strconv.FormatInt(shmSizeBytes, 10))
 	}
 
 	args = append(args, req.Image)

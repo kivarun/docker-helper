@@ -538,6 +538,11 @@ Validation details:
 - source is resolved through `EvalSymlinks` and checked via `isInside`;
 - environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
+- `shm_size` accepts a plain integer with an optional binary unit (`k`, `m`,
+  `g`; case-insensitive); values must be > 0 and <= 2 GiB (hard-coded
+  Release 1 limit); the parsed byte value is passed to Docker as
+  `--shm-size`; this is a `/dev/shm` limit only, NOT a general container
+  memory or CPU limit;
 - container runs with fixed security policy (details in implementation).
 
 ## Pull pipeline
@@ -721,6 +726,7 @@ Current error codes (non-exhaustive):
 | `invalid_mount` | `POST /run` | mount validation failure |
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
+| `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
 | `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
@@ -943,6 +949,7 @@ Emitted before a container starts.
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set; values are never logged) |
+| `shm_size` | string | /dev/shm size from the request (present when set) |
 
 No `result` or `duration` field.
 
@@ -967,6 +974,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set) |
+| `shm_size` | string | /dev/shm size from the request (present when set) |
 | `result` | string | outcome code |
 | `exit_code` | number | container exit code (present when available) |
 | `duration` | string | container run attempt wall-clock time |

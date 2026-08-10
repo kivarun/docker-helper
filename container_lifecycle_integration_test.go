@@ -115,6 +115,64 @@ func cleanupContainerByID(t *testing.T, containerID string) {
 	}
 }
 
+// TestShmSizeIntegration verifies that a container started with a non-default
+// shm_size has the expected /dev/shm size inside the container.
+//
+// This is a Docker integration test that requires a reachable Docker daemon.
+func TestShmSizeIntegration(t *testing.T) {
+	dockerAvailable(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Start a container with a 64 MiB shm_size that measures /dev/shm.
+	op := startRunOperation(t, app, result.Token, map[string]any{
+		"image":    "alpine:latest",
+		"shm_size": "64m",
+		"command":  []string{"sh", "-c", "df -B1 /dev/shm | tail -1 | awk '{print $2}'"},
+	})
+
+	// Wait for the operation to complete.
+	select {
+	case <-op.done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("operation did not complete within timeout")
+	}
+
+	if op.State != operationSucceeded {
+		t.Fatalf("expected status 'succeeded', got %q; result_code: %v", op.State, op.ResultCode)
+	}
+
+	// Read the logs to get the /dev/shm size.
+	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+op.ID+"/logs", nil)
+	logsReq.SetPathValue("id", op.ID)
+	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
+	logsW := httptest.NewRecorder()
+	app.handleOperationLogs(logsW, logsReq)
+
+	if logsW.Code != http.StatusOK {
+		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
+	}
+
+	var logsResp map[string]any
+	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
+		t.Fatalf("decode operation logs: %v", err)
+	}
+	logs, _ := logsResp["logs"].(string)
+
+	// Parse the expected shm size in bytes.
+	wantShmSize := "67108864" // 64 * 1024 * 1024
+	gotShmSize := strings.TrimSpace(logs)
+	if gotShmSize != wantShmSize {
+		t.Errorf("expected /dev/shm size %s, got %s", wantShmSize, gotShmSize)
+	}
+}
+
 // waitReadyFile polls for a file to appear, bounded by timeout.
 // Returns true if the file exists within the timeout.
 func waitReadyFile(t *testing.T, path string, timeout time.Duration) bool {

@@ -163,6 +163,8 @@ Supported fields:
 * `workdir` — optional absolute path inside the new container.
 * `environment` — optional object mapping environment-variable names to string values.
 * `mounts` — optional array of bind mounts.
+* `shm_size` — optional `/dev/shm` size string (e.g. `"64m"`, `"1g"`; case-insensitive
+  unit; max 2 GiB).
 
 Mount rules:
 

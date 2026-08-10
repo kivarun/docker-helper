@@ -394,6 +394,10 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   http://localhost/run
 ```
 
+Optional `shm_size` sets the `/dev/shm` size for the container. Accepts
+a plain integer with an optional binary unit (`k`, `m`, `g`; case-insensitive).
+Example: `"64m"`, `"1g"`. Maximum is 2 GiB. If omitted, Docker uses its default.
+
 Response (HTTP 201):
 
 ```json
