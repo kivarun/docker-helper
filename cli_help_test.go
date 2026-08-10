@@ -478,6 +478,7 @@ func TestHelpCommandEquivalence(t *testing.T) {
 		{"help build", []string{"help", "build"}},
 		{"help pull", []string{"help", "pull"}},
 		{"help run", []string{"help", "run"}},
+		{"help registry", []string{"help", "registry"}},
 		{"help registry login", []string{"help", "registry", "login"}},
 	}
 	for _, tt := range tests {

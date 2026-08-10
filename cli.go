@@ -411,7 +411,9 @@ for command-specific help.`,
 					return 2
 				}
 
-				cmd.printHelp(stdout, append([]string{}, args...))
+				// Path is the prefix before the target command (same as dispatch semantics)
+				path := args[:len(args)-1]
+				cmd.printHelp(stdout, path)
 				return 0
 			},
 		}
