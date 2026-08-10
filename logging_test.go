@@ -623,7 +623,13 @@ func TestOpLogWithContext(t *testing.T) {
 // TestOpLogDiscardWhenUnconfigured verifies that opLog does not leak
 // into slog.Default() when the operational logger is not configured.
 func TestOpLogDiscardWhenUnconfigured(t *testing.T) {
+	t.Cleanup(logging.reset)
 	logging.reset()
+
+	oldDefault := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(oldDefault)
+	})
 
 	defaultBuf := new(bytes.Buffer)
 	slog.SetDefault(slog.New(slog.NewTextHandler(defaultBuf, nil)))
