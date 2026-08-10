@@ -469,23 +469,7 @@ func (op *operation) succeed(duration *string) bool {
 	}
 	op.mu.Unlock()
 
-	dur := ""
-	if duration != nil {
-		dur = *duration
-	}
-	writeAuditWithRequestID(context.Background(), auditRecord{
-		Event:           op.Kind + ".finish",
-		SessionID:       op.SessionID,
-		OperationID:     op.ID,
-		Image:           op.Image,
-		Context:         op.Context,
-		Dockerfile:      op.Dockerfile,
-		CommandArgCount: op.auditCommandArgCount,
-		Mounts:          op.auditMounts,
-		EnvKeys:         op.auditEnvKeys,
-		Result:          *op.ResultCode,
-		Duration:        dur,
-	})
+	op.writeFinishAudit(nil, duration)
 	op.doneOnce.Do(func() { close(op.done) })
 	return true
 }
@@ -508,9 +492,20 @@ func (op *operation) fail(resultCode, message string, exitCode *int, duration ..
 	}
 	op.mu.Unlock()
 
+	var dur *string
+	if len(duration) > 0 {
+		dur = duration[0]
+	}
+	op.writeFinishAudit(exitCode, dur)
+	op.doneOnce.Do(func() { close(op.done) })
+	return true
+}
+
+// writeFinishAudit writes the <kind>.finish audit record for the operation.
+func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 	dur := ""
-	if len(duration) > 0 && duration[0] != nil {
-		dur = *duration[0]
+	if duration != nil {
+		dur = *duration
 	}
 	writeAuditWithRequestID(context.Background(), auditRecord{
 		Event:           op.Kind + ".finish",
@@ -526,8 +521,6 @@ func (op *operation) fail(resultCode, message string, exitCode *int, duration ..
 		ExitCode:        exitCode,
 		Duration:        dur,
 	})
-	op.doneOnce.Do(func() { close(op.done) })
-	return true
 }
 
 func (op *operation) Wait() {
