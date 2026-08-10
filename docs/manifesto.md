@@ -44,6 +44,11 @@ Sessions and workspaces are first-class concepts because they describe the
 relationship between an agent and allowed host resources. They are not
 implementation details inherited from Docker.
 
+Agent integrations belong at the client edge. Skills, native tool adapters,
+and other agent-specific wrappers may translate agent workflows into the stable
+capability contract, but they should not introduce agent-specific behavior into
+the daemon core.
+
 ## Defense in depth is welcome, duplication is not
 
 Docker-native authorization, socket proxies, AppArmor/SELinux, TLS/SSH
@@ -80,6 +85,7 @@ adoption is not a prerequisite for solving a real problem.
 - one tool — one capability;
 - standalone first;
 - integration optional;
+- agent-specific integrations live at the client edge, not in the daemon core;
 - standardize contracts and conventions, not mandatory shared runtime code;
 - preserve remote and multi-session futures without predesigning them;
 - prefer the smallest implementation that solves a demonstrated problem;
