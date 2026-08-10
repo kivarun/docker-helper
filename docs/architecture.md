@@ -328,8 +328,10 @@ Key internal guarantees that make cancel and shutdown safe:
   caller;
 - terminal transition is single-winner: the first `succeed()` or `fail()`
   to set `CompletedAt` wins; subsequent calls are no-ops;
-- completion goroutine is the sole `cmd.Wait()` owner; cancel and shutdown
-  only Signal/Kill and wait on `op.done`;
+- completion goroutine is the sole `cmd.Wait()` owner; termination paths
+  only Signal/Kill processes, coordinate force cleanup through the shared
+  force phase, and never call `cmd.Wait()` themselves; the cancel handler
+  waits for terminal `op.done` before returning;
 - graceful termination phase is bounded (default 5s);
 - force cleanup is single-owner: only the first caller to reach the force
   phase performs daemon-side container cleanup and CLI process kill;
