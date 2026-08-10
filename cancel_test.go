@@ -1448,3 +1448,71 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	}
 	t.Logf("follower returned in %v (context deadline: 50ms)", elapsed)
 }
+
+// TestCancelResponseNoTimestampFields verifies that the cancel response
+// does not contain timestamp fields (created_at, started_at, completed_at, duration).
+func TestCancelResponseNoTimestampFields(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Create a run operation that completes immediately.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	req := newRunRequest(map[string]any{
+		"image":   "alpine:3.24",
+		"command": []string{"echo", "hello"},
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("run: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
+
+	// Wait for the operation to complete.
+	time.Sleep(500 * time.Millisecond)
+
+	// Cancel the already-completed operation.
+	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
+	w = httptest.NewRecorder()
+	app.handleOperationCancel(w, cancelReq)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var cancelResp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&cancelResp); err != nil {
+		t.Fatalf("cannot decode cancel response: %v", err)
+	}
+
+	// Verify no timestamp fields are present.
+	for _, field := range []string{"created_at", "started_at", "completed_at", "duration"} {
+		if _, ok := cancelResp[field]; ok {
+			t.Errorf("cancel response must not contain %q field", field)
+		}
+	}
+
+	// Verify expected fields are present.
+	if cancelResp["ok"] != true {
+		t.Error("expected ok=true")
+	}
+	if cancelResp["operation_id"] != opID {
+		t.Errorf("expected operation_id=%s, got %v", opID, cancelResp["operation_id"])
+	}
+	if cancelResp["status"] != "succeeded" {
+		t.Errorf("expected status=succeeded, got %v", cancelResp["status"])
+	}
+}

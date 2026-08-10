@@ -302,7 +302,7 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 	// Check if operation is already terminal.
 	op.mu.Lock()
 	if op.CompletedAt != nil {
-		resp := operationStatusResponse{
+		resp := operationCancelResponse{
 			OK:          true,
 			OperationID: op.ID,
 			Status:      op.State,
@@ -321,7 +321,7 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err.Error() == "already_terminal" {
-			resp := operationStatusResponse{
+			resp := operationCancelResponse{
 				OK:          true,
 				OperationID: op.ID,
 				Status:      op.State,
@@ -338,7 +338,7 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 
 	// Return terminal state.
 	op.mu.Lock()
-	resp := operationStatusResponse{
+	resp := operationCancelResponse{
 		OK:          true,
 		OperationID: op.ID,
 		Status:      op.State,

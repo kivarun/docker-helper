@@ -74,3 +74,12 @@ type operationLogsResponse struct {
 	Truncated   bool   `json:"truncated"`
 	Logs        string `json:"logs"`
 }
+
+// operationCancelResponse is the response from POST /operations/{id}/cancel.
+type operationCancelResponse struct {
+	OK          bool           `json:"ok"`
+	OperationID string         `json:"operation_id"`
+	Status      operationState `json:"status"`
+	ExitCode    *int           `json:"exit_code,omitempty"`
+	ResultCode  *string        `json:"result_code,omitempty"`
+}
