@@ -27,6 +27,11 @@ const resultCancelled = "cancelled"
 // explicit cancel (terminateOne) and daemon shutdown (terminateAll).
 const defaultTerminationTimeout = 5 * time.Second
 
+// defaultForceCleanupTimeout is the shared force-cleanup budget for
+// daemon-side container cleanup and CLI process kill after the graceful
+// phase expires. Both owner and followers share this budget.
+const defaultForceCleanupTimeout = 3 * time.Second
+
 type terminationReason uint8
 
 const (
@@ -56,8 +61,9 @@ type operation struct {
 	doneOnce    sync.Once // ensures op.done is closed exactly once
 	terminated  bool      // set by terminateAll/terminateOne when process not yet started
 	reason      terminationReason
-	started     bool // set to true only after cmd.Start() succeeds
-	forceOwned  bool // true when force cleanup has been claimed for this operation
+	started     bool          // set to true only after cmd.Start() succeeds
+	forceOwned  bool          // true when force cleanup has been claimed for this operation
+	forceDone   chan struct{} // closed when shared force-cleanup phase completes
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
 	// publishes the container ID into the file after the daemon creates
@@ -306,14 +312,19 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		case <-ctx.Done():
 			// Deadline exceeded: claim force-cleanup ownership under op.mu.
 			// Only the first caller to claim performs the actual cleanup.
-			// Subsequent callers skip cleanup but still wait for op.done
-			// within the remaining budget so the caller contract is preserved.
+			// All callers (owner and followers) share a single bounded
+			// force-cleanup budget via op.forceDone.
 			op.mu.Lock()
 			if op.forceOwned {
 				// Another termination path already claimed force cleanup.
-				// Wait for it to complete within the remaining budget.
+				// Wait for the shared force phase to complete, bounded
+				// by the force-cleanup budget.
+				forceDone := op.forceDone
 				op.mu.Unlock()
-				<-op.done
+				select {
+				case <-forceDone:
+				case <-time.After(defaultForceCleanupTimeout):
+				}
 				continue
 			}
 			if op.CompletedAt != nil {
@@ -323,6 +334,8 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 				continue
 			}
 			op.forceOwned = true
+			op.forceDone = make(chan struct{})
+			forceDone := op.forceDone
 			op.mu.Unlock()
 
 			// Force cleanup phase (single owner):
@@ -332,23 +345,22 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 			// publishes the container ID asynchronously after cmd.Start().
 			// We use a single bounded cleanup context that covers both
 			// waiting for the cidfile and the docker kill itself.
+			forceCtx, forceCancel := context.WithTimeout(
+				context.Background(), defaultForceCleanupTimeout,
+			)
 			if op.cidfile != "" {
-				// Single bounded context for the entire cleanup phase:
-				// up to 3 seconds total for cidfile polling + docker kill.
-				cleanupCtx, cleanupCancel := context.WithTimeout(
-					context.Background(), 3*time.Second,
-				)
-				containerID := waitForContainerID(cleanupCtx, op)
+				containerID := waitForContainerID(forceCtx, op)
 				if containerID != "" && killContainer != nil {
-					killContainer(cleanupCtx, containerID)
+					killContainer(forceCtx, containerID)
 				}
-				cleanupCancel()
 			}
 			op.mu.Lock()
 			if op.cmd != nil && op.cmd.Process != nil {
 				op.cmd.Process.Kill()
 			}
 			op.mu.Unlock()
+			forceCancel()
+			close(forceDone)
 		}
 	}
 }
