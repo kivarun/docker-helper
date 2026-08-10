@@ -403,8 +403,12 @@ func (b *boundedBuffer) Range(offset int64) (data []byte, nextOffset int64, trun
 	return data, nextOffset, false
 }
 
-func (op *operation) succeed(duration *string) {
+func (op *operation) succeed(duration *string) bool {
 	op.mu.Lock()
+	if op.CompletedAt != nil {
+		op.mu.Unlock()
+		return false
+	}
 	now := time.Now()
 	op.State = operationSucceeded
 	op.CompletedAt = &now
@@ -433,10 +437,15 @@ func (op *operation) succeed(duration *string) {
 		Duration:        dur,
 	})
 	op.doneOnce.Do(func() { close(op.done) })
+	return true
 }
 
-func (op *operation) fail(resultCode, message string, exitCode *int, duration ...*string) {
+func (op *operation) fail(resultCode, message string, exitCode *int, duration ...*string) bool {
 	op.mu.Lock()
+	if op.CompletedAt != nil {
+		op.mu.Unlock()
+		return false
+	}
 	now := time.Now()
 	op.State = operationFailed
 	op.CompletedAt = &now
@@ -468,6 +477,7 @@ func (op *operation) fail(resultCode, message string, exitCode *int, duration ..
 		Duration:        dur,
 	})
 	op.doneOnce.Do(func() { close(op.done) })
+	return true
 }
 
 func (op *operation) Wait() {
