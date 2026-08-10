@@ -171,6 +171,20 @@ func (a *App) operationForSession(sessionID, operationID string) *operation {
 	return op
 }
 
+// operationIDFromRequest extracts the operation ID from the request.
+// It prefers r.PathValue("id") when set by the ServeMux, and falls back
+// to parsing the URL path for direct handler invocations in tests.
+func operationIDFromRequest(r *http.Request) string {
+	if id := r.PathValue("id"); id != "" {
+		return id
+	}
+	parts := strings.Split(r.URL.Path, "/")
+	if len(parts) >= 3 && parts[1] == "operations" && parts[2] != "" {
+		return parts[2]
+	}
+	return ""
+}
+
 func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSession(w, r)
 	if !ok {
@@ -178,14 +192,7 @@ func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := withSessionID(r.Context(), session.ID)
-	opID := r.PathValue("id")
-	if opID == "" {
-		// Fallback for unit tests that call the handler directly.
-		parts := strings.Split(r.URL.Path, "/")
-		if len(parts) >= 3 && parts[1] == "operations" {
-			opID = parts[2]
-		}
-	}
+	opID := operationIDFromRequest(r)
 
 	op := a.operationForSession(session.ID, opID)
 	if op == nil {
@@ -232,14 +239,7 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := withSessionID(r.Context(), session.ID)
-	opID := r.PathValue("id")
-	if opID == "" {
-		// Fallback for unit tests that call the handler directly.
-		parts := strings.Split(r.URL.Path, "/")
-		if len(parts) >= 4 && parts[1] == "operations" && parts[3] == "logs" {
-			opID = parts[2]
-		}
-	}
+	opID := operationIDFromRequest(r)
 
 	op := a.operationForSession(session.ID, opID)
 	if op == nil {
@@ -294,15 +294,7 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := withSessionID(r.Context(), session.ID)
-	opID := r.PathValue("id")
-	if opID == "" {
-		// Fallback for unit tests that call the handler directly.
-		// Parse /operations/{id}/cancel from the URL path.
-		parts := strings.Split(r.URL.Path, "/")
-		if len(parts) >= 4 && parts[1] == "operations" && parts[3] == "cancel" {
-			opID = parts[2]
-		}
-	}
+	opID := operationIDFromRequest(r)
 
 	op := a.operationForSession(session.ID, opID)
 	if op == nil {

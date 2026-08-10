@@ -774,3 +774,58 @@ func TestOperationForSessionOwner(t *testing.T) {
 		t.Errorf("expected operation ID %s, got %s", op.ID, result.ID)
 	}
 }
+
+// TestOperationIDFromRequest verifies operationIDFromRequest extraction.
+func TestOperationIDFromRequest(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		pathValue string
+		want      string
+	}{
+		{
+			name:      "PathValue takes priority",
+			path:      "/anything",
+			pathValue: "op_from_pathvalue",
+			want:      "op_from_pathvalue",
+		},
+		{
+			name: "status path fallback",
+			path: "/operations/op_123",
+			want: "op_123",
+		},
+		{
+			name: "logs path fallback",
+			path: "/operations/op_456/logs",
+			want: "op_456",
+		},
+		{
+			name: "cancel path fallback",
+			path: "/operations/op_789/cancel",
+			want: "op_789",
+		},
+		{
+			name: "unknown path returns empty",
+			path: "/other/op_123",
+			want: "",
+		},
+		{
+			name: "operations prefix only returns empty",
+			path: "/operations",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			if tt.pathValue != "" {
+				req.SetPathValue("id", tt.pathValue)
+			}
+			got := operationIDFromRequest(req)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
