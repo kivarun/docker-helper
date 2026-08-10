@@ -213,13 +213,6 @@ func loadRawConfig() (map[string]json.RawMessage, string, error) {
 		return nil, "", fmt.Errorf("configuration is not a JSON object")
 	}
 
-	// Reject reserved fields that must not appear in config.json.
-	for field := range raw {
-		if reservedConfigFields[field] {
-			return nil, "", fmt.Errorf("%s is computed and cannot be configured", field)
-		}
-	}
-
 	return raw, configPath, nil
 }
 
