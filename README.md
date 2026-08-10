@@ -351,8 +351,9 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 ```
 
 Build-arg names must match `[A-Za-z_][A-Za-z0-9_]*`. Empty values are valid.
-Build args are **not intended for secrets** — values are visible in Docker
-build logs and audit metadata (keys only, never values).
+Build args are not intended for secrets. Values may become visible in Docker
+build output depending on the Dockerfile/build process. Docker Helper audit
+records contain only `build_arg_keys`, never build-arg values.
 
 Response (HTTP 201):
 

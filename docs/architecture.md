@@ -475,7 +475,10 @@ Validation details:
 - context may be relative (joined with workspace) or absolute (must be
   inside workspace);
 - dockerfile must be relative to context;
-- all paths are resolved through `EvalSymlinks` before `isInside` checks.
+- all paths are resolved through `EvalSymlinks` before `isInside` checks;
+- build-arg names must match `^[A-Za-z_][A-Za-z0-9_]*$`;
+- build-arg keys are sorted for deterministic Docker argv;
+- build-arg values are never logged or audited (only `build_arg_keys`).
 
 ## Run pipeline
 
@@ -713,6 +716,7 @@ Current error codes (non-exhaustive):
 | `unauthorized` | all protected | missing/invalid token |
 | `invalid_json` | all JSON endpoints | request body is not valid JSON |
 | `invalid_build_context` | `POST /build` | build request validation failure |
+| `invalid_build_args` | `POST /build` | build-arg name invalid |
 | `invalid_image` | `POST /run`, `POST /pull` | image name is empty |
 | `invalid_mount` | `POST /run` | mount validation failure |
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
@@ -862,6 +866,7 @@ Emitted before a Docker build begins.
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
+| `build_arg_keys` | string[] | build-arg names, sorted (present when set; values are never logged) |
 
 No `result` or `duration` field.
 
@@ -877,6 +882,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
+| `build_arg_keys` | string[] | build-arg names, sorted (present when set; values are never logged) |
 | `result` | string | `succeeded`, `docker_build_failed`, or `cancelled` |
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | build wall-clock time |
@@ -1026,6 +1032,7 @@ The audit log and operational log never contain:
 - HTTP request headers;
 - `Authorization` header values and the token used for authentication;
 - environment variable values (only names appear in `env_keys`);
+- build-arg values (only names appear in `build_arg_keys`);
 - Docker build output or container stdout/stderr;
 - internal error messages or stack traces;
 - command arguments (only `command_arg_count` is recorded).
@@ -1128,8 +1135,7 @@ docker-helper applies a fixed security policy when running containers:
 - health checks;
 - resource limits (CPU, memory);
 - build caching configuration;
-- build secrets;
-- build arguments.
+- build secrets.
 
 ## Future work
 

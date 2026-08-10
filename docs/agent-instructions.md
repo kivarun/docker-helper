@@ -90,6 +90,10 @@ curl --silent --show-error \
 * Do not pass agent-container paths such as `/workspace/...` as build-context
   paths.
 
+Optional `build_args` (map[string]string) passes build-time variables to
+Docker. Names must match `[A-Za-z_][A-Za-z0-9_]*`. Empty values are valid.
+Build args are not intended for secrets.
+
 **Build is asynchronous.** The response is HTTP 201 with an `operation_id`:
 
 ```json
