@@ -212,6 +212,8 @@ func serveWithShutdown(
 			if shutdownErr == context.DeadlineExceeded {
 				server.Close()
 				drainErr = fmt.Errorf("graceful shutdown timeout after %v", timeout)
+			} else if shutdownErr != nil {
+				drainErr = shutdownErr
 			}
 			// Drain serveDone to avoid leaking the goroutine.
 			<-serveDone
