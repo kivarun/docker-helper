@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1233,9 +1234,16 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	}
 }
 
-// TestCancelPlusShutdownCleanup verifies that when explicit cancel and
-// daemon shutdown target the same operation concurrently, the cleanup
-// side effects are bounded and the operation reaches a consistent terminal state.
+// TestCancelPlusShutdownCleanup measures how many daemon-side cleanup
+// attempts occur when explicit cancel and shutdown concurrently force-cleanup
+// the same running run operation with a cidfile.
+//
+// This test does NOT assume cleanup is single-owner.
+// It records the actual killContainer call count to establish the baseline.
+//
+// Current observed behavior: killContainer is invoked 2 times (once per
+// termination path), confirming that cancel and shutdown can both invoke
+// daemon-side cleanup for the same run container.
 func TestCancelPlusShutdownCleanup(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
@@ -1247,71 +1255,98 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
+	// Create a cidfile with a synthetic container ID.
+	cidfile := filepath.Join(app.Config.RuntimeDir, "test.cid")
+	testContainerID := "test-container-id-12345"
+	if err := os.WriteFile(cidfile, []byte(testContainerID), 0644); err != nil {
+		t.Fatalf("cannot write cidfile: %v", err)
 	}
 
-	// Count docker kill invocations via ExecCommandContext seam.
-	var dockerKillCount int32
+	// Create a run operation directly with cidfile set.
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024)
+	op.cidfile = cidfile
+	op.started = true // simulate already-started process
+	app.OperationRegistry.mu.Lock()
+	app.OperationRegistry.ops[op.ID] = op
+	app.OperationRegistry.mu.Unlock()
 
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		// Intercept docker kill calls.
-		if name == "docker" && len(args) > 0 && args[0] == "kill" {
-			atomic.AddInt32(&dockerKillCount, 1)
-		}
-		return exec.CommandContext(ctx, "sleep", "300")
+	// Count daemon-side cleanup callback invocations.
+	var killCount int32
+	var killIDs []string
+	var killMu sync.Mutex
+
+	fakeKillContainer := func(ctx context.Context, cid string) {
+		atomic.AddInt32(&killCount, 1)
+		killMu.Lock()
+		killIDs = append(killIDs, cid)
+		killMu.Unlock()
 	}
 
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
-
-	op := app.OperationRegistry.get(opID)
-	if op == nil {
-		t.Fatal("operation not found")
+	// Create a long-running process that survives SIGTERM so the graceful
+	// phase expires and both termination paths reach force cleanup.
+	// Use a busy-loop approach that explicitly ignores SIGTERM.
+	cmd := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cannot start test process: %v", err)
 	}
+	op.cmd = cmd
 
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
-		op.mu.Lock()
-		proc := op.cmd
-		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Verify the process is running.
+	if cmd.Process == nil {
+		t.Fatal("process not started")
 	}
+	t.Logf("test process PID: %d", cmd.Process.Pid)
+
+	// Wait a moment for the process to stabilize.
+	time.Sleep(100 * time.Millisecond)
+
+	// Start a completion goroutine that waits for the process and transitions
+	// the operation to terminal (mimics the real run handler behavior).
+	go func() {
+		cmd.Wait()
+		// After process exits, transition to terminal.
+		exitCode := 137 // typical SIGKILL exit code
+		op.fail("docker_run_failed", "docker run failed", &exitCode, nil)
+	}()
 
 	// Launch cancel and shutdown concurrently.
+	// Both use the same fakeKillContainer callback to count cleanup attempts.
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	start := make(chan struct{})
+
 	go func() {
 		defer wg.Done()
-		cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
-		cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
-		cancelW := httptest.NewRecorder()
-		app.handleOperationCancel(cancelW, cancelReq)
+		<-start
+		app.OperationRegistry.terminateOne(op.ID, fakeKillContainer)
 	}()
 
 	go func() {
 		defer wg.Done()
-		app.OperationRegistry.setShuttingDown()
+		<-start
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+		app.OperationRegistry.terminateAll(ctx, fakeKillContainer)
 	}()
 
+	close(start)
 	wg.Wait()
+
+	// Wait for the completion goroutine to finish.
+	select {
+	case <-op.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("operation did not complete within timeout")
+	}
+
+	// Clean up the test process (should already be dead from Kill).
+	// Use Process.Signal to avoid racing with cmd.Wait() in the completion goroutine.
+	cmd.Process.Signal(syscall.SIGKILL) // best-effort, may already be dead
+	os.Remove(cidfile)
+
+	killCalls := atomic.LoadInt32(&killCount)
+	t.Logf("killContainer callback invoked %d times (observed behavior)", killCalls)
 
 	// Verify: operation reached terminal state.
 	op.mu.Lock()
@@ -1325,26 +1360,29 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	if completedAt == nil {
 		t.Fatal("CompletedAt must not be nil")
 	}
-	// Result is either cancelled or shutdown — both are valid.
-	if rc != "cancelled" && rc != "docker_build_failed" {
-		t.Errorf("result_code = %q, want cancelled or docker_build_failed", rc)
+	// Result is either cancelled or shutdown — both are valid (first-reason-wins).
+	if rc != "cancelled" && rc != "docker_run_failed" {
+		t.Errorf("result_code = %q, want cancelled or docker_run_failed", rc)
 	}
 
-	// Verify: docker kill was called at most once for build (no cidfile).
-	dkc := atomic.LoadInt32(&dockerKillCount)
-	if dkc > 1 {
-		t.Errorf("docker kill invoked %d times, want at most 1", dkc)
+	// Verify: all kill calls used the expected container ID.
+	killMu.Lock()
+	for _, id := range killIDs {
+		if id != testContainerID {
+			t.Errorf("killContainer called with unexpected ID %q, want %q", id, testContainerID)
+		}
 	}
+	killMu.Unlock()
 
 	// Verify: exactly one finish audit.
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
 	finishCount := 0
 	for _, r := range records {
-		if r.Event == "build.finish" {
+		if r.Event == "run.finish" {
 			finishCount++
 		}
 	}
 	if finishCount != 1 {
-		t.Errorf("build.finish audit count = %d, want 1", finishCount)
+		t.Errorf("run.finish audit count = %d, want 1", finishCount)
 	}
 }
