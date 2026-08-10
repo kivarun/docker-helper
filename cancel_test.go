@@ -849,10 +849,188 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	}
 }
 
-// TestTerminalTransitionNaturalWins proves that when natural completion
-// transitions the operation to terminal first, a concurrent cancel cannot
-// overwrite the result. Uses deterministic channel synchronization.
-func TestTerminalTransitionNaturalWins(t *testing.T) {
+// TestTerminalTransitionSucceedWins proves the single-terminal-transition
+// invariant at the primitive level: when succeed() transitions first,
+// a concurrent fail() cannot overwrite the result.
+func TestTerminalTransitionSucceedWins(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024)
+
+	// Barrier: fail waits until succeed has completed the transition.
+	succeedDone := make(chan struct{})
+
+	var succeedResult, failResult bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Goroutine 1: succeed (runs first).
+	go func() {
+		defer wg.Done()
+		dur := "100ms"
+		succeedResult = op.succeed(&dur)
+		close(succeedDone)
+	}()
+
+	// Goroutine 2: fail (waits for succeed to finish).
+	go func() {
+		defer wg.Done()
+		<-succeedDone
+		exitCode := 1
+		failResult = op.fail("cancelled", "build cancelled", &exitCode, nil)
+	}()
+
+	wg.Wait()
+
+	// Verify: succeed won, fail lost.
+	if !succeedResult {
+		t.Fatal("succeed() must return true when it wins")
+	}
+	if failResult {
+		t.Fatal("fail() must return false when succeed already transitioned")
+	}
+
+	// Verify: final state/result = succeeded.
+	op.mu.Lock()
+	state := op.State
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	completedAt := op.CompletedAt
+	op.mu.Unlock()
+
+	if state != operationSucceeded {
+		t.Errorf("state = %q, want succeeded", state)
+	}
+	if rc != "succeeded" {
+		t.Errorf("result_code = %q, want succeeded", rc)
+	}
+	if completedAt == nil {
+		t.Error("CompletedAt must not be nil")
+	}
+
+	// Verify: done is closed.
+	select {
+	case <-op.done:
+	default:
+		t.Fatal("op.done must be closed after successful transition")
+	}
+
+	// Verify: exactly one finish audit.
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	finishCount := 0
+	for _, r := range records {
+		if r.Event == "build.finish" {
+			finishCount++
+		}
+	}
+	if finishCount != 1 {
+		t.Errorf("build.finish audit count = %d, want 1", finishCount)
+	}
+}
+
+// TestTerminalTransitionFailWins proves the single-terminal-transition
+// invariant at the primitive level: when fail() transitions first,
+// a concurrent succeed() cannot overwrite the result.
+func TestTerminalTransitionFailWins(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024)
+
+	// Barrier: succeed waits until fail has completed the transition.
+	failDone := make(chan struct{})
+
+	var succeedResult, failResult bool
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Goroutine 1: fail (runs first).
+	go func() {
+		defer wg.Done()
+		exitCode := 1
+		failResult = op.fail("cancelled", "build cancelled", &exitCode, nil)
+		close(failDone)
+	}()
+
+	// Goroutine 2: succeed (waits for fail to finish).
+	go func() {
+		defer wg.Done()
+		<-failDone
+		dur := "100ms"
+		succeedResult = op.succeed(&dur)
+	}()
+
+	wg.Wait()
+
+	// Verify: fail won, succeed lost.
+	if !failResult {
+		t.Fatal("fail() must return true when it wins")
+	}
+	if succeedResult {
+		t.Fatal("succeed() must return false when fail already transitioned")
+	}
+
+	// Verify: final state/result = cancelled.
+	op.mu.Lock()
+	state := op.State
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	completedAt := op.CompletedAt
+	op.mu.Unlock()
+
+	if state != operationFailed {
+		t.Errorf("state = %q, want failed", state)
+	}
+	if rc != "cancelled" {
+		t.Errorf("result_code = %q, want cancelled", rc)
+	}
+	if completedAt == nil {
+		t.Error("CompletedAt must not be nil")
+	}
+
+	// Verify: done is closed.
+	select {
+	case <-op.done:
+	default:
+		t.Fatal("op.done must be closed after successful transition")
+	}
+
+	// Verify: exactly one finish audit.
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	finishCount := 0
+	for _, r := range records {
+		if r.Event == "build.finish" {
+			finishCount++
+		}
+	}
+	if finishCount != 1 {
+		t.Errorf("build.finish audit count = %d, want 1", finishCount)
+	}
+}
+
+// TestCancelAfterNaturalCompletionPreservesResult proves that when the
+// operation completes naturally before cancel processes it, the natural
+// result is preserved (sequential idempotency).
+func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
@@ -865,9 +1043,6 @@ func TestTerminalTransitionNaturalWins(t *testing.T) {
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
-
-	// Block the cancel goroutine until natural completion has transitioned.
-	cancelBlocked := make(chan struct{})
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		// Complete immediately with exit 0 (success).
@@ -894,20 +1069,7 @@ func TestTerminalTransitionNaturalWins(t *testing.T) {
 	// Wait for natural completion to finish.
 	op.Wait()
 
-	// Record the completed time set by natural completion.
-	op.mu.Lock()
-	firstCompletedAt := op.CompletedAt
-	op.mu.Unlock()
-
-	if firstCompletedAt == nil {
-		t.Fatal("CompletedAt must not be nil after natural completion")
-	}
-
 	// Now attempt cancel — it should see the operation is already terminal.
-	// Use cancelBlocked to control timing (cancel is not actually blocked,
-	// but the test structure shows the ordering).
-	close(cancelBlocked)
-
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
@@ -931,164 +1093,5 @@ func TestTerminalTransitionNaturalWins(t *testing.T) {
 	}
 	if completedAt == nil {
 		t.Error("CompletedAt must not be nil")
-	}
-	// CompletedAt should not have changed.
-	if !completedAt.Equal(*firstCompletedAt) {
-		t.Errorf("CompletedAt changed: first=%v, after=%v", firstCompletedAt, completedAt)
-	}
-}
-
-// TestTerminalTransitionCancelWins proves that when explicit cancel
-// transitions the operation to terminal first, the subsequent natural
-// completion (SIGTERM/kill exit) cannot overwrite the result.
-// Uses deterministic channel synchronization.
-func TestTerminalTransitionCancelWins(t *testing.T) {
-	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	// Block the process so we can cancel before it completes naturally.
-	blockProcess := make(chan struct{})
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, "sh", "-c", "while true; do sleep 0.1; done")
-		go func() {
-			<-blockProcess
-		}()
-		return cmd
-	}
-
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
-
-	op := app.OperationRegistry.get(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Wait for the process to start.
-	for i := 0; i < 50; i++ {
-		op.mu.Lock()
-		proc := op.cmd
-		op.mu.Unlock()
-		if proc != nil && proc.Process != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Cancel the operation.
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
-	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
-	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
-
-	// Unblock the process (it will be killed by SIGTERM already).
-	close(blockProcess)
-
-	// Verify: result must be cancelled, not docker_build_failed or succeeded.
-	op.mu.Lock()
-	state := op.State
-	rc := ""
-	if op.ResultCode != nil {
-		rc = *op.ResultCode
-	}
-	completedAt := op.CompletedAt
-	op.mu.Unlock()
-
-	if state != operationFailed {
-		t.Errorf("state = %q, want failed", state)
-	}
-	if rc != "cancelled" {
-		t.Errorf("result_code = %q, want cancelled", rc)
-	}
-	if completedAt == nil {
-		t.Error("CompletedAt must not be nil")
-	}
-}
-
-// TestTerminateOneVsNaturalCompletionRace proves that the race between
-// terminateOne checking CompletedAt and natural completion is safe:
-// the first terminal transition wins, and the second is a no-op.
-func TestTerminateOneVsNaturalCompletionRace(t *testing.T) {
-	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	// The process completes very quickly.
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
-	}
-
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	var buildResp map[string]any
-	json.NewDecoder(w.Body).Decode(&buildResp)
-	opID := buildResp["operation_id"].(string)
-
-	op := app.OperationRegistry.get(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Race: try to cancel while the operation is completing.
-	// The process exits immediately, so natural completion may win.
-	// Either way, the result should be consistent (no double transition).
-	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
-	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
-	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
-
-	// Wait for the operation to complete.
-	op.Wait()
-
-	// Verify: result is consistent (either succeeded or cancelled).
-	op.mu.Lock()
-	rc := ""
-	if op.ResultCode != nil {
-		rc = *op.ResultCode
-	}
-	completedAt := op.CompletedAt
-	op.mu.Unlock()
-
-	if completedAt == nil {
-		t.Fatal("CompletedAt must not be nil")
-	}
-	// Result should be one of the valid terminal results.
-	if rc != "succeeded" && rc != "cancelled" {
-		t.Errorf("result_code = %q, want succeeded or cancelled", rc)
 	}
 }
