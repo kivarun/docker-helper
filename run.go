@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -72,7 +71,7 @@ func (a *App) killContainerBestEffort(ctx context.Context, containerID string) {
 	if err := cmd.Run(); err != nil {
 		// Container already gone or docker not available — acceptable.
 		// Do not log the container ID to avoid unnecessary traceability.
-		slog.Warn("daemon-side container cleanup failed", "error", err)
+		opLog(ctx).Warn("daemon-side container cleanup failed", "error", err)
 	}
 }
 
