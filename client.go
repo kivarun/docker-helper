@@ -218,20 +218,11 @@ func (c *apiClient) registryLogin(registry, username, password string) (*registr
 	return &result, nil
 }
 
-// pullResponse is the response from POST /pull.
-type pullResponse struct {
-	OK       bool   `json:"ok"`
-	Code     string `json:"code,omitempty"`
-	Message  string `json:"message,omitempty"`
-	Output   string `json:"output,omitempty"`
-	Duration string `json:"duration,omitempty"`
-}
-
 // pull sends POST /pull with the given image reference.
 // On non-2xx responses, the response body is still parsed so that
 // the daemon's "output" field is preserved for diagnostics.
-func (c *apiClient) pull(image string) (*pullResponse, error) {
-	body, err := json.Marshal(map[string]string{"image": image})
+func (c *apiClient) pull(req pullRequest) (*pullResponse, error) {
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
@@ -259,24 +250,8 @@ func (c *apiClient) pull(image string) (*pullResponse, error) {
 	return &result, nil
 }
 
-// operationCreatedResponse is the response from POST /build and POST /run.
-type operationCreatedResponse struct {
-	OK          bool   `json:"ok"`
-	OperationID string `json:"operation_id"`
-	Status      string `json:"status"`
-}
-
 // startBuild sends POST /build and returns the operation ID.
-func (c *apiClient) startBuild(ctxPath, dockerfile, image string, buildArgs map[string]string) (*operationCreatedResponse, error) {
-	req := map[string]any{
-		"context":    ctxPath,
-		"dockerfile": dockerfile,
-		"image":      image,
-	}
-	if len(buildArgs) > 0 {
-		req["build_args"] = buildArgs
-	}
-
+func (c *apiClient) startBuild(req buildRequest) (*operationCreatedResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
@@ -300,26 +275,8 @@ func (c *apiClient) startBuild(ctxPath, dockerfile, image string, buildArgs map[
 	return &result, nil
 }
 
-// startRunRequest holds the fields for POST /run.
-type startRunRequest struct {
-	Image       string            `json:"image"`
-	Entrypoint  string            `json:"entrypoint,omitempty"`
-	Workdir     string            `json:"workdir,omitempty"`
-	Command     []string          `json:"command,omitempty"`
-	Environment map[string]string `json:"environment,omitempty"`
-	Mounts      []startRunMount   `json:"mounts,omitempty"`
-	ShmSize     string            `json:"shm_size,omitempty"`
-}
-
-// startRunMount is a mount specification for POST /run.
-type startRunMount struct {
-	Source   string `json:"source"`
-	Target   string `json:"target"`
-	ReadOnly bool   `json:"read_only,omitempty"`
-}
-
 // startRun sends POST /run and returns the operation ID.
-func (c *apiClient) startRun(req startRunRequest) (*operationCreatedResponse, error) {
+func (c *apiClient) startRun(req runRequest) (*operationCreatedResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
@@ -343,19 +300,6 @@ func (c *apiClient) startRun(req startRunRequest) (*operationCreatedResponse, er
 	return &result, nil
 }
 
-// operationStatusResponse is the response from GET /operations/{id}.
-type operationStatusResponse struct {
-	OK          bool   `json:"ok"`
-	OperationID string `json:"operation_id"`
-	Status      string `json:"status"`
-	CreatedAt   string `json:"created_at"`
-	StartedAt   string `json:"started_at,omitempty"`
-	CompletedAt string `json:"completed_at,omitempty"`
-	Duration    string `json:"duration,omitempty"`
-	ExitCode    *int   `json:"exit_code,omitempty"`
-	ResultCode  string `json:"result_code,omitempty"`
-}
-
 // operationStatus returns the status of an operation.
 func (c *apiClient) operationStatus(opID string) (*operationStatusResponse, error) {
 	resp, err := c.doAuthenticatedRequest("GET", "/operations/"+opID, nil)
@@ -374,16 +318,6 @@ func (c *apiClient) operationStatus(opID string) (*operationStatusResponse, erro
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
 	return &result, nil
-}
-
-// operationLogsResponse is the response from GET /operations/{id}/logs.
-type operationLogsResponse struct {
-	OK          bool   `json:"ok"`
-	OperationID string `json:"operation_id"`
-	Offset      int64  `json:"offset"`
-	NextOffset  int64  `json:"next_offset"`
-	Truncated   bool   `json:"truncated"`
-	Logs        string `json:"logs"`
 }
 
 // operationLogs returns logs for an operation starting at the given offset.

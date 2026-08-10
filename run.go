@@ -167,22 +167,6 @@ func defaultExecCommand(name string, args ...string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-type runRequest struct {
-	Image       string            `json:"image"`
-	Entrypoint  string            `json:"entrypoint,omitempty"`
-	Workdir     string            `json:"workdir,omitempty"`
-	Command     []string          `json:"command,omitempty"`
-	Environment map[string]string `json:"environment,omitempty"`
-	Mounts      []mountRequest    `json:"mounts,omitempty"`
-	ShmSize     string            `json:"shm_size,omitempty"`
-}
-
-type mountRequest struct {
-	Source   string `json:"source"`
-	Target   string `json:"target"`
-	ReadOnly bool   `json:"read_only,omitempty"`
-}
-
 type resolvedMount struct {
 	HostPath string
 	Target   string

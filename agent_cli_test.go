@@ -728,11 +728,11 @@ func TestWaitForOperationFinalLogsRace(t *testing.T) {
 		tokenSource: func() (string, error) { return "test-token", nil },
 	}
 
-	status, err := waitForOperation(c, opID, &out)
+	status, err := waitForOperation(c, opID, &out, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("waitForOperation failed: %v", err)
 	}
-	if status.Status != "succeeded" {
+	if status.Status != operationSucceeded {
 		t.Errorf("expected succeeded, got %s", status.Status)
 	}
 	if !strings.Contains(out.String(), "Final output") {
@@ -822,5 +822,408 @@ func TestPullFailedPreservesOutput(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "docker pull failed") {
 		t.Errorf("expected error message in stderr, got: %s", stderr.String())
+	}
+}
+
+// TestPullContract verifies that pull sends the expected JSON contract.
+func TestPullContract(t *testing.T) {
+	received := false
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "alpine:3.24"}, func(s *agentCLITestServer) {
+		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
+			var req pullRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("cannot decode request: %v", err)
+			}
+			if req.Image != "alpine:3.24" {
+				t.Errorf("expected image alpine:3.24, got %s", req.Image)
+			}
+			received = true
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		})
+	})
+	if !received {
+		t.Fatal("pull request not received")
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	}
+}
+
+// TestBuildContract verifies that build sends the expected JSON contract.
+func TestBuildContract(t *testing.T) {
+	opID := "op_build"
+	received := false
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"build", "--context", ".", "--dockerfile", "Dockerfile", "--image", "myapp:latest",
+		"--build-arg", "FOO=bar", "--build-arg", "BAZ=qux",
+	}, func(s *agentCLITestServer) {
+		s.handleBuild(func(w http.ResponseWriter, r *http.Request) {
+			var req buildRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("cannot decode request: %v", err)
+			}
+			if req.Context != "." {
+				t.Errorf("expected context '.', got %s", req.Context)
+			}
+			if req.Dockerfile != "Dockerfile" {
+				t.Errorf("expected dockerfile 'Dockerfile', got %s", req.Dockerfile)
+			}
+			if req.Image != "myapp:latest" {
+				t.Errorf("expected image 'myapp:latest', got %s", req.Image)
+			}
+			if req.BuildArgs["FOO"] != "bar" {
+				t.Errorf("expected FOO=bar, got %s", req.BuildArgs["FOO"])
+			}
+			if req.BuildArgs["BAZ"] != "qux" {
+				t.Errorf("expected BAZ=qux, got %s", req.BuildArgs["BAZ"])
+			}
+			received = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "running",
+			})
+		})
+		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "succeeded",
+			})
+		})
+		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"offset":       int64(0),
+				"next_offset":  int64(0),
+				"truncated":    false,
+				"logs":         "",
+			})
+		})
+	})
+	if !received {
+		t.Fatal("build request not received")
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	}
+}
+
+// TestRunContract verifies that run sends the expected JSON contract.
+func TestRunContract(t *testing.T) {
+	opID := "op_run"
+	received := false
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"run", "--image", "alpine:3.24",
+		"--env", "KEY=value",
+		"--mount", ".:/workspace:ro",
+		"--shm-size", "128m",
+		"--", "echo", "hello",
+	}, func(s *agentCLITestServer) {
+		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
+			var req runRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("cannot decode request: %v", err)
+			}
+			if req.Image != "alpine:3.24" {
+				t.Errorf("expected image alpine:3.24, got %s", req.Image)
+			}
+			if req.Environment["KEY"] != "value" {
+				t.Errorf("expected KEY=value, got %s", req.Environment["KEY"])
+			}
+			if len(req.Mounts) != 1 {
+				t.Fatalf("expected 1 mount, got %d", len(req.Mounts))
+			}
+			if req.Mounts[0].Source != "." {
+				t.Errorf("expected mount source '.', got %s", req.Mounts[0].Source)
+			}
+			if req.Mounts[0].Target != "/workspace" {
+				t.Errorf("expected mount target '/workspace', got %s", req.Mounts[0].Target)
+			}
+			if !req.Mounts[0].ReadOnly {
+				t.Error("expected mount to be read-only")
+			}
+			if req.ShmSize != "128m" {
+				t.Errorf("expected shm_size '128m', got %s", req.ShmSize)
+			}
+			if len(req.Command) != 2 || req.Command[0] != "echo" || req.Command[1] != "hello" {
+				t.Errorf("unexpected command: %v", req.Command)
+			}
+			received = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "running",
+			})
+		})
+		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "succeeded",
+			})
+		})
+		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"offset":       int64(0),
+				"next_offset":  int64(0),
+				"truncated":    false,
+				"logs":         "",
+			})
+		})
+	})
+	if !received {
+		t.Fatal("run request not received")
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	}
+}
+
+// TestWaitForOperationUsesConstants verifies that waitForOperation uses
+// operationState constants, not string literals.
+func TestWaitForOperationUsesConstants(t *testing.T) {
+	opID := "op_test"
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       string(operationSucceeded),
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(0),
+			"truncated":    false,
+			"logs":         "",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
+	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
+	defer func() {
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
+		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
+	}()
+
+	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
+
+	var out, stderr bytes.Buffer
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	status, err := waitForOperation(c, opID, &out, &stderr)
+	if err != nil {
+		t.Fatalf("waitForOperation failed: %v", err)
+	}
+	if status.Status != operationSucceeded {
+		t.Errorf("expected operationSucceeded, got %s", status.Status)
+	}
+}
+
+// TestTruncatedLogWarning verifies that truncated logs produce a warning.
+func TestTruncatedLogWarning(t *testing.T) {
+	opID := "op_test"
+	truncatedSeen := false
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       string(operationSucceeded),
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(100),
+			"truncated":    false,
+			"logs":         "some output\n",
+		}
+		if truncatedSeen {
+			resp["truncated"] = true
+		}
+		truncatedSeen = true
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
+	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
+	defer func() {
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
+		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
+	}()
+
+	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
+
+	var out, stderr bytes.Buffer
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	_, err = waitForOperation(c, opID, &out, &stderr)
+	if err != nil {
+		t.Fatalf("waitForOperation failed: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "warning: operation log was truncated") {
+		t.Errorf("expected truncation warning, got: %s", stderr.String())
+	}
+	// Warning should appear exactly once
+	if strings.Count(stderr.String(), "warning: operation log was truncated") != 1 {
+		t.Errorf("expected exactly one warning, got: %s", stderr.String())
+	}
+}
+
+// TestTruncatedOnlyInFinalLogs verifies that truncation in final logs
+// still produces the warning.
+func TestTruncatedOnlyInFinalLogs(t *testing.T) {
+	opID := "op_test"
+	callCount := 0
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       string(operationSucceeded),
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		resp := map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(0),
+			"truncated":    false,
+			"logs":         "",
+		}
+		// Only the final request (second call) has truncation
+		if callCount == 2 {
+			resp["truncated"] = true
+			resp["logs"] = "final output\n"
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
+	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
+	defer func() {
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
+		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
+	}()
+
+	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
+
+	var out, stderr bytes.Buffer
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	_, err = waitForOperation(c, opID, &out, &stderr)
+	if err != nil {
+		t.Fatalf("waitForOperation failed: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "warning: operation log was truncated") {
+		t.Errorf("expected truncation warning from final logs, got: %s", stderr.String())
+	}
+	if !strings.Contains(out.String(), "final output") {
+		t.Errorf("expected final output, got: %s", out.String())
 	}
 }

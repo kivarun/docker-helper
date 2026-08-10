@@ -16,13 +16,6 @@ import (
 
 var ErrInternal = errors.New("internal error")
 
-type buildRequest struct {
-	Context    string            `json:"context"`
-	Dockerfile string            `json:"dockerfile"`
-	Image      string            `json:"image"`
-	BuildArgs  map[string]string `json:"build_args,omitempty"`
-}
-
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSession(w, r)
 	if !ok {

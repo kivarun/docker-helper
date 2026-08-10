@@ -39,9 +39,11 @@ func agentClient() (*apiClient, error) {
 
 // waitForOperation polls an operation until it reaches a terminal state.
 // It streams logs to stdout as they become available.
+// If the daemon reports truncated logs, a single warning is printed to stderr.
 // Returns the final operation status response.
-func waitForOperation(c *apiClient, opID string, stdout io.Writer) (*operationStatusResponse, error) {
+func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
 	var offset int64
+	truncated := false
 
 	for {
 		// Fetch and print any new logs.
@@ -52,6 +54,9 @@ func waitForOperation(c *apiClient, opID string, stdout io.Writer) (*operationSt
 		if logs.Logs != "" {
 			fmt.Fprint(stdout, logs.Logs)
 		}
+		if logs.Truncated {
+			truncated = true
+		}
 		offset = logs.NextOffset
 
 		// Check operation status.
@@ -60,7 +65,7 @@ func waitForOperation(c *apiClient, opID string, stdout io.Writer) (*operationSt
 			return nil, err
 		}
 
-		if status.Status == "succeeded" || status.Status == "failed" {
+		if status.Status == operationSucceeded || status.Status == operationFailed {
 			// Read remaining logs one final time (always, even if offset == 0).
 			finalLogs, err := c.operationLogs(opID, offset)
 			if err != nil {
@@ -68,6 +73,12 @@ func waitForOperation(c *apiClient, opID string, stdout io.Writer) (*operationSt
 			}
 			if finalLogs.Logs != "" {
 				fmt.Fprint(stdout, finalLogs.Logs)
+			}
+			if finalLogs.Truncated {
+				truncated = true
+			}
+			if truncated {
+				fmt.Fprintln(stderr, "warning: operation log was truncated")
 			}
 			return status, nil
 		}
@@ -93,7 +104,7 @@ var pullCommand = &Command{
 					return 1
 				}
 
-				resp, err := c.pull(image)
+				resp, err := c.pull(pullRequest{Image: image})
 				if resp != nil && resp.Output != "" {
 					fmt.Fprint(stdout, resp.Output)
 				}
@@ -157,19 +168,24 @@ var buildCommand = &Command{
 					return 1
 				}
 
-				resp, err := c.startBuild(*ctx, *dockerfile, *image, argsMap)
+				resp, err := c.startBuild(buildRequest{
+					Context:    *ctx,
+					Dockerfile: *dockerfile,
+					Image:      *image,
+					BuildArgs:  argsMap,
+				})
 				if err != nil {
 					fmt.Fprintln(stderr, err)
 					return 1
 				}
 
-				status, err := waitForOperation(c, resp.OperationID, stdout)
+				status, err := waitForOperation(c, resp.OperationID, stdout, stderr)
 				if err != nil {
 					fmt.Fprintln(stderr, err)
 					return 1
 				}
 
-				if status.Status != "succeeded" {
+				if status.Status != operationSucceeded {
 					msg := "build failed"
 					if status.ResultCode != "" {
 						msg += " (" + status.ResultCode + ")"
@@ -237,14 +253,14 @@ var runContainerCommand = &Command{
 					envMap[parts[0]] = parts[1]
 				}
 
-				var runMounts []startRunMount
+				var runMounts []mountRequest
 				for _, m := range mountSlice.vals {
 					parts := strings.Split(m, ":")
 					if len(parts) < 2 || len(parts) > 3 {
 						fmt.Fprintf(stderr, "invalid mount format: %q (expected SOURCE:TARGET[:ro])\n", m)
 						return 2
 					}
-					rm := startRunMount{
+					rm := mountRequest{
 						Source: parts[0],
 						Target: parts[1],
 					}
@@ -264,7 +280,7 @@ var runContainerCommand = &Command{
 					return 1
 				}
 
-				req := startRunRequest{
+				req := runRequest{
 					Image:       *image,
 					Entrypoint:  *entrypoint,
 					Workdir:     *workdir,
@@ -280,7 +296,7 @@ var runContainerCommand = &Command{
 					return 1
 				}
 
-				status, err := waitForOperation(c, resp.OperationID, stdout)
+				status, err := waitForOperation(c, resp.OperationID, stdout, stderr)
 				if err != nil {
 					fmt.Fprintln(stderr, err)
 					return 1

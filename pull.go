@@ -6,10 +6,6 @@ import (
 	"time"
 )
 
-type pullRequest struct {
-	Image string `json:"image"`
-}
-
 func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSession(w, r)
 	if !ok {
