@@ -108,6 +108,12 @@ POST /build or POST /run  (session token)
     ├── transitions operation to succeeded/failed
     └── status/logs available via operation endpoints
     │
+POST /operations/{id}/cancel  (session token)
+    │
+    ├── graceful SIGTERM to running process
+    ├── bounded force-cleanup fallback if process does not exit
+    └── operation becomes terminal (status=failed, result_code=cancelled)
+    │
 DELETE /sessions/{id}  (admin token)
     │
     └── physically deletes session row
@@ -311,6 +317,27 @@ docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 
 After `TimeoutStopSec=30s`, systemd sends SIGKILL if any processes
 remain.
+
+### Operation lifecycle invariants
+
+Key internal guarantees that make cancel and shutdown safe:
+
+- explicit cancel and daemon shutdown share the same underlying
+  termination lifecycle;
+- first termination reason wins and cannot be overwritten by a concurrent
+  caller;
+- terminal transition is single-winner: the first `succeed()` or `fail()`
+  to set `CompletedAt` wins; subsequent calls are no-ops;
+- completion goroutine is the sole `cmd.Wait()` owner; cancel and shutdown
+  only Signal/Kill and wait on `op.done`;
+- graceful termination phase is bounded (default 5s);
+- force cleanup is single-owner: only the first caller to reach the force
+  phase performs daemon-side container cleanup and CLI process kill;
+- concurrent followers wait on a shared absolute force-cleanup deadline
+  rather than creating independent timers;
+- `/run` force cleanup uses cidfile + daemon-side `docker kill` to prevent
+  orphan containers;
+- `<kind>.finish` audit event is emitted exactly once per operation.
 
 ### Logout
 
@@ -580,6 +607,25 @@ log is stored in a bounded buffer of `operation_log_max_bytes`. When the
 limit is exceeded, the oldest data is evicted. `truncated` is true when
 the requested offset refers to evicted data.
 
+### POST /operations/{id}/cancel
+
+Cancels a running operation. Requires the session token that created the
+operation.
+
+Contract:
+
+- running operation → graceful SIGTERM, then bounded force-cleanup
+  fallback if the process does not exit in time;
+- operation becomes terminal: `status=failed`, `result_code=cancelled`;
+- already-terminal operation → idempotent HTTP 200 with current state;
+- unknown or foreign operation → HTTP 404 `operation_not_found`;
+- operation logs remain accessible after cancel;
+- the response returns after the operation reaches terminal state.
+
+Cancel and daemon shutdown share the same underlying termination
+lifecycle. The first termination reason to be set wins and cannot be
+overwritten by a concurrent caller.
+
 ## Retention
 
 Completed operations are retained in memory. Cleanup is opportunistic and
@@ -670,6 +716,7 @@ Current error codes:
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero |
 | `docker_run_failed` | `POST /run` | Docker run operation failed |
 | `container_exit_nonzero` | `POST /run` | container exited with non-zero status (not 125) |
+| `cancelled` | `POST /build`, `POST /run` | operation cancelled by client |
 
 Planned:
 

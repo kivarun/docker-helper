@@ -398,7 +398,21 @@ Run-specific result codes:
 
 - `succeeded` — container exited with status 0;
 - `docker_run_failed` — Docker run operation failed;
-- `container_exit_nonzero` — container exited with a non-zero status.
+- `container_exit_nonzero` — container exited with a non-zero status;
+- `cancelled` — operation cancelled by client.
+
+### Cancel an operation
+
+Cancel a running build or run operation:
+
+```bash
+curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -X POST 'http://localhost/operations/op_abcdef1234567890/cancel'
+```
+
+The operation becomes terminal with `status=failed` and `result_code=cancelled`.
+Cancelling an already-terminal operation is idempotent (returns current state).
 
 ### Health check
 

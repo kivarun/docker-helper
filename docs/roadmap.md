@@ -71,9 +71,8 @@ survive daemon restart. Durable/recoverable operations may be considered in
 - Docker/launch failure is an operation failure;
 - session expiry/deletion does not terminate an already-started operation;
 - later operation access still requires the owning valid session;
-- no `cancelled` state;
-- client-initiated cancellation remains outside Release 1 unless a concrete
-  need appears.
+- client-initiated cancellation is available via `POST /operations/{id}/cancel`;
+- `cancelled` is a result code, not a state (terminal status remains `failed`).
 
 ### 4. Shutdown ownership
 
@@ -189,7 +188,6 @@ Keep this short.
 
 Include:
 
-- evaluate cancellation if not included in 1.0;
 - richer log streaming if polling becomes insufficient;
 - remote/server-side deployment work;
 - durable/recoverable operations across daemon restart;

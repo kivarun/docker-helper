@@ -211,12 +211,28 @@ Run-specific result codes:
 
 - `succeeded` — container exited with status 0;
 - `docker_run_failed` — Docker run operation failed;
-- `container_exit_nonzero` — container exited with a non-zero status.
+- `container_exit_nonzero` — container exited with a non-zero status;
+- `cancelled` — operation cancelled by client.
 
 If the status is `failed`, inspect `result_code`, `exit_code`
 and the logs to diagnose the problem.
 
-Do not fall back to invoking Docker directly if the run fails.
+### Cancel an operation
+
+To cancel a running build or run operation:
+
+```bash
+curl --unix-socket /run/docker-helper/docker-helper.sock \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -X POST 'http://localhost/operations/op_abcdef1234567890/cancel'
+```
+
+The operation becomes terminal with `status=failed` and `result_code=cancelled`.
+Cancelling an already-terminal operation is idempotent (returns HTTP 200
+with the current terminal state).
+
+Do not fall back to invoking Docker directly (no `docker kill`, no manual
+container removal). Cancel must go through the helper.
 
 ### Workspace path model
 
