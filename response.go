@@ -105,28 +105,27 @@ func writeUnauthorizedSession(ctx context.Context, w http.ResponseWriter) {
 	})
 }
 
+func writeAuthFailure(ctx context.Context, r *http.Request, result string) {
+	writeAuditWithRequestID(ctx, auditRecord{
+		Event:  "auth.failure",
+		Method: r.Method,
+		Path:   r.URL.Path,
+		Result: result,
+	})
+}
+
 func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	ctx := r.Context()
 	token, ok := parseBearerToken(r)
 	if !ok {
-		writeAuditWithRequestID(ctx, auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: "admin.parse_failed",
-		})
+		writeAuthFailure(ctx, r, "admin.parse_failed")
 		writeUnauthorizedAdmin(ctx, w)
 		return false
 	}
 
 	tokenHash := sha256.Sum256([]byte(token))
 	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) != 1 {
-		writeAuditWithRequestID(ctx, auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: "admin.wrong_token",
-		})
+		writeAuthFailure(ctx, r, "admin.wrong_token")
 		writeUnauthorizedAdmin(ctx, w)
 		return false
 	}
@@ -138,12 +137,7 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 	ctx := r.Context()
 	token, ok := parseBearerToken(r)
 	if !ok {
-		writeAuditWithRequestID(ctx, auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: "session.parse_failed",
-		})
+		writeAuthFailure(ctx, r, "session.parse_failed")
 		writeUnauthorizedSession(ctx, w)
 		return nil, false
 	}
@@ -154,12 +148,7 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 		if !errors.Is(err, ErrSessionNotFound) {
 			resultCode = "session.database_error"
 		}
-		writeAuditWithRequestID(ctx, auditRecord{
-			Event:  "auth.failure",
-			Method: r.Method,
-			Path:   r.URL.Path,
-			Result: resultCode,
-		})
+		writeAuthFailure(ctx, r, resultCode)
 
 		if !errors.Is(err, ErrSessionNotFound) {
 			opLog(ctx).Error("session lookup error",
