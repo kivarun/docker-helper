@@ -531,6 +531,50 @@ func TestCleanupStaleSessionRuntimeDirsPreservesActive(t *testing.T) {
 	}
 }
 
+// --- Regression: ExecCommandContext nil panic ---
+
+func TestRegistryLoginNilExecCommandContext(t *testing.T) {
+	// Regression: registry login must not panic when ExecCommandContext is nil
+	// (the production default). It must use the real exec.CommandContext fallback.
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Explicitly ensure ExecCommandContext is nil (production default).
+	app.ExecCommandContext = nil
+
+	reqBody := map[string]string{
+		"registry": "registry.example.com",
+		"username": "user",
+		"password": "secret",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/registry/login", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	// Must not panic.
+	app.handleRegistryLogin(w, req)
+
+	// In the test environment without a real Docker daemon, the command will fail,
+	// but the handler should return a proper error response, not panic.
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode: %v", err)
+	}
+	if resp.OK {
+		t.Error("expected ok=false (no real Docker daemon)")
+	}
+}
+
 // --- CLI tests ---
 
 func TestRegistryLoginCLIInteractive(t *testing.T) {
