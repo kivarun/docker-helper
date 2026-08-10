@@ -228,6 +228,8 @@ type pullResponse struct {
 }
 
 // pull sends POST /pull with the given image reference.
+// On non-2xx responses, the response body is still parsed so that
+// the daemon's "output" field is preserved for diagnostics.
 func (c *apiClient) pull(image string) (*pullResponse, error) {
 	body, err := json.Marshal(map[string]string{"image": image})
 	if err != nil {
@@ -240,15 +242,20 @@ func (c *apiClient) pull(image string) (*pullResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := c.readResponseBody(resp)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot read response: %w", err)
 	}
 
 	var result pullResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &result, parseApiError(resp.StatusCode, respBody)
+	}
+
 	return &result, nil
 }
 

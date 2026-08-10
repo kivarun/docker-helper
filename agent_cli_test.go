@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -49,19 +50,9 @@ func runAgentCLITestWithServer(t *testing.T, args []string, setupServer func(*ag
 	t.Helper()
 
 	tempDir := t.TempDir()
-	configPath := tempDir + "/config.json"
-	tokenPath := tempDir + "/admin.token"
-
-	if writeErr := os.WriteFile(configPath, []byte(`{"allowed_root":"`+tempDir+`","session_ttl":"12h"}`), 0600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	if writeErr := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
 	runtimeDir := tempDir + "/runtime"
-	if err := os.MkdirAll(runtimeDir+"/docker-helper", 0700); err != nil {
-		t.Fatal(err)
+	if mkErr := os.MkdirAll(runtimeDir+"/docker-helper", 0700); mkErr != nil {
+		t.Fatal(mkErr)
 	}
 	socketPath := runtimeDir + "/docker-helper/docker-helper.sock"
 
@@ -82,17 +73,14 @@ func runAgentCLITestWithServer(t *testing.T, args []string, setupServer func(*ag
 	defer server.Close()
 	time.Sleep(50 * time.Millisecond)
 
-	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
 	defer func() {
-		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
-		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
 		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
 	}()
 
-	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
 	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-session-token")
 
 	exitCode = runCommandWithWriters(args, &stdout, &stderr)
@@ -101,23 +89,14 @@ func runAgentCLITestWithServer(t *testing.T, args []string, setupServer func(*ag
 }
 
 func TestPullMissingSessionToken(t *testing.T) {
-	tempDir := t.TempDir()
-	configPath := tempDir + "/config.json"
-	if writeErr := os.WriteFile(configPath, []byte(`{"allowed_root":"`+tempDir+`","session_ttl":"12h"}`), 0600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
 	defer func() {
-		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
-		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
 		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
 	}()
 
-	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	os.Setenv("XDG_RUNTIME_DIR", tempDir+"/runtime")
+	os.Unsetenv("DOCKER_HELPER_SOCKET_PATH")
 	os.Unsetenv("DOCKER_HELPER_SESSION_TOKEN")
 
 	var out, err bytes.Buffer
@@ -618,5 +597,230 @@ func TestRunHelp(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Run a Docker container") {
 		t.Errorf("expected help text, got: %s", out.String())
+	}
+}
+
+// TestPullNoConfigFile verifies that pull works without config.json.
+// Agent containers only have DOCKER_HELPER_SESSION_TOKEN + socket mount.
+func TestPullNoConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /pull", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":      true,
+			"message": "image pulled successfully",
+			"output":  "Status: pulled\n",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
+	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
+	defer func() {
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
+		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
+	}()
+
+	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
+	os.Unsetenv("DOCKER_HELPER_CONFIG")
+
+	var out, stderr bytes.Buffer
+	exitCode := runCommandWithWriters([]string{"pull", "alpine:3.24"}, &out, &stderr)
+
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d", exitCode)
+	}
+	if !strings.Contains(out.String(), "pulled") {
+		t.Errorf("expected pull output, got: %s", out.String())
+	}
+}
+
+// TestWaitForOperationFinalLogsRace tests the race condition where:
+// - first logs request returns empty (next_offset=0)
+// - status is already terminal
+// - final logs request returns output
+func TestWaitForOperationFinalLogsRace(t *testing.T) {
+	opID := "op_test"
+	callCount := 0
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "succeeded",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			// First request: empty logs, next_offset=0
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"offset":       int64(0),
+				"next_offset":  int64(0),
+				"truncated":    false,
+				"logs":         "",
+			})
+		} else {
+			// Final request: has output
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"offset":       int64(0),
+				"next_offset":  int64(10),
+				"truncated":    false,
+				"logs":         "Final output\n",
+			})
+		}
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
+	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
+	defer func() {
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
+		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
+	}()
+
+	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
+
+	var out bytes.Buffer
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	status, err := waitForOperation(c, opID, &out)
+	if err != nil {
+		t.Fatalf("waitForOperation failed: %v", err)
+	}
+	if status.Status != "succeeded" {
+		t.Errorf("expected succeeded, got %s", status.Status)
+	}
+	if !strings.Contains(out.String(), "Final output") {
+		t.Errorf("expected final output, got: %s", out.String())
+	}
+}
+
+// TestRunInvalidMountOption verifies that unknown mount options are rejected.
+func TestRunInvalidMountOption(t *testing.T) {
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"run", "--image", "alpine:3.24", "--mount", ".:/workspace:rw", "--", "echo", "hi",
+	}, nil)
+	if exitCode != 2 {
+		t.Errorf("expected exit 2, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "invalid mount option") {
+		t.Errorf("expected mount option error, got: %s", stderr.String())
+	}
+}
+
+// TestRunFailedDiagnostics verifies that failed run prints diagnostics.
+func TestRunFailedDiagnostics(t *testing.T) {
+	opID := "op_test"
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"run", "--image", "alpine:3.24", "--", "echo", "hi",
+	}, func(s *agentCLITestServer) {
+		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "running",
+			})
+		})
+		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "failed",
+				"result_code":  "docker_run_failed",
+			})
+		})
+		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"offset":       int64(0),
+				"next_offset":  int64(0),
+				"truncated":    false,
+				"logs":         "",
+			})
+		})
+	})
+
+	if exitCode != 1 {
+		t.Errorf("expected exit 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "docker_run_failed") {
+		t.Errorf("expected result_code in error, got: %s", stderr.String())
+	}
+}
+
+// TestPullFailedPreservesOutput verifies that failed pull preserves Docker output.
+func TestPullFailedPreservesOutput(t *testing.T) {
+	out, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "invalid:tag"}, func(s *agentCLITestServer) {
+		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":      false,
+				"code":    "docker_pull_failed",
+				"message": "docker pull failed",
+				"output":  "Error: invalid reference\n",
+			})
+		})
+	})
+
+	if exitCode != 1 {
+		t.Errorf("expected exit 1, got %d", exitCode)
+	}
+	// Output goes to stdout, error message to stderr
+	if !strings.Contains(out.String(), "invalid reference") {
+		t.Errorf("expected Docker output in stdout, got: %s", out.String())
+	}
+	if !strings.Contains(stderr.String(), "docker pull failed") {
+		t.Errorf("expected error message in stderr, got: %s", stderr.String())
 	}
 }

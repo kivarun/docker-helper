@@ -12,23 +12,27 @@ import (
 const (
 	// operationPollInterval is the fixed interval between operation status polls.
 	operationPollInterval = 500 * time.Millisecond
+
+	// agentSocketPath is the default Unix socket path for agent-facing CLI commands.
+	// Agent containers receive this path via mount; no config.json required.
+	agentSocketPath = "/run/docker-helper/docker-helper.sock"
 )
 
 // agentClient returns an apiClient configured for the current session.
 // It reads the session token from DOCKER_HELPER_SESSION_TOKEN and uses
-// the local Unix socket from the config.
+// the default Unix socket path (no config.json required).
 func agentClient() (*apiClient, error) {
 	token := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
 	if token == "" {
 		return nil, fmt.Errorf("DOCKER_HELPER_SESSION_TOKEN is not set")
 	}
 
-	cfg, err := loadConfig()
-	if err != nil {
-		return nil, fmt.Errorf("cannot load config: %w", err)
+	socketPath := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
+	if socketPath == "" {
+		socketPath = agentSocketPath
 	}
 
-	return newUnixAPIClient(cfg.SocketPath, func() (string, error) {
+	return newUnixAPIClient(socketPath, func() (string, error) {
 		return token, nil
 	}, nil), nil
 }
@@ -42,12 +46,13 @@ func waitForOperation(c *apiClient, opID string, stdout io.Writer) (*operationSt
 	for {
 		// Fetch and print any new logs.
 		logs, err := c.operationLogs(opID, offset)
-		if err == nil {
-			if logs.Logs != "" {
-				fmt.Fprint(stdout, logs.Logs)
-			}
-			offset = logs.NextOffset
+		if err != nil {
+			return nil, err
 		}
+		if logs.Logs != "" {
+			fmt.Fprint(stdout, logs.Logs)
+		}
+		offset = logs.NextOffset
 
 		// Check operation status.
 		status, err := c.operationStatus(opID)
@@ -56,12 +61,13 @@ func waitForOperation(c *apiClient, opID string, stdout io.Writer) (*operationSt
 		}
 
 		if status.Status == "succeeded" || status.Status == "failed" {
-			// Read remaining logs one final time.
-			if offset > 0 {
-				logs, err := c.operationLogs(opID, offset)
-				if err == nil && logs.Logs != "" {
-					fmt.Fprint(stdout, logs.Logs)
-				}
+			// Read remaining logs one final time (always, even if offset == 0).
+			finalLogs, err := c.operationLogs(opID, offset)
+			if err != nil {
+				return nil, err
+			}
+			if finalLogs.Logs != "" {
+				fmt.Fprint(stdout, finalLogs.Logs)
 			}
 			return status, nil
 		}
@@ -88,17 +94,19 @@ var pullCommand = &Command{
 				}
 
 				resp, err := c.pull(image)
+				if resp != nil && resp.Output != "" {
+					fmt.Fprint(stdout, resp.Output)
+				}
+
 				if err != nil {
 					fmt.Fprintln(stderr, err)
 					return 1
 				}
 
-				if resp.Output != "" {
-					fmt.Fprint(stdout, resp.Output)
-				}
-
 				if !resp.OK {
-					fmt.Fprintln(stderr, resp.Message)
+					if resp.Message != "" {
+						fmt.Fprintln(stderr, resp.Message)
+					}
 					return 1
 				}
 
@@ -240,7 +248,11 @@ var runContainerCommand = &Command{
 						Source: parts[0],
 						Target: parts[1],
 					}
-					if len(parts) == 3 && parts[2] == "ro" {
+					if len(parts) == 3 {
+						if parts[2] != "ro" {
+							fmt.Fprintf(stderr, "invalid mount option: %q (only 'ro' is supported)\n", parts[2])
+							return 2
+						}
 						rm.ReadOnly = true
 					}
 					runMounts = append(runMounts, rm)
@@ -280,10 +292,19 @@ var runContainerCommand = &Command{
 
 				// container_exit_nonzero: return the container's exit code
 				if status.ResultCode == "container_exit_nonzero" && status.ExitCode != nil {
+					fmt.Fprintf(stderr, "run failed (container_exit_nonzero), exit_code=%d\n", *status.ExitCode)
 					return *status.ExitCode
 				}
 
-				// Other failures
+				// Other failures: print diagnostics
+				msg := "run failed"
+				if status.ResultCode != "" {
+					msg += " (" + status.ResultCode + ")"
+				}
+				if status.ExitCode != nil {
+					msg += fmt.Sprintf(", exit_code=%d", *status.ExitCode)
+				}
+				fmt.Fprintln(stderr, msg)
 				return 1
 			},
 		}
