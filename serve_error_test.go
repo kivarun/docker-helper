@@ -41,10 +41,11 @@ func TestServeErrorPathTerminatesOperations(t *testing.T) {
 	listener.Close()
 
 	// serveWithShutdown will get the serve error (not signal path).
-	shutdownCtx, shutdownCancel, err := serveWithShutdown(signalCtx, server, listener, 2*time.Second, func() {
+	shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdown(signalCtx, server, listener, 2*time.Second, func() {
 		reg.setShuttingDown()
 	})
-	defer shutdownCancel()
+	shutdownCancel()
+	<-drainDone
 
 	// serveWithShutdown should return the serve error.
 	if err == nil {

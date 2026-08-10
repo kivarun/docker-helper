@@ -222,8 +222,12 @@ func (r *operationRegistry) setShuttingDown() {
 // The killContainer callback (may be nil) is called for run operations
 // that have a cidfile, to perform daemon-side container cleanup before
 // force-killing the CLI process.
+//
+// For daemon shutdown, the caller's context deadline is the authoritative
+// absolute deadline. All operations share this deadline. Force cleanup
+// runs concurrently for all remaining operations.
 func (r *operationRegistry) terminateAll(ctx context.Context, killContainer func(context.Context, string)) {
-	r.terminateAllOps(ctx, nil, killContainer, terminationShutdown)
+	r.terminateAllOps(ctx, nil, killContainer, terminationShutdown, true)
 }
 
 // terminateOne cancels a single operation by ID.
@@ -245,7 +249,7 @@ func (r *operationRegistry) terminateOne(id string, killContainer func(context.C
 	}
 	op.mu.Unlock()
 
-	r.terminateAllOps(context.Background(), op, killContainer, terminationCancelled)
+	r.terminateAllOps(context.Background(), op, killContainer, terminationCancelled, false)
 	return nil
 }
 
@@ -254,7 +258,13 @@ func (r *operationRegistry) terminateOne(id string, killContainer func(context.C
 // If targetOp is nil, all operations are terminated (shutdown).
 // If targetOp is non-nil, only that operation is terminated (cancel).
 // reason distinguishes shutdown from explicit cancel for result semantics.
-func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *operation, killContainer func(context.Context, string), reason terminationReason) {
+// isShutdown controls the deadline model:
+//
+//	shutdown: caller's ctx deadline is the absolute daemon shutdown deadline.
+//	  graceful SIGTERM starts immediately. Force cleanup runs concurrently
+//	  for all remaining operations under the same deadline.
+//	cancel: per-operation bounded cleanup with a fresh force-cleanup budget.
+func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *operation, killContainer func(context.Context, string), reason terminationReason, isShutdown bool) {
 	// Normalize context: if the caller did not supply a deadline, create
 	// a bounded termination context so that all wait paths are guaranteed
 	// to be bounded. This prevents unbounded waits when terminateOne
@@ -275,6 +285,22 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		}
 	}
 	r.mu.RUnlock()
+
+	// Determine force deadline and graceful wait end.
+	// For shutdown: the root deadline is authoritative.
+	// Reserve defaultForceCleanupTimeout at the tail for force cleanup.
+	var forceDeadline time.Time
+	var forceStart time.Time
+	if isShutdown {
+		dl, _ := ctx.Deadline()
+		forceDeadline = dl
+		forceStart = dl.Add(-defaultForceCleanupTimeout)
+		// If remaining budget is shorter than force cleanup reserve,
+		// begin force cleanup immediately.
+		if time.Now().After(forceStart) {
+			forceStart = time.Time{} // zero means "skip graceful"
+		}
+	}
 
 	// Phase 0+1: For each operation, atomically decide its fate under op.mu.
 	// If not started: mark terminated (blocks cmd.Start from proceeding).
@@ -301,74 +327,172 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		terminatedSet[op] = struct{}{}
 	}
 
-	// Phase 2: Wait for each operation to complete. If the termination
-	// context expires, claim force-cleanup ownership (single-owner) and
-	// perform bounded daemon-side cleanup.
+	// Phase 2: Wait for each operation to complete gracefully.
+	// For shutdown, wait only until forceStart.
+	// For cancel, wait until ctx deadline.
+	var completed []*operation
 	for _, op := range ops {
 		if _, ok := terminatedSet[op]; ok {
 			continue
 		}
 		select {
 		case <-op.done:
+			completed = append(completed, op)
 		case <-ctx.Done():
-			// Deadline exceeded: claim force-cleanup ownership under op.mu.
-			// Only the first caller to claim performs the actual cleanup.
-			// All callers share a single absolute force-cleanup deadline
-			// via op.forceDeadline.
-			op.mu.Lock()
-			if op.forceOwned {
-				// Another termination path already claimed force cleanup.
-				// Wait for the shared force phase to complete, bounded
-				// by the remaining time until the shared deadline.
-				forceDone := op.forceDone
-				forceDeadline := op.forceDeadline
-				op.mu.Unlock()
-				remaining := time.Until(forceDeadline)
-				if remaining > 0 {
-					timer := time.NewTimer(remaining)
-					select {
-					case <-forceDone:
-						timer.Stop()
-					case <-timer.C:
-					}
-				}
-				continue
+			// Deadline exceeded.
+			if !isShutdown {
+				// Cancel mode: legacy sequential force cleanup with per-op deadline.
+				r.forceCleanupSequential(op, killContainer)
 			}
-			if op.CompletedAt != nil {
-				// Operation completed naturally just before force claim.
-				// No cleanup needed.
-				op.mu.Unlock()
-				continue
-			}
-			op.forceOwned = true
-			op.forceDone = make(chan struct{})
-			op.forceDeadline = time.Now().Add(defaultForceCleanupTimeout)
-			forceDeadline := op.forceDeadline
-			forceDone := op.forceDone
-			op.mu.Unlock()
-
-			// Force cleanup phase (single owner):
-			// bounded daemon-side cleanup before force-killing the docker run CLI.
-			// Uses the shared force deadline so followers can bound their wait
-			// to the same absolute deadline rather than independent timers.
-			forceCtx, forceCancel := context.WithDeadline(
-				context.Background(), forceDeadline,
-			)
-			if op.cidfile != "" {
-				containerID := waitForContainerID(forceCtx, op)
-				if containerID != "" && killContainer != nil {
-					killContainer(forceCtx, containerID)
-				}
-			}
-			op.mu.Lock()
-			if op.cmd != nil && op.cmd.Process != nil {
-				op.cmd.Process.Kill()
-			}
-			op.mu.Unlock()
-			forceCancel()
-			close(forceDone)
+			// Shutdown mode: handled below with concurrent force cleanup.
 		}
 	}
+
+	// For shutdown: also wait until forceStart for any remaining operations.
+	if isShutdown && !forceStart.IsZero() {
+		remaining := time.Until(forceStart)
+		if remaining > 0 {
+			completedSet := make(map[*operation]struct{}, len(completed))
+			for _, c := range completed {
+				completedSet[c] = struct{}{}
+			}
+			for _, op := range ops {
+				if _, ok := terminatedSet[op]; ok {
+					continue
+				}
+				if _, ok := completedSet[op]; ok {
+					continue
+				}
+				select {
+				case <-op.done:
+					completed = append(completed, op)
+				case <-time.After(remaining):
+					// forceStart reached, proceed to force cleanup.
+				}
+			}
+		}
+	}
+
+	// Phase 3: Force cleanup for remaining operations.
+	// For shutdown: concurrent force cleanup under the shared deadline.
+	// For cancel: already handled sequentially above.
+	if isShutdown {
+		completedSet := make(map[*operation]struct{}, len(completed))
+		for _, c := range completed {
+			completedSet[c] = struct{}{}
+		}
+
+		var wg sync.WaitGroup
+		for _, op := range ops {
+			if _, ok := terminatedSet[op]; ok {
+				continue
+			}
+			if _, ok := completedSet[op]; ok {
+				continue
+			}
+			wg.Add(1)
+			go func(op *operation) {
+				defer wg.Done()
+				forceCleanupOperation(op, killContainer, forceDeadline)
+			}(op)
+		}
+		wg.Wait()
+	}
+}
+
+// forceCleanupSequential performs sequential force cleanup for a single
+// operation using a per-operation force-cleanup deadline. Used by cancel mode.
+func (r *operationRegistry) forceCleanupSequential(op *operation, killContainer func(context.Context, string)) {
+	op.mu.Lock()
+	if op.forceOwned {
+		forceDone := op.forceDone
+		forceDeadline := op.forceDeadline
+		op.mu.Unlock()
+		remaining := time.Until(forceDeadline)
+		if remaining > 0 {
+			timer := time.NewTimer(remaining)
+			select {
+			case <-forceDone:
+				timer.Stop()
+			case <-timer.C:
+			}
+		}
+		return
+	}
+	if op.CompletedAt != nil {
+		op.mu.Unlock()
+		return
+	}
+	op.forceOwned = true
+	op.forceDone = make(chan struct{})
+	op.forceDeadline = time.Now().Add(defaultForceCleanupTimeout)
+	forceDeadline := op.forceDeadline
+	forceDone := op.forceDone
+	op.mu.Unlock()
+
+	forceCtx, forceCancel := context.WithDeadline(context.Background(), forceDeadline)
+	if op.cidfile != "" {
+		containerID := waitForContainerID(forceCtx, op)
+		if containerID != "" && killContainer != nil {
+			killContainer(forceCtx, containerID)
+		}
+	}
+	op.mu.Lock()
+	if op.cmd != nil && op.cmd.Process != nil {
+		op.cmd.Process.Kill()
+	}
+	op.mu.Unlock()
+	forceCancel()
+	close(forceDone)
+}
+
+// forceCleanupOperation performs the force-cleanup phase for a single
+// operation under a shared absolute deadline. Used by shutdown mode.
+// Only one goroutine performs the actual cleanup (single-owner guard).
+// Followers wait until the shared deadline.
+func forceCleanupOperation(op *operation, killContainer func(context.Context, string), forceDeadline time.Time) {
+	op.mu.Lock()
+	if op.forceOwned {
+		// Another termination path already claimed force cleanup.
+		// Wait for the shared force phase to complete, bounded
+		// by the remaining time until the shared deadline.
+		forceDone := op.forceDone
+		op.mu.Unlock()
+		remaining := time.Until(forceDeadline)
+		if remaining > 0 {
+			timer := time.NewTimer(remaining)
+			select {
+			case <-forceDone:
+				timer.Stop()
+			case <-timer.C:
+			}
+		}
+		return
+	}
+	if op.CompletedAt != nil {
+		op.mu.Unlock()
+		return
+	}
+	op.forceOwned = true
+	op.forceDone = make(chan struct{})
+	op.mu.Unlock()
+
+	// Force cleanup phase (single owner):
+	// bounded daemon-side cleanup before force-killing the process.
+	forceCtx, forceCancel := context.WithDeadline(context.Background(), forceDeadline)
+	if op.cidfile != "" {
+		containerID := waitForContainerID(forceCtx, op)
+		if containerID != "" && killContainer != nil {
+			killContainer(forceCtx, containerID)
+		}
+	}
+	op.mu.Lock()
+	if op.cmd != nil && op.cmd.Process != nil {
+		op.cmd.Process.Kill()
+	}
+	op.mu.Unlock()
+	forceCancel()
+	close(op.forceDone)
 }
 
 // boundedBuffer is a thread-safe rolling byte buffer that preserves the newest
