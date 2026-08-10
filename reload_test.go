@@ -216,7 +216,7 @@ func TestSystemdExecReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "ExecReload=/usr/bin/docker-helper reload") {
+	if !strings.Contains(content, "ExecReload=%h/.local/bin/docker-helper reload") {
 		t.Fatalf("systemd unit missing ExecReload, got:\n%s", content)
 	}
 }

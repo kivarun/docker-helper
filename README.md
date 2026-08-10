@@ -25,12 +25,18 @@ Full architecture and detailed API documentation: [docs/architecture.md](docs/ar
 ## Prerequisites
 
 - Linux
-- Go 1.23 with CGO enabled and a C compiler
 - Docker CLI and access to a running Docker daemon
+
+To build from source, you additionally need:
+- Go 1.23 with CGO enabled and a C compiler
 
 ## Docker access
 
 The user running docker-helper must be able to access the Docker daemon.
+docker-helper runs as a **user service** and does not use sudo (except
+optionally for the AppArmor profile). Ensure the current user has Docker
+access before installing.
+
 For a standard rootful Docker installation, add the user to the `docker`
 group:
 
@@ -49,16 +55,71 @@ Membership in the `docker` group is effectively root-level access to the
 host. For rootless Docker, use the already configured Docker environment
 instead of adding the user to the `docker` group.
 
-## Getting started
+## Installation
 
-### 1. Build and install
+### Quick start (release tarball)
+
+Download the release tarball for your platform, extract it, and run the
+installer:
+
+```bash
+tar xzf docker-helper-*.tar.gz
+cd docker-helper-*
+./install.sh
+```
+
+The installer:
+
+- copies the binary to `~/.local/bin/docker-helper`;
+- installs the systemd user unit to `~/.config/systemd/user/`;
+- optionally installs an AppArmor profile (requires sudo for this step only);
+- prompts to run `docker-helper init` and enable+start the user service.
+
+For a fully non-interactive installation:
+
+```bash
+./install.sh --yes
+```
+
+### Manual installation
+
+Build from source and place the binary in `~/.local/bin`:
 
 ```bash
 go build -o docker-helper .
-sudo install -Dm755 docker-helper /usr/bin/docker-helper
+mkdir -p ~/.local/bin
+cp docker-helper ~/.local/bin/docker-helper
 ```
 
-### 2. Initialize
+Ensure `~/.local/bin` is on your PATH (most distributions add it via
+`~/.profile` or `/etc/profile`).
+
+Install the systemd user unit:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp packaging/systemd/user/docker-helper.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
+
+### Uninstall
+
+Soft uninstall (preserves config and state):
+
+```bash
+./uninstall.sh
+```
+
+Hard uninstall (also removes `~/.config/docker-helper` and
+`~/.local/state/docker-helper`):
+
+```bash
+./uninstall.sh --purge
+```
+
+## Getting started
+
+### 1. Initialize
 
 ```bash
 docker-helper init
@@ -113,7 +174,7 @@ The same environment variable must be supplied to the daemon and CLI.
 `DOCKER_HELPER_CONFIG` does not relocate runtime or state data; those
 continue to follow `XDG_RUNTIME_DIR` and `XDG_STATE_HOME`.
 
-### 3. Review and modify configuration
+### 2. Review and modify configuration
 
 ```bash
 docker-helper config show
@@ -215,7 +276,7 @@ config.json. If present, configuration validation and daemon startup fail:
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
 
-### 4. Start the daemon
+### 3. Start the daemon
 
 Choose one of the startup modes below. The daemon listens on the Unix
 socket at `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`
@@ -237,11 +298,9 @@ to stdout, operational logs to stderr. Stop the daemon with Ctrl+C.
 The systemd user service runs as the current user. That user must have
 Docker access before the service is started.
 
-Install the unit and start the service:
+Enable and start the service:
 
 ```bash
-sudo install -Dm644 packaging/systemd/user/docker-helper.service \
-  /usr/lib/systemd/user/docker-helper.service
 systemctl --user daemon-reload
 systemctl --user enable --now docker-helper
 ```
@@ -510,6 +569,9 @@ Note: `docker-helper config show` (without a field) displays
   permissions. The coding tool must not be given access to docker.sock.
 - **Container policy** — containers run with `--rm`, host UID/GID,
   and `--security-opt label=disable`.
+- **AppArmor** — an optional AppArmor profile is included in the release
+  tarball and can be installed during `./install.sh` to further restrict
+  daemon access.
 
 **Known limitations:**
 

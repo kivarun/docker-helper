@@ -1,0 +1,67 @@
+# Docker Helper — user-service sandbox profile.
+#
+# This profile restricts the docker-helper daemon to the minimum
+# filesystem and capability access needed to mediate Docker operations.
+#
+# Install:
+#   sudo cp docker-helper /etc/apparmor.d/
+#   sudo aa-enforce docker-helper
+
+#include <tunables/global>
+
+profile docker-helper flags=(attach_disconnected,mediate_deleted) {
+	#include <abstractions/base>
+
+	# Allow reading the user's config and state.
+	owner @{HOME}/.config/docker-helper/ r,
+	owner @{HOME}/.config/docker-helper/** r,
+	owner @{HOME}/.local/state/docker-helper/ r,
+	owner @{HOME}/.local/state/docker-helper/** rw,
+
+	# Runtime directory (socket, session Docker dirs).
+	owner /run/user/*/docker-helper/ r,
+	owner /run/user/*/docker-helper/** rw,
+
+	# Docker socket — required to execute Docker commands.
+	/run/docker.sock rw,
+	/var/run/docker.sock rw,
+
+	# Docker CLI binary.
+	/usr/bin/docker rix,
+
+	# Allow the binary itself to be executed.
+	owner @{HOME}/.local/bin/docker-helper r,
+
+	# /tmp for Docker build contexts and temporary files.
+	/tmp/ r,
+	owner /tmp/** rw,
+
+	# Standard system files.
+	/etc/passwd r,
+	/etc/group r,
+	/etc/nsswitch.conf r,
+	/etc/host.conf r,
+	/etc/ld.so.cache r,
+	/etc/ld.so.preload r,
+	/etc/ld.so.conf r,
+	/etc/ld.so.conf/** r,
+	/lib/** r,
+	/usr/lib/** r,
+	/usr/bin/** r,
+	/bin/** r,
+
+	# Network access (for registry pulls, etc.).
+	network inet tcp,
+	network inet udp,
+	network inet6 tcp,
+	network inet6 udp,
+
+	# Deny privilege escalation.
+	deny /proc/sys/kernel/** w,
+	deny capability sys_admin,
+	deny capability sys_ptrace,
+	deny capability sys_rawio,
+	deny capability dac_override,
+	deny capability setuid,
+	deny capability setgid,
+}

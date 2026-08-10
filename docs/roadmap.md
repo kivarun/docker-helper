@@ -132,6 +132,10 @@ Uninstall direction:
 Release 1 target environment is openSUSE and Ubuntu, plus the generic Linux
 `tar.gz` installation path.
 
+**Completed.** `install.sh` and `uninstall.sh` provide user-only installation
+to `~/.local/bin/` with systemd user unit, optional AppArmor profile,
+and `--yes`/`--purge` flags for non-interactive and hard-remove workflows.
+
 ### 5. Release build and GitHub release
 
 Add minimal release automation:
