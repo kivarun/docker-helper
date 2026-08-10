@@ -1060,10 +1060,7 @@ func TestServerErrorLogGoesToOperational(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	server := &http.Server{
-		ErrorLog: slog.NewLogLogger(
-			opLog(context.Background()).Handler(), slog.LevelError),
-	}
+	server := newHTTPServer(http.NewServeMux())
 
 	server.ErrorLog.Print("synthetic http server error")
 

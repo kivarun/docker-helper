@@ -287,12 +287,7 @@ func runServe(stdout, stderr io.Writer) error {
 		mux.HandleFunc("GET /operations/{id}/logs", withRequestID(withLogging(app.handleOperationLogs)))
 		mux.HandleFunc("POST /operations/{id}/cancel", withRequestID(withLogging(app.handleOperationCancel)))
 
-		server := &http.Server{
-			Handler:           mux,
-			ReadHeaderTimeout: 10 * time.Second,
-			ErrorLog: slog.NewLogLogger(
-				opLog(context.Background()).Handler(), slog.LevelError),
-		}
+		server := newHTTPServer(mux)
 
 		logger := logging.snapshotLogger()
 
@@ -359,5 +354,16 @@ func main() {
 	exitCode := runCommand(os.Args[1:])
 	if exitCode != 0 {
 		os.Exit(exitCode)
+	}
+}
+
+// newHTTPServer creates the production HTTP server with operational
+// ErrorLog bridged to the configured operational logger.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ErrorLog: slog.NewLogLogger(
+			opLog(context.Background()).Handler(), slog.LevelError),
 	}
 }
