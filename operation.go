@@ -41,29 +41,30 @@ const (
 )
 
 type operation struct {
-	mu          sync.Mutex
-	ID          string         `json:"operation_id"`
-	SessionID   string         `json:"session_id"`
-	Kind        string         `json:"kind"`
-	State       operationState `json:"status"`
-	CreatedAt   time.Time      `json:"created_at"`
-	StartedAt   *time.Time     `json:"started_at,omitempty"`
-	CompletedAt *time.Time     `json:"completed_at,omitempty"`
-	Duration    *string        `json:"duration,omitempty"`
-	ExitCode    *int           `json:"exit_code,omitempty"`
-	ResultCode  *string        `json:"result_code,omitempty"`
-	Image       string         `json:"image,omitempty"`
-	Context     string         `json:"context,omitempty"`
-	Dockerfile  string         `json:"dockerfile,omitempty"`
-	LogBuffer   *boundedBuffer `json:"-"`
-	cmd         *exec.Cmd
-	done        chan struct{}
-	doneOnce    sync.Once // ensures op.done is closed exactly once
-	terminated  bool      // set by terminateAll/terminateOne when process not yet started
-	reason      terminationReason
-	started     bool          // set to true only after cmd.Start() succeeds
-	forceOwned  bool          // true when force cleanup has been claimed for this operation
-	forceDone   chan struct{} // closed when shared force-cleanup phase completes
+	mu            sync.Mutex
+	ID            string         `json:"operation_id"`
+	SessionID     string         `json:"session_id"`
+	Kind          string         `json:"kind"`
+	State         operationState `json:"status"`
+	CreatedAt     time.Time      `json:"created_at"`
+	StartedAt     *time.Time     `json:"started_at,omitempty"`
+	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
+	Duration      *string        `json:"duration,omitempty"`
+	ExitCode      *int           `json:"exit_code,omitempty"`
+	ResultCode    *string        `json:"result_code,omitempty"`
+	Image         string         `json:"image,omitempty"`
+	Context       string         `json:"context,omitempty"`
+	Dockerfile    string         `json:"dockerfile,omitempty"`
+	LogBuffer     *boundedBuffer `json:"-"`
+	cmd           *exec.Cmd
+	done          chan struct{}
+	doneOnce      sync.Once // ensures op.done is closed exactly once
+	terminated    bool      // set by terminateAll/terminateOne when process not yet started
+	reason        terminationReason
+	started       bool          // set to true only after cmd.Start() succeeds
+	forceOwned    bool          // true when force cleanup has been claimed for this operation
+	forceDone     chan struct{} // closed when shared force-cleanup phase completes
+	forceDeadline time.Time     // absolute deadline shared by owner and all followers
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
 	// publishes the container ID into the file after the daemon creates
@@ -312,18 +313,24 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		case <-ctx.Done():
 			// Deadline exceeded: claim force-cleanup ownership under op.mu.
 			// Only the first caller to claim performs the actual cleanup.
-			// All callers (owner and followers) share a single bounded
-			// force-cleanup budget via op.forceDone.
+			// All callers share a single absolute force-cleanup deadline
+			// via op.forceDeadline.
 			op.mu.Lock()
 			if op.forceOwned {
 				// Another termination path already claimed force cleanup.
 				// Wait for the shared force phase to complete, bounded
-				// by the force-cleanup budget.
+				// by the remaining time until the shared deadline.
 				forceDone := op.forceDone
+				forceDeadline := op.forceDeadline
 				op.mu.Unlock()
-				select {
-				case <-forceDone:
-				case <-time.After(defaultForceCleanupTimeout):
+				remaining := time.Until(forceDeadline)
+				if remaining > 0 {
+					timer := time.NewTimer(remaining)
+					select {
+					case <-forceDone:
+						timer.Stop()
+					case <-timer.C:
+					}
 				}
 				continue
 			}
@@ -335,18 +342,17 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 			}
 			op.forceOwned = true
 			op.forceDone = make(chan struct{})
+			op.forceDeadline = time.Now().Add(defaultForceCleanupTimeout)
+			forceDeadline := op.forceDeadline
 			forceDone := op.forceDone
 			op.mu.Unlock()
 
 			// Force cleanup phase (single owner):
 			// bounded daemon-side cleanup before force-killing the docker run CLI.
-			//
-			// The cidfile may not yet be populated because Docker daemon
-			// publishes the container ID asynchronously after cmd.Start().
-			// We use a single bounded cleanup context that covers both
-			// waiting for the cidfile and the docker kill itself.
-			forceCtx, forceCancel := context.WithTimeout(
-				context.Background(), defaultForceCleanupTimeout,
+			// Uses the shared force deadline so followers can bound their wait
+			// to the same absolute deadline rather than independent timers.
+			forceCtx, forceCancel := context.WithDeadline(
+				context.Background(), forceDeadline,
 			)
 			if op.cidfile != "" {
 				containerID := waitForContainerID(forceCtx, op)
