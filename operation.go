@@ -77,6 +77,7 @@ type operation struct {
 	auditCommandArgCount *int
 	auditMounts          []auditMount
 	auditEnvKeys         []string
+	auditBuildArgKeys    []string
 }
 
 func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64) *operation {
@@ -635,6 +636,7 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 		CommandArgCount: op.auditCommandArgCount,
 		Mounts:          op.auditMounts,
 		EnvKeys:         op.auditEnvKeys,
+		BuildArgKeys:    op.auditBuildArgKeys,
 		Result:          *op.ResultCode,
 		ExitCode:        exitCode,
 		Duration:        dur,

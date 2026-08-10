@@ -339,6 +339,21 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
   http://localhost/build
 ```
 
+Optional `build_args` (map of string keys to string values) passes
+build-time variables to Docker:
+
+```bash
+curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -d '{"context":".","dockerfile":"Dockerfile","image":"myapp:v1","build_args":{"FOO":"bar","VERSION":"1.2.3"}}' \
+  http://localhost/build
+```
+
+Build-arg names must match `[A-Za-z_][A-Za-z0-9_]*`. Empty values are valid.
+Build args are **not intended for secrets** — values are visible in Docker
+build logs and audit metadata (keys only, never values).
+
 Response (HTTP 201):
 
 ```json

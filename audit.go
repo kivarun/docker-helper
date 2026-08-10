@@ -13,6 +13,7 @@ type auditRecord struct {
 	CommandArgCount *int         `json:"command_arg_count,omitempty"`
 	Mounts          []auditMount `json:"mounts,omitempty"`
 	EnvKeys         []string     `json:"env_keys,omitempty"`
+	BuildArgKeys    []string     `json:"build_arg_keys,omitempty"`
 	Context         string       `json:"context,omitempty"`
 	Dockerfile      string       `json:"dockerfile,omitempty"`
 	Workspace       string       `json:"workspace,omitempty"`

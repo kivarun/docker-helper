@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,9 +17,10 @@ import (
 var ErrInternal = errors.New("internal error")
 
 type buildRequest struct {
-	Context    string `json:"context"`
-	Dockerfile string `json:"dockerfile"`
-	Image      string `json:"image"`
+	Context    string            `json:"context"`
+	Dockerfile string            `json:"dockerfile"`
+	Image      string            `json:"image"`
+	BuildArgs  map[string]string `json:"build_args,omitempty"`
 }
 
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
@@ -50,10 +52,18 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate build-arg names and collect sorted keys.
+	buildArgKeys, err := validateBuildArgs(req.BuildArgs)
+	if err != nil {
+		writeError(ctx, w, http.StatusBadRequest, "invalid_build_args", "invalid build args")
+		return
+	}
+
 	cfg := a.getConfig()
 	bufSize := cfg.OperationLogMaxBytes
 
 	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize)
+	op.auditBuildArgKeys = buildArgKeys
 
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
@@ -64,12 +74,13 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:       "build.start",
-		SessionID:   session.ID,
-		OperationID: op.ID,
-		Image:       req.Image,
-		Context:     req.Context,
-		Dockerfile:  req.Dockerfile,
+		Event:        "build.start",
+		SessionID:    session.ID,
+		OperationID:  op.ID,
+		Image:        req.Image,
+		Context:      req.Context,
+		Dockerfile:   req.Dockerfile,
+		BuildArgKeys: buildArgKeys,
 	})
 
 	// Build the command synchronously and start it.
@@ -80,8 +91,13 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		"--sbom=false",
 		"--file", dockerfilePath,
 		"--tag", req.Image,
-		contextPath,
 	}
+
+	// Append build-arg entries in sorted key order.
+	for _, key := range buildArgKeys {
+		args = append(args, "--build-arg", key+"="+req.BuildArgs[key])
+	}
+	args = append(args, contextPath)
 
 	cmdCtx, cancel := context.WithCancel(context.Background())
 
@@ -416,4 +432,21 @@ func isInside(parent, child string) bool {
 
 	return relative != ".." &&
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// validateBuildArgs validates build-arg names and returns sorted keys.
+// Empty map or nil returns nil keys with no error.
+func validateBuildArgs(args map[string]string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		if !envNamePattern.MatchString(k) {
+			return nil, fmt.Errorf("invalid build arg name: %q", k)
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
