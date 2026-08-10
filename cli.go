@@ -216,6 +216,13 @@ func (c *Command) printHelp(w io.Writer, path []string) {
 	// Always print -h/--help
 	fmt.Fprintln(w, "  -h, --help  Show help for this command")
 	fmt.Fprintln(w)
+
+	// Root command: add hint about help <command>
+	if c == rootCommand {
+		fmt.Fprintln(w, "Run 'docker-helper help <command>' or 'docker-helper <command> --help'")
+		fmt.Fprintln(w, "for command-specific help.")
+		fmt.Fprintln(w)
+	}
 }
 
 func (c *Command) usageLine(prefix string) string {
@@ -380,17 +387,57 @@ configuration and this command returns an error.`,
 }
 
 var helpCommand = &Command{
-	Name:    "help",
-	Summary: "Show help",
-	Usage:   "docker-helper help",
+	Name:       "help",
+	Summary:    "Show help",
+	Usage:      "docker-helper help [command]",
+	MaxPosArgs: -1, // Allow unlimited positional args for nested commands
+	Help: `Show help for docker-helper or a specific command.
+
+Run 'docker-helper help <command>' or 'docker-helper <command> --help'
+for command-specific help.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				rootCommand.printHelp(stdout, []string{})
+				args := fs.Args()
+				if len(args) == 0 {
+					rootCommand.printHelp(stdout, []string{})
+					return 0
+				}
+
+				// Walk the command tree to find the target command
+				cmd := findCommand(rootCommand, args)
+				if cmd == nil {
+					fmt.Fprintf(stderr, "error: unknown command %q\n", strings.Join(args, " "))
+					return 2
+				}
+
+				cmd.printHelp(stdout, append([]string{}, args...))
 				return 0
 			},
 		}
 	},
+}
+
+// findCommand walks the command tree to find a command by name path.
+func findCommand(cmd *Command, names []string) *Command {
+	if len(names) == 0 {
+		return cmd
+	}
+
+	// If current command is a leaf, we can't go deeper
+	if cmd.NewInvocation != nil {
+		return nil
+	}
+
+	for _, sub := range cmd.Subcommands {
+		if sub.Name == names[0] {
+			if len(names) == 1 {
+				return sub
+			}
+			return findCommand(sub, names[1:])
+		}
+	}
+	return nil
 }
 
 func init() {

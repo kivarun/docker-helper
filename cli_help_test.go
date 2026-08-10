@@ -467,3 +467,70 @@ func TestInitHelpDoesNotCreateDirs(t *testing.T) {
 		t.Error("init --help should not create state directory")
 	}
 }
+
+// --- Help subcommand tests ---
+
+func TestHelpCommandEquivalence(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"help build", []string{"help", "build"}},
+		{"help pull", []string{"help", "pull"}},
+		{"help run", []string{"help", "run"}},
+		{"help registry login", []string{"help", "registry", "login"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var helpOut, helpErr bytes.Buffer
+			helpCode := runCommandWithWriters(tt.args, &helpOut, &helpErr)
+
+			equivalentArgs := append(tt.args[1:], "--help")
+			var flagOut, flagErr bytes.Buffer
+			flagCode := runCommandWithWriters(equivalentArgs, &flagOut, &flagErr)
+
+			if helpCode != 0 {
+				t.Errorf("help %s: expected exit 0, got %d", strings.Join(tt.args, " "), helpCode)
+			}
+			if flagCode != 0 {
+				t.Errorf("%s --help: expected exit 0, got %d", strings.Join(equivalentArgs, " "), flagCode)
+			}
+			if helpOut.String() != flagOut.String() {
+				t.Errorf("help output mismatch\nhelp: %s\nflag: %s", helpOut.String(), flagOut.String())
+			}
+		})
+	}
+}
+
+func TestHelpUnknownCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"help", "wat"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown command") {
+		t.Errorf("expected unknown command error, got: %s", stderr.String())
+	}
+}
+
+func TestHelpUnknownNestedCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"help", "registry", "wat"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown command") {
+		t.Errorf("expected unknown command error, got: %s", stderr.String())
+	}
+}
+
+func TestRootHelpContainsHint(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "docker-helper help <command>") {
+		t.Errorf("expected help hint in root output, got: %s", stdout.String())
+	}
+}
