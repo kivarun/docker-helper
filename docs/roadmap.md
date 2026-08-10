@@ -37,7 +37,9 @@ Verified against current implementation:
 - developer rules in root `AGENTS.md`;
 - documentation cleanup (README, architecture, agent instructions);
 - version source prepared for ldflags release injection (`var version = "dev"`);
-- image-reference syntax delegated to Docker (no home-grown regex).
+- image-reference syntax delegated to Docker (no home-grown regex);
+- private-registry authentication (`POST /registry/login`, per-session
+  Docker config, CLI `registry login` with interactive password prompt).
 
 ## Release 1 blockers
 
@@ -82,8 +84,13 @@ concurrent drain + operation termination, and force cleanup is implemented.
 
 ### 3. Private-registry authentication
 
-Agents need to build from and run images from private registries. The
-authentication mechanism is not yet designed.
+Agents need to build from and run images from private registries.
+
+**Completed.** `POST /registry/login` authenticates per-session using
+a session-scoped Docker config directory. Credentials are isolated per
+session and cleaned up on session delete. CLI supports interactive
+password prompt and `--password` flag. Audit events track login
+attempts without exposing credentials.
 
 ### 4. Installation / service packaging
 

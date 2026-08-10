@@ -442,6 +442,36 @@ curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
 The operation becomes terminal with `status=failed` and `result_code=cancelled`.
 Cancelling an already-terminal operation is idempotent (returns current state).
 
+### Private registry authentication
+
+Authenticate with a private registry before pulling images:
+
+```bash
+curl --unix-socket "$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "registry": "registry.example.com",
+    "username": "myuser",
+    "password": "mypassword"
+  }' \
+  http://localhost/registry/login
+```
+
+Or use the CLI:
+
+```bash
+docker-helper registry login \
+  --registry registry.example.com \
+  --username myuser
+```
+
+When run interactively, the CLI prompts for the password via the terminal.
+Use `--password` only in non-interactive contexts.
+
+After successful login, subsequent `POST /pull` requests for images from
+that registry use the stored credentials automatically.
+
 ### Health check
 
 ```bash

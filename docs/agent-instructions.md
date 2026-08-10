@@ -248,6 +248,49 @@ with the current terminal state).
 Do not fall back to invoking Docker directly (no `docker kill`, no manual
 container removal). Cancel must go through the helper.
 
+### Private registry authentication
+
+To pull images from a private registry, authenticate first:
+
+```bash
+curl --silent --show-error \
+  --unix-socket /run/docker-helper/docker-helper.sock \
+  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "registry": "registry.example.com",
+    "username": "myuser",
+    "password": "mypassword"
+  }' \
+  http://localhost/registry/login
+```
+
+Response on success (HTTP 200):
+
+```json
+{"ok":true,"message":"registry login successful"}
+```
+
+On failure (HTTP 400):
+
+```json
+{"ok":false,"code":"registry_login_failed","message":"registry login failed"}
+```
+
+After successful login, subsequent `POST /pull` requests for images from
+that registry will use the stored credentials automatically.
+
+Alternatively, use the CLI:
+
+```bash
+docker-helper registry login \
+  --registry registry.example.com \
+  --username myuser
+```
+
+When run interactively, the CLI prompts for the password via the terminal
+(never in argv). Use `--password` only in non-interactive contexts.
+
 ### Workspace path model
 
 There are two different filesystem namespaces:
@@ -284,6 +327,15 @@ not infer it from the response body or curl's exit code.
 | 400 | false | validation error | Request validation failed |
 | 401 | false | — | Missing or invalid session token |
 | 500 | false | `docker_pull_failed` | Docker operation failed |
+
+**POST /registry/login (synchronous)**
+
+| HTTP | `ok` | `code` | Meaning |
+|------|------|--------|---------|
+| 200 | true | — | Login successful |
+| 400 | false | `invalid_registry_login` | Missing or empty field |
+| 400 | false | `registry_login_failed` | Docker login failed |
+| 401 | false | — | Missing or invalid session token |
 
 **POST /build and POST /run (asynchronous)**
 

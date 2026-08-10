@@ -565,6 +565,52 @@ field is non-empty. Docker CLI validates the reference when the command
 executes. If Docker rejects the reference, the endpoint returns its
 standard Docker failure response.
 
+## Registry login
+
+`POST /registry/login` authenticates a session with a Docker registry.
+
+```
+Authentication
+    │
+Request validation
+    │
+Session Docker config directory
+    │
+Docker invocation
+```
+
+Authentication validates the session token. Request validation checks
+that `registry`, `username`, and `password` are all non-empty.
+
+The session Docker config directory is per-session, located at
+`runtimeDir/sessions/<session_id>/docker`. It is created with `0700`
+permissions on first login. This directory is used as the Docker config
+home via `--config`, so registry credentials are isolated per session.
+
+Docker invocation runs `docker --config <dir> login --username <user>
+--password-stdin <registry>`. The password is passed via stdin, never
+in argv, environment, logs, or audit records.
+
+On success, the endpoint returns HTTP 200. On failure, it returns HTTP
+400 with `code: registry_login_failed`. The Docker output is never
+returned to the client.
+
+### Audit
+
+| Event | Fields |
+|-------|--------|
+| `registry.login.start` | `session_id`, `registry` |
+| `registry.login.finish` | `session_id`, `registry`, `result`, `duration` |
+
+`result` is `success` or `login_failed`. The password and username are
+never included in audit records.
+
+### Session delete cleanup
+
+When a session is deleted, its runtime directory (including the Docker
+config directory) is removed. Stale session directories from crashed
+or expired sessions are cleaned up at daemon startup.
+
 ## Health endpoint
 
 `GET /health` returns a 200 OK response with a JSON body indicating the
