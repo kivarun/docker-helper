@@ -116,19 +116,21 @@ remove_apparmor() {
 				info "Skipping AppArmor profile removal"
 				return
 			fi
+		elif ! $purge && ! $interactive; then
+			# --yes removes AppArmor profile like other artifacts.
+			:
 		else
-			# In non-interactive mode, skip AppArmor removal unless --purge
-			if ! $purge; then
-				return
-			fi
+			return
 		fi
+
+		# Unload the profile first while the file still exists.
+		sudo apparmor_parser -R "/etc/apparmor.d/$APPARMOR_PROFILE_NAME" 2>/dev/null || true
 
 		if ! sudo rm -f "/etc/apparmor.d/$APPARMOR_PROFILE_NAME"; then
 			warn "Failed to remove AppArmor profile"
 			return
 		fi
 
-		sudo apparmor_parser -R "/etc/apparmor.d/$APPARMOR_PROFILE_NAME" 2>/dev/null || true
 		info "AppArmor profile removed"
 	fi
 }

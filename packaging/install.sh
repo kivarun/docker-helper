@@ -123,7 +123,7 @@ install_apparmor() {
 	fi
 
 	# Check if AppArmor is available
-	if ! command -v aa-enabled >/dev/null 2>&1 && ! command -v aa-enforce >/dev/null 2>&1; then
+	if ! command -v apparmor_parser >/dev/null 2>&1; then
 		return
 	fi
 
@@ -132,14 +132,30 @@ install_apparmor() {
 		return
 	fi
 
+	# Read allowed_root from existing config to grant workspace access.
+	local workspace_rule="# (no workspace configured yet; add allowed_root rule manually if needed)"
+	local config_file="${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json"
+	if [[ -f "$config_file" ]]; then
+		local allowed_root
+		allowed_root=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['allowed_root'])" "$config_file" 2>/dev/null || true)
+		if [[ -n "$allowed_root" ]]; then
+			workspace_rule="${allowed_root}/ r,
+	owner ${allowed_root}/** rw,"
+		fi
+	fi
+
+	# Generate the final profile with workspace rule substituted.
 	local target_dir="/etc/apparmor.d"
-	if ! sudo cp "$profile_path" "$target_dir/$APPARMOR_PROFILE_NAME"; then
+	local final_profile
+	final_profile=$(sed "s|@@WORKSPACE_RULE@@|${workspace_rule}|" "$profile_path")
+
+	if ! echo "$final_profile" | sudo tee "$target_dir/$APPARMOR_PROFILE_NAME" >/dev/null 2>&1; then
 		warn "Failed to install AppArmor profile"
 		return
 	fi
 
-	if ! sudo aa-enforce "$APPARMOR_PROFILE_NAME" 2>/dev/null; then
-		warn "Failed to enforce AppArmor profile (may need to reload AppArmor)"
+	if ! sudo apparmor_parser -a "$target_dir/$APPARMOR_PROFILE_NAME" >/dev/null 2>&1; then
+		warn "Failed to load AppArmor profile"
 		return
 	fi
 

@@ -20,6 +20,7 @@ NoNewPrivileges=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 RestrictRealtime=true
+SecurityAppArmor=docker-helper
 
 [Install]
 WantedBy=default.target
