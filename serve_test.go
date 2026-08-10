@@ -961,11 +961,12 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	defer os.Remove(socketPath)
 
 	serverDone := make(chan struct{})
+	var drainErr error
 
 	go func() {
 		defer close(serverDone)
 		_, shutdownCancel, drainCh, _ := serveWithShutdown(signalCtx, server, listener, shutdownTimeout, nil)
-		<-drainCh
+		drainErr = <-drainCh
 		shutdownCancel()
 	}()
 
@@ -1054,6 +1055,14 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 
 	if requestErr == nil {
 		t.Fatal("expected active request to be interrupted by forced close")
+	}
+
+	// Verify drain reported timeout error.
+	if drainErr == nil {
+		t.Fatal("expected drain error, got nil")
+	}
+	if !strings.Contains(drainErr.Error(), "graceful shutdown timeout") {
+		t.Fatalf("unexpected drain error: %v", drainErr)
 	}
 }
 

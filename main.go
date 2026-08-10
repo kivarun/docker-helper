@@ -177,8 +177,9 @@ func runWithLock(lockPath, socketPath string, fn func(net.Listener) error) error
 // waits for either signalCtx cancellation (graceful shutdown) or a Serve error.
 // On signalCtx cancellation it invokes onSignal (if non-nil), creates a shutdown
 // context with the given timeout, and starts server.Shutdown in a goroutine.
-// Returns the shutdown context, its cancel func, and a drain-done channel so
-// the caller can run operation termination concurrently then wait for HTTP drain.
+// Returns the shutdown context, its cancel func, and a drain-done channel that
+// carries the drain result (nil on success, timeout error on deadline expiry).
+// The caller runs operation termination concurrently, then waits for drain.
 // The caller must call shutdownCancel() after both terminateAll and drain complete.
 // The callback in runWithLock must not return until drain completes so the
 // lock stays held during the entire drain.
@@ -188,13 +189,13 @@ func serveWithShutdown(
 	listener net.Listener,
 	timeout time.Duration,
 	onSignal func(),
-) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan struct{}, err error) {
+) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error, err error) {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- server.Serve(listener)
 	}()
 
-	drainDoneCh := make(chan struct{})
+	drainDoneCh := make(chan error, 1)
 
 	select {
 	case <-signalCtx.Done():
@@ -207,12 +208,14 @@ func serveWithShutdown(
 		// concurrently, then waits for drain to complete.
 		go func() {
 			shutdownErr := server.Shutdown(shutdownCtx)
+			var drainErr error
 			if shutdownErr == context.DeadlineExceeded {
 				server.Close()
+				drainErr = fmt.Errorf("graceful shutdown timeout after %v", timeout)
 			}
 			// Drain serveDone to avoid leaking the goroutine.
 			<-serveDone
-			close(drainDoneCh)
+			drainDoneCh <- drainErr
 		}()
 
 		drainDone = drainDoneCh
@@ -223,7 +226,7 @@ func serveWithShutdown(
 		// Create a bounded cleanup context so terminateAll can still
 		// shut down running operations without panicking on nil ctx.
 		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
-		close(drainDoneCh)
+		drainDoneCh <- nil
 		drainDone = drainDoneCh
 		err = serveErr
 		return
@@ -323,8 +326,13 @@ func runServe(stdout, stderr io.Writer) error {
 		// Wait for HTTP drain to complete before cancelling the shutdown
 		// context. The drain goroutine runs server.Shutdown(shutdownCtx)
 		// and must not be interrupted by premature context cancellation.
-		<-drainDone
+		drainErr := <-drainDone
 		shutdownCancel()
+
+		// Use drain error if no serve error was returned.
+		if err == nil {
+			err = drainErr
+		}
 
 		logger = logging.snapshotLogger()
 
