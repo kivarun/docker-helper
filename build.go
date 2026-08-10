@@ -99,22 +99,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		} else {
 			op.fail("docker_build_failed", msg, nil)
 		}
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
+		writeOperationCreated(ctx, w, op.ID, op.State)
 		return
 	}
 	if result.Err != nil {
 		cancel()
 		msg := fmt.Sprintf("cannot start build: %v", result.Err)
 		op.fail("docker_build_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
+		writeOperationCreated(ctx, w, op.ID, op.State)
 		return
 	}
 
@@ -124,11 +116,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		a.waitBuildCompletion(op, *op.StartedAt)
 	}()
 
-	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-		"ok":           true,
-		"operation_id": op.ID,
-		"status":       operationRunning,
-	})
+	writeOperationCreated(ctx, w, op.ID, operationRunning)
 }
 
 // waitBuildCompletion waits for the build process to finish and transitions

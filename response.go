@@ -61,6 +61,14 @@ func writeJSONRaw(ctx context.Context, w http.ResponseWriter, status int, value 
 	}
 }
 
+func writeOperationCreated(ctx context.Context, w http.ResponseWriter, operationID string, status operationState) {
+	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
+		"ok":           true,
+		"operation_id": operationID,
+		"status":       status,
+	})
+}
+
 func writeError(ctx context.Context, w http.ResponseWriter, status int, code, message string) {
 	writeJSON(ctx, w, status, response{
 		OK:      false,

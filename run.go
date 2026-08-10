@@ -333,11 +333,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		} else {
 			op.fail("docker_run_failed", msg, nil)
 		}
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
+		writeOperationCreated(ctx, w, op.ID, op.State)
 		return
 	}
 	if result.Err != nil {
@@ -345,11 +341,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cleanupCidfile(op)
 		msg := fmt.Sprintf("cannot start run: %v", result.Err)
 		op.fail("docker_run_failed", msg, nil)
-		writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       op.State,
-		})
+		writeOperationCreated(ctx, w, op.ID, op.State)
 		return
 	}
 
@@ -359,11 +351,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		a.waitRunCompletion(op, *op.StartedAt)
 	}()
 
-	writeJSONRaw(ctx, w, http.StatusCreated, map[string]any{
-		"ok":           true,
-		"operation_id": op.ID,
-		"status":       operationRunning,
-	})
+	writeOperationCreated(ctx, w, op.ID, operationRunning)
 }
 
 // newOperationCmd creates a new exec.Cmd for operation processes.
