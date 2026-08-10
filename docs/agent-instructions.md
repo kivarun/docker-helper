@@ -223,7 +223,7 @@ To cancel a running build or run operation:
 
 ```bash
 curl --unix-socket /run/docker-helper/docker-helper.sock \
-  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
   -X POST 'http://localhost/operations/op_abcdef1234567890/cancel'
 ```
 

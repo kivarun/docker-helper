@@ -27,9 +27,10 @@ func (a *App) getConfig() Config {
 }
 
 // setConfig atomically replaces the configuration pointer.
-// Only configurable fields (allowed_root, session_ttl, log_level,
-// audit_enabled) are taken from newCfg; computed paths are preserved
-// from the current configuration.
+// Only configurable fields are taken from newCfg; computed paths are preserved
+// from the current configuration. Configurable fields: allowed_root,
+// session_ttl, log_level, audit_enabled, shutdown_timeout,
+// operation_retention_ttl, operation_max_completed, operation_log_max_bytes.
 func (a *App) setConfig(newCfg *Config) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

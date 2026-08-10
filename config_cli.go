@@ -196,7 +196,9 @@ will apply on the next start.`,
 }
 
 // loadRawConfig reads config.json from disk as a raw JSON map.
-// It requires a top-level JSON object and rejects reserved/read-only fields.
+// It parses the top-level JSON object and returns the raw map and config path.
+// Semantic validation (reserved fields, deprecated fields, value constraints)
+// is performed by validateRawConfig, not by this function.
 // Returns the raw map, the config file path, and any error.
 func loadRawConfig() (map[string]json.RawMessage, string, error) {
 	configPath := getConfigPath()

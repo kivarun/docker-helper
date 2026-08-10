@@ -65,8 +65,10 @@ docker-helper init
 ```
 
 Creates configuration and state directories, writes `config.json` with
-`allowed_root`, `session_ttl`, and `log_level` (default `info`), and
-generates an admin token. The
+`allowed_root`, `session_ttl`, `log_level` (default `info`), `shutdown_timeout`
+(default `30s`), `operation_retention_ttl` (default `10m`),
+`operation_max_completed` (default `200`), and `operation_log_max_bytes`
+(default `4194304` = 4 MiB), and generates an admin token. The
 token is printed once and stored beside the config file.
 
 If running interactively and `--allowed-root` is not provided, you will
@@ -140,10 +142,15 @@ To remove a setting and restore its default:
 ```bash
 docker-helper config unset log_level
 docker-helper config unset audit_enabled
+docker-helper config unset shutdown_timeout
+docker-helper config unset operation_retention_ttl
+docker-helper config unset operation_max_completed
+docker-helper config unset operation_log_max_bytes
 ```
 
 Each prints `unset` when the member was removed, or `unchanged ... is already unset`
-when it was already absent.
+when it was already absent. `allowed_root` and `session_ttl` are required and
+cannot be unset.
 
 Configuration fields:
 
@@ -160,7 +167,8 @@ Configuration fields:
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log (bounded buffer, default: `4194304` = 4 MiB) |
 
-Only `log_level` and `audit_enabled` may be unset to restore defaults.
+`allowed_root` and `session_ttl` are required and cannot be unset. All other
+fields may be unset to restore their defaults.
 
 Runtime reload: after `config set` or `config unset`, the change is written
 to disk immediately. If the daemon is running, the new configuration is
@@ -212,8 +220,8 @@ config.json. If present, configuration validation and daemon startup fail:
 Choose one of the startup modes below. The daemon listens on the Unix
 socket at `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`
 (permissions 0600). On SIGINT or SIGTERM, docker-helper stops accepting
-new connections and waits up to 30 seconds for in-flight HTTP requests
-to complete.
+new connections and waits for in-flight HTTP requests to complete, up to
+the configured `shutdown_timeout` (default 30 seconds).
 
 #### Manual foreground run
 

@@ -356,10 +356,14 @@ var reloadCommand = &Command{
 	Help: `Ask the running daemon to re-read config.json and apply changes without restarting.
 
 The following configurable fields are applied at runtime:
-  allowed_root    root directory for agent workspaces
-  session_ttl     session lifetime
-  log_level       operational log verbosity
-  audit_enabled   audit output enablement
+  allowed_root              root directory for agent workspaces
+  session_ttl               session lifetime
+  log_level                 operational log verbosity
+  audit_enabled             audit output enablement
+  shutdown_timeout          graceful shutdown budget
+  operation_retention_ttl   completed operation retention period
+  operation_max_completed   max completed operations in memory
+  operation_log_max_bytes   max bytes per operation log
 
 Runtime paths (socket, database, state) are not changed.
 

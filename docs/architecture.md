@@ -242,29 +242,33 @@ effective configuration as JSON (admin_token redacted). With FIELD, prints
 only that field's scalar value.
 
 `docker-helper config set FIELD VALUE` — sets a writable field
-(`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`). Reports
-`updated` or `unchanged`. If the daemon is running, the change is applied
-immediately.
+(`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`,
+`shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
+`operation_log_max_bytes`). Reports `updated` or `unchanged`. If the daemon
+is running, the change is applied immediately.
 
-`docker-helper config unset FIELD` — removes an optional field
-(`log_level`, `audit_enabled`) to restore its default. Reports `unset` or
-`unchanged`. If the daemon is running, the change is applied immediately.
+`docker-helper config unset FIELD` — removes an optional field to restore
+its default. `allowed_root` and `session_ttl` are required and cannot be
+unset. Reports `unset` or `unchanged`. If the daemon is running, the change
+is applied immediately.
 
 ### `docker-helper reload`
 
 Ask the running daemon to re-read `config.json` and apply changes without
-restarting. Only configurable fields are applied at runtime
-(`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`). Computed
-paths (socket, database, state) are not changed. If the daemon is not
-running, the command fails with a non-zero exit code. If the new
-configuration is invalid, the daemon keeps its current configuration and
-the command returns an error.
+restarting. All configurable fields are applied at runtime:
+`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`,
+`shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
+`operation_log_max_bytes`. Computed paths (socket, database, state) are not
+changed. If the daemon is not running, the command fails with a non-zero
+exit code. If the new configuration is invalid, the daemon keeps its current
+configuration and the command returns an error.
 
 ### `docker-helper session <subcommand>`
 
 Manages sessions. Requires a subcommand.
 
-Subcommands: `create`, `list`, `delete` (see Session CLI section above).
+Subcommands: `create`, `list`, `delete`, `cleanup` (see Session CLI section
+above).
 
 ### Help flag
 
@@ -702,23 +706,29 @@ through the operation endpoints:
 `POST /pull` remains synchronous and returns the execution
 result directly in the response.
 
-Current error codes:
+Current error codes (non-exhaustive):
 
 | Code | Endpoint | Condition |
 |------|----------|-----------|
 | `unauthorized` | all protected | missing/invalid token |
+| `invalid_json` | all JSON endpoints | request body is not valid JSON |
 | `invalid_build_context` | `POST /build` | context validation failure |
+| `invalid_dockerfile` | `POST /build` | Dockerfile validation failure |
 | `invalid_image` | `POST /build`, `POST /run`, `POST /pull` | image name is empty |
 | `invalid_mount` | `POST /run` | mount validation failure |
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
+| `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
 | `docker_build_failed` | `POST /build` | docker build returned non-zero |
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero |
 | `docker_run_failed` | `POST /run` | Docker run operation failed |
-| `container_exit_nonzero` | `POST /run` | container exited with non-zero status (not 125) |
+| `container_exit_nonzero` | `POST /run` | container exited with non-zero status |
 | `cancelled` | `POST /build`, `POST /run` | operation cancelled by client |
+| `operation_not_found` | `GET /operations/{id}` | operation not found or foreign session |
+| `not_found` | `POST /operations/{id}/cancel` | operation not found |
+| `already_terminal` | `POST /operations/{id}/cancel` | operation already completed |
 
 Planned:
 
@@ -853,7 +863,9 @@ Emitted before a Docker build begins.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `request_id` | string | request correlation ID |
 | `session_id` | string | session identifier |
+| `operation_id` | string | operation identifier |
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
@@ -863,14 +875,16 @@ No `result` or `duration` field.
 #### build.finish
 
 Emitted after a Docker build completes (success or failure).
+Does not include `request_id` because completion is not request-scoped.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
+| `operation_id` | string | operation identifier |
 | `image` | string | target image reference |
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
-| `result` | string | `success` or `build_error` |
+| `result` | string | `succeeded`, `docker_build_failed`, or `cancelled` |
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | build wall-clock time |
 
@@ -923,8 +937,9 @@ Emitted before a container starts.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `session_id` | string | session identifier |
 | `request_id` | string | request correlation ID |
+| `session_id` | string | session identifier |
+| `operation_id` | string | operation identifier |
 | `image` | string | container image reference |
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
@@ -943,11 +958,12 @@ Each entry in `mounts` has:
 #### run.finish
 
 Emitted after a container run attempt completes.
+Does not include `request_id` because completion is not request-scoped.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_id` | string | session identifier |
-| `request_id` | string | request correlation ID |
+| `operation_id` | string | operation identifier |
 | `image` | string | container image reference |
 | `command_arg_count` | number | number of command arguments (present when command is set) |
 | `mounts` | object[] | bind mounts (present when set) |
@@ -960,9 +976,10 @@ Result codes:
 
 | Code | Condition |
 |------|-----------|
-| `success` | container exited with status 0 |
-| `container_exit_nonzero` | container exited with a non-zero status (not 125) |
-| `docker_error` | Docker failed to start the container, or exited with status 125 |
+| `succeeded` | container exited with status 0 |
+| `docker_run_failed` | Docker failed to start the container |
+| `container_exit_nonzero` | container exited with a non-zero status |
+| `cancelled` | operation cancelled by client |
 
 #### auth.failure
 
@@ -1025,8 +1042,8 @@ The audit log and operational log never contain:
 Successful build:
 
 ```json
-{"time":"2026-01-15T10:30:00Z","event":"build.start","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile"}
-{"time":"2026-01-15T10:30:05Z","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","image":"myapp:v1","context":".","dockerfile":"Dockerfile","result":"success","duration":"5s"}
+{"time":"2026-01-15T10:30:00Z","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile"}
+{"time":"2026-01-15T10:30:05Z","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","result":"succeeded","duration":"5s"}
 ```
 
 Successful session creation:
@@ -1044,8 +1061,8 @@ Authorization failure:
 Container run:
 
 ```json
-{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","session_id":"dhs_0a1b2c3d4e5f","request_id":"req_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
-{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","request_id":"req_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"success","duration":"1s"}
+{"time":"2026-01-15T10:32:00Z","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
+{"time":"2026-01-15T10:32:01Z","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"succeeded","duration":"1s"}
 ```
 
 ## Security considerations

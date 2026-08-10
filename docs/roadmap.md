@@ -29,7 +29,8 @@ Verified against current implementation:
 - session expiration enforcement (`expires_at` check on every request);
 - startup expired-session cleanup + `docker-helper session cleanup` CLI;
 - strict single-document JSON request decoding (`decodeJSONRequest`);
-- graceful shutdown with 30-second drain timeout;
+- graceful shutdown with configurable `shutdown_timeout` (default 30s);
+- async build/run with operation lifecycle (status, logs, cancel);
 - developer rules in root `AGENTS.md`;
 - documentation cleanup (README, architecture, agent instructions);
 - version source prepared for ldflags release injection (`var version = "dev"`);
@@ -58,57 +59,19 @@ Verified against current implementation:
 survive daemon restart. Durable/recoverable operations may be considered in
 2.0 or later if needed; this is not currently a committed 2.0 feature.
 
-### 2. Log ownership
+### 2. Shutdown timeout
 
-- **build:** helper-owned bounded in-memory log buffer;
-- **run:** Docker-owned logs via detached container + `docker logs`.
-
-### 3. Operation lifecycle
-
-- minimum operation states: `running`, `succeeded`, `failed`;
-- container non-zero exit is a successfully executed `run` operation with a
-  non-zero exit code;
-- Docker/launch failure is an operation failure;
-- session expiry/deletion does not terminate an already-started operation;
-- later operation access still requires the owning valid session;
-- client-initiated cancellation is available via `POST /operations/{id}/cancel`;
-- `cancelled` is a result code, not a state (terminal status remains `failed`).
-
-### 4. Shutdown ownership
-
-docker-helper must not intentionally leave helper-owned active operations
-running after normal daemon shutdown.
-
-Shutdown direction:
+`shutdown_timeout` is configurable (default 30s). Shutdown direction:
 
 - stop accepting new operations;
 - HTTP drain and operation termination share one overall shutdown deadline;
 - build CLI receives graceful cancellation, with bounded forced termination
   fallback;
-- running run containers receive graceful Docker stop, with force removal as
+- running run containers receive daemon-side kill, with force removal as
   fallback;
-- retained completed run containers are removed before registry destruction;
 - cleanup failures are logged but must not hang shutdown indefinitely.
 
-The overall graceful-shutdown budget should become a configurable configuration
-field. The current 30-second default is retained for now.
-
-### 5. Process lifetime hardening
-
-Do this after the operation model exists, because process ownership depends on it.
-
-Revisit:
-
-- request/process context ownership;
-- cancellation;
-- shutdown behavior for running Docker processes;
-- timeout policy;
-- bounded output/log storage;
-- concurrency limits if demonstrated necessary.
-
-Do not implement generic worker pools or schedulers without a concrete requirement.
-
-### 6. Installation / service packaging
+### 3. Installation / service packaging
 
 Finish the operator installation path.
 
@@ -122,7 +85,7 @@ Include:
 Release 1 remains user-service oriented.
 Do not expand to system-wide/root daemon deployment unless separately decided.
 
-### 7. Release build and GitHub release
+### 4. Release build and GitHub release
 
 Add minimal release automation:
 
@@ -143,7 +106,7 @@ Git tag/release tag should be the authoritative release version source.
 
 Do not introduce generated version files.
 
-### 8. Clean-install acceptance test
+### 5. Clean-install acceptance test
 
 Before 1.0, test the project as a new operator would use it:
 
