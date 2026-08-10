@@ -597,3 +597,53 @@ func TestDebugRequestLogNon200Status(t *testing.T) {
 
 	t.Fatal("no 'request completed' record found")
 }
+
+// TestStatusResponseWriterCapturesFirstWriteHeader verifies that
+// statusResponseWriter records only the first WriteHeader call,
+// matching net/http semantics.
+func TestStatusResponseWriterCapturesFirstWriteHeader(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
+	defer logging.reset()
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	w := httptest.NewRecorder()
+
+	withRequestID(withLogging(handler))(w, req)
+
+	// Verify actual response status is 201 (first WriteHeader).
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected response status 201, got %d", w.Code)
+	}
+
+	// Verify operational log contains status=201.
+	opOutput := opBuf.String()
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" || !strings.Contains(line, "request completed") {
+			continue
+		}
+
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("cannot parse debug record: %v: %s", err, line)
+		}
+
+		status, ok := m["status"].(float64)
+		if !ok {
+			t.Fatal("expected status to be a number")
+		}
+		if status != 201 {
+			t.Errorf("expected logged status=201, got %v", status)
+		}
+		return
+	}
+
+	t.Fatal("no 'request completed' record found")
+}

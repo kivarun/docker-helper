@@ -57,12 +57,16 @@ func withLogging(next http.HandlerFunc) http.HandlerFunc {
 // statusResponseWriter wraps http.ResponseWriter to capture the status code.
 type statusResponseWriter struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (w *statusResponseWriter) WriteHeader(statusCode int) {
-	w.status = statusCode
-	w.ResponseWriter.WriteHeader(statusCode)
+	if !w.wroteHeader {
+		w.status = statusCode
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(statusCode)
+	}
 }
 
 // getRoutePattern returns the registered route pattern for the request.
