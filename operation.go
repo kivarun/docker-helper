@@ -296,21 +296,24 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		case <-time.After(time.Until(deadline)):
 			// Deadline exceeded: claim force-cleanup ownership under op.mu.
 			// Only the first caller to claim performs the actual cleanup.
-			// Subsequent callers skip cleanup and rely on the first caller's
-			// work to eventually close op.done.
+			// Subsequent callers skip cleanup but still wait for op.done
+			// within the remaining budget so the caller contract is preserved.
 			op.mu.Lock()
 			if op.forceOwned {
 				// Another termination path already claimed force cleanup.
-				// Nothing more to do — op.done will be closed by the
-				// completion goroutine after the owner finishes cleanup.
+				// Wait for it to complete within the remaining budget.
 				op.mu.Unlock()
-				break
+				select {
+				case <-op.done:
+				case <-ctx.Done():
+				}
+				continue
 			}
 			if op.CompletedAt != nil {
 				// Operation completed naturally just before force claim.
 				// No cleanup needed.
 				op.mu.Unlock()
-				break
+				continue
 			}
 			op.forceOwned = true
 			op.mu.Unlock()
