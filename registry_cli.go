@@ -69,13 +69,6 @@ Examples:
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				sessionToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
-				if sessionToken == "" {
-					fmt.Fprintln(stderr, "error: DOCKER_HELPER_SESSION_TOKEN is not set")
-					return 1
-				}
-
-				// Read password.
 				var password string
 				var err error
 
@@ -93,15 +86,11 @@ Examples:
 					return 1
 				}
 
-				cfg, err := loadConfig()
+				client, err := agentClient()
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
-					return sessionToken, nil
-				}, nil)
 
 				result, err := client.registryLogin(*registry, *username, password)
 				if err != nil {
