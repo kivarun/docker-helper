@@ -39,7 +39,8 @@ func agentClient() (*apiClient, error) {
 
 // waitForOperation polls an operation until it reaches a terminal state.
 // It streams logs to stdout as they become available.
-// If the daemon reports truncated logs, a single warning is printed to stderr.
+// If the daemon reports truncated logs, a single warning is printed to stderr
+// immediately on first occurrence.
 // Returns the final operation status response.
 func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
 	var offset int64
@@ -54,8 +55,9 @@ func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*ope
 		if logs.Logs != "" {
 			fmt.Fprint(stdout, logs.Logs)
 		}
-		if logs.Truncated {
+		if logs.Truncated && !truncated {
 			truncated = true
+			fmt.Fprintln(stderr, "warning: operation log was truncated")
 		}
 		offset = logs.NextOffset
 
@@ -74,10 +76,7 @@ func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*ope
 			if finalLogs.Logs != "" {
 				fmt.Fprint(stdout, finalLogs.Logs)
 			}
-			if finalLogs.Truncated {
-				truncated = true
-			}
-			if truncated {
+			if finalLogs.Truncated && !truncated {
 				fmt.Fprintln(stderr, "warning: operation log was truncated")
 			}
 			return status, nil
@@ -187,8 +186,8 @@ var buildCommand = &Command{
 
 				if status.Status != operationSucceeded {
 					msg := "build failed"
-					if status.ResultCode != "" {
-						msg += " (" + status.ResultCode + ")"
+					if status.ResultCode != nil {
+						msg += " (" + *status.ResultCode + ")"
 					}
 					if status.ExitCode != nil {
 						msg += fmt.Sprintf(", exit_code=%d", *status.ExitCode)
@@ -307,15 +306,15 @@ var runContainerCommand = &Command{
 				}
 
 				// container_exit_nonzero: return the container's exit code
-				if status.ResultCode == "container_exit_nonzero" && status.ExitCode != nil {
+				if status.ResultCode != nil && *status.ResultCode == "container_exit_nonzero" && status.ExitCode != nil {
 					fmt.Fprintf(stderr, "run failed (container_exit_nonzero), exit_code=%d\n", *status.ExitCode)
 					return *status.ExitCode
 				}
 
 				// Other failures: print diagnostics
 				msg := "run failed"
-				if status.ResultCode != "" {
-					msg += " (" + status.ResultCode + ")"
+				if status.ResultCode != nil {
+					msg += " (" + *status.ResultCode + ")"
 				}
 				if status.ExitCode != nil {
 					msg += fmt.Sprintf(", exit_code=%d", *status.ExitCode)

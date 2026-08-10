@@ -1227,3 +1227,87 @@ func TestTruncatedOnlyInFinalLogs(t *testing.T) {
 		t.Errorf("expected final output, got: %s", out.String())
 	}
 }
+
+// TestTruncatedMultiplePollsSingleWarning verifies that when truncation
+// appears across multiple polls, the warning is printed exactly once.
+func TestTruncatedMultiplePollsSingleWarning(t *testing.T) {
+	opID := "op_test"
+	statusCallCount := 0
+	logsCallCount := 0
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		statusCallCount++
+		w.Header().Set("Content-Type", "application/json")
+		// First two status checks return running, third returns succeeded
+		status := string(operationRunning)
+		if statusCallCount >= 3 {
+			status = string(operationSucceeded)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       status,
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		logsCallCount++
+		w.Header().Set("Content-Type", "application/json")
+		// All logs requests return truncated=true
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(100),
+			"truncated":    true,
+			"logs":         "output\n",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
+	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
+	defer func() {
+		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
+		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
+	}()
+
+	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
+	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
+
+	var out, stderr bytes.Buffer
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	_, err = waitForOperation(c, opID, &out, &stderr)
+	if err != nil {
+		t.Fatalf("waitForOperation failed: %v", err)
+	}
+
+	warningCount := strings.Count(stderr.String(), "warning: operation log was truncated")
+	if warningCount != 1 {
+		t.Errorf("expected exactly one truncation warning, got %d: %s", warningCount, stderr.String())
+	}
+}

@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 // Shared API request/response types for the docker-helper HTTP contract.
 // Both server handlers and client methods use these types.
 
@@ -55,12 +57,12 @@ type operationStatusResponse struct {
 	OK          bool           `json:"ok"`
 	OperationID string         `json:"operation_id"`
 	Status      operationState `json:"status"`
-	CreatedAt   string         `json:"created_at"`
-	StartedAt   string         `json:"started_at,omitempty"`
-	CompletedAt string         `json:"completed_at,omitempty"`
-	Duration    string         `json:"duration,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	StartedAt   *time.Time     `json:"started_at,omitempty"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+	Duration    *string        `json:"duration,omitempty"`
 	ExitCode    *int           `json:"exit_code,omitempty"`
-	ResultCode  string         `json:"result_code,omitempty"`
+	ResultCode  *string        `json:"result_code,omitempty"`
 }
 
 // operationLogsResponse is the response from GET /operations/{id}/logs.

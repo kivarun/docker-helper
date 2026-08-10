@@ -219,26 +219,16 @@ func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	op.mu.Lock()
-	resp := map[string]any{
-		"ok":           true,
-		"operation_id": op.ID,
-		"status":       op.State,
-		"created_at":   op.CreatedAt,
-	}
-	if op.StartedAt != nil {
-		resp["started_at"] = *op.StartedAt
-	}
-	if op.CompletedAt != nil {
-		resp["completed_at"] = *op.CompletedAt
-	}
-	if op.Duration != nil {
-		resp["duration"] = *op.Duration
-	}
-	if op.ExitCode != nil {
-		resp["exit_code"] = *op.ExitCode
-	}
-	if op.ResultCode != nil {
-		resp["result_code"] = *op.ResultCode
+	resp := operationStatusResponse{
+		OK:          true,
+		OperationID: op.ID,
+		Status:      op.State,
+		CreatedAt:   op.CreatedAt,
+		StartedAt:   op.StartedAt,
+		CompletedAt: op.CompletedAt,
+		Duration:    op.Duration,
+		ExitCode:    op.ExitCode,
+		ResultCode:  op.ResultCode,
 	}
 	op.mu.Unlock()
 
@@ -268,13 +258,13 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 
 	data, nextOffset, truncated := op.LogBuffer.Range(offset)
 
-	resp := map[string]any{
-		"ok":           true,
-		"operation_id": opID,
-		"offset":       offset,
-		"next_offset":  nextOffset,
-		"truncated":    truncated,
-		"logs":         string(data),
+	resp := operationLogsResponse{
+		OK:          true,
+		OperationID: opID,
+		Offset:      offset,
+		NextOffset:  nextOffset,
+		Truncated:   truncated,
+		Logs:        string(data),
 	}
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
@@ -312,18 +302,14 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 	// Check if operation is already terminal.
 	op.mu.Lock()
 	if op.CompletedAt != nil {
-		state := op.State
-		rc := ""
-		if op.ResultCode != nil {
-			rc = *op.ResultCode
+		resp := operationStatusResponse{
+			OK:          true,
+			OperationID: op.ID,
+			Status:      op.State,
+			ResultCode:  op.ResultCode,
 		}
 		op.mu.Unlock()
-		writeJSONRaw(ctx, w, http.StatusOK, map[string]any{
-			"ok":           true,
-			"operation_id": op.ID,
-			"status":       state,
-			"result_code":  rc,
-		})
+		writeJSONRaw(ctx, w, http.StatusOK, resp)
 		return
 	}
 	op.mu.Unlock()
@@ -335,11 +321,12 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err.Error() == "already_terminal" {
-			writeJSONRaw(ctx, w, http.StatusOK, map[string]any{
-				"ok":           true,
-				"operation_id": op.ID,
-				"status":       op.State,
-			})
+			resp := operationStatusResponse{
+				OK:          true,
+				OperationID: op.ID,
+				Status:      op.State,
+			}
+			writeJSONRaw(ctx, w, http.StatusOK, resp)
 			return
 		}
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -351,16 +338,12 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 
 	// Return terminal state.
 	op.mu.Lock()
-	resp := map[string]any{
-		"ok":           true,
-		"operation_id": op.ID,
-		"status":       op.State,
-	}
-	if op.ResultCode != nil {
-		resp["result_code"] = *op.ResultCode
-	}
-	if op.ExitCode != nil {
-		resp["exit_code"] = *op.ExitCode
+	resp := operationStatusResponse{
+		OK:          true,
+		OperationID: op.ID,
+		Status:      op.State,
+		ExitCode:    op.ExitCode,
+		ResultCode:  op.ResultCode,
 	}
 	op.mu.Unlock()
 

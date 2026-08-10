@@ -451,16 +451,6 @@ for command-specific help.`,
 	},
 }
 
-// findCommand walks the command tree to find a command by name path.
-// Returns nil if the command is not found.
-func findCommand(cmd *Command, names []string) *Command {
-	if len(names) == 0 {
-		return cmd
-	}
-	resolved, _ := cmd.resolveCommandPath(names)
-	return resolved
-}
-
 func init() {
 	rootCommand.Subcommands = []*Command{
 		serveCommand,
