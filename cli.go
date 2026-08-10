@@ -122,7 +122,7 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 
 	// Check positional argument count
 	nArgs := fs.NArg()
-	if c.MinPosArgs > 0 || c.MaxPosArgs > 0 {
+	if c.MinPosArgs > 0 || c.MaxPosArgs > 0 || c.MaxPosArgs == -1 {
 		if c.MaxPosArgs == -1 {
 			// Unlimited
 			if nArgs < c.MinPosArgs {
@@ -402,6 +402,9 @@ func init() {
 		configCommand,
 		versionCommand,
 		helpCommand,
+		pullCommand,
+		buildCommand,
+		runContainerCommand,
 	}
 }
 
