@@ -132,6 +132,9 @@ install_apparmor() {
 		return
 	fi
 
+	# Absolute binary path for executable attachment.
+	local binary_path="$INSTALL_DIR/$BINARY_NAME"
+
 	# Read allowed_root from existing config to grant workspace access.
 	local workspace_rule="# (no workspace configured yet; add allowed_root rule manually if needed)"
 	local config_file="${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json"
@@ -144,10 +147,11 @@ install_apparmor() {
 		fi
 	fi
 
-	# Generate the final profile with workspace rule substituted.
+	# Generate the final profile with paths substituted.
 	local target_dir="/etc/apparmor.d"
 	local final_profile
-	final_profile=$(sed "s|@@WORKSPACE_RULE@@|${workspace_rule}|" "$profile_path")
+	final_profile=$(sed -e "s|@@BINARY_PATH@@|${binary_path}|g" \
+		-e "s|@@WORKSPACE_RULE@@|${workspace_rule}|" "$profile_path")
 
 	if ! echo "$final_profile" | sudo tee "$target_dir/$APPARMOR_PROFILE_NAME" >/dev/null 2>&1; then
 		warn "Failed to install AppArmor profile"

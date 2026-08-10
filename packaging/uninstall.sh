@@ -116,11 +116,9 @@ remove_apparmor() {
 				info "Skipping AppArmor profile removal"
 				return
 			fi
-		elif ! $purge && ! $interactive; then
-			# --yes removes AppArmor profile like other artifacts.
-			:
 		else
-			return
+			# --yes: remove AppArmor profile like other artifacts.
+			:
 		fi
 
 		# Unload the profile first while the file still exists.

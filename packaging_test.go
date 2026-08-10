@@ -406,29 +406,24 @@ func TestUninstallScriptUnknownFlag(t *testing.T) {
 	}
 }
 
-// TestAppArmorProfileHasWorkspacePlaceholder verifies the AppArmor profile
-// template contains the workspace rule placeholder for substitution at install time.
-func TestAppArmorProfileHasWorkspacePlaceholder(t *testing.T) {
+// TestAppArmorProfileHasPlaceholders verifies the AppArmor profile
+// template contains both @@BINARY_PATH@@ and @@WORKSPACE_RULE@@ placeholders
+// for substitution at install time.
+func TestAppArmorProfileHasPlaceholders(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
+	if !strings.Contains(content, "@@BINARY_PATH@@") {
+		t.Fatal("AppArmor profile must contain @@BINARY_PATH@@ placeholder for executable attachment")
+	}
 	if !strings.Contains(content, "@@WORKSPACE_RULE@@") {
-		t.Fatal("AppArmor profile must contain @@WORKSPACE_RULE@@ placeholder")
+		t.Fatal("AppArmor profile must contain @@WORKSPACE_RULE@@ placeholder for workspace access")
 	}
-}
-
-// TestSystemdUnitHasSecurityAppArmor verifies the systemd user unit
-// includes SecurityAppArmor=docker-helper for profile attachment.
-func TestSystemdUnitHasSecurityAppArmor(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/user/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "SecurityAppArmor=docker-helper") {
-		t.Fatalf("systemd unit missing SecurityAppArmor=docker-helper, got:\n%s", content)
+	// Verify the profile uses path-based attachment (profile @@BINARY_PATH@@)
+	if !strings.Contains(content, "profile @@BINARY_PATH@@") {
+		t.Fatal("AppArmor profile must use path-based attachment: profile @@BINARY_PATH@@")
 	}
 }
 
@@ -458,7 +453,7 @@ func TestAppArmorInstallSubstitutesWorkspace(t *testing.T) {
 	if err := os.MkdirAll(apparmorDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	profileTemplate := `profile docker-helper {
+	profileTemplate := `profile @@BINARY_PATH@@ {
 	@@WORKSPACE_RULE@@
 }`
 	if err := os.WriteFile(filepath.Join(apparmorDir, "docker-helper"), []byte(profileTemplate), 0644); err != nil {
@@ -543,15 +538,18 @@ exit 0
 
 	output, err := cmd.CombinedOutput()
 	_ = output // output may contain warnings about missing commands
-	_ = err     // may fail on systemd/service steps, that's ok
+	_ = err    // may fail on systemd/service steps, that's ok
 
 	// Verify the source template is unchanged (substitution happens in-memory)
 	profileData, err := os.ReadFile(filepath.Join(apparmorDir, "docker-helper"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(string(profileData), "@@BINARY_PATH@@") {
+		t.Error("source profile template should still contain @@BINARY_PATH@@")
+	}
 	if !strings.Contains(string(profileData), "@@WORKSPACE_RULE@@") {
-		t.Error("source profile template should be unchanged")
+		t.Error("source profile template should still contain @@WORKSPACE_RULE@@")
 	}
 }
 
@@ -629,7 +627,9 @@ remove_apparmor
 // TestUninstallYesRemovesAppArmor verifies that uninstall.sh --yes
 // removes the AppArmor profile (not skips it).
 // The remove_apparmor function in uninstall.sh has this logic:
-//   interactive=false (--yes) → does NOT return early → proceeds to removal.
+//
+//	interactive=false (--yes) → does NOT return early → proceeds to removal.
+//
 // We verify this by checking the script source.
 func TestUninstallYesRemovesAppArmor(t *testing.T) {
 	data, err := os.ReadFile("packaging/uninstall.sh")

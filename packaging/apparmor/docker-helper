@@ -7,13 +7,13 @@
 #   sudo cp docker-helper /etc/apparmor.d/
 #   sudo apparmor_parser -a /etc/apparmor.d/docker-helper
 #
-# The systemd unit attaches this profile via SecurityAppArmor=docker-helper.
-# The profile name matches the executable basename, so AppArmor attaches
-# it to any process whose executable is named "docker-helper".
+# The profile uses path-based executable attachment: the profile name is
+# the absolute path to the binary (e.g., /home/user/.local/bin/docker-helper).
+# At install time, @@BINARY_PATH@@ is substituted with the actual path.
 
 #include <tunables/global>
 
-profile docker-helper flags=(attach_disconnected,mediate_deleted) {
+profile @@BINARY_PATH@@ flags=(attach_disconnected,mediate_deleted) {
 	#include <abstractions/base>
 
 	# Allow reading the user's config and state.
@@ -34,7 +34,7 @@ profile docker-helper flags=(attach_disconnected,mediate_deleted) {
 	/usr/bin/docker rix,
 
 	# Allow the binary itself to be read (needed for execution within profile).
-	owner @{HOME}/.local/bin/docker-helper r,
+	owner @@BINARY_PATH@@ r,
 
 	# Workspace access (configured allowed_root).
 	# @@WORKSPACE_RULE@@
