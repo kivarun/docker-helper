@@ -273,6 +273,9 @@ func cleanupSessionRuntimeDir(runtimeDir, sessionID string) error {
 // longer correspond to an active session. It reads all active session IDs from
 // the database and removes any runtime directories whose session ID is not
 // in that set. Expired sessions are excluded.
+//
+// This is best-effort: all stale directories are attempted, and any removal
+// failures are accumulated and returned as a single error.
 func cleanupStaleSessionRuntimeDirs(db *sql.DB, runtimeDir string) error {
 	sessionsDir := filepath.Join(runtimeDir, "sessions")
 
@@ -299,7 +302,7 @@ func cleanupStaleSessionRuntimeDirs(db *sql.DB, runtimeDir string) error {
 		return fmt.Errorf("iterate sessions: %w", err)
 	}
 
-	// Remove stale directories.
+	// Remove stale directories, accumulating errors.
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -308,6 +311,7 @@ func cleanupStaleSessionRuntimeDirs(db *sql.DB, runtimeDir string) error {
 		return fmt.Errorf("cannot read sessions directory: %w", err)
 	}
 
+	var staleErrors []error
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -315,11 +319,13 @@ func cleanupStaleSessionRuntimeDirs(db *sql.DB, runtimeDir string) error {
 		if !active[entry.Name()] {
 			dir := filepath.Join(sessionsDir, entry.Name())
 			if removeErr := os.RemoveAll(dir); removeErr != nil {
-				// Log but don't fail — stale cleanup is best-effort.
-				fmt.Fprintf(os.Stderr, "warning: cannot remove stale session runtime directory %s: %v\n", dir, removeErr)
+				staleErrors = append(staleErrors, fmt.Errorf("%s: %w", entry.Name(), removeErr))
 			}
 		}
 	}
 
+	if len(staleErrors) > 0 {
+		return fmt.Errorf("stale session cleanup failed (%d error(s)): %v", len(staleErrors), staleErrors)
+	}
 	return nil
 }
