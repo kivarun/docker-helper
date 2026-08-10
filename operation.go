@@ -328,50 +328,46 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 	}
 
 	// Phase 2: Wait for each operation to complete gracefully.
-	// For shutdown, wait only until forceStart.
+	// For shutdown, wait only until forceStart (may be zero = skip graceful).
 	// For cancel, wait until ctx deadline.
 	var completed []*operation
-	for _, op := range ops {
-		if _, ok := terminatedSet[op]; ok {
-			continue
-		}
-		select {
-		case <-op.done:
-			completed = append(completed, op)
-		case <-ctx.Done():
-			// Deadline exceeded.
-			if !isShutdown {
-				// Cancel mode: legacy sequential force cleanup with per-op deadline.
-				r.forceCleanupSequential(op, killContainer)
-			}
-			// Shutdown mode: handled below with concurrent force cleanup.
-		}
-	}
 
-	// For shutdown: also wait until forceStart for any remaining operations.
-	if isShutdown && !forceStart.IsZero() {
-		remaining := time.Until(forceStart)
-		if remaining > 0 {
-			completedSet := make(map[*operation]struct{}, len(completed))
-			for _, c := range completed {
-				completedSet[c] = struct{}{}
-			}
+	if isShutdown {
+		if !forceStart.IsZero() {
+			// Graceful phase: use a single timer for all operations.
+			graceTimer := time.NewTimer(time.Until(forceStart))
+			defer graceTimer.Stop()
 			for _, op := range ops {
 				if _, ok := terminatedSet[op]; ok {
-					continue
-				}
-				if _, ok := completedSet[op]; ok {
 					continue
 				}
 				select {
 				case <-op.done:
 					completed = append(completed, op)
-				case <-time.After(remaining):
-					// forceStart reached, proceed to force cleanup.
+				case <-graceTimer.C:
+					// forceStart reached; proceed to force cleanup below.
+					goto forceCleanup
 				}
 			}
 		}
+		// forceStart is zero or timer expired: skip to force cleanup.
+	} else {
+		// Cancel: wait until each op completes or ctx deadline.
+		for _, op := range ops {
+			if _, ok := terminatedSet[op]; ok {
+				continue
+			}
+			select {
+			case <-op.done:
+				completed = append(completed, op)
+			case <-ctx.Done():
+				// Deadline exceeded: legacy sequential force cleanup.
+				r.forceCleanupSequential(op, killContainer)
+			}
+		}
 	}
+
+forceCleanup:
 
 	// Phase 3: Force cleanup for remaining operations.
 	// For shutdown: concurrent force cleanup under the shared deadline.
@@ -475,10 +471,8 @@ func forceCleanupOperation(op *operation, killContainer func(context.Context, st
 	}
 	op.forceOwned = true
 	op.forceDone = make(chan struct{})
+	op.forceDeadline = forceDeadline
 	op.mu.Unlock()
-
-	// Force cleanup phase (single owner):
-	// bounded daemon-side cleanup before force-killing the process.
 	forceCtx, forceCancel := context.WithDeadline(context.Background(), forceDeadline)
 	if op.cidfile != "" {
 		containerID := waitForContainerID(forceCtx, op)

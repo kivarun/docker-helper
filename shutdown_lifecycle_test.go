@@ -12,7 +12,7 @@ import (
 )
 
 // TestShutdownGlobalDeadlineOwnership proves that for daemon shutdown,
-// the operation's forceDeadline is not later than the root shutdown deadline.
+// the operation's forceDeadline is non-zero and equal to the root shutdown deadline.
 // Old code failed this because it used time.Now().Add(defaultForceCleanupTimeout).
 func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 	app, reg, token := setupBuildTest(t)
@@ -33,14 +33,16 @@ func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
-	// Verify: forceDeadline must not be later than the root shutdown deadline.
+	// Verify: forceDeadline is non-zero and equals the root shutdown deadline.
 	op.mu.Lock()
 	forceDL := op.forceDeadline
 	op.mu.Unlock()
 
-	if forceDL.After(shutdownDeadline) {
-		t.Errorf("forceDeadline %v is after root shutdown deadline %v (exceeded wall-clock budget)",
-			forceDL, shutdownDeadline)
+	if forceDL.IsZero() {
+		t.Fatal("forceDeadline must be non-zero for shutdown")
+	}
+	if !forceDL.Equal(shutdownDeadline) {
+		t.Errorf("forceDeadline %v != root shutdown deadline %v", forceDL, shutdownDeadline)
 	}
 
 	op.Wait()

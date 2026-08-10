@@ -82,8 +82,8 @@ func TestCmdStartRaceStartBeforeShutdown(t *testing.T) {
 }
 
 // TestCmdStartRaceForceKillIgnoringSignal verifies that a process that
-// ignores graceful SIGTERM is force-killed after the deadline, even when
-// it was properly started before shutdown.
+// ignores graceful SIGTERM is force-killed within the shutdown deadline,
+// even when it was properly started before shutdown.
 func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
 	app, reg, token := setupBuildTest(t)
 
@@ -105,14 +105,9 @@ func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
 	elapsed := time.Since(start)
 	cancel()
 
-	// terminateAll should not return immediately (graceful phase ran).
-	// Allow some tolerance for timing jitter.
-	if elapsed < 400*time.Millisecond {
-		t.Errorf("terminateAll returned too quickly: %v (graceful phase may not have run)", elapsed)
-	}
-
-	// terminateAll should not exceed the deadline significantly.
-	if elapsed > 1*time.Second {
+	// With the bounded lifecycle, terminateAll must complete within
+	// the shutdown deadline (no additional fixed wait beyond deadline).
+	if elapsed > 750*time.Millisecond {
 		t.Errorf("terminateAll took too long: %v", elapsed)
 	}
 
