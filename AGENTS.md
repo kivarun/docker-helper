@@ -285,7 +285,7 @@ modify code, stop after the analysis and do not edit files or create commits.
 Text files must end with a newline.
 
 Operational policy values must be configurable and have documented
-reasonable defaults.
+reasonable defaults when operators reasonably need to tune them.
 
 This applies to values such as:
 - timeouts;
@@ -303,6 +303,11 @@ Architectural/protocol invariants and implementation constants such as:
 
 should remain in code unless there is a concrete operational reason to make
 them configurable.
+
+Release-scoped hard limits may remain implementation constants when they are
+deliberate, documented, and intended to be configurable in a later release.
+Example: the POST /run `shm_size` maximum of 2 GiB is a deliberate Release 1
+limit that will become configurable in Release 2+.
 
 Review the final diff for unrelated changes.
 

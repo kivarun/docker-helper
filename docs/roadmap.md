@@ -23,14 +23,17 @@ Verified against current implementation:
 - mount validation and symlink escape protection;
 - environment policy (name validation, sorted, values never logged);
 - pull/build/run endpoints;
+- build_args for POST /build (name validation, sorted, audit keys only);
+- shm_size for POST /run (Release 1 hard limit 2 GiB, parsed binary units);
 - config CLI (`show`, `set`, `unset`) and runtime reload;
 - audit logging (stdout, JSONL) and operational logging (stderr, slog JSONL);
 - SQLite session state;
 - session expiration enforcement (`expires_at` check on every request);
 - startup expired-session cleanup + `docker-helper session cleanup` CLI;
 - strict single-document JSON request decoding (`decodeJSONRequest`);
-- graceful shutdown with configurable `shutdown_timeout` (default 30s);
 - async build/run with operation lifecycle (status, logs, cancel);
+- global bounded shutdown lifecycle (one absolute deadline, concurrent drain
+  + operation termination, force cleanup);
 - developer rules in root `AGENTS.md`;
 - documentation cleanup (README, architecture, agent instructions);
 - version source prepared for ldflags release injection (`var version = "dev"`);
@@ -59,6 +62,9 @@ Verified against current implementation:
 survive daemon restart. Durable/recoverable operations may be considered in
 2.0 or later if needed; this is not currently a committed 2.0 feature.
 
+**Completed.** Async operation lifecycle, status polling, incremental logs,
+and cancel are implemented.
+
 ### 2. Shutdown timeout
 
 `shutdown_timeout` is configurable (default 30s). Shutdown direction:
@@ -71,7 +77,15 @@ survive daemon restart. Durable/recoverable operations may be considered in
   fallback;
 - cleanup failures are logged but must not hang shutdown indefinitely.
 
-### 3. Installation / service packaging
+**Completed.** Global bounded shutdown lifecycle with one absolute deadline,
+concurrent drain + operation termination, and force cleanup is implemented.
+
+### 3. Private-registry authentication
+
+Agents need to build from and run images from private registries. The
+authentication mechanism is not yet designed.
+
+### 4. Installation / service packaging
 
 Finish the operator installation path.
 
@@ -85,7 +99,7 @@ Include:
 Release 1 remains user-service oriented.
 Do not expand to system-wide/root daemon deployment unless separately decided.
 
-### 4. Release build and GitHub release
+### 5. Release build and GitHub release
 
 Add minimal release automation:
 
@@ -106,7 +120,12 @@ Git tag/release tag should be the authoritative release version source.
 
 Do not introduce generated version files.
 
-### 5. Clean-install acceptance test
+### 6. Agent-facing integration / dogfood
+
+Validate the API with a real coding agent integration to surface usability
+issues before release.
+
+### 7. Clean-install acceptance test
 
 Before 1.0, test the project as a new operator would use it:
 
@@ -126,6 +145,11 @@ Before 1.0, test the project as a new operator would use it:
 - verify version.
 
 This is an end-to-end release acceptance pass, not another unit-test framework.
+
+### 8. Final hardening and documentation
+
+Address any remaining edge cases, race conditions, or documentation gaps
+discovered during integration testing and acceptance.
 
 ## Explicitly not required for Release 1
 

@@ -1034,7 +1034,7 @@ Emitted after a Docker pull completes (success or failure).
 
 ### What is never logged
 
-The audit log and operational log never contain:
+The daemon audit log and operational log never contain:
 
 - the raw HTTP request body;
 - HTTP request headers;
@@ -1044,6 +1044,12 @@ The audit log and operational log never contain:
 - Docker build output or container stdout/stderr;
 - internal error messages or stack traces;
 - command arguments (only `command_arg_count` is recorded).
+
+This section refers to the daemon's audit and operational logs. The per-operation
+output buffer accessed via `GET /operations/{id}/logs` is intentionally separate:
+it captures the merged stdout/stderr stream from the Docker CLI process and may
+contain Docker pull/build status output, container stdout/stderr, and build
+process output. That stream is not part of the daemon audit or operational logs.
 
 ### Examples
 

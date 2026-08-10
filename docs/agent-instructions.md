@@ -124,6 +124,10 @@ The logs response includes `next_offset` — use it as the `offset` for the
 next request. When `truncated` is `true`, older log data was evicted by
 the bounded retention limit.
 
+Operation logs are the merged stdout/stderr stream from the Docker CLI
+process and may include Docker pull/build status output in addition to
+container stdout. Do not assume the response contains only container output.
+
 **Do not** start `/run` with the new image until the build status is
 `succeeded`. If the status is `failed`, inspect `result_code`, `exit_code`
 and the logs to diagnose the problem.
@@ -212,6 +216,10 @@ curl --silent --show-error \
 The logs response includes `next_offset` — use it as the `offset` for the
 next request. When `truncated` is `true`, older log data was evicted by
 the bounded retention limit.
+
+Operation logs are the merged stdout/stderr stream from the Docker CLI
+process and may include Docker status output. Do not assume the response
+contains only container stdout.
 
 Run-specific result codes:
 
