@@ -96,15 +96,40 @@ attempts without exposing credentials.
 
 Finish the operator installation path.
 
-Include:
+Release 1 packaging is intentionally user-only:
 
-- final systemd user service;
-- installation locations;
-- config/state/runtime path behavior;
-- binary installation/update story.
+- helper runs as the installing user;
+- binary installs to `~/.local/bin/docker-helper`;
+- systemd user unit installs to `~/.config/systemd/user/docker-helper.service`;
+- generic release artifact is `tar.gz` with the binary, `install.sh`,
+  `uninstall.sh`, user unit, and optional AppArmor integration;
+- no native `.deb`/`.rpm` packages in Release 1;
+- no system-wide/root daemon deployment in Release 1.
 
-Release 1 remains user-service oriented.
-Do not expand to system-wide/root daemon deployment unless separately decided.
+Installer direction:
+
+- no root is required for the helper binary, user unit, init, or user service;
+- interactive install should offer to continue directly into `docker-helper init`
+  and then enable/start the systemd user service;
+- installer checks Docker access but must not automatically add the user to the
+  `docker` group or otherwise change Docker authorization;
+- installer must not edit shell startup files automatically; if
+  `~/.local/bin` is not visible in the current `PATH`, explain how to refresh
+  the login environment;
+- optional AppArmor host-policy installation/removal may explicitly request
+  `sudo`, because it changes host security policy.
+
+Uninstall direction:
+
+- normal uninstall removes installed program/service files while preserving
+  Docker Helper configuration, admin token, and state;
+- purge uninstall removes configuration and state too;
+- expose both an interactive purge question and a non-interactive `--purge`
+  option;
+- never remove broader parent directories or modify shell startup files.
+
+Release 1 target environment is openSUSE and Ubuntu, plus the generic Linux
+`tar.gz` installation path.
 
 ### 5. Release build and GitHub release
 
@@ -131,6 +156,10 @@ Do not introduce generated version files.
 
 Validate the API with a real coding agent integration to surface usability
 issues before release.
+
+**Completed.** Real OpenCode usage has exercised the helper throughout normal
+agent workflows and directly driven usability fixes in async operations, CLI,
+help/documentation, logging, and private-registry handling.
 
 ### 7. Clean-install acceptance test
 
@@ -174,6 +203,9 @@ Record these so they do not accidentally expand Release 1 scope:
 - DB VACUUM/maintenance framework;
 - generic retry subsystem;
 - system-wide/root daemon deployment;
+- multi-user daemon deployment;
+- native `.deb`/`.rpm` packaging;
+- Fedora/RHEL-specific distribution support;
 - WebSocket/SSE log streaming unless polling proves insufficient.
 
 ## Post-1.0 candidates
@@ -186,12 +218,45 @@ Include:
 - remote/server-side deployment work;
 - durable/recoverable operations across daemon restart;
 - network/proxy capability as a separate tool/project;
-- notification helper with restricted DBus access;
-- packaging improvements.
+- notification helper with restricted DBus access.
 
 Do not design their APIs here.
 
 ## 2.0
+
+### System/root and multi-user deployment
+
+Add a system-service deployment mode in addition to the Release 1 user service.
+Treat root/system deployment and multi-user operation as one design area rather
+than adding a root unit mechanically.
+
+Expected scope:
+
+- system/root service mode;
+- multi-user client access;
+- formal user/system deployment scopes;
+- system config/state/runtime paths and systemd system unit;
+- explicit Unix-socket ownership/permission model for clients;
+- workspace authorization suitable for multiple users rather than widening one
+  global `allowed_root` to all of `/home`;
+- administrative operations may initially rely on `sudo`; do not introduce a
+  separate administrative control plane unless a demonstrated need appears.
+
+Do not predesign the exact multi-user authorization API during Release 1.
+
+### Distribution packaging and platform expansion
+
+Move native distribution packaging out of Release 1.
+
+Expected scope:
+
+- native `.deb` packaging;
+- native `.rpm` packaging;
+- RHEL-family support is the likely RPM enterprise target rather than Fedora;
+- exact RHEL-family target(s) and distro-specific security integration should be
+  selected when this work starts.
+
+Fedora is not currently a committed target.
 
 ### Database doctor / maintenance CLI
 
