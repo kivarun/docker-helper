@@ -165,11 +165,19 @@ func TestShmSizeIntegration(t *testing.T) {
 	}
 	logs, _ := logsResp["logs"].(string)
 
-	// Parse the expected shm size in bytes.
+	// Parse the operation log by lines. Docker pull/status output may be
+	// present in the merged stdout/stderr log, so we need to find the
+	// line that contains the /dev/shm size.
 	wantShmSize := "134217728" // 128 * 1024 * 1024
-	gotShmSize := strings.TrimSpace(logs)
-	if gotShmSize != wantShmSize {
-		t.Errorf("expected /dev/shm size %s, got %s", wantShmSize, gotShmSize)
+	found := false
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.TrimSpace(line) == wantShmSize {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a line with %q in operation logs, got:\n%s", wantShmSize, logs)
 	}
 }
 
