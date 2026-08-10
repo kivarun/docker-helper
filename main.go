@@ -290,6 +290,8 @@ func runServe(stdout, stderr io.Writer) error {
 		server := &http.Server{
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
+			ErrorLog: slog.NewLogLogger(
+				opLog(context.Background()).Handler(), slog.LevelError),
 		}
 
 		logger := logging.snapshotLogger()

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -1044,5 +1047,44 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	}
 	if requestErr == nil {
 		t.Fatal("expected active request to be interrupted by forced close")
+	}
+}
+
+// TestServerErrorLogGoesToOperational verifies that http.Server.ErrorLog
+// is bridged to the operational logging pipeline so that internal net/http
+// diagnostics appear as structured JSON with stream=operational.
+func TestServerErrorLogGoesToOperational(t *testing.T) {
+	opBuf := new(bytes.Buffer)
+	auditBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelError, true)
+	defer logging.reset()
+
+	server := &http.Server{
+		ErrorLog: slog.NewLogLogger(
+			opLog(context.Background()).Handler(), slog.LevelError),
+	}
+
+	server.ErrorLog.Print("synthetic http server error")
+
+	output := opBuf.String()
+	if !strings.Contains(output, "synthetic http server error") {
+		t.Fatalf("expected error in operational log:\n%s", output)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("not valid JSON: %s: %v", line, err)
+		}
+		if m["stream"] != "operational" {
+			t.Errorf("expected stream=operational, got %v", m["stream"])
+		}
+		if m["level"] != "ERROR" {
+			t.Errorf("expected level=ERROR, got %v", m["level"])
+		}
 	}
 }
