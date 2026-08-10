@@ -82,21 +82,6 @@ var deprecatedConfigFields = map[string]string{
 	"build_log_max_bytes": "operation_log_max_bytes",
 }
 
-// validateNoReservedFields checks that no reserved field appears in the config JSON.
-// It returns an error naming the first offending field found.
-func validateNoReservedFields(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("cannot parse config: %w", err)
-	}
-	for field := range raw {
-		if reservedConfigFields[field] {
-			return fmt.Errorf("%s is computed and cannot be configured", field)
-		}
-	}
-	return nil
-}
-
 // validateNoDeprecatedRawFields checks that no deprecated field appears in the raw config map.
 // It returns an error with a clear rename diagnostic.
 func validateNoDeprecatedRawFields(raw map[string]json.RawMessage) error {
@@ -166,11 +151,6 @@ func loadConfig() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read config: %w", err)
-	}
-
-	// Check for reserved fields that must not appear in config.json.
-	if err := validateNoReservedFields(data); err != nil {
-		return nil, err
 	}
 
 	// Validate the raw config document before decoding into fileConfig.
@@ -471,6 +451,13 @@ func promptAllowedRoot(defaultPath string, stdin io.Reader, stderr io.Writer) (s
 func validateRawConfig(raw map[string]json.RawMessage) error {
 	if raw == nil {
 		return fmt.Errorf("configuration is not a JSON object")
+	}
+
+	// Reject reserved/computed fields.
+	for field := range raw {
+		if reservedConfigFields[field] {
+			return fmt.Errorf("%s is computed and cannot be configured", field)
+		}
 	}
 
 	// Reject deprecated config keys with a clear rename diagnostic.
