@@ -712,23 +712,16 @@ Current error codes (non-exhaustive):
 |------|----------|-----------|
 | `unauthorized` | all protected | missing/invalid token |
 | `invalid_json` | all JSON endpoints | request body is not valid JSON |
-| `invalid_build_context` | `POST /build` | context validation failure |
-| `invalid_dockerfile` | `POST /build` | Dockerfile validation failure |
-| `invalid_image` | `POST /build`, `POST /run`, `POST /pull` | image name is empty |
+| `invalid_build_context` | `POST /build` | context or image validation failure |
+| `invalid_image` | `POST /run`, `POST /pull` | image name is empty |
 | `invalid_mount` | `POST /run` | mount validation failure |
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
-| `docker_build_failed` | `POST /build` | docker build returned non-zero |
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero |
-| `docker_run_failed` | `POST /run` | Docker run operation failed |
-| `container_exit_nonzero` | `POST /run` | container exited with non-zero status |
-| `cancelled` | `POST /build`, `POST /run` | operation cancelled by client |
-| `operation_not_found` | `GET /operations/{id}` | operation not found or foreign session |
-| `not_found` | `POST /operations/{id}/cancel` | operation not found |
-| `already_terminal` | `POST /operations/{id}/cancel` | operation already completed |
+| `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 
 Planned:
 
