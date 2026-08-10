@@ -371,6 +371,19 @@ func safeWriteConfig(configPath string, data []byte) error {
 	return nil
 }
 
+// persistRawConfig validates, encodes, and atomically writes the raw config.
+func persistRawConfig(configPath string, raw map[string]json.RawMessage) error {
+	if err := validateRawConfig(raw); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("cannot encode JSON: %w", err)
+	}
+	data = append(data, '\n')
+	return safeWriteConfig(configPath, data)
+}
+
 func getRuntimeDirSafe() string {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
@@ -700,20 +713,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 
 	raw[field] = newValue
 
-	// Validate the complete resulting configuration before writing.
-	if err := validateRawConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	data, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
-		return 1
-	}
-	data = append(data, '\n')
-
-	if err := safeWriteConfig(configPath, data); err != nil {
+	if err := persistRawConfig(configPath, raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
@@ -760,20 +760,7 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 
 	delete(raw, field)
 
-	// Validate the complete resulting configuration before writing.
-	if err := validateRawConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	data, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
-		return 1
-	}
-	data = append(data, '\n')
-
-	if err := safeWriteConfig(configPath, data); err != nil {
+	if err := persistRawConfig(configPath, raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
