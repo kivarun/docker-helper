@@ -723,3 +723,54 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 		})
 	}
 }
+
+// TestOperationForSessionNilRegistry verifies that operationForSession
+// returns nil when the operation registry is not set.
+func TestOperationForSessionNilRegistry(t *testing.T) {
+	app := &App{}
+	op := app.operationForSession("session-1", "op-1")
+	if op != nil {
+		t.Error("expected nil for nil registry")
+	}
+}
+
+// TestOperationForSessionUnknownID verifies that operationForSession
+// returns nil for an unknown operation ID.
+func TestOperationForSessionUnknownID(t *testing.T) {
+	app := &App{OperationRegistry: newOperationRegistry()}
+	op := app.operationForSession("session-1", "nonexistent")
+	if op != nil {
+		t.Error("expected nil for unknown operation ID")
+	}
+}
+
+// TestOperationForSessionForeignSession verifies that operationForSession
+// returns nil when the operation belongs to a different session.
+func TestOperationForSessionForeignSession(t *testing.T) {
+	reg := newOperationRegistry()
+	op := newRunOperation("other-session", "alpine:latest", 1024)
+	reg.tryCreate(op)
+
+	app := &App{OperationRegistry: reg}
+	result := app.operationForSession("session-1", op.ID)
+	if result != nil {
+		t.Error("expected nil for foreign session")
+	}
+}
+
+// TestOperationForSessionOwner verifies that operationForSession
+// returns the operation when the session matches.
+func TestOperationForSessionOwner(t *testing.T) {
+	reg := newOperationRegistry()
+	op := newRunOperation("session-1", "alpine:latest", 1024)
+	reg.tryCreate(op)
+
+	app := &App{OperationRegistry: reg}
+	result := app.operationForSession("session-1", op.ID)
+	if result == nil {
+		t.Fatal("expected operation for owner session")
+	}
+	if result.ID != op.ID {
+		t.Errorf("expected operation ID %s, got %s", op.ID, result.ID)
+	}
+}

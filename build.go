@@ -154,6 +154,23 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 	op.succeed(&duration)
 }
 
+// operationForSession looks up an operation by ID and verifies it belongs
+// to the given session. Returns nil if the registry is nil, the operation
+// does not exist, or it belongs to a different session.
+func (a *App) operationForSession(sessionID, operationID string) *operation {
+	if a.OperationRegistry == nil {
+		return nil
+	}
+	op := a.OperationRegistry.get(operationID)
+	if op == nil {
+		return nil
+	}
+	if op.SessionID != sessionID {
+		return nil
+	}
+	return op
+}
+
 func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSession(w, r)
 	if !ok {
@@ -170,18 +187,8 @@ func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if a.OperationRegistry == nil {
-		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
-		return
-	}
-
-	op := a.OperationRegistry.get(opID)
+	op := a.operationForSession(session.ID, opID)
 	if op == nil {
-		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
-		return
-	}
-
-	if op.SessionID != session.ID {
 		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
 		return
 	}
@@ -234,18 +241,8 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if a.OperationRegistry == nil {
-		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
-		return
-	}
-
-	op := a.OperationRegistry.get(opID)
+	op := a.operationForSession(session.ID, opID)
 	if op == nil {
-		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
-		return
-	}
-
-	if op.SessionID != session.ID {
 		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
 		return
 	}
@@ -307,18 +304,8 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if a.OperationRegistry == nil {
-		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
-		return
-	}
-
-	op := a.OperationRegistry.get(opID)
+	op := a.operationForSession(session.ID, opID)
 	if op == nil {
-		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
-		return
-	}
-
-	if op.SessionID != session.ID {
 		writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
 		return
 	}
