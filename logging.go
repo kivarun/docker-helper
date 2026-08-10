@@ -233,18 +233,11 @@ func opLog(ctx context.Context) *slog.Logger {
 // writeJSONError logs a response encoding failure using the request context.
 // It includes request_id and session_id when available.
 func writeJSONError(ctx context.Context, err error) {
-	logger := logging.snapshotLogger()
-	if logger == nil {
-		return
-	}
-	l := logger.With(slog.String("operation", "response_encode"), slog.String("error", err.Error()))
-	if rid := requestIDFromContext(ctx); rid != "" {
-		l = l.With(slog.String("request_id", rid))
-	}
-	if sid := sessionIDFromContext(ctx); sid != "" {
-		l = l.With(slog.String("session_id", sid))
-	}
-	l.Error("failed to encode response")
+	opLog(ctx).Error(
+		"failed to encode response",
+		slog.String("operation", "response_encode"),
+		slog.String("error", err.Error()),
+	)
 }
 
 // osStderr is the original os.Stderr, captured at package init.

@@ -774,6 +774,9 @@ func TestResponseEncodingErrorContainsCorrelation(t *testing.T) {
 	if m["session_id"] != "dhs_corr" {
 		t.Errorf("expected session_id=dhs_corr, got %v", m["session_id"])
 	}
+	if m["operation"] != "response_encode" {
+		t.Errorf("expected operation=response_encode, got %v", m["operation"])
+	}
 }
 
 // TestAuditWriterFailureContainsCorrelation verifies that an audit writer
