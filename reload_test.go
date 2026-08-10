@@ -588,6 +588,90 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	}
 }
 
+// TestReloadSuccessLogContainsRequestID verifies that the successful reload
+// operational log includes stream=operational, the request_id, and the message.
+func TestReloadSuccessLogContainsRequestID(t *testing.T) {
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
+	defer logging.reset()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+
+	time.Sleep(100 * time.Millisecond)
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	output := opBuf.String()
+	if !strings.Contains(output, "configuration reloaded") {
+		t.Fatalf("expected reload message in operational log:\n%s", output)
+	}
+	if !strings.Contains(output, `"stream":"operational"`) {
+		t.Errorf("expected stream=operational:\n%s", output)
+	}
+	if !strings.Contains(output, `"request_id":"req_`) {
+		t.Errorf("expected request_id in operational log:\n%s", output)
+	}
+}
+
 // TestReloadRuntimeLogLevel verifies that log_level change takes effect at runtime.
 func TestReloadRuntimeLogLevel(t *testing.T) {
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
