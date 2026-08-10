@@ -69,6 +69,14 @@ func (w *statusResponseWriter) WriteHeader(statusCode int) {
 	}
 }
 
+func (w *statusResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.status = http.StatusOK
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(p)
+}
+
 // getRoutePattern returns the registered route pattern for the request.
 // For parameterized routes, it returns the pattern with {param} placeholders.
 // For static routes, it returns the path as-is.

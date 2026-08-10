@@ -647,3 +647,56 @@ func TestStatusResponseWriterCapturesFirstWriteHeader(t *testing.T) {
 
 	t.Fatal("no 'request completed' record found")
 }
+
+// TestStatusResponseWriterImplicitOKOnWrite verifies that when Write()
+// is called before WriteHeader, the middleware captures status=200
+// (implicit OK from net/http semantics).
+func TestStatusResponseWriterImplicitOKOnWrite(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
+	defer logging.reset()
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+		w.WriteHeader(http.StatusBadGateway)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	w := httptest.NewRecorder()
+
+	withRequestID(withLogging(handler))(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected response status 200, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	if body != "ok" {
+		t.Errorf("expected body 'ok', got %q", body)
+	}
+
+	opOutput := opBuf.String()
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" || !strings.Contains(line, "request completed") {
+			continue
+		}
+
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("cannot parse debug record: %v: %s", err, line)
+		}
+
+		status, ok := m["status"].(float64)
+		if !ok {
+			t.Fatal("expected status to be a number")
+		}
+		if status != 200 {
+			t.Errorf("expected logged status=200, got %v", status)
+		}
+		return
+	}
+
+	t.Fatal("no 'request completed' record found")
+}
