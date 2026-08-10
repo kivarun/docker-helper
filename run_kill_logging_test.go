@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,10 @@ func TestKillContainerBestEffortLogsToOperational(t *testing.T) {
 	defer logging.reset()
 
 	app := &App{}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
+	}
+
 	ctx := context.Background()
 	containerID := "abc123def456"
 	app.killContainerBestEffort(ctx, containerID)

@@ -67,7 +67,7 @@ func waitForContainerID(ctx context.Context, op *operation) string {
 // If the container is already gone or the command fails, the error is
 // logged but not propagated — "container already gone" is a success.
 func (a *App) killContainerBestEffort(ctx context.Context, containerID string) {
-	cmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+	cmd := a.newOperationCmd(ctx, "docker", "kill", containerID)
 	if err := cmd.Run(); err != nil {
 		// Container already gone or docker not available — acceptable.
 		// Do not log the container ID to avoid unnecessary traceability.
