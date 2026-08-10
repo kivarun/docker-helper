@@ -22,6 +22,11 @@ const (
 
 const resultCancelled = "cancelled"
 
+// defaultTerminationTimeout is the graceful termination budget applied
+// when the caller does not supply a context deadline. Used by both
+// explicit cancel (terminateOne) and daemon shutdown (terminateAll).
+const defaultTerminationTimeout = 5 * time.Second
+
 type terminationReason uint8
 
 const (
@@ -243,6 +248,16 @@ func (r *operationRegistry) terminateOne(id string, killContainer func(context.C
 // If targetOp is non-nil, only that operation is terminated (cancel).
 // reason distinguishes shutdown from explicit cancel for result semantics.
 func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *operation, killContainer func(context.Context, string), reason terminationReason) {
+	// Normalize context: if the caller did not supply a deadline, create
+	// a bounded termination context so that all wait paths are guaranteed
+	// to be bounded. This prevents unbounded waits when terminateOne
+	// passes context.Background().
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultTerminationTimeout)
+		defer cancel()
+	}
+
 	r.mu.RLock()
 	var ops []*operation
 	if targetOp != nil {
@@ -274,26 +289,21 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		op.mu.Unlock()
 	}
 
-	// Phase 2: Wait for non-terminated operations to complete until the
-	// shared deadline. Terminated operations will be cleaned up by the
-	// handler detecting op.terminated before cmd.Start.
-	deadline, hasDeadline := ctx.Deadline()
-	if !hasDeadline {
-		deadline = time.Now().Add(5 * time.Second)
-	}
-
 	terminatedSet := make(map[*operation]struct{}, len(terminated))
 	for _, op := range terminated {
 		terminatedSet[op] = struct{}{}
 	}
 
+	// Phase 2: Wait for each operation to complete. If the termination
+	// context expires, claim force-cleanup ownership (single-owner) and
+	// perform bounded daemon-side cleanup.
 	for _, op := range ops {
 		if _, ok := terminatedSet[op]; ok {
 			continue
 		}
 		select {
 		case <-op.done:
-		case <-time.After(time.Until(deadline)):
+		case <-ctx.Done():
 			// Deadline exceeded: claim force-cleanup ownership under op.mu.
 			// Only the first caller to claim performs the actual cleanup.
 			// Subsequent callers skip cleanup but still wait for op.done
@@ -303,10 +313,7 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 				// Another termination path already claimed force cleanup.
 				// Wait for it to complete within the remaining budget.
 				op.mu.Unlock()
-				select {
-				case <-op.done:
-				case <-ctx.Done():
-				}
+				<-op.done
 				continue
 			}
 			if op.CompletedAt != nil {
