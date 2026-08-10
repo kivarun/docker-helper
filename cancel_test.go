@@ -851,7 +851,8 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 
 // TestTerminalTransitionSucceedWins proves the single-terminal-transition
 // invariant at the primitive level: when succeed() transitions first,
-// a concurrent fail() cannot overwrite the result.
+// a subsequent fail() cannot overwrite the result.
+// A channel barrier fixes the ordering: succeed() runs first, then fail().
 func TestTerminalTransitionSucceedWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
@@ -940,7 +941,8 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 
 // TestTerminalTransitionFailWins proves the single-terminal-transition
 // invariant at the primitive level: when fail() transitions first,
-// a concurrent succeed() cannot overwrite the result.
+// a subsequent succeed() cannot overwrite the result.
+// A channel barrier fixes the ordering: fail() runs first, then succeed().
 func TestTerminalTransitionFailWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
