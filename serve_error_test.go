@@ -44,8 +44,8 @@ func TestServeErrorPathTerminatesOperations(t *testing.T) {
 	shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdown(signalCtx, server, listener, 2*time.Second, func() {
 		reg.setShuttingDown()
 	})
-	shutdownCancel()
 	<-drainDone
+	shutdownCancel()
 
 	// serveWithShutdown should return the serve error.
 	if err == nil {

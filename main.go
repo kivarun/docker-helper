@@ -320,10 +320,11 @@ func runServe(stdout, stderr io.Writer) error {
 			app.OperationRegistry.terminateAll(shutdownCtx, app.killContainerBestEffort)
 		}
 
-		// Drain goroutine manages shutdownCancel internally.
-		// Call it (no-op after drain) and wait for drain to complete.
-		shutdownCancel()
+		// Wait for HTTP drain to complete before cancelling the shutdown
+		// context. The drain goroutine runs server.Shutdown(shutdownCtx)
+		// and must not be interrupted by premature context cancellation.
 		<-drainDone
+		shutdownCancel()
 
 		logger = logging.snapshotLogger()
 
