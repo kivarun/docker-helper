@@ -1386,3 +1386,66 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 		t.Errorf("run.finish audit count = %d, want 1", finishCount)
 	}
 }
+
+// TestForceCleanupLateFollowerSharedDeadline proves that a late-arriving
+// follower in the force-cleanup phase waits only the remaining time until
+// the shared force deadline, not a fresh full defaultForceCleanupTimeout.
+func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Create a run operation with force cleanup already claimed by an owner.
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024)
+	op.started = true
+	op.forceOwned = true
+	op.forceDone = make(chan struct{})
+	// Set a short shared force deadline (200ms) to avoid long test times.
+	op.forceDeadline = time.Now().Add(200 * time.Millisecond)
+	app.OperationRegistry.mu.Lock()
+	app.OperationRegistry.ops[op.ID] = op
+	app.OperationRegistry.mu.Unlock()
+
+	// Start a long-running process that survives SIGTERM so the follower
+	// reaches the force phase. The owner is simulated (already claimed).
+	cmd := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cannot start test process: %v", err)
+	}
+	op.cmd = cmd
+
+	// Wait for the process to stabilize.
+	time.Sleep(100 * time.Millisecond)
+
+	// Completion goroutine (mimics real handler).
+	go func() {
+		cmd.Wait()
+		exitCode := 137
+		op.fail("docker_run_failed", "docker run failed", &exitCode, nil)
+	}()
+
+	// Launch the follower via terminateAll with a short context deadline
+	// so the graceful phase expires quickly and we reach the force phase.
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	app.OperationRegistry.terminateAll(ctx, func(context.Context, string) {})
+	elapsed := time.Since(start)
+
+	// Clean up.
+	// Use Signal to avoid racing with cmd.Wait() in the completion goroutine.
+	cmd.Process.Signal(syscall.SIGKILL)
+	<-op.done
+
+	// The follower should return within the shared deadline (200ms),
+	// not a fresh full defaultForceCleanupTimeout (3s).
+	// Allow generous margin for CI slowness, but it should be far less than 3s.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("follower waited %v, expected significantly less than 3s (shared deadline was 200ms)", elapsed)
+	}
+	t.Logf("follower returned in %v (shared deadline: 200ms)", elapsed)
+}
