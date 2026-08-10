@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -42,18 +43,14 @@ func withLogging(next http.HandlerFunc) http.HandlerFunc {
 
 		duration := time.Since(started).Milliseconds()
 		route := getRoutePattern(r)
-		rid := requestIDFromContext(r.Context())
 
-		logger := logging.snapshotLogger()
-		if logger != nil {
-			logger.Debug("request completed",
-				"request_id", rid,
-				"method", r.Method,
-				"route", route,
-				"status", lw.status,
-				"duration_ms", duration,
-			)
-		}
+		opLog(r.Context()).Debug(
+			"request completed",
+			slog.String("method", r.Method),
+			slog.String("route", route),
+			slog.Int("status", lw.status),
+			slog.Int64("duration_ms", duration),
+		)
 	}
 }
 
