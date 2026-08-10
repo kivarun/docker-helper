@@ -814,6 +814,21 @@ func TestOperationIDFromRequest(t *testing.T) {
 			path: "/operations",
 			want: "",
 		},
+		{
+			name: "garbage suffix returns empty",
+			path: "/operations/op_123/garbage",
+			want: "",
+		},
+		{
+			name: "logs with extra segment returns empty",
+			path: "/operations/op_123/logs/extra",
+			want: "",
+		},
+		{
+			name: "empty id returns empty",
+			path: "/operations//logs",
+			want: "",
+		},
 	}
 
 	for _, tt := range tests {

@@ -180,7 +180,12 @@ func operationIDFromRequest(r *http.Request) string {
 	}
 	parts := strings.Split(r.URL.Path, "/")
 	if len(parts) >= 3 && parts[1] == "operations" && parts[2] != "" {
-		return parts[2]
+		if len(parts) == 3 {
+			return parts[2]
+		}
+		if len(parts) == 4 && (parts[3] == "logs" || parts[3] == "cancel") {
+			return parts[2]
+		}
 	}
 	return ""
 }
