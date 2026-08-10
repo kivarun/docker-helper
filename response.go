@@ -49,12 +49,7 @@ type response struct {
 }
 
 func writeJSON(ctx context.Context, w http.ResponseWriter, status int, value response) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		writeJSONError(ctx, err)
-	}
+	writeJSONRaw(ctx, w, status, value)
 }
 
 func writeJSONRaw(ctx context.Context, w http.ResponseWriter, status int, value any) {
