@@ -319,3 +319,192 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 		t.Errorf("container not gone after forced cleanup: status=%s running=%s", status, running)
 	}
 }
+
+// TestContainerLifecycleGracefulCancel verifies that an explicit cancel
+// of a running /run operation terminates the container via SIGTERM,
+// the container exits, --rm removes it, and the operation reaches
+// result_code=cancelled with cidfile cleaned up.
+//
+// This is a Docker integration test that requires a reachable Docker daemon.
+func TestContainerLifecycleGracefulCancel(t *testing.T) {
+	dockerAvailable(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Start a long-running container (normal process that handles SIGTERM).
+	op := startRunOperation(t, app, result.Token, map[string]any{
+		"image":   "alpine:latest",
+		"command": []string{"sleep", "300"},
+	})
+
+	// Get the cidfile from the operation and wait for the container ID.
+	if op.cidfile == "" {
+		t.Fatal("cidfile not set on operation")
+	}
+	containerID := waitForCidfile(t, op.cidfile, 15*time.Second)
+	if containerID == "" {
+		t.Fatal("container ID not published in cidfile within timeout")
+	}
+	t.Logf("container ID from cidfile: %s", containerID)
+
+	// Clean up the container regardless of test outcome.
+	t.Cleanup(func() { cleanupContainerByID(t, containerID) })
+
+	// Wait for the container to actually be running.
+	if !waitForContainerRunning(t, containerID, 15*time.Second) {
+		t.Fatal("container did not become running within timeout")
+	}
+	t.Logf("container is running: %s", containerID)
+
+	// Cancel the operation via HTTP endpoint.
+	start := time.Now()
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
+	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
+	cancelW := httptest.NewRecorder()
+	app.handleOperationCancel(cancelW, cancelReq)
+	elapsed := time.Since(start)
+
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel: expected %d, got %d; body: %s", http.StatusOK, cancelW.Code, cancelW.Body.String())
+	}
+
+	// Sanity bound: graceful cancel should complete in reasonable time.
+	if elapsed > 15*time.Second {
+		t.Errorf("cancel took %v, expected significantly less than 15s", elapsed)
+	}
+
+	// Verify operation terminal state.
+	var cancelResp map[string]any
+	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
+	if cancelResp["status"] != "failed" {
+		t.Errorf("status = %q, want failed", cancelResp["status"])
+	}
+	if cancelResp["result_code"] != "cancelled" {
+		t.Errorf("result_code = %q, want cancelled", cancelResp["result_code"])
+	}
+
+	// Verify container is gone (--rm removes it on normal exit).
+	if !waitForContainerGone(t, containerID, 10*time.Second) {
+		status := dockerInspectField(t, containerID, "{{.State.Status}}")
+		running := dockerInspectField(t, containerID, "{{.State.Running}}")
+		t.Errorf("container not gone after graceful cancel: status=%s running=%s", status, running)
+	}
+
+	// Verify cidfile is cleaned up.
+	if _, err := os.Stat(op.cidfile); !os.IsNotExist(err) {
+		t.Errorf("cidfile %s should be removed after cancel", op.cidfile)
+	}
+}
+
+// TestContainerLifecycleForcedCancel verifies that when a container process
+// ignores SIGTERM, the explicit cancel deadline expires, the helper performs
+// daemon-side docker kill, and the container is removed (no orphan).
+//
+// This is a Docker integration test that requires a reachable Docker daemon.
+func TestContainerLifecycleForcedCancel(t *testing.T) {
+	dockerAvailable(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Create a readiness marker directory inside the session workspace
+	// so it can be bind-mounted into the container.
+	readyDir := filepath.Join(app.Config.AllowedRoot, "test_cancel_ready")
+	if err := os.MkdirAll(readyDir, 0755); err != nil {
+		t.Fatalf("cannot create ready dir: %v", err)
+	}
+	readyFile := filepath.Join(readyDir, "ready")
+
+	// Start a container that ignores SIGTERM.
+	// The shell command:
+	// 1. Installs trap to ignore SIGTERM
+	// 2. Touches the readiness file to signal the trap is installed
+	// 3. Enters long-running sleep
+	op := startRunOperation(t, app, result.Token, map[string]any{
+		"image":      "alpine:latest",
+		"entrypoint": "/bin/sh",
+		"command":    []string{"-c", "trap '' TERM; touch /ready/ready; exec sleep 300"},
+		"mounts": []map[string]any{
+			{"source": "test_cancel_ready", "target": "/ready", "read_only": false},
+		},
+	})
+
+	// Get the cidfile from the operation and wait for the container ID.
+	if op.cidfile == "" {
+		t.Fatal("cidfile not set on operation")
+	}
+	containerID := waitForCidfile(t, op.cidfile, 15*time.Second)
+	if containerID == "" {
+		t.Fatal("container ID not published in cidfile within timeout")
+	}
+	t.Logf("container ID from cidfile: %s", containerID)
+
+	// Clean up the container regardless of test outcome.
+	t.Cleanup(func() { cleanupContainerByID(t, containerID) })
+
+	// Wait for the container to actually be running.
+	if !waitForContainerRunning(t, containerID, 15*time.Second) {
+		t.Fatal("container did not become running within timeout")
+	}
+	t.Logf("container is running: %s", containerID)
+
+	// Wait for the readiness marker — deterministic handshake proving
+	// the SIGTERM trap is installed.
+	if !waitReadyFile(t, readyFile, 10*time.Second) {
+		t.Fatal("container did not signal readiness within timeout")
+	}
+	t.Log("container SIGTERM trap confirmed via readiness marker")
+
+	// Cancel the operation — this will exercise the forced cleanup path.
+	start := time.Now()
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
+	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
+	cancelW := httptest.NewRecorder()
+	app.handleOperationCancel(cancelW, cancelReq)
+	elapsed := time.Since(start)
+
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel: expected %d, got %d; body: %s", http.StatusOK, cancelW.Code, cancelW.Body.String())
+	}
+
+	// Sanity bound: forced cancel should complete within reasonable time.
+	// The graceful phase is ~5s + cleanup ~3s = ~8s worst case.
+	// Allow generous margin for CI slowness.
+	if elapsed > 15*time.Second {
+		t.Errorf("forced cancel took %v, expected significantly less than 15s", elapsed)
+	}
+
+	// Verify operation terminal state.
+	var cancelResp map[string]any
+	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
+	if cancelResp["status"] != "failed" {
+		t.Errorf("status = %q, want failed", cancelResp["status"])
+	}
+	if cancelResp["result_code"] != "cancelled" {
+		t.Errorf("result_code = %q, want cancelled", cancelResp["result_code"])
+	}
+
+	// KEY CHECK: container must NOT be running after forced cleanup.
+	// This is the regression test for the orphan-container bug.
+	if !waitForContainerGone(t, containerID, 10*time.Second) {
+		status := dockerInspectField(t, containerID, "{{.State.Status}}")
+		running := dockerInspectField(t, containerID, "{{.State.Running}}")
+		t.Errorf("container not gone after forced cancel: status=%s running=%s", status, running)
+	}
+
+	// Verify cidfile is cleaned up.
+	if _, err := os.Stat(op.cidfile); !os.IsNotExist(err) {
+		t.Errorf("cidfile %s should be removed after cancel", op.cidfile)
+	}
+}

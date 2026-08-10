@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1095,5 +1096,255 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	}
 	if completedAt == nil {
 		t.Error("CompletedAt must not be nil")
+	}
+}
+
+// TestConcurrentDoubleCancel proves that two simultaneous cancel requests
+// for the same running operation produce exactly one terminal transition
+// and one finish audit. Both HTTP requests complete without error.
+func TestConcurrentDoubleCancel(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	var buildResp map[string]any
+	json.NewDecoder(w.Body).Decode(&buildResp)
+	opID := buildResp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Wait for the process to start.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		proc := op.cmd
+		op.mu.Unlock()
+		if proc != nil && proc.Process != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Launch two cancel requests concurrently.
+	// Both enter the handler at roughly the same time.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var cancelW1, cancelW2 *httptest.ResponseRecorder
+	var cancelReq1, cancelReq2 *http.Request
+
+	// Prepare both requests.
+	cancelReq1 = httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq1.Header.Set("Authorization", "Bearer "+result.Token)
+	cancelW1 = httptest.NewRecorder()
+
+	cancelReq2 = httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+	cancelReq2.Header.Set("Authorization", "Bearer "+result.Token)
+	cancelW2 = httptest.NewRecorder()
+
+	// Barrier: both goroutines start at the same time.
+	start := make(chan struct{})
+
+	go func() {
+		defer wg.Done()
+		<-start
+		app.handleOperationCancel(cancelW1, cancelReq1)
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		app.handleOperationCancel(cancelW2, cancelReq2)
+	}()
+
+	close(start)
+	wg.Wait()
+
+	// Both requests must complete successfully.
+	if cancelW1.Code != http.StatusOK {
+		t.Errorf("cancel 1: expected %d, got %d", http.StatusOK, cancelW1.Code)
+	}
+	if cancelW2.Code != http.StatusOK {
+		t.Errorf("cancel 2: expected %d, got %d", http.StatusOK, cancelW2.Code)
+	}
+
+	// Verify: single terminal result.
+	op.mu.Lock()
+	state := op.State
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	completedAt := op.CompletedAt
+	op.mu.Unlock()
+
+	if state != operationFailed {
+		t.Errorf("state = %q, want failed", state)
+	}
+	if rc != "cancelled" {
+		t.Errorf("result_code = %q, want cancelled", rc)
+	}
+	if completedAt == nil {
+		t.Error("CompletedAt must not be nil")
+	}
+
+	// Verify: exactly one finish audit.
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	finishCount := 0
+	for _, r := range records {
+		if r.Event == "build.finish" {
+			finishCount++
+		}
+	}
+	if finishCount != 1 {
+		t.Errorf("build.finish audit count = %d, want 1", finishCount)
+	}
+
+	// Verify: done is closed.
+	select {
+	case <-op.done:
+	default:
+		t.Fatal("op.done must be closed")
+	}
+}
+
+// TestCancelPlusShutdownCleanup verifies that when explicit cancel and
+// daemon shutdown target the same operation concurrently, the cleanup
+// side effects are bounded and the operation reaches a consistent terminal state.
+func TestCancelPlusShutdownCleanup(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	// Count docker kill invocations via ExecCommandContext seam.
+	var dockerKillCount int32
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// Intercept docker kill calls.
+		if name == "docker" && len(args) > 0 && args[0] == "kill" {
+			atomic.AddInt32(&dockerKillCount, 1)
+		}
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	var buildResp map[string]any
+	json.NewDecoder(w.Body).Decode(&buildResp)
+	opID := buildResp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Wait for the process to start.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		proc := op.cmd
+		op.mu.Unlock()
+		if proc != nil && proc.Process != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Launch cancel and shutdown concurrently.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
+		cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
+		cancelW := httptest.NewRecorder()
+		app.handleOperationCancel(cancelW, cancelReq)
+	}()
+
+	go func() {
+		defer wg.Done()
+		app.OperationRegistry.setShuttingDown()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+	}()
+
+	wg.Wait()
+
+	// Verify: operation reached terminal state.
+	op.mu.Lock()
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	completedAt := op.CompletedAt
+	op.mu.Unlock()
+
+	if completedAt == nil {
+		t.Fatal("CompletedAt must not be nil")
+	}
+	// Result is either cancelled or shutdown — both are valid.
+	if rc != "cancelled" && rc != "docker_build_failed" {
+		t.Errorf("result_code = %q, want cancelled or docker_build_failed", rc)
+	}
+
+	// Verify: docker kill was called at most once for build (no cidfile).
+	dkc := atomic.LoadInt32(&dockerKillCount)
+	if dkc > 1 {
+		t.Errorf("docker kill invoked %d times, want at most 1", dkc)
+	}
+
+	// Verify: exactly one finish audit.
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	finishCount := 0
+	for _, r := range records {
+		if r.Event == "build.finish" {
+			finishCount++
+		}
+	}
+	if finishCount != 1 {
+		t.Errorf("build.finish audit count = %d, want 1", finishCount)
 	}
 }
