@@ -173,19 +173,18 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	// Check for deprecated fields that were renamed.
-	if err := validateNoDeprecatedFields(data); err != nil {
+	// Validate the raw config document before decoding into fileConfig.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("cannot parse config: %w", err)
+	}
+	if err := validateRawConfig(raw); err != nil {
 		return nil, err
 	}
 
 	var fc fileConfig
-
 	if err := json.Unmarshal(data, &fc); err != nil {
 		return nil, fmt.Errorf("cannot parse config: %w", err)
-	}
-
-	if err := validateAllowedRootValue(fc.AllowedRoot); err != nil {
-		return nil, err
 	}
 
 	ttl, err := parseSessionTTL(fc.SessionTTL)
@@ -464,4 +463,110 @@ func promptAllowedRoot(defaultPath string, stdin io.Reader, stderr io.Writer) (s
 		return defaultPath, nil
 	}
 	return input, nil
+}
+
+// validateRawConfig validates the known fields in a raw config map.
+// It does not require XDG_RUNTIME_DIR and does not create directories.
+// Returns an error if the document is malformed or known fields are invalid.
+func validateRawConfig(raw map[string]json.RawMessage) error {
+	if raw == nil {
+		return fmt.Errorf("configuration is not a JSON object")
+	}
+
+	// Reject deprecated config keys with a clear rename diagnostic.
+	if err := validateNoDeprecatedRawFields(raw); err != nil {
+		return err
+	}
+
+	// Validate allowed_root: must exist as a non-empty absolute string.
+	if v, ok := raw["allowed_root"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("allowed_root must be a JSON string")
+		}
+		if err := validateAllowedRootValue(s); err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("allowed_root is required")
+	}
+
+	// Validate session_ttl: must exist as a valid positive duration string.
+	if v, ok := raw["session_ttl"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("session_ttl must be a JSON string")
+		}
+		if _, err := parseSessionTTL(s); err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("session_ttl is required")
+	}
+
+	// Validate log_level if present.
+	if v, ok := raw["log_level"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("log_level must be a JSON string")
+		}
+		if _, err := parseLogLevel(s); err != nil {
+			return err
+		}
+	}
+
+	// Validate audit_enabled if present: must be a JSON boolean.
+	if v, ok := raw["audit_enabled"]; ok {
+		var b bool
+		if err := json.Unmarshal(v, &b); err != nil {
+			return fmt.Errorf("audit_enabled must be a JSON boolean")
+		}
+		_ = b
+	}
+
+	// Validate shutdown_timeout if present.
+	if v, ok := raw["shutdown_timeout"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("shutdown_timeout must be a JSON string")
+		}
+		if _, err := parseDurationPositive(s, "shutdown_timeout"); err != nil {
+			return err
+		}
+	}
+
+	// Validate operation_retention_ttl if present.
+	if v, ok := raw["operation_retention_ttl"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("operation_retention_ttl must be a JSON string")
+		}
+		if _, err := parseDurationPositive(s, "operation_retention_ttl"); err != nil {
+			return err
+		}
+	}
+
+	// Validate operation_max_completed if present.
+	if v, ok := raw["operation_max_completed"]; ok {
+		var n int
+		if err := json.Unmarshal(v, &n); err != nil {
+			return fmt.Errorf("operation_max_completed must be a JSON integer")
+		}
+		if n <= 0 {
+			return fmt.Errorf("operation_max_completed must be a positive integer")
+		}
+	}
+
+	// Validate operation_log_max_bytes if present.
+	if v, ok := raw["operation_log_max_bytes"]; ok {
+		var n int64
+		if err := json.Unmarshal(v, &n); err != nil {
+			return fmt.Errorf("operation_log_max_bytes must be a JSON integer")
+		}
+		if n <= 0 {
+			return fmt.Errorf("operation_log_max_bytes must be a positive integer")
+		}
+	}
+
+	return nil
 }
