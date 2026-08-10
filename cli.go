@@ -27,6 +27,40 @@ type Command struct {
 	NewInvocation func(*flag.FlagSet) Invocation
 }
 
+// resolveSubcommand finds a direct subcommand by name.
+// Returns nil if no matching subcommand exists.
+func (c *Command) resolveSubcommand(name string) *Command {
+	for _, sub := range c.Subcommands {
+		if sub.Name == name {
+			return sub
+		}
+	}
+	return nil
+}
+
+// resolveCommandPath walks the command tree to resolve a full command path.
+// Returns the resolved command and the path prefix (ancestors before the target).
+// Returns (nil, nil) if any component in the path is not found or is a leaf.
+func (c *Command) resolveCommandPath(names []string) (*Command, []string) {
+	current := c
+	for i, name := range names {
+		sub := current.resolveSubcommand(name)
+		if sub == nil {
+			return nil, nil
+		}
+		// If we reached the last component, return it
+		if i == len(names)-1 {
+			return sub, names[:i]
+		}
+		// Otherwise, the intermediate must be a branch (not a leaf)
+		if sub.NewInvocation != nil {
+			return nil, nil
+		}
+		current = sub
+	}
+	return c, nil
+}
+
 // dispatch recursively routes args through the command tree.
 // For branch commands: selects subcommand, requires it (except root).
 // For leaf commands: parses flags, validates, runs.
@@ -70,15 +104,14 @@ func (c *Command) dispatchBranch(args []string, path []string, stdout, stderr io
 	}
 
 	// Find matching subcommand
-	for _, sub := range c.Subcommands {
-		if sub.Name == args[0] {
-			newPath := path
-			// Don't include root command name in path
-			if c != rootCommand {
-				newPath = appendPath(path, c.Name)
-			}
-			return sub.dispatch(args[1:], newPath, stdout, stderr)
+	sub := c.resolveSubcommand(args[0])
+	if sub != nil {
+		newPath := path
+		// Don't include root command name in path
+		if c != rootCommand {
+			newPath = appendPath(path, c.Name)
 		}
+		return sub.dispatch(args[1:], newPath, stdout, stderr)
 	}
 
 	// Unknown subcommand
@@ -404,15 +437,13 @@ for command-specific help.`,
 					return 0
 				}
 
-				// Walk the command tree to find the target command
-				cmd := findCommand(rootCommand, args)
+				// Resolve the command using the shared lookup primitive
+				cmd, path := rootCommand.resolveCommandPath(args)
 				if cmd == nil {
 					fmt.Fprintf(stderr, "error: unknown command %q\n", strings.Join(args, " "))
 					return 2
 				}
 
-				// Path is the prefix before the target command (same as dispatch semantics)
-				path := args[:len(args)-1]
 				cmd.printHelp(stdout, path)
 				return 0
 			},
@@ -421,25 +452,13 @@ for command-specific help.`,
 }
 
 // findCommand walks the command tree to find a command by name path.
+// Returns nil if the command is not found.
 func findCommand(cmd *Command, names []string) *Command {
 	if len(names) == 0 {
 		return cmd
 	}
-
-	// If current command is a leaf, we can't go deeper
-	if cmd.NewInvocation != nil {
-		return nil
-	}
-
-	for _, sub := range cmd.Subcommands {
-		if sub.Name == names[0] {
-			if len(names) == 1 {
-				return sub
-			}
-			return findCommand(sub, names[1:])
-		}
-	}
-	return nil
+	resolved, _ := cmd.resolveCommandPath(names)
+	return resolved
 }
 
 func init() {
