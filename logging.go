@@ -219,7 +219,7 @@ func writeAuditWithRequestID(ctx context.Context, record auditRecord) {
 func opLog(ctx context.Context) *slog.Logger {
 	l := logging.snapshotLogger()
 	if l == nil {
-		return slog.Default()
+		return discardLogger
 	}
 	if rid := requestIDFromContext(ctx); rid != "" {
 		l = l.With(slog.String("request_id", rid))
@@ -249,6 +249,10 @@ func writeJSONError(ctx context.Context, err error) {
 
 // osStderr is the original os.Stderr, captured at package init.
 var osStderr io.Writer = os.Stderr
+
+// discardLogger is a no-op logger used when the operational logger
+// has not been configured. It silently drops all records.
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // serveStartupError logs a daemon startup failure as structured JSON to stderr.
 // It is safe to call before initLoggers.

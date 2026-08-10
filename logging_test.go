@@ -620,6 +620,41 @@ func TestOpLogWithContext(t *testing.T) {
 	}
 }
 
+// TestOpLogDiscardWhenUnconfigured verifies that opLog does not leak
+// into slog.Default() when the operational logger is not configured.
+func TestOpLogDiscardWhenUnconfigured(t *testing.T) {
+	logging.reset()
+
+	defaultBuf := new(bytes.Buffer)
+	slog.SetDefault(slog.New(slog.NewTextHandler(defaultBuf, nil)))
+
+	opLog(context.Background()).Warn("must not escape")
+
+	if defaultBuf.Len() > 0 {
+		t.Errorf("slog.Default() should not receive records, got:\n%s", defaultBuf.String())
+	}
+}
+
+// TestOpLogWritesToConfigured verifies that after initLoggers, opLog
+// writes to the configured operational writer with stream=operational.
+func TestOpLogWritesToConfigured(t *testing.T) {
+	opBuf := new(bytes.Buffer)
+	auditBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	defer logging.reset()
+
+	opLog(context.Background()).Warn("configured test")
+
+	output := opBuf.String()
+	if !strings.Contains(output, "configured test") {
+		t.Errorf("expected message in operational output:\n%s", output)
+	}
+	if !strings.Contains(output, `"stream":"operational"`) {
+		t.Errorf("expected stream=operational:\n%s", output)
+	}
+}
+
 // TestParseLogLevel verifies log level parsing.
 func TestParseLogLevel(t *testing.T) {
 	tests := []struct {
