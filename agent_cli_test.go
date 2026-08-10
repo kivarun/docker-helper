@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -44,6 +46,10 @@ func (s *agentCLITestServer) handleOperationStatus(handler func(http.ResponseWri
 
 func (s *agentCLITestServer) handleOperationLogs(handler func(http.ResponseWriter, *http.Request)) {
 	s.mux.HandleFunc("GET /operations/{id}/logs", handler)
+}
+
+func (s *agentCLITestServer) handleOperationCancel(handler func(http.ResponseWriter, *http.Request)) {
+	s.mux.HandleFunc("POST /operations/{id}/cancel", handler)
 }
 
 func runAgentCLITestWithServer(t *testing.T, args []string, setupServer func(*agentCLITestServer)) (stdout bytes.Buffer, stderr bytes.Buffer, exitCode int) {
@@ -1402,5 +1408,465 @@ func TestTruncatedMultiplePollsSingleWarning(t *testing.T) {
 	warningCount := strings.Count(stderr.String(), "warning: operation log was truncated")
 	if warningCount != 1 {
 		t.Errorf("expected exactly one truncation warning, got %d: %s", warningCount, stderr.String())
+	}
+}
+
+// TestBuildSignalCancel verifies that SIGINT during build triggers cancel
+// and exits with code 130.
+func TestBuildSignalCancel(t *testing.T) {
+	opID := "op_signal_test"
+	cancelCalled := int32(0)
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /build", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "running",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "running",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(0),
+			"truncated":    false,
+			"logs":         "",
+		})
+	})
+	mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cancelCalled, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "failed",
+			"result_code":  "cancelled",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	sigCh := make(chan os.Signal, 1)
+
+	var out, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, err := waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
+		_ = err
+		close(done)
+	}()
+
+	// Wait for the poll to start, then send signal.
+	time.Sleep(100 * time.Millisecond)
+	sigCh <- syscall.SIGINT
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForOperationWithSignalCh did not return after signal")
+	}
+
+	if atomic.LoadInt32(&cancelCalled) != 1 {
+		t.Errorf("expected cancel called exactly once, got %d", atomic.LoadInt32(&cancelCalled))
+	}
+}
+
+// TestRunSignalCancel verifies that SIGTERM during run triggers cancel
+// and exits with code 143.
+func TestRunSignalCancel(t *testing.T) {
+	opID := "op_signal_run"
+	cancelCalled := int32(0)
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /run", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "running",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "running",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(0),
+			"truncated":    false,
+			"logs":         "",
+		})
+	})
+	mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cancelCalled, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "failed",
+			"result_code":  "cancelled",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	sigCh := make(chan os.Signal, 1)
+
+	var out, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, err := waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
+		_ = err
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sigCh <- syscall.SIGTERM
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForOperationWithSignalCh did not return after signal")
+	}
+
+	if atomic.LoadInt32(&cancelCalled) != 1 {
+		t.Errorf("expected cancel called exactly once, got %d", atomic.LoadInt32(&cancelCalled))
+	}
+}
+
+// TestSignalCancelErrorDiagnostic verifies that a cancel endpoint error
+// prints a diagnostic but does not change the signal exit code.
+func TestSignalCancelErrorDiagnostic(t *testing.T) {
+	opID := "op_cancel_err"
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "running",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(0),
+			"truncated":    false,
+			"logs":         "",
+		})
+	})
+	mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{
+			"code":    "internal_error",
+			"message": "daemon internal error",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	sigCh := make(chan os.Signal, 1)
+
+	var out, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, err := waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
+		_ = err
+		close(done)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sigCh <- syscall.SIGINT
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForOperationWithSignalCh did not return after signal")
+	}
+
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "warning: cancel failed") {
+		t.Errorf("expected cancel error diagnostic in stderr, got: %s", stderrStr)
+	}
+}
+
+// TestSignalCancelOnce verifies that multiple signals only trigger one cancel.
+func TestSignalCancelOnce(t *testing.T) {
+	opID := "op_cancel_once"
+	cancelCalled := int32(0)
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "running",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(0),
+			"truncated":    false,
+			"logs":         "",
+		})
+	})
+	mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cancelCalled, 1)
+		// Slow response to keep the operation "running" from the daemon side.
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "failed",
+			"result_code":  "cancelled",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	// Pre-load two signals so both are available immediately.
+	sigCh := make(chan os.Signal, 2)
+	sigCh <- syscall.SIGINT
+	sigCh <- syscall.SIGTERM
+
+	var out, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, err := waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
+		_ = err
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForOperationWithSignalCh did not return after signals")
+	}
+
+	if atomic.LoadInt32(&cancelCalled) != 1 {
+		t.Errorf("expected cancel called exactly once, got %d", atomic.LoadInt32(&cancelCalled))
+	}
+}
+
+// TestSignalExitCodes verifies that signalExitCode returns correct values.
+func TestSignalExitCodes(t *testing.T) {
+	if got := signalExitCode(syscall.SIGINT); got != 130 {
+		t.Errorf("SIGINT: expected 130, got %d", got)
+	}
+	if got := signalExitCode(syscall.SIGTERM); got != 143 {
+		t.Errorf("SIGTERM: expected 143, got %d", got)
+	}
+	if got := signalExitCode(syscall.SIGHUP); got != 1 {
+		t.Errorf("SIGHUP: expected 1, got %d", got)
+	}
+}
+
+// TestSignalExitError verifies that signalExitError is returned correctly.
+func TestSignalExitError(t *testing.T) {
+	opID := "op_sigerr"
+
+	tempDir := t.TempDir()
+	socketPath := tempDir + "/docker-helper.sock"
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "running",
+		})
+	})
+	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"offset":       int64(0),
+			"next_offset":  int64(0),
+			"truncated":    false,
+			"logs":         "",
+		})
+	})
+	mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":           true,
+			"operation_id": opID,
+			"status":       "failed",
+			"result_code":  "cancelled",
+		})
+	})
+
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	time.Sleep(50 * time.Millisecond)
+
+	c := &apiClient{
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "unix", socketPath)
+				},
+			},
+		},
+		baseURL:     "http://localhost",
+		tokenSource: func() (string, error) { return "test-token", nil },
+	}
+
+	// Pre-load signal so it is delivered immediately.
+	sigCh := make(chan os.Signal, 1)
+	sigCh <- syscall.SIGTERM
+
+	var out, stderr bytes.Buffer
+	_, err = waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
+	if err == nil {
+		t.Fatal("expected signalExitError")
+	}
+	sigErr, ok := err.(*signalExitError)
+	if !ok {
+		t.Fatalf("expected *signalExitError, got %T: %v", err, err)
+	}
+	if sigErr.Signal != syscall.SIGTERM {
+		t.Errorf("expected SIGTERM, got %v", sigErr.Signal)
+	}
+	if code := signalExitCode(sigErr.Signal); code != 143 {
+		t.Errorf("expected exit code 143, got %d", code)
 	}
 }

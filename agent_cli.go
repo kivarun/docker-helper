@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -84,6 +87,83 @@ func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*ope
 		}
 
 		time.Sleep(operationPollInterval)
+	}
+}
+
+// signalExitError indicates the CLI was interrupted by a signal.
+// The Signal field holds the received os.Signal.
+type signalExitError struct {
+	Signal os.Signal
+}
+
+func (e *signalExitError) Error() string {
+	return fmt.Sprintf("interrupted by %s", e.Signal)
+}
+
+// signalExitCode returns the conventional exit code for the given signal.
+func signalExitCode(sig os.Signal) int {
+	switch sig {
+	case syscall.SIGINT:
+		return 130
+	case syscall.SIGTERM:
+		return 143
+	default:
+		return 1
+	}
+}
+
+// waitForOperationWithSignal polls an operation while watching for SIGINT/SIGTERM.
+// On signal, it fires a best-effort cancel (at most once) and returns a
+// signalExitError so the caller can exit with the correct code.
+// On normal completion, it returns the operation status as usual.
+func waitForOperationWithSignal(c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	return waitForOperationWithSignalCh(c, opID, stdout, stderr, sigCh)
+}
+
+// waitForOperationWithSignalCh is the testable core of waitForOperationWithSignal.
+// It accepts a pre-configured signal channel so tests can inject signals.
+func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.Writer, sigCh <-chan os.Signal) (*operationStatusResponse, error) {
+	var cancelOnce sync.Once
+
+	tryCancel := func() {
+		cancelOnce.Do(func() {
+			if err := c.cancelOperation(opID); err != nil {
+				fmt.Fprintf(stderr, "warning: cancel failed: %v\n", err)
+			}
+		})
+	}
+
+	resultCh := make(chan struct {
+		status *operationStatusResponse
+		err    error
+	}, 1)
+
+	go func() {
+		status, err := waitForOperation(c, opID, stdout, stderr)
+		resultCh <- struct {
+			status *operationStatusResponse
+			err    error
+		}{status, err}
+	}()
+
+	select {
+	case sig := <-sigCh:
+		tryCancel()
+		// Give the poll goroutine a moment to finish if it was about to.
+		select {
+		case <-resultCh:
+			// Operation finished (possibly after cancel took effect).
+			// Still honour the signal exit code.
+			return nil, &signalExitError{Signal: sig}
+		case <-time.After(2 * time.Second):
+			// Poll goroutine hasn't exited; cancel was sent.
+			return nil, &signalExitError{Signal: sig}
+		}
+	case res := <-resultCh:
+		return res.status, res.err
 	}
 }
 
@@ -179,8 +259,11 @@ var buildCommand = &Command{
 					return 1
 				}
 
-				status, err := waitForOperation(c, resp.OperationID, stdout, stderr)
+				status, err := waitForOperationWithSignal(c, resp.OperationID, stdout, stderr)
 				if err != nil {
+					if sigErr, ok := err.(*signalExitError); ok {
+						return signalExitCode(sigErr.Signal)
+					}
 					fmt.Fprintln(stderr, err)
 					return 1
 				}
@@ -311,8 +394,11 @@ var runContainerCommand = &Command{
 					return 1
 				}
 
-				status, err := waitForOperation(c, resp.OperationID, stdout, stderr)
+				status, err := waitForOperationWithSignal(c, resp.OperationID, stdout, stderr)
 				if err != nil {
+					if sigErr, ok := err.(*signalExitError); ok {
+						return signalExitCode(sigErr.Signal)
+					}
 					fmt.Fprintln(stderr, err)
 					return 1
 				}

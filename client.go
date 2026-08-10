@@ -320,6 +320,45 @@ func (c *apiClient) operationStatus(opID string) (*operationStatusResponse, erro
 	return &result, nil
 }
 
+// cancelOperationTimeout is the deadline for a best-effort cancel request.
+// The daemon cancel endpoint is blocking (waits for operation completion),
+// so the CLI must not hang indefinitely.
+const cancelOperationTimeout = 5 * time.Second
+
+// cancelOperation sends POST /operations/{id}/cancel with a bounded timeout.
+// It is best-effort: the caller should not block on the result.
+func (c *apiClient) cancelOperation(opID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cancelOperationTimeout)
+	defer cancel()
+
+	token, err := c.tokenSource()
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/operations/"+opID+"/cancel", nil)
+	if err != nil {
+		return fmt.Errorf("cannot create cancel request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	// Reuse the existing transport (which knows the socket path)
+	// but create a new client with a bounded timeout.
+	timeoutClient := &http.Client{
+		Transport: c.httpClient.Transport,
+		Timeout:   cancelOperationTimeout,
+	}
+
+	resp, err := timeoutClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	_, err = c.readResponseBody(resp)
+	return err
+}
+
 // operationLogs returns logs for an operation starting at the given offset.
 func (c *apiClient) operationLogs(opID string, offset int64) (*operationLogsResponse, error) {
 	path := "/operations/" + opID + "/logs?offset=" + strconv.FormatInt(offset, 10)
