@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -229,7 +230,7 @@ var runContainerCommand = &Command{
 		var envSlice stringSlice
 		var mountSlice stringSlice
 		fs.Var(&envSlice, "env", "Environment variable KEY=VALUE (repeatable)")
-		fs.Var(&mountSlice, "mount", "Mount SOURCE:TARGET[:ro] (repeatable)")
+		fs.Var(&mountSlice, "mount", "Mount WORKSPACE_RELATIVE_SOURCE:ABSOLUTE_TARGET[:ro] (repeatable)")
 
 		return Invocation{
 			Validate: func() error {
@@ -259,9 +260,24 @@ var runContainerCommand = &Command{
 						fmt.Fprintf(stderr, "invalid mount format: %q (expected SOURCE:TARGET[:ro])\n", m)
 						return 2
 					}
+					source := parts[0]
+					target := parts[1]
+
+					// Validate source is relative to workspace
+					if filepath.IsAbs(source) {
+						fmt.Fprintf(stderr, "invalid mount source %q: source must be relative to session workspace\n", source)
+						return 2
+					}
+
+					// Validate target is absolute
+					if !filepath.IsAbs(target) {
+						fmt.Fprintf(stderr, "invalid mount target %q: target must be an absolute path\n", target)
+						return 2
+					}
+
 					rm := mountRequest{
-						Source: parts[0],
-						Target: parts[1],
+						Source: source,
+						Target: target,
 					}
 					if len(parts) == 3 {
 						if parts[2] != "ro" {

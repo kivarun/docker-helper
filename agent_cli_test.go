@@ -753,6 +753,99 @@ func TestRunInvalidMountOption(t *testing.T) {
 	}
 }
 
+// TestRunMountAbsoluteSourceRejected verifies that absolute source paths
+// are rejected at CLI level with a clear error.
+func TestRunMountAbsoluteSourceRejected(t *testing.T) {
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"run", "--image", "alpine:3.24", "--mount", "/workspace/probe.txt:/target", "--", "echo", "hi",
+	}, nil)
+	if exitCode != 2 {
+		t.Errorf("expected exit 2, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "source must be relative to session workspace") {
+		t.Errorf("expected source relative error, got: %s", stderr.String())
+	}
+}
+
+// TestRunMountRelativeSourceAccepted verifies that relative source paths
+// pass CLI validation and reach the API.
+func TestRunMountRelativeSourceAccepted(t *testing.T) {
+	opID := "op_run"
+	received := false
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"run", "--image", "alpine:3.24", "--mount", "src:/target:ro", "--", "echo", "hi",
+	}, func(s *agentCLITestServer) {
+		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
+			var req runRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("cannot decode request: %v", err)
+			}
+			if len(req.Mounts) != 1 {
+				t.Fatalf("expected 1 mount, got %d", len(req.Mounts))
+			}
+			if req.Mounts[0].Source != "src" {
+				t.Errorf("expected source 'src', got %s", req.Mounts[0].Source)
+			}
+			if req.Mounts[0].Target != "/target" {
+				t.Errorf("expected target '/target', got %s", req.Mounts[0].Target)
+			}
+			if !req.Mounts[0].ReadOnly {
+				t.Error("expected mount to be read-only")
+			}
+			received = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "running",
+			})
+		})
+		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"status":       "succeeded",
+			})
+		})
+		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"operation_id": opID,
+				"offset":       int64(0),
+				"next_offset":  int64(0),
+				"truncated":    false,
+				"logs":         "",
+			})
+		})
+	})
+	if !received {
+		t.Fatal("run request not received")
+	}
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	}
+}
+
+// TestRunHelpMountFlag verifies that run --help mentions workspace-relative
+// source and [:ro] option.
+func TestRunHelpMountFlag(t *testing.T) {
+	var out, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"run", "--help"}, &out, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit 0, got %d", code)
+	}
+	output := out.String()
+	if !strings.Contains(output, "WORKSPACE_RELATIVE_SOURCE") {
+		t.Errorf("expected mount help to mention workspace-relative source, got: %s", output)
+	}
+	if !strings.Contains(output, "[:ro]") {
+		t.Errorf("expected mount help to mention [:ro], got: %s", output)
+	}
+}
+
 // TestRunFailedDiagnostics verifies that failed run prints diagnostics.
 func TestRunFailedDiagnostics(t *testing.T) {
 	opID := "op_test"
