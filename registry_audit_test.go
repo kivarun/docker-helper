@@ -81,7 +81,7 @@ func TestRegistryLoginAuditStartFinish(t *testing.T) {
 }
 
 func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
-	auditBuf, _ := setupTestLogging(t)
+	auditBuf, opBuf := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -92,8 +92,9 @@ func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 
 	const secretPassword = "super-secret-password-12345"
 
+	// Use failure path so the operational logger actually writes.
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
 	}
 
 	reqBody := map[string]string{
@@ -109,21 +110,23 @@ func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 
 	app.handleRegistryLogin(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
 	}
 
-	output := auditBuf.String()
-	if strings.Contains(output, secretPassword) {
-		t.Fatalf("audit must not contain password!\n%s", output)
+	auditOutput := auditBuf.String()
+	if strings.Contains(auditOutput, secretPassword) {
+		t.Fatalf("audit must not contain password:\n%s", auditOutput)
 	}
 
-	// Also verify operational logs don't contain it
-	// (They go to stderr in tests, but we check the audit buffer)
+	opOutput := opBuf.String()
+	if strings.Contains(opOutput, secretPassword) {
+		t.Fatalf("operational log must not contain password:\n%s", opOutput)
+	}
 }
 
 func TestRegistryLoginAuditUsernameNotLogged(t *testing.T) {
-	auditBuf, _ := setupTestLogging(t)
+	auditBuf, opBuf := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
 
@@ -134,8 +137,9 @@ func TestRegistryLoginAuditUsernameNotLogged(t *testing.T) {
 
 	const secretUsername = "secret-username-12345"
 
+	// Use failure path so the operational logger actually writes.
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 1")
 	}
 
 	reqBody := map[string]string{
@@ -151,13 +155,17 @@ func TestRegistryLoginAuditUsernameNotLogged(t *testing.T) {
 
 	app.handleRegistryLogin(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
 	}
 
-	output := auditBuf.String()
-	// Username is not in audit fields, so it should not appear
-	if strings.Contains(output, secretUsername) {
-		t.Fatalf("audit must not contain username!\n%s", output)
+	auditOutput := auditBuf.String()
+	if strings.Contains(auditOutput, secretUsername) {
+		t.Fatalf("audit must not contain username:\n%s", auditOutput)
+	}
+
+	opOutput := opBuf.String()
+	if strings.Contains(opOutput, secretUsername) {
+		t.Fatalf("operational log must not contain username:\n%s", opOutput)
 	}
 }
