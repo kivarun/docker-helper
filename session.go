@@ -231,3 +231,95 @@ func (a *App) findSessionByToken(token string) (*Session, error) {
 
 	return &s, nil
 }
+
+// sessionDockerDir returns the path to the session-scoped Docker config
+// directory: $RUNTIME_DIR/sessions/<session-id>/docker/
+func sessionDockerDir(runtimeDir, sessionID string) string {
+	return filepath.Join(runtimeDir, "sessions", sessionID, "docker")
+}
+
+// ensureSessionDockerDir creates the session-scoped Docker config directory
+// with restrictive permissions (0700) if it does not exist.
+// Returns the directory path.
+func ensureSessionDockerDir(runtimeDir, sessionID string) (string, error) {
+	dir := sessionDockerDir(runtimeDir, sessionID)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("cannot create session Docker directory: %w", err)
+	}
+	return dir, nil
+}
+
+// sessionRuntimeDir returns the parent runtime directory for a session:
+// $RUNTIME_DIR/sessions/<session-id>/
+func sessionRuntimeDir(runtimeDir, sessionID string) string {
+	return filepath.Join(runtimeDir, "sessions", sessionID)
+}
+
+// cleanupSessionRuntimeDir removes the session runtime directory best-effort.
+// If the directory does not exist, it is not an error.
+// Returns a non-nil error only if the directory exists but cannot be removed.
+func cleanupSessionRuntimeDir(runtimeDir, sessionID string) error {
+	dir := sessionRuntimeDir(runtimeDir, sessionID)
+	if err := os.RemoveAll(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("cannot remove session runtime directory: %w", err)
+	}
+	return nil
+}
+
+// cleanupStaleSessionRuntimeDirs removes session runtime directories that no
+// longer correspond to an active session. It reads all active session IDs from
+// the database and removes any runtime directories whose session ID is not
+// in that set. Expired sessions are excluded.
+func cleanupStaleSessionRuntimeDirs(db *sql.DB, runtimeDir string) error {
+	sessionsDir := filepath.Join(runtimeDir, "sessions")
+
+	// List all active session IDs.
+	now := time.Now().Unix()
+	rows, err := db.Query(
+		`SELECT id FROM sessions WHERE expires_at > ?`,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot query active sessions: %w", err)
+	}
+
+	active := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("cannot scan session id: %w", err)
+		}
+		active[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate sessions: %w", err)
+	}
+
+	// Remove stale directories.
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("cannot read sessions directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if !active[entry.Name()] {
+			dir := filepath.Join(sessionsDir, entry.Name())
+			if removeErr := os.RemoveAll(dir); removeErr != nil {
+				// Log but don't fail — stale cleanup is best-effort.
+				fmt.Fprintf(os.Stderr, "warning: cannot remove stale session runtime directory %s: %v\n", dir, removeErr)
+			}
+		}
+	}
+
+	return nil
+}

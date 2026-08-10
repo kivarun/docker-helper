@@ -328,7 +328,9 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 
 	waitBuild(t, app, w)
 
+	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
 	expectedArgs := []string{
+		"--config", dockerDir,
 		"build",
 		"--pull",
 		"--provenance=false",

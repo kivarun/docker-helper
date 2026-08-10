@@ -15,6 +15,7 @@ type auditRecord struct {
 	EnvKeys         []string     `json:"env_keys,omitempty"`
 	BuildArgKeys    []string     `json:"build_arg_keys,omitempty"`
 	ShmSize         string       `json:"shm_size,omitempty"`
+	Registry        string       `json:"registry,omitempty"`
 	Context         string       `json:"context,omitempty"`
 	Dockerfile      string       `json:"dockerfile,omitempty"`
 	Workspace       string       `json:"workspace,omitempty"`

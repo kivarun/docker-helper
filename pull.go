@@ -38,7 +38,19 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	started := time.Now()
 
-	args := []string{"pull", req.Image}
+	// Ensure the session Docker config directory exists.
+	cfg := a.getConfig()
+	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
+	if err != nil {
+		opLog(ctx).Error("cannot create session Docker directory",
+			slog.String("operation", "pull"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	args := []string{"--config", dockerDir, "pull", req.Image}
 
 	pullCmd := a.ExecCommand
 	if pullCmd == nil {

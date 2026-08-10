@@ -347,21 +347,22 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	}
 	op.Wait()
 
-	// --cidfile is inserted after --user, before other options.
-	baseArgs := []string{"run", "--rm", "--security-opt", "label=disable", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+	// --config is first, then --cidfile is inserted after --user, before other options.
+	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
+	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--security-opt", "label=disable", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
 	for i, expected := range baseArgs {
 		if capturedArgs[i] != expected {
 			t.Fatalf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])
 		}
 	}
-	if len(capturedArgs) < 6 || capturedArgs[6] != "--cidfile" {
-		t.Fatalf("expected --cidfile at arg[6], got %v", capturedArgs)
+	if len(capturedArgs) < 8 || capturedArgs[8] != "--cidfile" {
+		t.Fatalf("expected --cidfile at arg[8], got %v", capturedArgs)
 	}
-	if len(capturedArgs) < 7 || capturedArgs[7] == "" {
-		t.Fatalf("expected cidfile path at arg[7], got %v", capturedArgs)
+	if len(capturedArgs) < 9 || capturedArgs[9] == "" {
+		t.Fatalf("expected cidfile path at arg[9], got %v", capturedArgs)
 	}
 	// Skip the cidfile args for the rest of the comparison.
-	remainingArgs := capturedArgs[8:]
+	remainingArgs := capturedArgs[10:]
 	expectedRemaining := []string{"--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
 	if len(remainingArgs) != len(expectedRemaining) {
 		t.Fatalf("expected %d remaining args, got %d: %v", len(expectedRemaining), len(remainingArgs), remainingArgs)

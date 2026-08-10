@@ -83,8 +83,20 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		BuildArgKeys: buildArgKeys,
 	})
 
+	// Ensure the session Docker config directory exists.
+	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
+	if err != nil {
+		opLog(ctx).Error("cannot create session Docker directory",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
 	// Build the command synchronously and start it.
 	args := []string{
+		"--config", dockerDir,
 		"build",
 		"--pull",
 		"--provenance=false",

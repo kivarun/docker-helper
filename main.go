@@ -278,6 +278,14 @@ func runServe(stdout, stderr io.Writer) error {
 			return err
 		}
 
+		// Clean up stale session runtime directories that no longer
+		// correspond to an active session.
+		if err := cleanupStaleSessionRuntimeDirs(db, cfg.RuntimeDir); err != nil {
+			opLog(context.Background()).Warn("stale session runtime cleanup failed",
+				slog.String("error", err.Error()),
+			)
+		}
+
 		app := &App{
 			Config:            cfg,
 			DB:                db,
@@ -290,6 +298,7 @@ func runServe(stdout, stderr io.Writer) error {
 		mux.HandleFunc("GET /health", app.handleHealth)
 		mux.HandleFunc("POST /pull", app.handlePull)
 		mux.HandleFunc("POST /run", app.handleRun)
+		mux.HandleFunc("POST /registry/login", app.handleRegistryLogin)
 		mux.HandleFunc("POST /sessions", app.handleCreateSession)
 		mux.HandleFunc("GET /sessions", app.handleListSessions)
 		mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)

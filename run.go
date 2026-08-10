@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -369,8 +370,20 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		ShmSize:         op.auditShmSize,
 	})
 
+	// Ensure the session Docker config directory exists.
+	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
+	if err != nil {
+		opLog(ctx).Error("cannot create session Docker directory",
+			slog.String("operation", "run"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
 	// Build docker run command.
 	args := []string{
+		"--config", dockerDir,
 		"run",
 		"--rm",
 		"--security-opt", "label=disable",

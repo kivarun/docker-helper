@@ -182,3 +182,37 @@ func (c *apiClient) deleteSession(id string) error {
 	_, err = c.readResponseBody(resp)
 	return err
 }
+
+type registryLoginResponse struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
+}
+
+func (c *apiClient) registryLogin(registry, username, password string) (*registryLoginResponse, error) {
+	body, err := json.Marshal(registryLoginRequest{
+		Registry: registry,
+		Username: username,
+		Password: password,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("POST", "/registry/login", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result registryLoginResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+
+	return &result, nil
+}

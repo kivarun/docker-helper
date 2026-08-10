@@ -242,7 +242,8 @@ func TestPullDockerArgsUnchanged(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	expectedArgs := []string{"pull", "alpine:3.24"}
+	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
+	expectedArgs := []string{"--config", dockerDir, "pull", "alpine:3.24"}
 
 	if len(capturedArgs) != len(expectedArgs) {
 		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(capturedArgs), capturedArgs)

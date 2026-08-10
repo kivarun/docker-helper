@@ -199,5 +199,15 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		Duration:  duration,
 	})
 
+	// Clean up session runtime directory (Docker config, etc.) best-effort.
+	// Cleanup failure must not fail the already-deleted session.
+	cfg := a.getConfig()
+	if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, session.ID); err != nil {
+		opLog(ctx).Warn("cannot remove session runtime directory",
+			slog.String("operation", "session_delete"),
+			slog.String("error", err.Error()),
+		)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
