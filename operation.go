@@ -52,6 +52,7 @@ type operation struct {
 	terminated  bool      // set by terminateAll/terminateOne when process not yet started
 	reason      terminationReason
 	started     bool // set to true only after cmd.Start() succeeds
+	forceOwned  bool // true when force cleanup has been claimed for this operation
 	// cidfile is the path to the Docker --cidfile for run operations.
 	// The helper determines this path before cmd.Start(); Docker CLI
 	// publishes the container ID into the file after the daemon creates
@@ -293,8 +294,29 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		select {
 		case <-op.done:
 		case <-time.After(time.Until(deadline)):
-			// Deadline exceeded: perform bounded daemon-side cleanup
-			// before force-killing the docker run CLI.
+			// Deadline exceeded: claim force-cleanup ownership under op.mu.
+			// Only the first caller to claim performs the actual cleanup.
+			// Subsequent callers skip cleanup and rely on the first caller's
+			// work to eventually close op.done.
+			op.mu.Lock()
+			if op.forceOwned {
+				// Another termination path already claimed force cleanup.
+				// Nothing more to do — op.done will be closed by the
+				// completion goroutine after the owner finishes cleanup.
+				op.mu.Unlock()
+				break
+			}
+			if op.CompletedAt != nil {
+				// Operation completed naturally just before force claim.
+				// No cleanup needed.
+				op.mu.Unlock()
+				break
+			}
+			op.forceOwned = true
+			op.mu.Unlock()
+
+			// Force cleanup phase (single owner):
+			// bounded daemon-side cleanup before force-killing the docker run CLI.
 			//
 			// The cidfile may not yet be populated because Docker daemon
 			// publishes the container ID asynchronously after cmd.Start().

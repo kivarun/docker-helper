@@ -1234,16 +1234,13 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	}
 }
 
-// TestCancelPlusShutdownCleanup measures how many daemon-side cleanup
-// attempts occur when explicit cancel and shutdown concurrently force-cleanup
-// the same running run operation with a cidfile.
+// TestCancelPlusShutdownCleanup verifies that when explicit cancel and
+// shutdown concurrently force-cleanup the same running run operation with
+// a cidfile, daemon-side cleanup is performed exactly once.
 //
-// This test does NOT assume cleanup is single-owner.
-// It records the actual killContainer call count to establish the baseline.
-//
-// Current observed behavior: killContainer is invoked 2 times (once per
-// termination path), confirming that cancel and shutdown can both invoke
-// daemon-side cleanup for the same run container.
+// The single-owner guard ensures that only the first termination path
+// to reach the force phase claims cleanup ownership. The second path
+// skips cleanup and waits for the first path's work to complete.
 func TestCancelPlusShutdownCleanup(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
@@ -1345,8 +1342,11 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	cmd.Process.Signal(syscall.SIGKILL) // best-effort, may already be dead
 	os.Remove(cidfile)
 
+	// Verify: daemon-side cleanup performed exactly once.
 	killCalls := atomic.LoadInt32(&killCount)
-	t.Logf("killContainer callback invoked %d times (observed behavior)", killCalls)
+	if killCalls != 1 {
+		t.Errorf("killContainer invoked %d times, want 1 (single-owner force cleanup)", killCalls)
+	}
 
 	// Verify: operation reached terminal state.
 	op.mu.Lock()
@@ -1365,7 +1365,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 		t.Errorf("result_code = %q, want cancelled or docker_run_failed", rc)
 	}
 
-	// Verify: all kill calls used the expected container ID.
+	// Verify: kill callback used the expected container ID.
 	killMu.Lock()
 	for _, id := range killIDs {
 		if id != testContainerID {
