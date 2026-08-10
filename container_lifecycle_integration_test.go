@@ -130,10 +130,10 @@ func TestShmSizeIntegration(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	// Start a container with a 64 MiB shm_size that measures /dev/shm.
+	// Start a container with a 128 MiB shm_size (non-default; Docker default is 64m).
 	op := startRunOperation(t, app, result.Token, map[string]any{
 		"image":    "alpine:latest",
-		"shm_size": "64m",
+		"shm_size": "128m",
 		"command":  []string{"sh", "-c", "df -B1 /dev/shm | tail -1 | awk '{print $2}'"},
 	})
 
@@ -166,7 +166,7 @@ func TestShmSizeIntegration(t *testing.T) {
 	logs, _ := logsResp["logs"].(string)
 
 	// Parse the expected shm size in bytes.
-	wantShmSize := "67108864" // 64 * 1024 * 1024
+	wantShmSize := "134217728" // 128 * 1024 * 1024
 	gotShmSize := strings.TrimSpace(logs)
 	if gotShmSize != wantShmSize {
 		t.Errorf("expected /dev/shm size %s, got %s", wantShmSize, gotShmSize)
