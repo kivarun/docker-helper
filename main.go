@@ -275,19 +275,19 @@ func runServe(stdout, stderr io.Writer) error {
 		}
 
 		mux := http.NewServeMux()
-		mux.HandleFunc("POST /build", withRequestID(withLogging(app.handleBuild)))
-		mux.HandleFunc("GET /health", withRequestID(withLogging(app.handleHealth)))
-		mux.HandleFunc("POST /pull", withRequestID(withLogging(app.handlePull)))
-		mux.HandleFunc("POST /run", withRequestID(withLogging(app.handleRun)))
-		mux.HandleFunc("POST /sessions", withRequestID(withLogging(app.handleCreateSession)))
-		mux.HandleFunc("GET /sessions", withRequestID(withLogging(app.handleListSessions)))
-		mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
-		mux.HandleFunc("POST /reload", withRequestID(withLogging(app.handleReload)))
-		mux.HandleFunc("GET /operations/{id}", withRequestID(withLogging(app.handleOperationStatus)))
-		mux.HandleFunc("GET /operations/{id}/logs", withRequestID(withLogging(app.handleOperationLogs)))
-		mux.HandleFunc("POST /operations/{id}/cancel", withRequestID(withLogging(app.handleOperationCancel)))
+		mux.HandleFunc("POST /build", app.handleBuild)
+		mux.HandleFunc("GET /health", app.handleHealth)
+		mux.HandleFunc("POST /pull", app.handlePull)
+		mux.HandleFunc("POST /run", app.handleRun)
+		mux.HandleFunc("POST /sessions", app.handleCreateSession)
+		mux.HandleFunc("GET /sessions", app.handleListSessions)
+		mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+		mux.HandleFunc("POST /reload", app.handleReload)
+		mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
+		mux.HandleFunc("GET /operations/{id}/logs", app.handleOperationLogs)
+		mux.HandleFunc("POST /operations/{id}/cancel", app.handleOperationCancel)
 
-		server := newHTTPServer(mux)
+		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 
 		logger := logging.snapshotLogger()
 

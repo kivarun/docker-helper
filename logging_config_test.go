@@ -700,3 +700,150 @@ func TestStatusResponseWriterImplicitOKOnWrite(t *testing.T) {
 
 	t.Fatal("no 'request completed' record found")
 }
+
+// TestMiddlewareWrapsUnknownRoute verifies that an unmatched request
+// gets request_id, request completed log with status=404, and route=<unmatched>.
+func TestMiddlewareWrapsUnknownRoute(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
+	defer logging.reset()
+
+	mux := http.NewServeMux()
+	handler := withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP)))
+
+	req := httptest.NewRequest(http.MethodGet, "/unknown/path", nil)
+	w := httptest.NewRecorder()
+
+	handler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+
+	rid := w.Header().Get("X-Request-ID")
+	if rid == "" {
+		t.Error("expected X-Request-ID header on unknown route")
+	}
+
+	opOutput := opBuf.String()
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" || !strings.Contains(line, "request completed") {
+			continue
+		}
+
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("cannot parse record: %v: %s", err, line)
+		}
+
+		if m["request_id"] != rid {
+			t.Errorf("expected request_id=%s, got %v", rid, m["request_id"])
+		}
+		status, ok := m["status"].(float64)
+		if !ok || status != 404 {
+			t.Errorf("expected status=404, got %v", m["status"])
+		}
+		if m["route"] != "<unmatched>" {
+			t.Errorf("expected route=<unmatched>, got %v", m["route"])
+		}
+
+		// Verify raw path did not leak.
+		if strings.Contains(line, "/unknown/path") {
+			t.Error("raw unknown path must not appear in log")
+		}
+		return
+	}
+
+	t.Fatal("no 'request completed' record found")
+}
+
+// TestMiddlewareWrapsMethodMismatch verifies that a 405 on an existing
+// route gets request_id and request completed log with status=405.
+func TestMiddlewareWrapsMethodMismatch(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
+	defer logging.reset()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {})
+	handler := withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP)))
+
+	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	w := httptest.NewRecorder()
+
+	handler(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+
+	rid := w.Header().Get("X-Request-ID")
+	if rid == "" {
+		t.Error("expected X-Request-ID header on method mismatch")
+	}
+
+	opOutput := opBuf.String()
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" || !strings.Contains(line, "request completed") {
+			continue
+		}
+
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("cannot parse record: %v: %s", err, line)
+		}
+
+		if m["request_id"] != rid {
+			t.Errorf("expected request_id=%s, got %v", rid, m["request_id"])
+		}
+		status, ok := m["status"].(float64)
+		if !ok || status != 405 {
+			t.Errorf("expected status=405, got %v", m["status"])
+		}
+		return
+	}
+
+	t.Fatal("no 'request completed' record found")
+}
+
+// TestMiddlewareSingleLogForMatchedRoute verifies that a matched request
+// produces exactly one request completed log entry.
+func TestMiddlewareSingleLogForMatchedRoute(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+
+	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
+	defer logging.reset()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {})
+	handler := withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP)))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	opOutput := opBuf.String()
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "request completed") {
+			count++
+		}
+	}
+
+	if count != 1 {
+		t.Errorf("expected exactly 1 request completed log, got %d", count)
+	}
+}

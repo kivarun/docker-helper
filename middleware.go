@@ -79,10 +79,11 @@ func (w *statusResponseWriter) Write(p []byte) (int, error) {
 
 // getRoutePattern returns the registered route pattern for the request.
 // For parameterized routes, it returns the pattern with {param} placeholders.
-// For static routes, it returns the path as-is.
+// For unmatched requests (404/405), it returns "<unmatched>" to avoid
+// logging raw user-controlled URL paths.
 func getRoutePattern(r *http.Request) string {
 	if r.Pattern != "" {
 		return r.Pattern
 	}
-	return r.URL.Path
+	return "<unmatched>"
 }
