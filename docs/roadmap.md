@@ -224,19 +224,36 @@ Do not design their APIs here.
 
 ## 2.0
 
-### System/root and multi-user deployment
+### Main goal: remote operation
 
-Add a system-service deployment mode in addition to the Release 1 user service.
-Treat root/system deployment and multi-user operation as one design area rather
-than adding a root unit mechanically.
+The defining goal of Release 2 is remote/server-side access to docker-helper.
+System-level deployment and multi-user support are enabling steps toward that
+goal, not separate end goals.
+
+Core remote work includes:
+
+- remote transport and network exposure;
+- authentication and authorization for remote clients;
+- remote session semantics;
+- preserving the narrow policy-enforcing security boundary when the client and
+  helper no longer share the same local user/session context.
+
+Keep the exact remote API and security model intentionally undesigned until
+Release 2 work begins.
+
+### System deployment and multi-user foundation
+
+Add a system-service deployment mode as a foundation for remote operation.
+Do not treat a root unit as a mechanical variant of the Release 1 user unit.
 
 Expected scope:
 
-- system/root service mode;
+- decide whether the system daemon should run as root or under a dedicated
+  service account;
 - multi-user client access;
 - formal user/system deployment scopes;
 - system config/state/runtime paths and systemd system unit;
-- explicit Unix-socket ownership/permission model for clients;
+- explicit local Unix-socket ownership/permission model for clients;
 - workspace authorization suitable for multiple users rather than widening one
   global `allowed_root` to all of `/home`;
 - administrative operations may initially rely on `sudo`; do not introduce a
