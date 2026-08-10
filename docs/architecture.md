@@ -712,7 +712,7 @@ Current error codes (non-exhaustive):
 |------|----------|-----------|
 | `unauthorized` | all protected | missing/invalid token |
 | `invalid_json` | all JSON endpoints | request body is not valid JSON |
-| `invalid_build_context` | `POST /build` | context or image validation failure |
+| `invalid_build_context` | `POST /build` | build request validation failure |
 | `invalid_image` | `POST /run`, `POST /pull` | image name is empty |
 | `invalid_mount` | `POST /run` | mount validation failure |
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
