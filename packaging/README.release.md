@@ -9,7 +9,7 @@ accompanying installation artifacts.
 - `install.sh` — host installer script
 - `uninstall.sh` — host uninstaller script
 - `systemd/user/docker-helper.service` — systemd user service unit
-- `apparmor/docker-helper` — optional AppArmor profile template
+- `apparmor/docker-helper` — optional AppArmor profile template (manual install)
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
 
 ## Quick start
@@ -47,10 +47,6 @@ docker-helper pull alpine:3.24
 docker-helper run --image alpine:3.24 -- echo "docker-helper works"
 ```
 
-For agent use, provide the same session token and Docker Helper Unix socket
-to the agent environment. The included `SKILL.md` may be copied or mounted
-into a skill directory supported by the agent runtime.
-
 ## Host installation
 
 Run the installer from this directory:
@@ -66,20 +62,45 @@ For a fully non-interactive installation:
 ```
 
 The installer copies the binary to `~/.local/bin/docker-helper`, installs
-the systemd user unit, and optionally installs an AppArmor profile.
+the systemd user unit, and optionally installs the agent skill.
+
+### Skill installation
+
+`install.sh` offers to install the docker-helper agent skill to
+`~/.claude/skills/docker-helper/SKILL.md`. In interactive mode, confirm
+with `y`. With `./install.sh --yes`, the skill is installed automatically.
+
+To install the skill manually:
+
+```bash
+mkdir -p ~/.claude/skills/docker-helper
+cp skills/docker-helper/SKILL.md ~/.claude/skills/docker-helper/SKILL.md
+```
+
+### AppArmor profile (optional)
+
+The `apparmor/docker-helper` file is a template for an optional AppArmor
+profile. It is **not** installed by `install.sh`. To install it manually:
+
+1. Substitute `@@BINARY_PATH@@` with the absolute path to the docker-helper
+   binary (e.g., `/home/user/.local/bin/docker-helper`).
+2. Optionally substitute `@@WORKSPACE_RULE@@` with workspace access rules
+   if you configured `allowed_root` in your docker-helper config.
+3. Copy the profile to `/etc/apparmor.d/` and load it with `apparmor_parser`.
+
+This is a system-level operation that requires sudo and should be performed
+by an administrator.
 
 ## Agent-side artifacts
 
-The `docker-helper` binary and `skills/docker-helper/SKILL.md` are
-agent-side artifacts. They are **not** installed automatically by `install.sh`
-(skill installation is offered as an optional step).
+The `skills/docker-helper/SKILL.md` file is an agent-side artifact.
+The `docker-helper` binary is installed to `~/.local/bin` by `install.sh`.
 
-To use them in an agent environment, copy or mount them into the agent's
+To use the skill in an agent environment, copy or mount it into the agent's
 filesystem. The exact paths depend on your agent runtime:
 
 ```bash
-# Example: copy binary and skill to an agent container
-cp docker-helper /path/to/agent/bin/
+# Example: copy skill to an agent container
 mkdir -p /path/to/agent/skills/docker-helper
 cp skills/docker-helper/SKILL.md \
   /path/to/agent/skills/docker-helper/SKILL.md

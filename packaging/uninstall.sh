@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # uninstall.sh — remove docker-helper user installation.
 #
-# Removes the binary, systemd user unit, and optionally the AppArmor profile.
+# Removes the binary, systemd user unit, and optionally the skill.
 # Config, admin token, and state are preserved by default.
 #
 # Usage:
@@ -19,7 +19,6 @@ readonly BINARY_NAME="docker-helper"
 readonly INSTALL_DIR="$HOME/.local/bin"
 readonly UNIT_DIR="$HOME/.config/systemd/user"
 readonly UNIT_NAME="docker-helper.service"
-readonly APPARMOR_PROFILE_NAME="docker-helper"
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper"
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper"
 readonly SKILL_INSTALL_DIR="$HOME/.claude/skills/docker-helper"
@@ -107,17 +106,6 @@ remove_unit() {
 	fi
 }
 
-remove_apparmor() {
-	if [[ -f "/etc/apparmor.d/$APPARMOR_PROFILE_NAME" ]]; then
-		info ""
-		info "The $APPARMOR_PROFILE_NAME AppArmor profile is installed system-wide."
-		info "Removing it requires sudo. To remove it manually, run:"
-		info "  sudo apparmor_parser -R /etc/apparmor.d/$APPARMOR_PROFILE_NAME"
-		info "  sudo rm -f /etc/apparmor.d/$APPARMOR_PROFILE_NAME"
-		info ""
-	fi
-}
-
 remove_skill() {
 	if [[ ! -f "$SKILL_INSTALL_DIR/SKILL.md" ]]; then
 		return
@@ -162,7 +150,6 @@ main() {
 	stop_disable_service
 	remove_binary
 	remove_unit
-	remove_apparmor
 	remove_skill
 
 	info ""
