@@ -408,8 +408,8 @@ func TestUninstallScriptUnknownFlag(t *testing.T) {
 }
 
 // TestAppArmorProfileHasPlaceholders verifies the AppArmor profile
-// template contains both @@BINARY_PATH@@ and @@WORKSPACE_RULE@@ placeholders
-// for substitution at install time.
+// template in the bundle contains both @@BINARY_PATH@@ and @@WORKSPACE_RULE@@
+// placeholders for manual substitution by the administrator.
 func TestAppArmorProfileHasPlaceholders(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper")
 	if err != nil {
@@ -422,209 +422,38 @@ func TestAppArmorProfileHasPlaceholders(t *testing.T) {
 	if !strings.Contains(content, "@@WORKSPACE_RULE@@") {
 		t.Fatal("AppArmor profile must contain @@WORKSPACE_RULE@@ placeholder for workspace access")
 	}
-	// Verify the profile uses path-based attachment (profile @@BINARY_PATH@@)
+	// Verify the profile uses path-based attachment (profile @@BINARY@@)
 	if !strings.Contains(content, "profile @@BINARY_PATH@@") {
 		t.Fatal("AppArmor profile must use path-based attachment: profile @@BINARY_PATH@@")
 	}
 }
 
-// TestAppArmorInstallSubstitutesWorkspace verifies that install_apparmor
-// substitutes @@WORKSPACE_RULE@@ with the actual allowed_root path from config
-// and writes the prepared profile to a user-accessible location (no sudo).
-func TestAppArmorInstallSubstitutesWorkspace(t *testing.T) {
-	tempHome := t.TempDir()
-	scriptDir := t.TempDir()
-
-	// Create a fake binary
-	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create config with allowed_root
-	configDir := filepath.Join(tempHome, ".config", "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	configContent := `{"allowed_root": "/home/user/workspaces", "session_ttl": "12h"}`
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(configContent), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create AppArmor profile template
-	apparmorDir := filepath.Join(scriptDir, "apparmor")
-	if err := os.MkdirAll(apparmorDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	profileTemplate := `profile @@BINARY_PATH@@ {
-	@@WORKSPACE_RULE@@
-}`
-	if err := os.WriteFile(filepath.Join(apparmorDir, "docker-helper"), []byte(profileTemplate), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create fake python3 for reading config
-	fakePythonDir := t.TempDir()
-	fakePython := filepath.Join(fakePythonDir, "python3")
-	pythonScript := `#!/bin/bash
-# Fake python3 that extracts allowed_root from config
-echo "/home/user/workspaces"
-`
-	if err := os.WriteFile(fakePython, []byte(pythonScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create fake apparmor_parser (just for command -v check)
-	fakeAaDir := t.TempDir()
-	fakeApparmorParser := filepath.Join(fakeAaDir, "apparmor_parser")
-	if err := os.WriteFile(fakeApparmorParser, []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	installDir := filepath.Join(tempHome, ".local", "bin")
-	unitDir := filepath.Join(tempHome, ".config", "systemd", "user")
-	if err := os.MkdirAll(installDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(unitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "docker-helper.service"), []byte("[Unit]\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create fake docker
-	fakeDockerDir := t.TempDir()
-	fakeDocker := filepath.Join(fakeDockerDir, "docker")
-	if err := os.WriteFile(fakeDocker, []byte("#!/bin/bash\necho ok\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run install.sh with --yes
-	cmd := exec.Command("bash", "packaging/install.sh", "--yes")
-	cmd.Dir = "."
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-	)
-	// Override PATH to use fakes first
-	cmd.Env = append(cmd.Env, "PATH="+fakeDockerDir+":"+fakeAaDir+":"+fakePythonDir+":"+os.Getenv("PATH"))
-	cmd.Dir = scriptDir
-
-	output, err := cmd.CombinedOutput()
-	_ = output // output may contain warnings about missing commands
-	_ = err    // may fail on systemd/service steps, that's ok
-
-	// Verify the source template is unchanged (substitution happens in-memory)
-	profileData, err := os.ReadFile(filepath.Join(apparmorDir, "docker-helper"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(profileData), "@@BINARY_PATH@@") {
-		t.Error("source profile template should still contain @@BINARY_PATH@@")
-	}
-	if !strings.Contains(string(profileData), "@@WORKSPACE_RULE@@") {
-		t.Error("source profile template should still contain @@WORKSPACE_RULE@@")
-	}
-
-	// Verify the prepared profile was written to a user-accessible location
-	preparedProfile := filepath.Join(tempHome, ".local", "share", "docker-helper", "apparmor-profile")
-	if _, err := os.Stat(preparedProfile); err == nil {
-		// Check that the prepared profile has substitutions applied
-		preparedData, err := os.ReadFile(preparedProfile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		preparedContent := string(preparedData)
-		if strings.Contains(preparedContent, "@@BINARY_PATH@@") {
-			t.Error("prepared profile should have @@BINARY_PATH@@ substituted")
-		}
-		if strings.Contains(preparedContent, "@@WORKSPACE_RULE@@") {
-			t.Error("prepared profile should have @@WORKSPACE_RULE@@ substituted")
-		}
-	}
-}
-
-// TestAppArmorUninstallShowsInstructions verifies that remove_apparmor
-// does not execute sudo and instead prints manual removal instructions.
-func TestAppArmorUninstallShowsInstructions(t *testing.T) {
-	data, err := os.ReadFile("packaging/uninstall.sh")
+// TestInstallScriptNoSudo verifies install.sh does not execute sudo.
+func TestInstallScriptNoSudo(t *testing.T) {
+	data, err := os.ReadFile("packaging/install.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
-
-	// Find the remove_apparmor function
-	idx := strings.Index(content, "remove_apparmor()")
-	if idx < 0 {
-		t.Fatal("remove_apparmor function not found")
-	}
-	// Find the next function
-	remaining := content[idx:]
-	nextFunc := strings.Index(remaining, "\nremove_skill()")
-	if nextFunc < 0 {
-		nextFunc = strings.Index(remaining, "\npurge_config_and_state()")
-	}
-	if nextFunc < 0 {
-		nextFunc = len(remaining)
-	}
-	funcBody := remaining[:nextFunc]
-
-	// Must not execute sudo (sudo as a command, not in instructions)
-	// Check for "sudo " followed by a command (not inside info/echo quotes)
-	lines := strings.Split(funcBody, "\n")
-	for _, line := range lines {
+	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
-		// Skip comment lines and info/warn/printf lines (instructions)
-		if strings.HasPrefix(trimmed, "#") ||
-			strings.HasPrefix(trimmed, "info ") ||
-			strings.HasPrefix(trimmed, "warn ") ||
-			strings.HasPrefix(trimmed, "printf ") ||
-			strings.HasPrefix(trimmed, "echo ") {
+		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		// If sudo appears outside of a string/instruction, it's an execution
 		if strings.Contains(trimmed, "sudo") {
-			t.Error("remove_apparmor must not execute sudo (found outside instruction context): " + trimmed)
+			t.Error("install.sh must not execute sudo: " + trimmed)
 		}
-	}
-
-	// Should contain instructions
-	if !strings.Contains(funcBody, "apparmor_parser -R") {
-		t.Error("remove_apparmor should mention apparmor_parser -R in instructions")
-	}
-	if !strings.Contains(funcBody, "rm -f") {
-		t.Error("remove_apparmor should mention rm -f in instructions")
 	}
 }
 
-// TestUninstallYesNoSudo verifies that uninstall.sh --yes
-// does not execute sudo for any operation (including AppArmor).
-func TestUninstallYesNoSudo(t *testing.T) {
+// TestUninstallScriptNoSudo verifies uninstall.sh does not contain sudo.
+func TestUninstallScriptNoSudo(t *testing.T) {
 	data, err := os.ReadFile("packaging/uninstall.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
-
-	// Check for sudo executed as a command (not in string literals/instructions)
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Skip comments and lines that are clearly instructions/strings
-		if strings.HasPrefix(trimmed, "#") ||
-			strings.HasPrefix(trimmed, "info ") ||
-			strings.HasPrefix(trimmed, "warn ") ||
-			strings.HasPrefix(trimmed, "printf ") ||
-			strings.HasPrefix(trimmed, "echo ") ||
-			strings.HasPrefix(trimmed, `"`) ||
-			strings.HasPrefix(trimmed, "'") {
-			continue
-		}
-		// sudo as a standalone command invocation
-		if strings.Contains(trimmed, "sudo ") || trimmed == "sudo" {
-			t.Error("uninstall.sh must not execute sudo: " + trimmed)
-		}
+	if strings.Contains(string(data), "sudo") {
+		t.Error("uninstall.sh must not contain sudo")
 	}
 }
 
@@ -1079,12 +908,6 @@ func TestInstallSkillCopied(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create apparmor dir
-	apparmorDir := filepath.Join(scriptDir, "apparmor")
-	if err := os.MkdirAll(apparmorDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	// Create fake docker
 	fakeDockerDir := t.TempDir()
 	fakeDocker := filepath.Join(fakeDockerDir, "docker")
@@ -1204,35 +1027,6 @@ func TestUninstallSkillRemovesOnlyDockerHelper(t *testing.T) {
 	// Verify other skill is untouched
 	if _, err := os.Stat(filepath.Join(otherSkillDir, "SKILL.md")); err != nil {
 		t.Error("other skill should not be removed")
-	}
-}
-
-// TestInstallScriptNoSudo verifies install.sh does not execute sudo.
-func TestInstallScriptNoSudo(t *testing.T) {
-	data, err := os.ReadFile("packaging/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Check for sudo executed as a command (not in string literals/instructions)
-	lines := strings.Split(content, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Skip comments and lines that are clearly instructions/strings
-		if strings.HasPrefix(trimmed, "#") ||
-			strings.HasPrefix(trimmed, "info ") ||
-			strings.HasPrefix(trimmed, "warn ") ||
-			strings.HasPrefix(trimmed, "printf ") ||
-			strings.HasPrefix(trimmed, "echo ") ||
-			strings.HasPrefix(trimmed, `"`) ||
-			strings.HasPrefix(trimmed, "'") {
-			continue
-		}
-		// sudo as a standalone command invocation
-		if strings.Contains(trimmed, "sudo ") || trimmed == "sudo" {
-			t.Error("install.sh must not execute sudo: " + trimmed)
-		}
 	}
 }
 

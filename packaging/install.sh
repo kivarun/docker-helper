@@ -20,7 +20,6 @@ readonly BINARY_NAME="docker-helper"
 readonly INSTALL_DIR="$HOME/.local/bin"
 readonly UNIT_DIR="$HOME/.config/systemd/user"
 readonly UNIT_NAME="docker-helper.service"
-readonly APPARMOR_PROFILE_NAME="docker-helper"
 readonly SKILL_INSTALL_DIR="$HOME/.claude/skills/docker-helper"
 
 # --- State ---
@@ -80,9 +79,10 @@ parse_args() {
 check_docker() {
 	info ""
 	info "WARNING: docker-helper requires access to the Docker daemon."
-	info "Docker daemon access (e.g., via the 'docker' group, rootless Docker,"
-	info "or other mechanisms) effectively grants root-equivalent privileges"
-	info "on the host. Ensure you trust this access before proceeding."
+	info "Access via a rootful Docker daemon (e.g., membership in the 'docker'"
+	info "group) effectively grants root-equivalent privileges on the host."
+	info "Rootless Docker does not carry the same risk."
+	info "Ensure you trust this access before proceeding."
 	info ""
 
 	if ! docker info >/dev/null 2>&1; then
@@ -121,62 +121,6 @@ install_unit() {
 	mkdir -p "$UNIT_DIR"
 	cp "$unit_path" "$UNIT_DIR/$UNIT_NAME"
 	chmod 644 "$UNIT_DIR/$UNIT_NAME"
-}
-
-install_apparmor() {
-	local profile_path="$script_dir/apparmor/$APPARMOR_PROFILE_NAME"
-	if [[ ! -f "$profile_path" ]]; then
-		return
-	fi
-
-	# Check if AppArmor is available
-	if ! command -v apparmor_parser >/dev/null 2>&1; then
-		return
-	fi
-
-	info ""
-	info "An AppArmor profile for docker-helper is included in this bundle."
-	info "Installing it is a system-level operation that requires sudo."
-	info ""
-
-	if ! ask "Would you like instructions to install the AppArmor profile manually"; then
-		info "Skipping AppArmor profile"
-		return
-	fi
-
-	# Absolute binary path for executable attachment.
-	local binary_path="$INSTALL_DIR/$BINARY_NAME"
-
-	# Read allowed_root from existing config to grant workspace access.
-	local workspace_rule="# (no workspace configured yet; add allowed_root rule manually if needed)"
-	local config_file="${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json"
-	if [[ -f "$config_file" ]]; then
-		local allowed_root
-		allowed_root=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['allowed_root'])" "$config_file" 2>/dev/null || true)
-		if [[ -n "$allowed_root" ]]; then
-			workspace_rule="${allowed_root}/ r,
-	owner ${allowed_root}/** rw,"
-		fi
-	fi
-
-	# Generate the final profile with paths substituted.
-	local target_dir="/etc/apparmor.d"
-	local final_profile
-	final_profile=$(sed -e "s|@@BINARY_PATH@@|${binary_path}|g" \
-		-e "s|@@WORKSPACE_RULE@@|${workspace_rule}|" "$profile_path")
-
-	# Write the prepared profile to a user-accessible location.
-	local prepared_profile="$HOME/.local/share/docker-helper/apparmor-profile"
-	mkdir -p "$(dirname "$prepared_profile")"
-	printf '%s\n' "$final_profile" > "$prepared_profile"
-
-	info ""
-	info "AppArmor profile prepared at: $prepared_profile"
-	info ""
-	info "To install it, run (requires sudo):"
-	info "  sudo cp $prepared_profile $target_dir/$APPARMOR_PROFILE_NAME"
-	info "  sudo apparmor_parser -a $target_dir/$APPARMOR_PROFILE_NAME"
-	info ""
 }
 
 install_skill() {
@@ -262,7 +206,6 @@ main() {
 
 	install_binary
 	install_unit
-	install_apparmor
 	install_skill
 	check_path
 
