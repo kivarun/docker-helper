@@ -22,6 +22,7 @@ readonly UNIT_NAME="docker-helper.service"
 readonly APPARMOR_PROFILE_NAME="docker-helper"
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper"
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper"
+readonly SKILL_INSTALL_DIR="$HOME/.claude/skills/docker-helper"
 
 # --- State ---
 interactive=true
@@ -108,28 +109,34 @@ remove_unit() {
 
 remove_apparmor() {
 	if [[ -f "/etc/apparmor.d/$APPARMOR_PROFILE_NAME" ]]; then
-		if $interactive; then
-			printf 'Remove %s AppArmor profile (requires sudo)? [y/N]: ' "$APPARMOR_PROFILE_NAME"
-			read -r answer
-			if [[ "${answer,,}" != "y" && "${answer,,}" != "yes" ]]; then
-				info "Skipping AppArmor profile removal"
-				return
-			fi
-		else
-			# --yes: remove AppArmor profile like other artifacts.
-			:
-		fi
-
-		# Unload the profile first while the file still exists.
-		sudo apparmor_parser -R "/etc/apparmor.d/$APPARMOR_PROFILE_NAME" 2>/dev/null || true
-
-		if ! sudo rm -f "/etc/apparmor.d/$APPARMOR_PROFILE_NAME"; then
-			warn "Failed to remove AppArmor profile"
-			return
-		fi
-
-		info "AppArmor profile removed"
+		info ""
+		info "The $APPARMOR_PROFILE_NAME AppArmor profile is installed system-wide."
+		info "Removing it requires sudo. To remove it manually, run:"
+		info "  sudo apparmor_parser -R /etc/apparmor.d/$APPARMOR_PROFILE_NAME"
+		info "  sudo rm -f /etc/apparmor.d/$APPARMOR_PROFILE_NAME"
+		info ""
 	fi
+}
+
+remove_skill() {
+	if [[ ! -f "$SKILL_INSTALL_DIR/SKILL.md" ]]; then
+		return
+	fi
+
+	if ! ask "Remove docker-helper skill from ~/.claude/skills/docker-helper"; then
+		info "Keeping skill at $SKILL_INSTALL_DIR"
+		return
+	fi
+
+	info "Removing $SKILL_INSTALL_DIR/SKILL.md"
+	rm -f "$SKILL_INSTALL_DIR/SKILL.md"
+
+	# Remove the docker-helper directory if it's now empty.
+	if [[ -d "$SKILL_INSTALL_DIR" ]] && [[ -z "$(ls -A "$SKILL_INSTALL_DIR" 2>/dev/null)" ]]; then
+		rmdir "$SKILL_INSTALL_DIR" 2>/dev/null || true
+	fi
+
+	info "Skill removed"
 }
 
 purge_config_and_state() {
@@ -156,6 +163,7 @@ main() {
 	remove_binary
 	remove_unit
 	remove_apparmor
+	remove_skill
 
 	info ""
 

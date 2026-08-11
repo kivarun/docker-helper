@@ -11,7 +11,7 @@
 #   --yes   Non-interactive: accept all defaults, run init, enable+start service.
 #
 # Requires: bash 4+, Docker access for the current user.
-# Does NOT require: sudo (except optional AppArmor step).
+# Does NOT require: sudo.
 
 set -euo pipefail
 
@@ -21,6 +21,7 @@ readonly INSTALL_DIR="$HOME/.local/bin"
 readonly UNIT_DIR="$HOME/.config/systemd/user"
 readonly UNIT_NAME="docker-helper.service"
 readonly APPARMOR_PROFILE_NAME="docker-helper"
+readonly SKILL_INSTALL_DIR="$HOME/.claude/skills/docker-helper"
 
 # --- State ---
 interactive=true
@@ -77,6 +78,13 @@ parse_args() {
 # --- Pre-flight checks ---
 
 check_docker() {
+	info ""
+	info "WARNING: docker-helper requires access to the Docker daemon."
+	info "Docker daemon access (e.g., via the 'docker' group, rootless Docker,"
+	info "or other mechanisms) effectively grants root-equivalent privileges"
+	info "on the host. Ensure you trust this access before proceeding."
+	info ""
+
 	if ! docker info >/dev/null 2>&1; then
 		error "cannot access Docker daemon."
 		error "Ensure the current user has Docker access (e.g., is in the 'docker' group or uses rootless Docker)."
@@ -126,8 +134,13 @@ install_apparmor() {
 		return
 	fi
 
-	if ! ask "Install $APPARMOR_PROFILE_NAME AppArmor profile (requires sudo)"; then
-		info "Skipping AppArmor profile installation"
+	info ""
+	info "An AppArmor profile for docker-helper is included in this bundle."
+	info "Installing it is a system-level operation that requires sudo."
+	info ""
+
+	if ! ask "Would you like instructions to install the AppArmor profile manually"; then
+		info "Skipping AppArmor profile"
 		return
 	fi
 
@@ -152,17 +165,35 @@ install_apparmor() {
 	final_profile=$(sed -e "s|@@BINARY_PATH@@|${binary_path}|g" \
 		-e "s|@@WORKSPACE_RULE@@|${workspace_rule}|" "$profile_path")
 
-	if ! echo "$final_profile" | sudo tee "$target_dir/$APPARMOR_PROFILE_NAME" >/dev/null 2>&1; then
-		warn "Failed to install AppArmor profile"
+	# Write the prepared profile to a user-accessible location.
+	local prepared_profile="$HOME/.local/share/docker-helper/apparmor-profile"
+	mkdir -p "$(dirname "$prepared_profile")"
+	printf '%s\n' "$final_profile" > "$prepared_profile"
+
+	info ""
+	info "AppArmor profile prepared at: $prepared_profile"
+	info ""
+	info "To install it, run (requires sudo):"
+	info "  sudo cp $prepared_profile $target_dir/$APPARMOR_PROFILE_NAME"
+	info "  sudo apparmor_parser -a $target_dir/$APPARMOR_PROFILE_NAME"
+	info ""
+}
+
+install_skill() {
+	local skill_src="$script_dir/skills/docker-helper/SKILL.md"
+	if [[ ! -f "$skill_src" ]]; then
 		return
 	fi
 
-	if ! sudo apparmor_parser -a "$target_dir/$APPARMOR_PROFILE_NAME" >/dev/null 2>&1; then
-		warn "Failed to load AppArmor profile"
+	if ! ask "Install docker-helper agent skill to ~/.claude/skills/docker-helper"; then
+		info "Skipping skill installation"
 		return
 	fi
 
-	info "AppArmor profile installed"
+	info "Installing docker-helper skill to $SKILL_INSTALL_DIR"
+	mkdir -p "$SKILL_INSTALL_DIR"
+	cp "$skill_src" "$SKILL_INSTALL_DIR/SKILL.md"
+	info "Skill installed"
 }
 
 check_path() {
@@ -232,6 +263,7 @@ main() {
 	install_binary
 	install_unit
 	install_apparmor
+	install_skill
 	check_path
 
 	info ""
