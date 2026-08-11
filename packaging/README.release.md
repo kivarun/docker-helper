@@ -82,11 +82,13 @@ cp skills/docker-helper/SKILL.md ~/.claude/skills/docker-helper/SKILL.md
 The `apparmor/docker-helper` file is a template for an optional AppArmor
 profile. It is **not** installed by `install.sh`. To install it manually:
 
-1. Substitute `@@BINARY_PATH@@` with the absolute path to the docker-helper
-   binary (e.g., `/home/user/.local/bin/docker-helper`).
-2. Optionally substitute `@@WORKSPACE_RULE@@` with workspace access rules
-   if you configured `allowed_root` in your docker-helper config.
-3. Copy the profile to `/etc/apparmor.d/` and load it with `apparmor_parser`.
+1. Replace every occurrence of `@@BINARY_PATH@@` with the absolute path to
+   the docker-helper binary (e.g., `/home/user/.local/bin/docker-helper`).
+2. For workspace access, replace the commented `@@WORKSPACE_RULE@@` line with
+   the appropriate AppArmor rules for your `allowed_root`, or leave it
+   commented out if workspace access is not needed.
+3. Copy the prepared profile to `/etc/apparmor.d/` and load it with
+   `apparmor_parser`.
 
 This is a system-level operation that requires sudo and should be performed
 by an administrator.

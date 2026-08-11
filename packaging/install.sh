@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # install.sh — user-only installation of docker-helper.
 #
-# Installs the binary to ~/.local/bin/docker-helper and the systemd user
-# unit to ~/.config/systemd/user/docker-helper.service.
+# Installs the binary to ~/.local/bin/docker-helper, the systemd user
+# unit to ~/.config/systemd/user/docker-helper.service, and optionally
+# the agent skill to ~/.claude/skills/docker-helper.
 #
 # Usage:
 #   ./install.sh [--yes]
