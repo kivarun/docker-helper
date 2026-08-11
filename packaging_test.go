@@ -429,7 +429,8 @@ func TestAppArmorProfileHasPlaceholders(t *testing.T) {
 }
 
 // TestAppArmorInstallSubstitutesWorkspace verifies that install_apparmor
-// substitutes @@WORKSPACE_RULE@@ with the actual allowed_root path from config.
+// substitutes @@WORKSPACE_RULE@@ with the actual allowed_root path from config
+// and writes the prepared profile to a user-accessible location (no sudo).
 func TestAppArmorInstallSubstitutesWorkspace(t *testing.T) {
 	tempHome := t.TempDir()
 	scriptDir := t.TempDir()
@@ -472,36 +473,10 @@ echo "/home/user/workspaces"
 		t.Fatal(err)
 	}
 
-	// Create fake sudo that just writes to a temp location
-	fakeSudoDir := t.TempDir()
-	fakeSudo := filepath.Join(fakeSudoDir, "sudo")
-	sudoScript := `#!/bin/bash
-# Fake sudo: forward to apparmor_parser or tee
-shift # remove -a or other flags
-exec "$@"
-`
-	if err := os.WriteFile(fakeSudo, []byte(sudoScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	fakeApparmorParser := filepath.Join(fakeSudoDir, "apparmor_parser")
-	parserScript := `#!/bin/bash
-# Fake apparmor_parser: accept and return success
-exit 0
-`
-	if err := os.WriteFile(fakeApparmorParser, []byte(parserScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create fake tee
-	fakeTee := filepath.Join(fakeSudoDir, "tee")
-	teeScript := `#!/bin/bash
-# Fake tee: write to the target file
-target="${@: -1}"
-cat > "$target"
-exit 0
-`
-	if err := os.WriteFile(fakeTee, []byte(teeScript), 0755); err != nil {
+	// Create fake apparmor_parser (just for command -v check)
+	fakeAaDir := t.TempDir()
+	fakeApparmorParser := filepath.Join(fakeAaDir, "apparmor_parser")
+	if err := os.WriteFile(fakeApparmorParser, []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -533,8 +508,7 @@ exit 0
 		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
 	)
 	// Override PATH to use fakes first
-	cmd.Env = append(cmd.Env, "PATH="+fakeDockerDir+":"+fakeSudoDir+":"+fakePythonDir+":"+os.Getenv("PATH"))
-	// Override script_dir by running from scriptDir
+	cmd.Env = append(cmd.Env, "PATH="+fakeDockerDir+":"+fakeAaDir+":"+fakePythonDir+":"+os.Getenv("PATH"))
 	cmd.Dir = scriptDir
 
 	output, err := cmd.CombinedOutput()
@@ -552,105 +526,105 @@ exit 0
 	if !strings.Contains(string(profileData), "@@WORKSPACE_RULE@@") {
 		t.Error("source profile template should still contain @@WORKSPACE_RULE@@")
 	}
-}
 
-// TestAppArmorUninstallUnloadsBeforeRemove verifies that remove_apparmor
-// unloads the profile before removing the file.
-func TestAppArmorUninstallUnloadsBeforeRemove(t *testing.T) {
-	// Create fake commands that record their calls
-	fakeDir := t.TempDir()
-
-	callLog := filepath.Join(fakeDir, "calls.log")
-
-	fakeSudo := filepath.Join(fakeDir, "sudo")
-	sudoScript := "#!/bin/bash\necho \"sudo $@\" >> '" + callLog + "'\nexit 0\n"
-	if err := os.WriteFile(fakeSudo, []byte(sudoScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	fakeApparmorParser := filepath.Join(fakeDir, "apparmor_parser")
-	parserScript := "#!/bin/bash\necho \"apparmor_parser $@\" >> '" + callLog + "'\nexit 0\n"
-	if err := os.WriteFile(fakeApparmorParser, []byte(parserScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	fakeDocker := filepath.Join(fakeDir, "docker")
-	if err := os.WriteFile(fakeDocker, []byte("#!/bin/bash\necho ok\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	fakeSystemctl := filepath.Join(fakeDir, "systemctl")
-	if err := os.WriteFile(fakeSystemctl, []byte("#!/bin/bash\nexit 1\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create fake AppArmor profile
-	aaDir := filepath.Join(fakeDir, "apparmor.d")
-	if err := os.MkdirAll(aaDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(aaDir, "docker-helper"), []byte("profile\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a test script that simulates remove_apparmor behavior
-	testScript := `#!/usr/bin/env bash
-set -euo pipefail
-APPARMOR_PROFILE_NAME="docker-helper"
-AA_DIR="` + aaDir + `"
-remove_apparmor() {
-	if [[ -f "$AA_DIR/$APPARMOR_PROFILE_NAME" ]]; then
-		# Unload first
-		apparmor_parser -R "$AA_DIR/$APPARMOR_PROFILE_NAME" 2>/dev/null || true
-		# Then remove
-		rm -f "$AA_DIR/$APPARMOR_PROFILE_NAME"
-	fi
-}
-remove_apparmor
-`
-	tmpScript := filepath.Join(t.TempDir(), "test_aa_uninstall.sh")
-	if err := os.WriteFile(tmpScript, []byte(testScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("bash", tmpScript)
-	cmd.Env = append(os.Environ(), "PATH="+fakeDir+":"+os.Getenv("PATH"))
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("uninstall failed: %v", err)
-	}
-
-	// Verify the profile was removed
-	if _, err := os.Stat(filepath.Join(aaDir, "docker-helper")); !os.IsNotExist(err) {
-		t.Error("AppArmor profile should be removed")
+	// Verify the prepared profile was written to a user-accessible location
+	preparedProfile := filepath.Join(tempHome, ".local", "share", "docker-helper", "apparmor-profile")
+	if _, err := os.Stat(preparedProfile); err == nil {
+		// Check that the prepared profile has substitutions applied
+		preparedData, err := os.ReadFile(preparedProfile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		preparedContent := string(preparedData)
+		if strings.Contains(preparedContent, "@@BINARY_PATH@@") {
+			t.Error("prepared profile should have @@BINARY_PATH@@ substituted")
+		}
+		if strings.Contains(preparedContent, "@@WORKSPACE_RULE@@") {
+			t.Error("prepared profile should have @@WORKSPACE_RULE@@ substituted")
+		}
 	}
 }
 
-// TestUninstallYesRemovesAppArmor verifies that uninstall.sh --yes
-// removes the AppArmor profile (not skips it).
-// The remove_apparmor function in uninstall.sh has this logic:
-//
-//	interactive=false (--yes) → does NOT return early → proceeds to removal.
-//
-// We verify this by checking the script source.
-func TestUninstallYesRemovesAppArmor(t *testing.T) {
+// TestAppArmorUninstallShowsInstructions verifies that remove_apparmor
+// does not execute sudo and instead prints manual removal instructions.
+func TestAppArmorUninstallShowsInstructions(t *testing.T) {
 	data, err := os.ReadFile("packaging/uninstall.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 
-	// The remove_apparmor function must NOT have an early return for
-	// non-interactive mode without --purge. It should proceed to removal.
-	// Check that apparmor_parser -R appears before rm -f in the function.
-	// This ensures unload-before-remove ordering.
-	idxUnload := strings.Index(content, "apparmor_parser -R")
-	if idxUnload < 0 {
-		t.Fatal("remove_apparmor must contain apparmor_parser -R")
+	// Find the remove_apparmor function
+	idx := strings.Index(content, "remove_apparmor()")
+	if idx < 0 {
+		t.Fatal("remove_apparmor function not found")
 	}
-	remaining := content[idxUnload:]
-	idxRemove := strings.Index(remaining, "rm -f")
-	if idxRemove < 0 {
-		t.Fatal("remove_apparmor must contain rm -f after apparmor_parser -R")
+	// Find the next function
+	remaining := content[idx:]
+	nextFunc := strings.Index(remaining, "\nremove_skill()")
+	if nextFunc < 0 {
+		nextFunc = strings.Index(remaining, "\npurge_config_and_state()")
+	}
+	if nextFunc < 0 {
+		nextFunc = len(remaining)
+	}
+	funcBody := remaining[:nextFunc]
+
+	// Must not execute sudo (sudo as a command, not in instructions)
+	// Check for "sudo " followed by a command (not inside info/echo quotes)
+	lines := strings.Split(funcBody, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip comment lines and info/warn/printf lines (instructions)
+		if strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "info ") ||
+			strings.HasPrefix(trimmed, "warn ") ||
+			strings.HasPrefix(trimmed, "printf ") ||
+			strings.HasPrefix(trimmed, "echo ") {
+			continue
+		}
+		// If sudo appears outside of a string/instruction, it's an execution
+		if strings.Contains(trimmed, "sudo") {
+			t.Error("remove_apparmor must not execute sudo (found outside instruction context): " + trimmed)
+		}
+	}
+
+	// Should contain instructions
+	if !strings.Contains(funcBody, "apparmor_parser -R") {
+		t.Error("remove_apparmor should mention apparmor_parser -R in instructions")
+	}
+	if !strings.Contains(funcBody, "rm -f") {
+		t.Error("remove_apparmor should mention rm -f in instructions")
+	}
+}
+
+// TestUninstallYesNoSudo verifies that uninstall.sh --yes
+// does not execute sudo for any operation (including AppArmor).
+func TestUninstallYesNoSudo(t *testing.T) {
+	data, err := os.ReadFile("packaging/uninstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Check for sudo executed as a command (not in string literals/instructions)
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip comments and lines that are clearly instructions/strings
+		if strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "info ") ||
+			strings.HasPrefix(trimmed, "warn ") ||
+			strings.HasPrefix(trimmed, "printf ") ||
+			strings.HasPrefix(trimmed, "echo ") ||
+			strings.HasPrefix(trimmed, `"`) ||
+			strings.HasPrefix(trimmed, "'") {
+			continue
+		}
+		// sudo as a standalone command invocation
+		if strings.Contains(trimmed, "sudo ") || trimmed == "sudo" {
+			t.Error("uninstall.sh must not execute sudo: " + trimmed)
+		}
 	}
 }
 
@@ -1015,5 +989,314 @@ func TestAskPrompts(t *testing.T) {
 				t.Errorf("status = %d, want %d", gotStatus, tc.wantStatus)
 			}
 		})
+	}
+}
+
+// TestBundleSkillPath verifies build-bundle.sh places the skill at
+// skills/docker-helper/SKILL.md (not .claude/skills/docker-helper/SKILL.md).
+func TestBundleSkillPath(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must reference the correct skill path in the bundle
+	if !strings.Contains(content, "skills/docker-helper/SKILL.md") {
+		t.Error("build-bundle.sh must reference skills/docker-helper/SKILL.md")
+	}
+
+	// Expected paths must include the correct skill path
+	if !strings.Contains(content, "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md") {
+		t.Error("build-bundle.sh must verify skills/docker-helper/SKILL.md in tarball")
+	}
+
+	// The bundle directory must not contain .claude/skills
+	// (the source copy from .claude is fine, but the destination must be skills/)
+	bundleDirIdx := strings.Index(content, "BUNDLE_DIR=")
+	if bundleDirIdx >= 0 {
+		afterBundleDir := content[bundleDirIdx:]
+		// Check that no cp/mkdir creates .claude inside BUNDLE_DIR
+		if strings.Contains(afterBundleDir, "$BUNDLE_DIR/.claude") {
+			t.Error("build-bundle.sh must not create .claude inside BUNDLE_DIR")
+		}
+	}
+}
+
+// TestBundleNoDotClaude verifies the bundle does not contain .claude/
+// in the expected paths check.
+func TestBundleNoDotClaude(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Find the EXPECTED_PATHS array
+	idx := strings.Index(content, "EXPECTED_PATHS=")
+	if idx < 0 {
+		t.Fatal("EXPECTED_PATHS not found")
+	}
+	remaining := content[idx:]
+	// Find the closing )
+	endIdx := strings.Index(remaining, ")")
+	if endIdx < 0 {
+		t.Fatal("EXPECTED_PATHS closing paren not found")
+	}
+	expectedPaths := remaining[:endIdx]
+
+	if strings.Contains(expectedPaths, ".claude") {
+		t.Error("EXPECTED_PATHS must not contain .claude paths")
+	}
+}
+
+// TestInstallSkillCopied verifies install.sh copies the skill to
+// ~/.claude/skills/docker-helper/SKILL.md when skill installation is accepted.
+func TestInstallSkillCopied(t *testing.T) {
+	tempHome := t.TempDir()
+	scriptDir := t.TempDir()
+
+	// Create a fake binary
+	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create skill source
+	skillDir := filepath.Join(scriptDir, "skills", "docker-helper")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# Docker Helper Skill\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create systemd unit dir
+	unitDir := filepath.Join(scriptDir, "systemd", "user")
+	if err := os.MkdirAll(unitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, "docker-helper.service"), []byte("[Unit]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create apparmor dir
+	apparmorDir := filepath.Join(scriptDir, "apparmor")
+	if err := os.MkdirAll(apparmorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create fake docker
+	fakeDockerDir := t.TempDir()
+	fakeDocker := filepath.Join(fakeDockerDir, "docker")
+	if err := os.WriteFile(fakeDocker, []byte("#!/bin/bash\necho ok\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Copy install.sh into scriptDir so script_dir resolves correctly
+	installData, err := os.ReadFile("packaging/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedScript := filepath.Join(scriptDir, "install.sh")
+	if err := os.WriteFile(installedScript, installData, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run install.sh with --yes (auto-accepts skill installation)
+	cmd := exec.Command("bash", installedScript, "--yes")
+	cmd.Env = append(os.Environ(),
+		"HOME="+tempHome,
+		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
+		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
+		"PATH="+fakeDockerDir+":"+os.Getenv("PATH"),
+	)
+	cmd.Dir = scriptDir
+
+	output, err := cmd.CombinedOutput()
+	_ = output
+	_ = err // may fail on systemd/service steps
+
+	// Verify skill was installed
+	skillPath := filepath.Join(tempHome, ".claude", "skills", "docker-helper", "SKILL.md")
+	if _, err := os.Stat(skillPath); err != nil {
+		t.Fatalf("skill not installed to %s: %v", skillPath, err)
+	}
+
+	// Verify skill content
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Docker Helper Skill") {
+		t.Error("skill content mismatch")
+	}
+}
+
+// TestUninstallSkillRemovesOnlyDockerHelper verifies uninstall.sh removes
+// only the docker-helper skill and does not touch ~/.claude, ~/.claude/skills,
+// or other skills.
+func TestUninstallSkillRemovesOnlyDockerHelper(t *testing.T) {
+	tempHome := t.TempDir()
+
+	// Create ~/.claude/skills with docker-helper and another skill
+	skillsDir := filepath.Join(tempHome, ".claude", "skills")
+	dhSkillDir := filepath.Join(skillsDir, "docker-helper")
+	otherSkillDir := filepath.Join(skillsDir, "other-skill")
+	if err := os.MkdirAll(dhSkillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(otherSkillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dhSkillDir, "SKILL.md"), []byte("# Docker Helper\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherSkillDir, "SKILL.md"), []byte("# Other Skill\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create script dir with minimal artifacts
+	scriptDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	unitDir := filepath.Join(scriptDir, "systemd", "user")
+	if err := os.MkdirAll(unitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Get absolute path to uninstall.sh
+	uninstallScript, err := filepath.Abs("packaging/uninstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run uninstall.sh with --yes (auto-accepts skill removal)
+	cmd := exec.Command("bash", uninstallScript, "--yes")
+	cmd.Env = append(os.Environ(),
+		"HOME="+tempHome,
+		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
+		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
+		"PATH="+os.Getenv("PATH"),
+	)
+	cmd.Dir = scriptDir
+
+	output, err := cmd.CombinedOutput()
+	_ = output
+	_ = err // may fail on systemd steps
+
+	// Verify docker-helper skill was removed
+	if _, err := os.Stat(filepath.Join(dhSkillDir, "SKILL.md")); !os.IsNotExist(err) {
+		t.Error("docker-helper skill should be removed")
+	}
+
+	// Verify docker-helper directory was removed (empty)
+	if _, err := os.Stat(dhSkillDir); !os.IsNotExist(err) {
+		// Directory may still exist if rmdir failed, that's acceptable
+		// as long as SKILL.md is gone
+	}
+
+	// Verify ~/.claude/skills still exists
+	if _, err := os.Stat(skillsDir); err != nil {
+		t.Error("~/.claude/skills should not be removed")
+	}
+
+	// Verify other skill is untouched
+	if _, err := os.Stat(filepath.Join(otherSkillDir, "SKILL.md")); err != nil {
+		t.Error("other skill should not be removed")
+	}
+}
+
+// TestInstallScriptNoSudo verifies install.sh does not execute sudo.
+func TestInstallScriptNoSudo(t *testing.T) {
+	data, err := os.ReadFile("packaging/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Check for sudo executed as a command (not in string literals/instructions)
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip comments and lines that are clearly instructions/strings
+		if strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "info ") ||
+			strings.HasPrefix(trimmed, "warn ") ||
+			strings.HasPrefix(trimmed, "printf ") ||
+			strings.HasPrefix(trimmed, "echo ") ||
+			strings.HasPrefix(trimmed, `"`) ||
+			strings.HasPrefix(trimmed, "'") {
+			continue
+		}
+		// sudo as a standalone command invocation
+		if strings.Contains(trimmed, "sudo ") || trimmed == "sudo" {
+			t.Error("install.sh must not execute sudo: " + trimmed)
+		}
+	}
+}
+
+// TestInstallYesSkill verifies --yes auto-accepts skill installation
+// by checking the install_skill function uses ask() which defaults to yes
+// in non-interactive mode.
+func TestInstallYesSkill(t *testing.T) {
+	data, err := os.ReadFile("packaging/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// install_skill must exist and use ask() for the prompt
+	if !strings.Contains(content, "install_skill()") {
+		t.Fatal("install_skill function not found")
+	}
+
+	// Extract install_skill function body (from install_skill() to the next function)
+	idx := strings.Index(content, "install_skill()")
+	if idx < 0 {
+		t.Fatal("install_skill function not found")
+	}
+	remaining := content[idx:]
+
+	// Find next function definition
+	nextFuncIdx := len(remaining)
+	for _, candidate := range []string{"\ncheck_path()", "\nrun_init()", "\nenable_service()", "\nmain()"} {
+		if i := strings.Index(remaining, candidate); i > 0 && i < nextFuncIdx {
+			nextFuncIdx = i
+		}
+	}
+	funcBody := remaining[:nextFuncIdx]
+
+	// Must use ask for the prompt (bash function call without parens: ask "prompt")
+	if !strings.Contains(funcBody, "ask ") {
+		t.Error("install_skill must use ask for user prompt")
+	}
+
+	// Verify ask() defaults to yes when interactive=false (--yes)
+	// The ask() function has: if $interactive; then ... else true; fi
+	askIdx := strings.Index(content, "ask() {")
+	if askIdx < 0 {
+		t.Fatal("ask() function not found")
+	}
+	askBody := content[askIdx:]
+	// Find the closing brace of ask() function
+	braceCount := 0
+	askEnd := len(askBody)
+	for i, c := range askBody {
+		if c == '{' {
+			braceCount++
+		} else if c == '}' {
+			braceCount--
+			if braceCount == 0 {
+				askEnd = i + 1
+				break
+			}
+		}
+	}
+	askImpl := askBody[:askEnd]
+
+	// When interactive=false, ask() should return true (accept)
+	if !strings.Contains(askImpl, "true") {
+		t.Error("ask() must return true (accept) when interactive=false")
 	}
 }

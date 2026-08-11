@@ -10,7 +10,7 @@ accompanying installation artifacts.
 - `uninstall.sh` — host uninstaller script
 - `systemd/user/docker-helper.service` — systemd user service unit
 - `apparmor/docker-helper` — optional AppArmor profile template
-- `.claude/skills/docker-helper/SKILL.md` — agent-facing skill file
+- `skills/docker-helper/SKILL.md` — agent-facing skill file
 
 ## Quick start
 
@@ -70,8 +70,9 @@ the systemd user unit, and optionally installs an AppArmor profile.
 
 ## Agent-side artifacts
 
-The `docker-helper` binary and `.claude/skills/docker-helper/SKILL.md` are
-agent-side artifacts. They are **not** installed automatically by `install.sh`.
+The `docker-helper` binary and `skills/docker-helper/SKILL.md` are
+agent-side artifacts. They are **not** installed automatically by `install.sh`
+(skill installation is offered as an optional step).
 
 To use them in an agent environment, copy or mount them into the agent's
 filesystem. The exact paths depend on your agent runtime:
@@ -80,7 +81,7 @@ filesystem. The exact paths depend on your agent runtime:
 # Example: copy binary and skill to an agent container
 cp docker-helper /path/to/agent/bin/
 mkdir -p /path/to/agent/skills/docker-helper
-cp .claude/skills/docker-helper/SKILL.md \
+cp skills/docker-helper/SKILL.md \
   /path/to/agent/skills/docker-helper/SKILL.md
 ```
 
@@ -90,4 +91,4 @@ provides Docker operations through its own policy-enforced interface.
 ## Documentation
 
 For full API/CLI documentation, see the project README and
-`.claude/skills/docker-helper/SKILL.md` in this archive.
+`skills/docker-helper/SKILL.md` in this archive.

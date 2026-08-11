@@ -21,10 +21,9 @@
 #         docker-helper.service
 #     apparmor/
 #       docker-helper
-#     .claude/
-#       skills/
-#         docker-helper/
-#           SKILL.md
+#     skills/
+#       docker-helper/
+#         SKILL.md
 #
 # If static linking cannot be confirmed, the build FAILS.
 # A release tarball must never contain an unconfirmed binary.
@@ -80,9 +79,9 @@ cp "$SCRIPT_DIR/packaging/apparmor/docker-helper" \
    "$BUNDLE_DIR/apparmor/docker-helper"
 
 # Agent skill
-mkdir -p "$BUNDLE_DIR/.claude/skills/docker-helper"
+mkdir -p "$BUNDLE_DIR/skills/docker-helper"
 cp "$SCRIPT_DIR/.claude/skills/docker-helper/SKILL.md" \
-   "$BUNDLE_DIR/.claude/skills/docker-helper/SKILL.md"
+   "$BUNDLE_DIR/skills/docker-helper/SKILL.md"
 
 # --- Step 3: Create tarball ---
 
@@ -140,7 +139,7 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/uninstall.sh"
   "docker-helper-${VERSION}-linux-amd64/systemd/user/docker-helper.service"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper"
-  "docker-helper-${VERSION}-linux-amd64/.claude/skills/docker-helper/SKILL.md"
+   "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
 )
 
 TARBALL_CONTENTS=$(tar tzf "$TARBALL")
