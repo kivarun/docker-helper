@@ -543,17 +543,17 @@ func TestRootHelpGroupsAgentAndOperator(t *testing.T) {
 		t.Errorf("expected exit 0, got %d", code)
 	}
 	output := stdout.String()
-	if !strings.Contains(output, "Agent commands:") {
-		t.Errorf("expected 'Agent commands:' section in root help, got: %s", output)
-	}
-	if !strings.Contains(output, "Operator commands:") {
-		t.Errorf("expected 'Operator commands:' section in root help, got: %s", output)
+	for _, section := range []string{"Agent commands:", "Operator commands:", "General commands:"} {
+		if !strings.Contains(output, section) {
+			t.Errorf("expected '%s' section in root help, got: %s", section, output)
+		}
 	}
 	// Verify agent commands appear under Agent commands
 	agentSection := output[strings.Index(output, "Agent commands:"):]
-	operatorIdx := strings.Index(agentSection, "Operator commands:")
-	if operatorIdx > 0 {
-		agentSection = agentSection[:operatorIdx]
+	nextIdx := minOfNonZero(strings.Index(agentSection, "Operator commands:"),
+		strings.Index(agentSection, "General commands:"))
+	if nextIdx > 0 {
+		agentSection = agentSection[:nextIdx]
 	}
 	for _, cmd := range []string{"pull", "build", "run", "registry"} {
 		if !strings.Contains(agentSection, cmd) {
@@ -562,9 +562,34 @@ func TestRootHelpGroupsAgentAndOperator(t *testing.T) {
 	}
 	// Verify operator commands appear under Operator commands
 	operatorSection := output[strings.Index(output, "Operator commands:"):]
-	for _, cmd := range []string{"serve", "init", "reload", "session", "config", "version"} {
+	nextIdx2 := strings.Index(operatorSection, "General commands:")
+	if nextIdx2 > 0 {
+		operatorSection = operatorSection[:nextIdx2]
+	}
+	for _, cmd := range []string{"serve", "init", "reload", "session", "config"} {
 		if !strings.Contains(operatorSection, cmd) {
 			t.Errorf("expected %s under Operator commands, got: %s", cmd, operatorSection)
 		}
+	}
+	// Verify general commands appear under General commands
+	generalSection := output[strings.Index(output, "General commands:"):]
+	for _, cmd := range []string{"version", "help"} {
+		if !strings.Contains(generalSection, cmd) {
+			t.Errorf("expected %s under General commands, got: %s", cmd, generalSection)
+		}
+	}
+}
+
+func minOfNonZero(a, b int) int {
+	switch {
+	case a <= 0:
+		return b
+	case b <= 0:
+		return a
+	default:
+		if a < b {
+			return a
+		}
+		return b
 	}
 }

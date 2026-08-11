@@ -271,11 +271,19 @@ var agentCommandNames = map[string]struct{}{
 	"registry": {},
 }
 
+// generalCommandNames lists commands useful in any context.
+var generalCommandNames = map[string]struct{}{
+	"version": {},
+	"help":    {},
+}
+
 func (c *Command) printGroupedSubcommands(w io.Writer) {
-	var agentCmds, operatorCmds []*Command
+	var agentCmds, operatorCmds, generalCmds []*Command
 	for _, sub := range c.Subcommands {
 		if _, ok := agentCommandNames[sub.Name]; ok {
 			agentCmds = append(agentCmds, sub)
+		} else if _, ok := generalCommandNames[sub.Name]; ok {
+			generalCmds = append(generalCmds, sub)
 		} else {
 			operatorCmds = append(operatorCmds, sub)
 		}
@@ -292,6 +300,14 @@ func (c *Command) printGroupedSubcommands(w io.Writer) {
 	if len(operatorCmds) > 0 {
 		fmt.Fprintln(w, "Operator commands:")
 		for _, sub := range operatorCmds {
+			fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(generalCmds) > 0 {
+		fmt.Fprintln(w, "General commands:")
+		for _, sub := range generalCmds {
 			fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
 		}
 		fmt.Fprintln(w)
