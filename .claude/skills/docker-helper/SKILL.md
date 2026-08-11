@@ -28,15 +28,17 @@ Both interfaces are first-class. Neither is a legacy or fallback interface.
 
 Use the interface selected by the user or environment.
 
-If no interface was explicitly selected, discover availability:
+If no interface was explicitly selected, determine availability of both:
 
-```bash
-command -v docker-helper >/dev/null 2>&1
-```
+- **CLI available:** `command -v docker-helper >/dev/null 2>&1`
+- **HTTP available:** the Docker Helper socket exists and a suitable HTTP
+  client is present (for the documented curl examples — `curl`)
 
-- If the CLI is available, use the CLI interface.
-- If the CLI is not available, use the HTTP API.
-- If neither is available, report that Docker Helper is unavailable.
+Then:
+
+- if only one interface is available, use it;
+- if both are available, either may be used, with no preference;
+- if neither is available, report that Docker Helper is unavailable.
 
 Use one interface consistently for the current operation when practical.
 
