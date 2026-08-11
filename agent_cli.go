@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -47,12 +48,18 @@ func agentClient() (*apiClient, error) {
 // immediately on first occurrence.
 // Returns the final operation status response.
 func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
+	return waitForOperationContext(context.Background(), c, opID, stdout, stderr)
+}
+
+// waitForOperationContext is the context-aware variant of waitForOperation.
+// If ctx is cancelled, it returns immediately with ctx.Err().
+func waitForOperationContext(ctx context.Context, c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
 	var offset int64
 	truncated := false
 
 	for {
 		// Fetch and print any new logs.
-		logs, err := c.operationLogs(opID, offset)
+		logs, err := c.operationLogsCtx(ctx, opID, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -66,14 +73,14 @@ func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*ope
 		offset = logs.NextOffset
 
 		// Check operation status.
-		status, err := c.operationStatus(opID)
+		status, err := c.operationStatusCtx(ctx, opID)
 		if err != nil {
 			return nil, err
 		}
 
 		if status.Status == operationSucceeded || status.Status == operationFailed {
 			// Read remaining logs one final time (always, even if offset == 0).
-			finalLogs, err := c.operationLogs(opID, offset)
+			finalLogs, err := c.operationLogsCtx(ctx, opID, offset)
 			if err != nil {
 				return nil, err
 			}
@@ -86,7 +93,11 @@ func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*ope
 			return status, nil
 		}
 
-		time.Sleep(operationPollInterval)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(operationPollInterval):
+		}
 	}
 }
 
@@ -126,6 +137,9 @@ func waitForOperationWithSignal(c *apiClient, opID string, stdout, stderr io.Wri
 // waitForOperationWithSignalCh is the testable core of waitForOperationWithSignal.
 // It accepts a pre-configured signal channel so tests can inject signals.
 func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.Writer, sigCh <-chan os.Signal) (*operationStatusResponse, error) {
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+
 	var cancelOnce sync.Once
 
 	tryCancel := func() {
@@ -142,7 +156,7 @@ func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.W
 	}, 1)
 
 	go func() {
-		status, err := waitForOperation(c, opID, stdout, stderr)
+		status, err := waitForOperationContext(ctx, c, opID, stdout, stderr)
 		resultCh <- struct {
 			status *operationStatusResponse
 			err    error
@@ -151,17 +165,10 @@ func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.W
 
 	select {
 	case sig := <-sigCh:
-		tryCancel()
-		// Give the poll goroutine a moment to finish if it was about to.
-		select {
-		case <-resultCh:
-			// Operation finished (possibly after cancel took effect).
-			// Still honour the signal exit code.
-			return nil, &signalExitError{Signal: sig}
-		case <-time.After(2 * time.Second):
-			// Poll goroutine hasn't exited; cancel was sent.
-			return nil, &signalExitError{Signal: sig}
-		}
+		cancelCtx() // stop poll goroutine immediately
+		tryCancel() // best-effort daemon cancel
+		<-resultCh  // wait for goroutine to exit (no orphan)
+		return nil, &signalExitError{Signal: sig}
 	case res := <-resultCh:
 		return res.status, res.err
 	}

@@ -105,12 +105,16 @@ func readAdminTokenPlain(path string) (string, error) {
 }
 
 func (c *apiClient) doAuthenticatedRequest(method, path string, body io.Reader) (*http.Response, error) {
+	return c.doAuthenticatedRequestWithCtx(context.Background(), method, path, body)
+}
+
+func (c *apiClient) doAuthenticatedRequestWithCtx(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	token, err := c.tokenSource()
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequest(method, c.baseURL+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create request: %w", err)
 	}
@@ -302,7 +306,12 @@ func (c *apiClient) startRun(req runRequest) (*operationCreatedResponse, error) 
 
 // operationStatus returns the status of an operation.
 func (c *apiClient) operationStatus(opID string) (*operationStatusResponse, error) {
-	resp, err := c.doAuthenticatedRequest("GET", "/operations/"+opID, nil)
+	return c.operationStatusCtx(context.Background(), opID)
+}
+
+// operationStatusCtx is the context-aware variant of operationStatus.
+func (c *apiClient) operationStatusCtx(ctx context.Context, opID string) (*operationStatusResponse, error) {
+	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "GET", "/operations/"+opID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -361,8 +370,13 @@ func (c *apiClient) cancelOperation(opID string) error {
 
 // operationLogs returns logs for an operation starting at the given offset.
 func (c *apiClient) operationLogs(opID string, offset int64) (*operationLogsResponse, error) {
+	return c.operationLogsCtx(context.Background(), opID, offset)
+}
+
+// operationLogsCtx is the context-aware variant of operationLogs.
+func (c *apiClient) operationLogsCtx(ctx context.Context, opID string, offset int64) (*operationLogsResponse, error) {
 	path := "/operations/" + opID + "/logs?offset=" + strconv.FormatInt(offset, 10)
-	resp, err := c.doAuthenticatedRequest("GET", path, nil)
+	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
