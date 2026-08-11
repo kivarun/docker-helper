@@ -264,6 +264,9 @@ Do not design their APIs here.
 
 ### Main goal: remote build
 
+See [`docs/release-2-plan.md`](release-2-plan.md) for the staged implementation
+and acceptance plan.
+
 Release 2 adds remote builds without turning docker-helper into a distributed
 workspace or control plane.
 
