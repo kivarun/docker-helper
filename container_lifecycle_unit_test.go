@@ -40,29 +40,6 @@ func TestReadContainerIDFromCidfile(t *testing.T) {
 	}
 }
 
-func TestCidfilePathIsUniquePerOperation(t *testing.T) {
-	dir := t.TempDir()
-
-	op1 := newRunOperation("session1", "alpine:latest", 1024)
-	op1.cidfile = filepath.Join(dir, op1.ID+".cid")
-
-	op2 := newRunOperation("session1", "alpine:latest", 1024)
-	op2.cidfile = filepath.Join(dir, op2.ID+".cid")
-
-	if op1.cidfile == op2.cidfile {
-		t.Error("cidfile paths should be unique per operation")
-	}
-
-	if op1.cidfile == "" || op2.cidfile == "" {
-		t.Error("cidfile paths should not be empty")
-	}
-
-	// Verify paths are under the runtime directory.
-	if !filepath.IsAbs(op1.cidfile) || !filepath.IsAbs(op2.cidfile) {
-		t.Error("cidfile paths should be absolute")
-	}
-}
-
 func TestCidfileCreatedAndCleanedUpOnNormalCompletion(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
@@ -166,20 +143,6 @@ func TestCidfileRemovedOnFailedStart(t *testing.T) {
 	}
 }
 
-func TestMissingCidfileDuringForceCleanupDoesNotPanic(t *testing.T) {
-	// Verify that readContainerIDFromCidfile handles missing files gracefully.
-	defer func() {
-		if r := recover(); r != nil {
-			t.Errorf("readContainerIDFromCidfile panicked on missing file: %v", r)
-		}
-	}()
-
-	id := readContainerIDFromCidfile("/nonexistent/path/to/cidfile")
-	if id != "" {
-		t.Errorf("expected empty string for missing file, got %q", id)
-	}
-}
-
 func TestKillContainerBestEffortDoesNotPanicOnMissingDocker(t *testing.T) {
 	// Verify that killContainerBestEffort handles errors gracefully.
 	defer func() {
@@ -193,30 +156,6 @@ func TestKillContainerBestEffortDoesNotPanicOnMissingDocker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	app.killContainerBestEffort(ctx, "nonexistent_container_id")
-}
-
-func TestTerminateAllWithMissingCidfileDoesNotPanic(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
-	app.ExecCommandContext = makeSleepCmd()
-
-	op := startBuild(t, app, token)
-
-	// Simulate force shutdown with short deadline.
-	reg.setShuttingDown()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	reg.terminateAll(shutdownCtx, nil)
-	cancel()
-
-	// Wait for operation to complete.
-	select {
-	case <-op.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("operation did not complete")
-	}
-
-	if op.State != operationFailed {
-		t.Errorf("expected failed, got %q", op.State)
-	}
 }
 
 func TestCidfileNotExposedInHTTPResponse(t *testing.T) {

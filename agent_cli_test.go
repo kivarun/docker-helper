@@ -352,7 +352,7 @@ func TestRunContainerExitNonzero(t *testing.T) {
 func TestTokenNotInOutput(t *testing.T) {
 	const token = "dht_super_secret_session_token_12345"
 
-	_, err, exitCode := runAgentCLITestWithServer(t, []string{
+	out, err, exitCode := runAgentCLITestWithServer(t, []string{
 		"pull", "alpine:3.24",
 	}, token, func(s *agentCLITestServer) {
 		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +370,9 @@ func TestTokenNotInOutput(t *testing.T) {
 
 	if exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d", exitCode)
+	}
+	if strings.Contains(out.String(), token) {
+		t.Error("token must not appear in stdout")
 	}
 	if strings.Contains(err.String(), token) {
 		t.Error("token must not appear in stderr")
@@ -1152,21 +1155,21 @@ func TestTruncatedMultiplePollsSingleWarning(t *testing.T) {
 	}
 }
 
-// TestSignalCancel verifies signal handling for both build and run operations.
+// TestSignalCancel verifies that waitForOperationWithSignalCh handles
+// SIGINT and SIGTERM correctly: cancels once, exits with proper code, stops polling.
 func TestSignalCancel(t *testing.T) {
 	cases := []struct {
 		name     string
 		signal   syscall.Signal
 		exitCode int
-		endpoint string
-		opID     string
 	}{
-		{"SIGINT", syscall.SIGINT, 130, "build", "op_signal_int"},
-		{"SIGTERM", syscall.SIGTERM, 143, "run", "op_signal_term"},
+		{"SIGINT", syscall.SIGINT, 130},
+		{"SIGTERM", syscall.SIGTERM, 143},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			opID := "op_signal_" + tc.name
 			cancelCalled := int32(0)
 			pollCount := int32(0)
 
@@ -1180,41 +1183,32 @@ func TestSignalCancel(t *testing.T) {
 			defer listener.Close()
 
 			mux := http.NewServeMux()
-			mux.HandleFunc("POST /"+tc.endpoint, func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusCreated)
-				json.NewEncoder(w).Encode(map[string]any{
-					"ok":           true,
-					"operation_id": tc.opID,
-					"status":       "running",
-				})
-			})
-			mux.HandleFunc("GET /operations/"+tc.opID, func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
 				atomic.AddInt32(&pollCount, 1)
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]any{
 					"ok":           true,
-					"operation_id": tc.opID,
+					"operation_id": opID,
 					"status":       "running",
 				})
 			})
-			mux.HandleFunc("GET /operations/"+tc.opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]any{
 					"ok":           true,
-					"operation_id": tc.opID,
+					"operation_id": opID,
 					"offset":       int64(0),
 					"next_offset":  int64(0),
 					"truncated":    false,
 					"logs":         "",
 				})
 			})
-			mux.HandleFunc("POST /operations/"+tc.opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("POST /operations/"+opID+"/cancel", func(w http.ResponseWriter, r *http.Request) {
 				atomic.AddInt32(&cancelCalled, 1)
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]any{
 					"ok":           true,
-					"operation_id": tc.opID,
+					"operation_id": opID,
 					"status":       "failed",
 					"result_code":  "cancelled",
 				})
@@ -1241,7 +1235,7 @@ func TestSignalCancel(t *testing.T) {
 			sigCh <- tc.signal
 
 			var out, stderr bytes.Buffer
-			_, err = waitForOperationWithSignalCh(c, tc.opID, &out, &stderr, sigCh)
+			_, err = waitForOperationWithSignalCh(c, opID, &out, &stderr, sigCh)
 			if err == nil {
 				t.Fatal("expected error from signal")
 			}
