@@ -58,14 +58,17 @@ fi
 # -extldflags '-static': tell the system linker to produce a fully
 #   static binary (required for go-sqlite3 with musl).
 
-CGO_ENABLED=1 \
+(
+  cd "$REPO_ROOT"
+  CGO_ENABLED=1 \
   CC="$CC" \
   GOOS=linux \
   GOARCH=amd64 \
   go build \
     -ldflags "-linkmode external -extldflags '-static' -X main.version=${VERSION}" \
     -o "$OUT_BIN" \
-    "$REPO_ROOT"
+    .
+)
 
 chmod 755 "$OUT_BIN"
 
