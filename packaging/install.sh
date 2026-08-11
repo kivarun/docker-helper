@@ -42,22 +42,13 @@ error() {
 
 ask() {
 	local prompt="$1"
-	local default="${2:-y}"
 	local answer
 
 	if $interactive; then
-		local y_opt n_opt
-		if [[ "$default" == "y" ]]; then
-			y_opt="Y"
-			n_opt="n"
-		else
-			y_opt="y"
-			n_opt="N"
-		fi
-		printf '%s [%s/%s]: ' "$prompt" "$y_opt" "$n_opt"
+		printf '%s [Y/n]: ' "$prompt"
 		read -r answer
 		if [[ -z "$answer" ]]; then
-			answer="$default"
+			answer="y"
 		fi
 		[[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
 	else
@@ -135,7 +126,7 @@ install_apparmor() {
 		return
 	fi
 
-	if ! ask "Install $APPARMOR_PROFILE_NAME AppArmor profile (requires sudo)" y; then
+	if ! ask "Install $APPARMOR_PROFILE_NAME AppArmor profile (requires sudo)"; then
 		info "Skipping AppArmor profile installation"
 		return
 	fi
@@ -192,7 +183,7 @@ run_init() {
 		return
 	fi
 
-	if ! ask "Run initial setup (docker-helper init)?" y; then
+	if ! ask "Run initial setup (docker-helper init)?"; then
 		return
 	fi
 
@@ -205,7 +196,7 @@ run_init() {
 }
 
 enable_service() {
-	if ! ask "Enable and start the systemd user service?" y; then
+	if ! ask "Enable and start the systemd user service?"; then
 		return
 	fi
 
@@ -254,4 +245,6 @@ main() {
 	info "Installation complete."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi

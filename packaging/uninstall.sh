@@ -43,22 +43,13 @@ error() {
 
 ask() {
 	local prompt="$1"
-	local default="${2:-y}"
 	local answer
 
 	if $interactive; then
-		local y_opt n_opt
-		if [[ "$default" == "y" ]]; then
-			y_opt="Y"
-			n_opt="n"
-		else
-			y_opt="y"
-			n_opt="N"
-		fi
-		printf '%s [%s/%s]: ' "$prompt" "$y_opt" "$n_opt"
+		printf '%s [y/N]: ' "$prompt"
 		read -r answer
 		if [[ -z "$answer" ]]; then
-			answer="$default"
+			answer="n"
 		fi
 		[[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
 	else
@@ -170,7 +161,7 @@ main() {
 
 	if $purge; then
 		if $interactive; then
-			if ! ask "Permanently delete config and state (admin token, sessions, database)?" n; then
+			if ! ask "Permanently delete config and state (admin token, sessions, database)?"; then
 				info "Keeping config and state"
 				info ""
 				info "Config: $CONFIG_DIR"
@@ -193,4 +184,6 @@ main() {
 	info "Uninstall complete."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi
