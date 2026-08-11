@@ -24,20 +24,25 @@ Docker Helper provides two supported client interfaces:
 1. the `docker-helper` CLI;
 2. the HTTP API over the Docker Helper Unix socket.
 
-Both interfaces are supported. Neither is a legacy or fallback interface.
+Both interfaces are first-class. Neither is a legacy or fallback interface.
 
 Use the interface selected by the user or environment.
 
-If no interface was explicitly selected:
+If no interface was explicitly selected, discover availability:
 
-- if only one interface is available, use that interface;
-- if both are available, either may be used;
-- use one interface consistently for the current operation when practical;
-- if neither is available, report that Docker Helper is unavailable.
+```bash
+command -v docker-helper >/dev/null 2>&1
+```
 
-The CLI is a convenience/reference client for the same daemon capabilities
-exposed by the HTTP API. It hides transport details such as asynchronous
-operation polling and incremental log offsets.
+- If the CLI is available, use the CLI interface.
+- If the CLI is not available, use the HTTP API.
+- If neither is available, report that Docker Helper is unavailable.
+
+Use one interface consistently for the current operation when practical.
+
+The CLI is a convenience client for the same daemon capabilities exposed by
+the HTTP API. It hides transport details such as asynchronous operation
+polling and incremental log offsets.
 
 Protected operations use the session token from:
 
@@ -55,6 +60,16 @@ The Docker Helper socket is normally:
 
 If `DOCKER_HELPER_SOCKET_PATH` is set, use that socket path instead.
 
+## Path model
+
+Both interfaces share the same path semantics. Define once, apply everywhere.
+
+- **Mount sources** and **build contexts** are relative to the Docker Helper
+  session workspace, never absolute agent-container paths like `/workspace/...`.
+- **Mount targets** are absolute paths inside the launched container.
+- **`--workdir`** / **`workdir`** is an absolute path inside the launched
+  container.
+
 # CLI interface
 
 When the `docker-helper` command is available, its built-in help is the
@@ -71,15 +86,7 @@ docker-helper help registry
 docker-helper help registry login
 ```
 
-Do not use operator commands such as:
-
-```text
-serve
-init
-reload
-session
-config
-```
+Do not use operator commands: `serve`, `init`, `reload`, `session`, `config`.
 
 ## Pull
 
@@ -107,14 +114,8 @@ docker-helper build \
   --build-arg OTHER=value
 ```
 
-Rules:
-
-- `--context` is relative to the session workspace;
-- `--dockerfile` is relative to the build context;
-- do not use agent-container paths such as `/workspace/...` as the build context;
-- build arguments are not a mechanism for passing secrets.
-
 `build` waits for the daemon operation to finish and streams operation output.
+Build arguments are not a mechanism for passing secrets.
 
 ## Run
 
@@ -151,25 +152,10 @@ docker-helper run \
   -- command arg...
 ```
 
-Other useful options include:
-
-```text
---entrypoint
---workdir
---shm-size
-```
-
-Use `docker-helper help run` for their exact syntax.
-
-Path rules:
-
-- mount sources are relative to the Docker Helper session workspace;
-- mount targets are absolute paths inside the launched container;
-- `--workdir` is an absolute path inside the launched container;
-- do not use the agent container's `/workspace/...` path as a host-side mount source.
+Other useful options: `--entrypoint`, `--workdir`, `--shm-size`.
+Use `docker-helper help run` for exact syntax.
 
 `run` waits for the container operation to finish and streams its output.
-
 If the container exits with a non-zero status, the CLI propagates the
 container exit code.
 
@@ -192,7 +178,7 @@ docker-helper registry login \
   --username USER
 ```
 
-For non-interactive password input:
+Non-interactive (pipe password via stdin):
 
 ```bash
 printf '%s\n' "$REGISTRY_PASSWORD" | \
@@ -207,9 +193,6 @@ Do not put registry passwords directly into command arguments.
 # HTTP API interface
 
 The HTTP API is a fully supported direct client interface.
-
-Use it when requested by the user or integration, or when the environment
-does not contain the `docker-helper` CLI.
 
 Set the socket path without displaying any secret:
 
@@ -230,8 +213,6 @@ Do not print the Authorization header with the expanded token.
 
 `POST /pull` is synchronous.
 
-Example:
-
 ```bash
 curl --silent --show-error \
   --unix-socket "$SOCKET" \
@@ -245,8 +226,6 @@ curl --silent --show-error \
 
 `POST /build` starts an asynchronous operation.
 
-Example:
-
 ```bash
 curl --silent --show-error \
   --unix-socket "$SOCKET" \
@@ -257,13 +236,9 @@ curl --silent --show-error \
 ```
 
 A successful start returns HTTP 201 with an `operation_id`.
+HTTP 201 means the operation was accepted, not that the build completed.
 
-HTTP 201 means that the operation was accepted, not that the build completed.
-
-Use workspace-relative build contexts from an agent environment.
-Do not send agent-container paths such as `/workspace/...` as host build paths.
-
-Optional build arguments are supplied as:
+Optional build arguments:
 
 ```json
 {
@@ -277,8 +252,6 @@ Optional build arguments are supplied as:
 
 `POST /run` also starts an asynchronous operation.
 
-Example:
-
 ```bash
 curl --silent --show-error \
   --unix-socket "$SOCKET" \
@@ -291,17 +264,8 @@ curl --silent --show-error \
   http://localhost/run
 ```
 
-Useful request fields include:
-
-```text
-image
-entrypoint
-command
-workdir
-environment
-mounts
-shm_size
-```
+Useful request fields: `image`, `entrypoint`, `command`, `workdir`,
+`environment`, `mounts`, `shm_size`.
 
 Example mount:
 
@@ -313,68 +277,22 @@ Example mount:
 }
 ```
 
-Rules:
-
-- mount `source` is relative to the session workspace;
-- mount `target` is absolute inside the launched container;
-- `workdir` is absolute inside the launched container;
-- environment values are strings.
-
 ## Async operation lifecycle
 
-For HTTP `build` and `run`, retain the returned `operation_id`.
+For HTTP `build` and `run`, follow this algorithm:
 
-Check status:
-
-```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
-  "http://localhost/operations/OPERATION_ID"
-```
-
-Continue until the status is:
-
-```text
-succeeded
-```
-
-or:
-
-```text
-failed
-```
-
-Read operation output:
-
-```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
-  "http://localhost/operations/OPERATION_ID/logs?offset=OFFSET"
-```
-
-The response contains `next_offset`.
-
-Use `next_offset` for the next log request.
-
-When `truncated` is true, older output has already been discarded.
-Do not assume missing older output can be recovered.
-
-Before considering an asynchronous operation complete:
-
-1. read available logs;
-2. inspect operation status;
-3. continue polling while status is running;
-4. after a terminal status, read remaining logs;
-5. inspect `result_code` and `exit_code` when the operation failed.
+1. **Start** — POST to `/build` or `/run`; retain the returned `operation_id`.
+2. **Poll** — GET `/operations/OPERATION_ID` until status is `succeeded` or `failed`.
+3. **Fetch logs** — GET `/operations/OPERATION_ID/logs?offset=OFFSET` during
+   polling and after completion. Use `next_offset` from each response for the
+   next request. When `truncated` is true, older output has been discarded.
+4. **Inspect result** — after a terminal status, check `result_code` and
+   `exit_code` in the operation status response.
 
 Do not start work that depends on a successful build until the build operation
 has reached `succeeded`.
 
 ## Cancel over HTTP
-
-Cancel a running build or run:
 
 ```bash
 curl --silent --show-error \
@@ -388,13 +306,7 @@ Do not use Docker directly to terminate the workload.
 
 ## Registry authentication over HTTP
 
-Registry login is:
-
-```text
-POST /registry/login
-```
-
-with JSON fields:
+`POST /registry/login` with JSON fields:
 
 ```json
 {
@@ -404,11 +316,9 @@ with JSON fields:
 }
 ```
 
-Treat the password as a secret.
-
-Construct and send the JSON using a mechanism that does not print or expose
-the password. Do not include the literal password in shell command text,
-logs, or diagnostic output.
+Treat the password as a secret. Construct and send the JSON using a mechanism
+that does not print or expose the password in shell command text, logs, or
+diagnostic output.
 
 After a successful login, subsequent operations in the same Docker Helper
 session use that session's registry credentials.
@@ -425,3 +335,8 @@ When Docker Helper rejects or fails an operation:
 
 If the requested capability cannot be performed through the available
 Docker Helper interface, report that limitation to the user.
+
+Do not invent workload-specific URLs, credentials, tokens, passwords, or other
+required external configuration. If a launched workload requires real
+configuration that is unavailable, report or request it rather than fabricating
+placeholder values and continuing.
