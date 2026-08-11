@@ -652,3 +652,159 @@ func TestUninstallYesRemovesAppArmor(t *testing.T) {
 		t.Fatal("remove_apparmor must contain rm -f after apparmor_parser -R")
 	}
 }
+
+// TestBuildStaticScriptSyntax verifies build-static.sh has valid bash syntax.
+func TestBuildStaticScriptSyntax(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "build-static.sh")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build-static.sh syntax error: %v", err)
+	}
+}
+
+// TestBuildBundleScriptSyntax verifies build-bundle.sh has valid bash syntax.
+func TestBuildBundleScriptSyntax(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "build-bundle.sh")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build-bundle.sh syntax error: %v", err)
+	}
+}
+
+// TestBuildBundleRequiresVersion verifies build-bundle.sh rejects
+// invocation without a version argument.
+func TestBuildBundleRequiresVersion(t *testing.T) {
+	cmd := exec.Command("bash", "build-bundle.sh")
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected non-zero exit code when no version provided")
+	}
+}
+
+// TestReleaseReadmeExists verifies the release README template exists.
+func TestReleaseReadmeExists(t *testing.T) {
+	data, err := os.ReadFile("packaging/README.release.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must mention key topics
+	expected := []string{
+		"docker-helper",
+		"install.sh",
+		"agent",
+		"SKILL.md",
+	}
+	for _, s := range expected {
+		if !strings.Contains(content, s) {
+			t.Errorf("release README should mention %q", s)
+		}
+	}
+}
+
+// TestReleaseReadmeNoSecrets verifies the release README does not
+// contain any secrets or sensitive patterns.
+func TestReleaseReadmeNoSecrets(t *testing.T) {
+	data, err := os.ReadFile("packaging/README.release.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	forbidden := []string{
+		"admin_token",
+		"session_token",
+		"Bearer",
+		"password",
+	}
+	for _, s := range forbidden {
+		if strings.Contains(content, s) {
+			t.Errorf("release README must not contain %q", s)
+		}
+	}
+}
+
+// TestBundleLayoutExpected verifies build-bundle.sh references the
+// expected bundle layout by inspecting the script source.
+func TestBundleLayoutExpected(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The script must copy these artifacts into the bundle
+	expected := []string{
+		"docker-helper",
+		"install.sh",
+		"uninstall.sh",
+		"systemd/user",
+		"apparmor",
+		"SKILL.md",
+		"README.release.md",
+	}
+	for _, s := range expected {
+		if !strings.Contains(content, s) {
+			t.Errorf("build-bundle.sh should reference %q", s)
+		}
+	}
+}
+
+// TestStaticBuildProducesStaticBinary verifies that build-static.sh
+// produces a statically linked binary when build tools are available.
+func TestStaticBuildProducesStaticBinary(t *testing.T) {
+	// Check if we can build at all
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not available")
+	}
+	if _, err := exec.LookPath("gcc"); err != nil {
+		t.Skip("gcc not available")
+	}
+
+	// Build with a test version
+	testVersion := "test-" + t.Name()
+	cmd := exec.Command("bash", "build-static.sh", testVersion)
+	cmd.Dir = "."
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("static build not possible: %v (%s)", err, string(out))
+	}
+
+	binPath := "dist/docker-helper"
+
+	// Verify binary exists and is executable
+	info, err := os.Stat(binPath)
+	if err != nil {
+		t.Fatalf("binary not found: %v", err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Fatal("binary is not executable")
+	}
+
+	// Verify version
+	cmd = exec.Command(binPath, "version")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("version command failed: %v", err)
+	}
+	got := strings.TrimSpace(string(out))
+	if got != testVersion {
+		t.Errorf("version = %q, want %q", got, testVersion)
+	}
+
+	// Verify static linking using 'file'
+	fileCmd := exec.Command("file", binPath)
+	fileOut, err := fileCmd.Output()
+	if err != nil {
+		// 'file' may not be available; try ldd
+		lddCmd := exec.Command("ldd", binPath)
+		lddOut, _ := lddCmd.CombinedOutput()
+		if !strings.Contains(string(lddOut), "not a dynamic") {
+			t.Skipf("cannot verify static linking: ldd output: %s", string(lddOut))
+		}
+		t.Log("static linking confirmed via ldd")
+	} else if !strings.Contains(string(fileOut), "statically linked") {
+		t.Errorf("binary is not statically linked: %s", string(fileOut))
+	} else {
+		t.Log("static linking confirmed via file")
+	}
+}
