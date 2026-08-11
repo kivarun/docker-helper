@@ -2,7 +2,7 @@
 
 ## Release 1 goal
 
-Release 1 should provide a first-class way for coding agents to use
+Release 1 provides a first-class way for coding agents to use
 docker-helper without requiring them to understand the HTTP transport,
 Authorization headers, asynchronous operation polling, or incremental log
 offsets.
@@ -11,10 +11,11 @@ The integration belongs at the client edge of the project. Agent-specific
 behavior must not be added to the daemon core or change the daemon capability
 contract.
 
-## Client-facing CLI
+## Client-facing reference CLI
 
-The initial Release 1 integration uses the existing `docker-helper` binary as
-both the operator/server CLI and the local client CLI.
+The `docker-helper` binary is the reference client for the daemon capability
+contract. It is the same binary that provides operator commands (serve, init,
+reload, session, config).
 
 The agent-facing capability commands are:
 
@@ -22,9 +23,6 @@ The agent-facing capability commands are:
 - `docker-helper build`;
 - `docker-helper run`;
 - `docker-helper registry login`.
-
-`registry login` already exists. `pull`, `build`, and `run` are the next client
-commands to add.
 
 The client commands use the session token supplied by the launcher through
 `DOCKER_HELPER_SESSION_TOKEN`. They must never expose the token in normal
@@ -34,32 +32,44 @@ For the initial local integration, client commands talk to the Docker Helper
 Unix socket. Remote endpoint discovery, TCP/TLS transport, and remote client
 authentication are Release 2 concerns and are intentionally not designed here.
 
-## Hide protocol mechanics from the agent
+## External integration options
 
-The daemon API remains the stable capability protocol, but normal agent use
-should not require direct protocol handling.
+External tooling has two options, both at the client edge:
 
-In particular, `docker-helper build` and `docker-helper run` should present a
-synchronous CLI experience even though the daemon executes them through the
-asynchronous operation API. The client owns the transport lifecycle:
+a) Invoke the reference CLI (`docker-helper pull`, `build`, `run`, `registry login`).
+b) Implement a native/direct adapter to the same daemon API.
 
-1. start the operation;
-2. receive the operation ID;
-3. poll status;
-4. read incremental logs using offsets;
-5. stream logs to the caller;
-6. wait for a terminal result;
-7. return a useful process exit status.
+Both approaches use the same capability contract. The daemon semantics remain
+identical regardless of which client is used.
 
-The agent should think in terms of `build` and `run`, not in terms of
-`POST /build`, operation IDs, status polling, and `next_offset` bookkeeping.
+The CLI is not a second API. It is the reference implementation of the client
+edge for the existing daemon API.
+
+## CLI lifecycle
+
+`docker-helper build` and `docker-helper run` present a synchronous CLI
+experience even though the daemon executes them asynchronously. The CLI hides:
+
+- async operation ID and polling;
+- incremental log offsets;
+- status polling loop.
+
+The CLI streams operation logs to stdout/stderr and waits for a terminal
+result. Container non-zero exit is propagated as the CLI exit code.
+
+Signal cancellation:
+
+- SIGINT -> best-effort cancel + exit 130;
+- SIGTERM -> best-effort cancel + exit 143;
+- cancel failure prints a diagnostic but does not replace the signal exit status.
 
 `pull` remains synchronous in the daemon and is exposed directly as a normal
 client command.
 
 ## Skills
 
-After the client CLI is usable, ship reusable skills for at least:
+The CLI is completed and dogfooded. Reusable agent skills remain Release 1
+work for at least:
 
 - OpenCode;
 - Claude Code.
@@ -79,8 +89,8 @@ Skills must preserve these invariants:
 
 ## Native tools
 
-Native agent-tool adapters are an experiment after the client CLI + skills are
-dogfooded.
+Native agent-tool adapters are a subsequent experiment after the CLI + skills
+are dogfooded.
 
 Implement at least one native adapter and compare it with the CLI + skill path
 on real agent tasks. Keep native tools only if they provide a demonstrated

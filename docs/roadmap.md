@@ -171,6 +171,13 @@ help/documentation, logging, and private-registry handling.
 Ship a reusable agent-facing integration rather than requiring every deployment
 to reproduce hand-written curl instructions.
 
+**Completed:** client-facing reference CLI (`pull`, `build`, `run`,
+`registry login`) with signal cancellation, synchronous UX, and log streaming.
+Real CLI dogfood completed.
+
+Reusable agent skills remain Release 1 work. Native adapter is a subsequent
+experiment, not a blocker.
+
 Use dogfood to choose the smallest useful form:
 
 - a reusable agent skill;

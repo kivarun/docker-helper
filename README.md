@@ -366,14 +366,36 @@ value; this command is useful for explicitly reclaiming storage during
 long daemon uptimes. The daemon also removes expired sessions
 automatically at startup. No running daemon or admin token is required.
 
+## Agent/client CLI
+
+The `docker-helper` binary includes a client CLI for agent use. The client
+commands use `DOCKER_HELPER_SESSION_TOKEN` (provided by the session launcher)
+and communicate with the running daemon.
+
+```bash
+docker-helper pull IMAGE
+docker-helper build --context . --dockerfile Dockerfile --image NAME
+docker-helper run --image NAME -- command args...
+docker-helper registry login --registry REG --username USER
+```
+
+`build` and `run` appear synchronous: the CLI polls for completion, streams
+logs, and returns the final exit status. Operation IDs and log offsets are
+handled internally.
+
+SIGINT (Ctrl+C) or SIGTERM cancels the current operation:
+- SIGINT -> exit 130
+- SIGTERM -> exit 143
+
+Use `docker-helper help` and `docker-helper help <command>` for discovery.
+
+Agent instructions template: [docs/agent-instructions.md](docs/agent-instructions.md)
+
 ## Using the HTTP API
 
-The `curl` examples below are host-side smoke tests. A containerized
-coding tool normally accesses the mounted socket at:
-
-```
-/run/docker-helper/docker-helper.sock
-```
+The HTTP API is the protocol-level interface. The `curl` examples below are
+useful for smoke testing, debugging, and as a fallback when the CLI is
+unavailable. The CLI is the preferred agent UX.
 
 ### Pull
 

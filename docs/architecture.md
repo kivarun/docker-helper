@@ -21,24 +21,21 @@ The agent cannot escalate beyond the workspace boundary.
 ## High-level architecture
 
 ```
-Developer
-    │
-Launcher  [planned]
-    │
-OpenCode
-    │
-Custom Tool  [planned]
-    │
-docker-helper (Unix socket)
-    │
-Docker CLI
-    │
-Docker Engine
+Agent
+  ├─ reference CLI (docker-helper pull/build/run/registry)
+  └─ native/direct adapter
+          |
+     capability/API contract
+          |
+     docker-helper daemon
+          |
+       Docker CLI
+          |
+      Docker Engine
 ```
 
-Launcher and Custom Tool are planned components. The launcher starts
-docker-helper and holds the administrative token. The custom tool is the
-OpenCode-side client that communicates with docker-helper.
+The launcher creates a session and passes the client token to the agent.
+It is not a mandatory daemon or control plane component.
 
 docker-helper listens on a Unix socket at
 `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock` with `0600` permissions.
@@ -204,32 +201,40 @@ untouched. Reports the number of removed rows.
 
 ## CLI reference
 
-### `docker-helper <command>`
+### Agent commands
 
-Root command. Without arguments, prints help and exits 0.
+- `pull` — Pull a Docker image.
+- `build` — Build a Docker image. Hides async operation lifecycle; streams
+  logs; propagates container exit code. SIGINT/SIGTERM cancels the operation
+  (exit 130/143). `--context` must be relative to the session workspace.
+- `run` — Run a Docker container. Same lifecycle semantics as `build`.
+  `--mount` source must be relative to the session workspace; target is an
+  absolute container path.
+- `registry` — Registry operations. Subcommand: `login`.
 
-```
-docker-helper <command>
-```
+### Operator commands
 
-Available commands: `serve`, `init`, `config`, `reload`, `session`,
-`version`, `help`.
+- `serve` — Start the HTTP server.
+- `init` — Initialize configuration and admin token.
+- `reload` — Reload configuration from disk.
+- `session` — Manage sessions. Subcommands: `create`, `list`, `delete`,
+  `cleanup`.
+- `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
+  `unset`.
 
-### `docker-helper help`
+### General commands
 
-Prints root help (identical to running without arguments).
+- `version` — Print version.
+- `help` — Show help.
 
-### `docker-helper serve`
+### Signal cancellation (agent commands)
 
-Starts the HTTP server on the Unix socket.
+`build` and `run` handle SIGINT and SIGTERM:
 
-### `docker-helper init`
-
-Initializes configuration and admin token.
-
-### `docker-helper version`
-
-Prints the current version.
+- SIGINT -> best-effort cancel + exit 130;
+- SIGTERM -> best-effort cancel + exit 143;
+- cancel failure prints a diagnostic but does not replace the signal exit
+  status.
 
 ### `docker-helper config <subcommand>`
 
@@ -287,7 +292,8 @@ the command action.
 ## systemd user service
 
 docker-helper can run as a systemd user service. The unit file is
-installed at `/usr/lib/systemd/user/docker-helper.service`.
+installed at `~/.config/systemd/user/docker-helper.service` by the Release 1
+installer.
 
 ### Installation
 
