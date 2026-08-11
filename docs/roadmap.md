@@ -255,7 +255,6 @@ Keep this short.
 Include:
 
 - richer log streaming if polling becomes insufficient;
-- durable/recoverable operations across daemon restart;
 - network/proxy capability as a separate tool/project;
 - notification helper with restricted DBus access.
 
@@ -263,96 +262,88 @@ Do not design their APIs here.
 
 ## 2.0
 
-### Main goal: remote operation
+### Main goal: remote build
 
-The defining goal of Release 2 is remote/server-side access to docker-helper.
-System-level deployment and multi-user support are enabling steps toward that
-goal, not separate end goals.
+Release 2 adds remote builds without turning docker-helper into a distributed
+workspace or control plane.
 
-Core remote work includes:
+The supported deployment remains single-owner and user-managed. One client is
+configured for either the local Unix socket or one remote HTTPS endpoint.
+Multiple helper contexts, routing, and helper-to-helper forwarding are outside
+Release 2.
 
-- remote transport and network exposure;
-- authentication and authorization for remote clients;
-- remote session semantics;
-- preserving the narrow policy-enforcing security boundary when the client and
-  helper no longer share the same local user/session context.
+Remote-build scope:
 
-Keep the exact remote API and security model intentionally undesigned until
-Release 2 work begins.
+- preserve the existing admin/session token model, session lifecycle, and async
+  build operation lifecycle;
+- require authenticated HTTPS for the remote endpoint with normal certificate
+  validation; do not add an insecure-TLS mode;
+- have the client assemble the Docker build context with `.dockerignore`
+  semantics and stream it as tar;
+- use one multipart build request with JSON metadata first and an
+  `application/x-tar` context part second;
+- do not introduce a separate upload resource or a second build-job lifecycle;
+- build in the Docker daemon attached to the selected helper;
+- keep the resulting image and build cache on that remote daemon;
+- do not automatically export/download the image or push it to a registry.
 
-### System deployment and multi-user foundation
+Explicitly outside Release 2:
 
-Add a system-service deployment mode as a foundation for remote operation.
-Do not treat a root unit as a mechanical variant of the Release 1 user unit.
+- remote `run`;
+- mutable remote workspaces or bidirectional workspace synchronization;
+- multi-helper selection or routing;
+- system-service and multi-user deployment;
+- native distribution packages and package repositories.
 
-Expected scope:
+## 3.0
 
-- decide whether the system daemon should run as root or under a dedicated
-  service account;
-- multi-user client access;
-- formal user/system deployment scopes;
-- system config/state/runtime paths and systemd system unit;
-- explicit local Unix-socket ownership/permission model for clients;
-- workspace authorization suitable for multiple users rather than widening one
-  global `allowed_root` to all of `/home`;
-- administrative operations may initially rely on `sudo`; do not introduce a
-  separate administrative control plane unless a demonstrated need appears.
+### Main goal: system distribution
 
-Do not predesign the exact multi-user authorization API during Release 1.
-
-### Distribution packaging, delivery, and platform expansion
-
-Move native distribution packaging and repository delivery out of Release 1.
-Release 2 should make docker-helper behave like a normal system package, not
-merely produce `.deb` and `.rpm` files as CI artifacts.
+Release 3 makes docker-helper a normally installable multi-user system service.
+System deployment, the access model, and native packages are one architectural
+block and should not be split into independent deliverables.
 
 Expected scope:
 
-- native `.deb` packaging;
-- native `.rpm` packaging;
-- publish packages through appropriate selected distribution/package-repository
-  channels so normal package-manager install and upgrade workflows work;
-- openSUSE and Ubuntu remain important targets;
-- RHEL-family support is the likely RPM enterprise target rather than Fedora;
-- exact RHEL-family target(s), publication channels, and distro-specific
-  security integration should be selected when this work starts.
+- decide whether the daemon runs as root or under a dedicated service account;
+- define system config, state, runtime, token, and socket paths;
+- define local multi-user authentication and authorization;
+- define Unix-socket ownership and permissions;
+- authorize workspaces per user without widening one global `allowed_root` to
+  all of `/home`;
+- provide a systemd system unit and the operational hardening required by a
+  packaged system daemon;
+- provide native DEB and RPM packages;
+- publish packages through selected repository/update channels so normal package
+  manager install and upgrade workflows work;
+- keep openSUSE and Ubuntu as important targets and select the exact RHEL-family
+  target when implementation begins; Fedora is not currently committed;
+- provide at least `docker-helper(1)` and `docker-helper-config(5)` manual
+  pages.
 
-Fedora is not currently a committed target.
+Administrative operations may initially rely on `sudo`. Do not introduce a
+separate administrative control plane without a demonstrated need.
 
-### Unix manual pages
+## 4.0
 
-Provide proper system documentation as part of the native/system package
-experience.
+### Main goal: full remote environment
 
-At minimum:
+Release 4 is the earliest stage for capabilities that turn remote build into a
+full remote working environment:
 
-- `docker-helper(1)` for CLI/operator usage;
-- `docker-helper-config(5)` for configuration format and semantics.
+- mutable remote workspace delivery and synchronization;
+- remote `run`;
+- multiple helper contexts and target selection;
+- routing or optional helper-to-helper integration;
+- richer asynchronous upload/job protocols if the one-request build upload
+  proves insufficient;
+- cancellation and recovery across interrupted uploads, connections, or daemon
+  restarts;
+- durable operation state and other deferred operational capabilities justified
+  by real use.
 
-Add further sections only when the actual installed interfaces justify them.
-
-### Database doctor / maintenance CLI
-
-Future administrative command, exact name TBD (`db doctor` or similar).
-
-Possible scope:
-
-- database integrity diagnostics;
-- database size/statistics;
-- maintenance recommendations;
-- explicit VACUUM/optimization;
-- safe database maintenance operations.
-
-Do not define the command/API now.
-`session cleanup` remains a narrow expired-session command and is not replaced by
-this future feature.
-
-## 3.0+
-
-Development after 2.0 is explicitly use-case driven. Do not invent a generic
-platform roadmap in advance. New capabilities should be justified by observed
-operator/agent workflows; a demonstrated use case from a single real operator
-is sufficient evidence to investigate a problem.
+Keep Release 4 use-case driven. Do not predesign these APIs while implementing
+Release 2 or Release 3.
 
 ## Architectural constraints
 
