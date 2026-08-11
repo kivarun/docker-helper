@@ -3,13 +3,23 @@
 # This profile restricts the docker-helper daemon to the minimum
 # filesystem and capability access needed to mediate Docker operations.
 #
-# Install:
+# Before installing, prepare the profile manually:
+#
+#   1. Replace every occurrence of @@BINARY_PATH@@ with the absolute path
+#      to the docker-helper binary (e.g., /home/user/.local/bin/docker-helper).
+#      This is used for path-based executable attachment.
+#
+#   2. For workspace access, replace the commented @@WORKSPACE_RULE@@ line
+#      with the appropriate AppArmor rules for your allowed_root, or leave
+#      it commented out if workspace access is not needed.  Example:
+#
+#         /home/user/workspaces/ r,
+#         owner /home/user/workspaces/** rw,
+#
+# Then install the prepared profile (requires sudo):
+#
 #   sudo cp docker-helper /etc/apparmor.d/
 #   sudo apparmor_parser -a /etc/apparmor.d/docker-helper
-#
-# The profile uses path-based executable attachment: the profile name is
-# the absolute path to the binary (e.g., /home/user/.local/bin/docker-helper).
-# At install time, @@BINARY_PATH@@ is substituted with the actual path.
 
 #include <tunables/global>
 
