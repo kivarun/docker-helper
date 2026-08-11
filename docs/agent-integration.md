@@ -59,8 +59,11 @@ authentication are Release 2 concerns and are intentionally not designed here.
 A portable skill is available at `.claude/skills/docker-helper/SKILL.md`.
 
 One skill covers both the CLI and HTTP API interfaces for Claude Code and
-OpenCode. The skill is auto-discovered by the agent runtime — no manual
-installation or configuration is required.
+OpenCode. The skill is auto-discovered by the agent runtime when placed in
+a supported skill directory. The exact skill path depends on the agent
+runtime (e.g., `.claude/skills/` for Claude Code and OpenCode). The file
+in the repository or release bundle is the canonical artifact; it must be
+copied or mounted into the agent environment for the runtime to find it.
 
 OpenCode dogfood completed for both interfaces:
 - CLI interface (full `docker-helper` binary present);
