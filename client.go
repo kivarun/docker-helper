@@ -330,9 +330,10 @@ func (c *apiClient) operationStatusCtx(ctx context.Context, opID string) (*opera
 }
 
 // cancelOperationTimeout is the deadline for a best-effort cancel request.
-// The daemon cancel endpoint is blocking (waits for operation completion),
-// so the CLI must not hang indefinitely.
-const cancelOperationTimeout = 5 * time.Second
+// The daemon cancel endpoint is blocking: it waits for graceful termination
+// (defaultTerminationTimeout=5s) plus force cleanup (defaultForceCleanupTimeout=3s).
+// The client timeout covers the daemon worst case with a small margin.
+const cancelOperationTimeout = 12 * time.Second
 
 // cancelOperation sends POST /operations/{id}/cancel with a bounded timeout.
 // It is best-effort: the caller should not block on the result.

@@ -221,11 +221,16 @@ func (c *Command) printHelp(w io.Writer, path []string) {
 	}
 
 	if len(c.Subcommands) > 0 {
-		fmt.Fprintln(w, "Subcommands:")
-		for _, sub := range c.Subcommands {
-			fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
+		// Root command: group commands by category.
+		if c == rootCommand {
+			c.printGroupedSubcommands(w)
+		} else {
+			fmt.Fprintln(w, "Subcommands:")
+			for _, sub := range c.Subcommands {
+				fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
+			}
+			fmt.Fprintln(w)
 		}
-		fmt.Fprintln(w)
 	}
 
 	// Print Help text if present
@@ -254,6 +259,41 @@ func (c *Command) printHelp(w io.Writer, path []string) {
 	if c == rootCommand {
 		fmt.Fprintln(w, "Run 'docker-helper help <command>' or 'docker-helper <command> --help'")
 		fmt.Fprintln(w, "for command-specific help.")
+		fmt.Fprintln(w)
+	}
+}
+
+// agentCommandNames lists commands intended for agent containers.
+var agentCommandNames = map[string]struct{}{
+	"pull":     {},
+	"build":    {},
+	"run":      {},
+	"registry": {},
+}
+
+func (c *Command) printGroupedSubcommands(w io.Writer) {
+	var agentCmds, operatorCmds []*Command
+	for _, sub := range c.Subcommands {
+		if _, ok := agentCommandNames[sub.Name]; ok {
+			agentCmds = append(agentCmds, sub)
+		} else {
+			operatorCmds = append(operatorCmds, sub)
+		}
+	}
+
+	if len(agentCmds) > 0 {
+		fmt.Fprintln(w, "Agent commands:")
+		for _, sub := range agentCmds {
+			fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(operatorCmds) > 0 {
+		fmt.Fprintln(w, "Operator commands:")
+		for _, sub := range operatorCmds {
+			fmt.Fprintf(w, "  %-10s %s\n", sub.Name, sub.Summary)
+		}
 		fmt.Fprintln(w)
 	}
 }

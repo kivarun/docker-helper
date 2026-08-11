@@ -535,3 +535,36 @@ func TestRootHelpContainsHint(t *testing.T) {
 		t.Errorf("expected help hint in root output, got: %s", stdout.String())
 	}
 }
+
+func TestRootHelpGroupsAgentAndOperator(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit 0, got %d", code)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "Agent commands:") {
+		t.Errorf("expected 'Agent commands:' section in root help, got: %s", output)
+	}
+	if !strings.Contains(output, "Operator commands:") {
+		t.Errorf("expected 'Operator commands:' section in root help, got: %s", output)
+	}
+	// Verify agent commands appear under Agent commands
+	agentSection := output[strings.Index(output, "Agent commands:"):]
+	operatorIdx := strings.Index(agentSection, "Operator commands:")
+	if operatorIdx > 0 {
+		agentSection = agentSection[:operatorIdx]
+	}
+	for _, cmd := range []string{"pull", "build", "run", "registry"} {
+		if !strings.Contains(agentSection, cmd) {
+			t.Errorf("expected %s under Agent commands, got: %s", cmd, agentSection)
+		}
+	}
+	// Verify operator commands appear under Operator commands
+	operatorSection := output[strings.Index(output, "Operator commands:"):]
+	for _, cmd := range []string{"serve", "init", "reload", "session", "config", "version"} {
+		if !strings.Contains(operatorSection, cmd) {
+			t.Errorf("expected %s under Operator commands, got: %s", cmd, operatorSection)
+		}
+	}
+}

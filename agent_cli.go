@@ -187,7 +187,7 @@ var pullCommand = &Command{
 
 				c, err := agentClient()
 				if err != nil {
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
@@ -197,7 +197,7 @@ var pullCommand = &Command{
 				}
 
 				if err != nil {
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
@@ -218,8 +218,9 @@ var buildCommand = &Command{
 	Name:    "build",
 	Summary: "Build a Docker image",
 	Usage:   "docker-helper build --context PATH --dockerfile FILE --image NAME [flags]",
+	Help:    `SIGINT/SIGTERM cancels the running build operation.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		ctx := fs.String("context", "", "Build context path")
+		ctx := fs.String("context", "", "Build context path relative to session workspace")
 		dockerfile := fs.String("dockerfile", "", "Dockerfile path relative to context")
 		image := fs.String("image", "", "Image name and tag")
 		var buildArgs stringSlice
@@ -229,6 +230,9 @@ var buildCommand = &Command{
 			Validate: func() error {
 				if *ctx == "" {
 					return fmt.Errorf("--context is required")
+				}
+				if filepath.IsAbs(*ctx) {
+					return fmt.Errorf("--context must be relative to session workspace")
 				}
 				if *dockerfile == "" {
 					return fmt.Errorf("--dockerfile is required")
@@ -251,7 +255,7 @@ var buildCommand = &Command{
 
 				c, err := agentClient()
 				if err != nil {
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
@@ -262,7 +266,7 @@ var buildCommand = &Command{
 					BuildArgs:  argsMap,
 				})
 				if err != nil {
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
@@ -271,7 +275,7 @@ var buildCommand = &Command{
 					if sigErr, ok := err.(*signalExitError); ok {
 						return signalExitCode(sigErr.Signal)
 					}
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
@@ -312,11 +316,12 @@ var runContainerCommand = &Command{
 	Summary:    "Run a Docker container",
 	Usage:      "docker-helper run --image NAME [flags] -- [command]",
 	MaxPosArgs: -1, // Unlimited positional args after --
+	Help:       `SIGINT/SIGTERM cancels the running container operation.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		image := fs.String("image", "", "Image name and tag")
 		entrypoint := fs.String("entrypoint", "", "Container entrypoint")
-		workdir := fs.String("workdir", "", "Working directory inside container")
-		shmSize := fs.String("shm-size", "", "Size of /dev/shm (e.g. 64m, 1g)")
+		workdir := fs.String("workdir", "", "Absolute working directory inside container")
+		shmSize := fs.String("shm-size", "", "Size of /dev/shm (e.g. 64m, 1g); max 2g")
 		var envSlice stringSlice
 		var mountSlice stringSlice
 		fs.Var(&envSlice, "env", "Environment variable KEY=VALUE (repeatable)")
@@ -381,7 +386,7 @@ var runContainerCommand = &Command{
 
 				c, err := agentClient()
 				if err != nil {
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
@@ -397,7 +402,7 @@ var runContainerCommand = &Command{
 
 				resp, err := c.startRun(req)
 				if err != nil {
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
@@ -406,7 +411,7 @@ var runContainerCommand = &Command{
 					if sigErr, ok := err.(*signalExitError); ok {
 						return signalExitCode(sigErr.Signal)
 					}
-					fmt.Fprintln(stderr, err)
+					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 

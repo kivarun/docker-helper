@@ -2078,3 +2078,78 @@ func TestRunCommandSignalExitCode(t *testing.T) {
 		t.Errorf("expected cancel called, got %d", atomic.LoadInt32(&cancelCalled))
 	}
 }
+
+// TestBuildHelpSignalNote verifies build --help mentions signal cancellation.
+func TestBuildHelpSignalNote(t *testing.T) {
+	var out bytes.Buffer
+	_ = runCommandWithWriters([]string{"build", "--help"}, &out, &bytes.Buffer{})
+	if !strings.Contains(out.String(), "SIGINT") {
+		t.Errorf("expected build help to mention SIGINT, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "SIGTERM") {
+		t.Errorf("expected build help to mention SIGTERM, got: %s", out.String())
+	}
+}
+
+// TestRunHelpSignalNote verifies run --help mentions signal cancellation.
+func TestRunHelpSignalNote(t *testing.T) {
+	var out bytes.Buffer
+	_ = runCommandWithWriters([]string{"run", "--help"}, &out, &bytes.Buffer{})
+	if !strings.Contains(out.String(), "SIGINT") {
+		t.Errorf("expected run help to mention SIGINT, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "SIGTERM") {
+		t.Errorf("expected run help to mention SIGTERM, got: %s", out.String())
+	}
+}
+
+// TestBuildHelpContextWorkspace verifies build --help mentions workspace-relative context.
+func TestBuildHelpContextWorkspace(t *testing.T) {
+	var out bytes.Buffer
+	_ = runCommandWithWriters([]string{"build", "--help"}, &out, &bytes.Buffer{})
+	if !strings.Contains(out.String(), "workspace") {
+		t.Errorf("expected build help to mention workspace for --context, got: %s", out.String())
+	}
+}
+
+// TestRunHelpWorkdirAbsolute verifies run --help mentions absolute path for --workdir.
+func TestRunHelpWorkdirAbsolute(t *testing.T) {
+	var out bytes.Buffer
+	_ = runCommandWithWriters([]string{"run", "--help"}, &out, &bytes.Buffer{})
+	output := strings.ToLower(out.String())
+	if !strings.Contains(output, "absolute") {
+		t.Errorf("expected run help to mention 'absolute' for --workdir, got: %s", out.String())
+	}
+}
+
+// TestRunHelpShmSizeMax verifies run --help mentions shm-size max 2g.
+func TestRunHelpShmSizeMax(t *testing.T) {
+	var out bytes.Buffer
+	_ = runCommandWithWriters([]string{"run", "--help"}, &out, &bytes.Buffer{})
+	if !strings.Contains(out.String(), "2g") {
+		t.Errorf("expected run help to mention '2g' max for --shm-size, got: %s", out.String())
+	}
+}
+
+// TestBuildContextAbsoluteRejected verifies that build rejects absolute --context.
+func TestBuildContextAbsoluteRejected(t *testing.T) {
+	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
+		"build", "--context", "/absolute/path", "--dockerfile", "Dockerfile", "--image", "app:test",
+	}, nil)
+	if exitCode != 2 {
+		t.Errorf("expected exit 2, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "relative") {
+		t.Errorf("expected relative path error, got: %s", stderr.String())
+	}
+}
+
+// TestCancelOperationTimeout verifies that the cancel operation timeout
+// covers the daemon worst case (graceful + force cleanup + margin).
+func TestCancelOperationTimeout(t *testing.T) {
+	// The timeout should be at least:
+	// defaultTerminationTimeout (5s) + defaultForceCleanupTimeout (3s) + margin (4s) = 12s
+	if cancelOperationTimeout < 12*time.Second {
+		t.Errorf("cancelOperationTimeout %v is too short; should cover daemon worst case (5+3+4=12s)", cancelOperationTimeout)
+	}
+}
