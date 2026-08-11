@@ -262,23 +262,23 @@ Do not design their APIs here.
 
 ## 2.0
 
-### Main goal: remote build
+### Main goal: remote build and run
 
 See [`docs/release-2-plan.md`](release-2-plan.md) for the staged implementation
 and acceptance plan.
 
-Release 2 adds remote builds without turning docker-helper into a distributed
-workspace or control plane.
+Release 2 adds remote builds and image runs without turning docker-helper into
+a distributed workspace or control plane.
 
 The supported deployment remains single-owner and user-managed. One client is
 configured for either the local Unix socket or one remote HTTPS endpoint.
 Multiple helper contexts, routing, and helper-to-helper forwarding are outside
 Release 2.
 
-Remote-build scope:
+Remote-operation scope:
 
 - preserve the existing admin/session token model, session lifecycle, and async
-  build operation lifecycle;
+  build/run operation lifecycle;
 - require authenticated HTTPS for the remote endpoint with normal certificate
   validation; do not add an insecure-TLS mode;
 - have the client assemble the Docker build context with `.dockerignore`
@@ -288,12 +288,17 @@ Remote-build scope:
 - do not introduce a separate upload resource or a second build-job lifecycle;
 - build in the Docker daemon attached to the selected helper;
 - keep the resulting image and build cache on that remote daemon;
-- do not automatically export/download the image or push it to a registry.
+- do not automatically export/download the image or push it to a registry;
+- run images on the selected helper with the existing command, entrypoint,
+  container workdir, environment, `shm_size`, logs, status, result, and
+  cancellation behavior;
+- reject host mounts for remote sessions: remote `run` operates on the image
+  and its container-local filesystem only.
 
 Explicitly outside Release 2:
 
-- remote `run`;
-- mutable remote workspaces or bidirectional workspace synchronization;
+- mutable remote workspaces, host mounts, or bidirectional workspace
+  synchronization;
 - multi-helper selection or routing;
 - system-service and multi-user deployment;
 - native distribution packages and package repositories.
@@ -331,11 +336,11 @@ separate administrative control plane without a demonstrated need.
 
 ### Main goal: full remote environment
 
-Release 4 is the earliest stage for capabilities that turn remote build into a
-full remote working environment:
+Release 4 is the earliest stage for capabilities that turn remote Docker
+execution into a full remote working environment:
 
 - mutable remote workspace delivery and synchronization;
-- remote `run`;
+- remote runs coupled to a delivered workspace;
 - multiple helper contexts and target selection;
 - routing or optional helper-to-helper integration;
 - richer asynchronous upload/job protocols if the one-request build upload

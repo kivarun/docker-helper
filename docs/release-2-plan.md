@@ -2,13 +2,14 @@
 
 ## Goal
 
-Release 2 adds remote image builds through one authenticated HTTPS endpoint.
-The client streams a local Docker build context to the selected helper; the
-resulting image and build cache remain in that helper's Docker daemon.
+Release 2 adds remote image builds and image runs through one authenticated
+HTTPS endpoint. The client streams a local Docker build context to the selected
+helper; the resulting image and build cache remain in that helper's Docker
+daemon. Images can then be run there without access to the client's workspace.
 
 The supported deployment remains single-owner and user-managed. Release 2 does
-not add remote `run`, mutable remote workspaces, multiple helper contexts,
-system-wide deployment, multi-user authorization, or native packages.
+not add mutable remote workspaces, host mounts for remote runs, multiple helper
+contexts, system-wide deployment, multi-user authorization, or native packages.
 
 ## Release branch policy
 
@@ -34,14 +35,17 @@ outcome only where the review identifies a concrete obstacle to Release 2.
   lifecycle.
 - Trace how the CLI constructs its HTTP client and where Unix-socket assumptions
   enter command behavior.
-- Trace session creation, workspace authorization, and build request handling.
-- Trace the async build operation from request decoding through Docker process
-  startup, log capture, polling, cancellation, and shutdown.
+- Trace session creation, workspace authorization, and build/run request
+  handling.
+- Trace async build and run operations from request decoding through Docker
+  process startup, log capture, polling, cancellation, and shutdown.
 - Identify the smallest boundary between the HTTP application and its listener.
 - Decide whether Unix and HTTPS listeners may be enabled together or are
   mutually exclusive in Release 2.
-- Decide how a remote-build session is represented and authorized without
-  inventing a server-side workspace.
+- Decide how a remote session is represented and authorized without inventing
+  a server-side workspace or allowing host mounts.
+- Decide which existing routes are exposed through HTTPS and enforce that
+  boundary on the server rather than relying on client behavior.
 - Decide how the multipart upload joins the existing async operation lifecycle,
   especially what happens when upload or client connectivity is interrupted.
 - Separate server configuration from client connection configuration without
@@ -111,7 +115,18 @@ outcome only where the review identifies a concrete obstacle to Release 2.
   certificate files, plaintext requests, and missing authentication.
 - Local Unix operation remains unchanged.
 
-## Phase 3: remote-build protocol
+## Phase 3: remote build and run protocol
+
+### Remote session boundary
+
+- Introduce an explicit remote session kind or scope without a server-side
+  workspace.
+- Authorize remote sessions server-side for image pull, registry login, build,
+  run, and their own operation status/log/result/cancel endpoints.
+- Deny workspace-dependent behavior and host mounts for remote sessions; a
+  client-side omission of unsupported options is not sufficient.
+
+### Remote build
 
 - Preserve the current JSON build request for local workspace builds.
 - Add one streaming multipart build request for remote builds:
@@ -120,21 +135,30 @@ outcome only where the review identifies a concrete obstacle to Release 2.
 - Validate metadata before consuming and forwarding the context.
 - Stream the tar body to Docker without buffering the complete context in
   memory or a temporary archive.
-- Authorize remote-build sessions server-side for the intended operations; a
-  client-side omission of unsupported commands is not sufficient.
 - Reuse the current operation registry, status, logs, result, and cancellation
   contract rather than adding upload resources or a second job model.
 - Define deterministic cleanup for malformed multipart bodies, interrupted
   uploads, Docker startup failure, and shutdown during upload/build.
 - Keep the resulting image and cache on the helper's Docker daemon.
 
+### Remote run
+
+- Preserve the existing JSON run request and async operation lifecycle.
+- Support the existing image, command, entrypoint, container workdir,
+  environment, and `shm_size` behavior over HTTPS.
+- Reject any host mounts for remote sessions.
+- Preserve existing logs, status, result, exit-code, cancellation, and shutdown
+  behavior.
+
 ### Completion criteria
 
 - A test HTTP client can upload a context, receive the existing operation
   identity, follow logs/status, and verify build completion.
+- A remote session can run an image on the helper and follow the existing
+  operation lifecycle without access to any host workspace.
 - Interrupted or rejected uploads leave no orphan Docker process or operation.
-- Remote sessions cannot use workspace-dependent operations that are outside
-  Release 2.
+- Remote sessions cannot request host mounts or other workspace-dependent
+  behavior.
 
 ## Phase 4: network client and launcher integration
 
@@ -149,14 +173,14 @@ outcome only where the review identifies a concrete obstacle to Release 2.
 - Stream multipart output without materializing the full tar in memory or on
   disk.
 - Reuse existing polling, log display, result handling, and cancellation UX.
-- Reject or omit unsupported remote commands consistently and explain the
-  Release 2 limitation in CLI errors/help.
+- Support remote `run` through the existing client UX while rejecting mounts
+  consistently and explaining the no-workspace limitation in CLI errors/help.
 
 ### Completion criteria
 
-- A launcher on one host creates a remote-build session for a helper on another
-  host.
+- A launcher on one host creates a remote session for a helper on another host.
 - The client builds a local context remotely over HTTPS.
+- The client runs the resulting image on the remote helper without host mounts.
 - The image exists on the remote Docker daemon and is not automatically
   downloaded or pushed.
 
@@ -168,6 +192,8 @@ outcome only where the review identifies a concrete obstacle to Release 2.
   isolated environments.
 - Exercise small and large contexts, `.dockerignore`, symlinks, executable
   modes, empty files, alternate Dockerfiles, and private base images.
+- Exercise remote runs with command, entrypoint, workdir, environment,
+  `shm_size`, exit codes, cancellation, and rejected mounts.
 - Exercise upload interruption, loss of connectivity after operation creation,
   cancellation, daemon shutdown, and restart limitations.
 - Review operational and audit logs for secret leakage and useful failure
@@ -181,7 +207,8 @@ outcome only where the review identifies a concrete obstacle to Release 2.
 
 ## Deferred beyond Release 2
 
-- Remote `run` and mutable remote workspace synchronization.
+- Mutable remote workspace synchronization and remote runs coupled to a
+  delivered workspace.
 - Multiple helper contexts, selection, routing, or helper-to-helper forwarding.
 - Separate upload resources, resumable uploads, or a second build-job model.
 - Durable operation state and recovery across daemon restarts.
