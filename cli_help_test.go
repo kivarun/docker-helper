@@ -357,91 +357,7 @@ func TestBlackBoxSessionHelpHint(t *testing.T) {
 	}
 }
 
-// --- Legacy test compatibility ---
-
-func TestServeHelpExitCode(t *testing.T) {
-	exitCode := runCommand([]string{"serve", "--help"})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-}
-
-func TestServeHelpShortFlag(t *testing.T) {
-	exitCode := runCommand([]string{"serve", "-h"})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-}
-
-func TestInitHelpExitCode(t *testing.T) {
-	exitCode := runCommand([]string{"init", "--help"})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-}
-
-func TestInitHelpShortFlag(t *testing.T) {
-	exitCode := runCommand([]string{"init", "-h"})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-}
-
-func TestInitHelpDoesNotCreateFiles(t *testing.T) {
-	dir := t.TempDir()
-
-	oldConfig := os.Getenv("XDG_CONFIG_HOME")
-	oldState := os.Getenv("XDG_STATE_HOME")
-	os.Setenv("XDG_CONFIG_HOME", dir)
-	os.Setenv("XDG_STATE_HOME", dir)
-	defer func() {
-		os.Setenv("XDG_CONFIG_HOME", oldConfig)
-		os.Setenv("XDG_STATE_HOME", oldState)
-	}()
-
-	_ = runCommand([]string{"init", "--help"})
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("cannot read dir: %v", err)
-	}
-	dhEntries := 0
-	for _, e := range entries {
-		if e.Name() == "docker-helper" {
-			dhEntries++
-		}
-	}
-	if dhEntries > 0 {
-		t.Errorf("expected no docker-helper dir created, got %d entries", dhEntries)
-	}
-}
-
-func TestVersionHelpExitCode(t *testing.T) {
-	exitCode := runCommand([]string{"version", "--help"})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-}
-
-func TestVersionHelpShortFlag(t *testing.T) {
-	exitCode := runCommand([]string{"version", "-h"})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", exitCode)
-	}
-}
-
-func TestServeHelpDoesNotAccessRuntimeDir(t *testing.T) {
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	os.Unsetenv("XDG_RUNTIME_DIR")
-	defer os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
-
-	exitCode := runCommand([]string{"serve", "--help"})
-	if exitCode != 0 {
-		t.Errorf("expected exit code 0, got %d (serve --help should not need XDG_RUNTIME_DIR)", exitCode)
-	}
-}
-
-func TestInitHelpDoesNotCreateDirs(t *testing.T) {
+func TestHelpNoSideEffects(t *testing.T) {
 	dir := t.TempDir()
 	configHome := filepath.Join(dir, "nonexistent_config_home")
 	stateHome := filepath.Join(dir, "nonexistent_state_home")
@@ -465,6 +381,26 @@ func TestInitHelpDoesNotCreateDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(stateHome); !os.IsNotExist(err) {
 		t.Error("init --help should not create state directory")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("cannot read dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() == "docker-helper" {
+			t.Error("expected no docker-helper dir created")
+			break
+		}
+	}
+
+	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
+	os.Unsetenv("XDG_RUNTIME_DIR")
+	defer os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
+
+	exitCode = runCommand([]string{"serve", "--help"})
+	if exitCode != 0 {
+		t.Errorf("expected exit code 0, got %d (serve --help should not need XDG_RUNTIME_DIR)", exitCode)
 	}
 }
 

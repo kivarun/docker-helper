@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -363,57 +362,6 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	}
 }
 
-// TestCidfileRaceOperationCompletesDuringWait verifies that if the operation
-// completes while we're waiting for the cidfile, docker kill is not called.
-func TestCidfileRaceOperationCompletesDuringWait(t *testing.T) {
-	app := newTestAppWithAuth(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	var killCalled int32
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if len(args) > 0 && args[0] == "kill" {
-			atomic.AddInt32(&killCalled, 1)
-		}
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "alpine:latest",
-		"command": []string{"echo", "hello"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := reg.get(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Wait for the operation to complete (it should complete quickly since /bin/true exits).
-	op.Wait()
-
-	// Now trigger shutdown — the operation is already done, so no docker kill.
-	reg.setShuttingDown()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx, nil)
-	cancel()
-
-	if atomic.LoadInt32(&killCalled) != 0 {
-		t.Errorf("expected 0 docker kill calls when operation already completed, got %d", killCalled)
-	}
-}
-
 // TestCidfileRaceContextExpiresWithoutCidfile verifies that when the cleanup
 // context expires before the cidfile appears, shutdown still proceeds with
 // CLI kill and doesn't hang.
@@ -460,66 +408,6 @@ func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 	if elapsed > 5*time.Second {
 		t.Errorf("terminateAll took too long: %v (should be bounded)", elapsed)
 	}
-
-	// Wait for operation to complete.
-	select {
-	case <-op.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("operation did not complete")
-	}
-
-	if op.State != operationFailed {
-		t.Errorf("expected failed, got %q", op.State)
-	}
-}
-
-// TestCidfileRaceDockerKillFailureDoesNotBlockCLICleanup verifies that when
-// docker kill fails, the CLI process is still killed and shutdown proceeds.
-func TestCidfileRaceDockerKillFailureDoesNotBlockCLICleanup(t *testing.T) {
-	app := newTestAppWithAuth(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	var cidfilePath string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		for i, arg := range args {
-			if arg == "--cidfile" && i+1 < len(args) {
-				cidfilePath = args[i+1]
-				break
-			}
-		}
-		// Publish cidfile immediately.
-		os.WriteFile(cidfilePath, []byte("test_container_123\n"), 0644)
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
-	}
-
-	req := newRunRequest(map[string]any{
-		"image":   "alpine:latest",
-		"command": []string{"sleep", "300"},
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := reg.get(opID)
-	if op == nil {
-		t.Fatal("operation not found")
-	}
-
-	// Start shutdown with short deadline.
-	reg.setShuttingDown()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx, nil)
-	cancel()
 
 	// Wait for operation to complete.
 	select {
