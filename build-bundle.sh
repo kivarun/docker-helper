@@ -25,6 +25,9 @@
 #       skills/
 #         docker-helper/
 #           SKILL.md
+#
+# If static linking cannot be confirmed, the build FAILS.
+# A release tarball must never contain an unconfirmed binary.
 
 set -euo pipefail
 
@@ -110,30 +113,49 @@ if [[ "$VER_OUTPUT" != "$VERSION" ]]; then
 fi
 echo "OK: version is $VERSION"
 
-# Check static linking
+# Check static linking — MUST be confirmed, not just warned.
+STATIC_CONFIRMED=false
 FILE_OUTPUT=$(file "$BUNDLE_DIR/docker-helper" 2>/dev/null || true)
 if echo "$FILE_OUTPUT" | grep -qi "statically linked"; then
-  echo "OK: binary is statically linked"
+  STATIC_CONFIRMED=true
 else
-  # Fallback: check with ldd
   LDD_OUTPUT=$(ldd "$BUNDLE_DIR/docker-helper" 2>&1 || true)
   if echo "$LDD_OUTPUT" | grep -qi "not a dynamic"; then
-    echo "OK: binary is statically linked (ldd check)"
-  else
-    echo "WARN: could not confirm static linking"
-    echo "  file output: $FILE_OUTPUT"
+    STATIC_CONFIRMED=true
   fi
 fi
 
-# Check tarball layout
-TARBALL_CONTENTS=$(tar tzf "$TARBALL")
-echo "Tarball contents:"
-echo "$TARBALL_CONTENTS"
+if [[ "$STATIC_CONFIRMED" != "true" ]]; then
+  echo "FAIL: cannot confirm static linking" >&2
+  echo "  file output: $FILE_OUTPUT" >&2
+  exit 1
+fi
+echo "OK: binary is statically linked"
 
-# Check executable bits in tarball
-TARBALL_DIR=$(echo "$TARBALL_CONTENTS" | head -1 | cut -d/ -f1)
+# Check tarball contains the exact mandatory set of paths.
+EXPECTED_PATHS=(
+  "docker-helper-${VERSION}-linux-amd64/docker-helper"
+  "docker-helper-${VERSION}-linux-amd64/README.md"
+  "docker-helper-${VERSION}-linux-amd64/install.sh"
+  "docker-helper-${VERSION}-linux-amd64/uninstall.sh"
+  "docker-helper-${VERSION}-linux-amd64/systemd/user/docker-helper.service"
+  "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper"
+  "docker-helper-${VERSION}-linux-amd64/.claude/skills/docker-helper/SKILL.md"
+)
+
+TARBALL_CONTENTS=$(tar tzf "$TARBALL")
+
+for expected in "${EXPECTED_PATHS[@]}"; do
+  if ! echo "$TARBALL_CONTENTS" | grep -qxF "$expected"; then
+    echo "FAIL: tarball missing required path: $expected" >&2
+    exit 1
+  fi
+done
+echo "OK: tarball contains all required paths"
+
+# Check executable bits for files that must be executable.
 for f in docker-helper install.sh uninstall.sh; do
-  PERMS=$(tar tzvf "$TARBALL" | grep "${TARBALL_DIR}/${f}$" | awk '{print $1}')
+  PERMS=$(tar tzvf "$TARBALL" | grep "docker-helper-${VERSION}-linux-amd64/${f}$" | awk '{print $1}')
   if [[ "$PERMS" =~ ^-rwx ]]; then
     echo "OK: $f has executable bit"
   else

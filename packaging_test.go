@@ -661,6 +661,41 @@ func TestBuildStaticScriptSyntax(t *testing.T) {
 	}
 }
 
+// TestBuildStaticScriptUsesExternalLinkmode verifies build-static.sh
+// explicitly uses -linkmode external to ensure the system linker
+// receives -extldflags '-static'.
+func TestBuildStaticScriptUsesExternalLinkmode(t *testing.T) {
+	data, err := os.ReadFile("build-static.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "-linkmode external") {
+		t.Fatal("build-static.sh must use -linkmode external for static linking")
+	}
+}
+
+// TestBuildStaticScriptRequiresMusl verifies build-static.sh fails
+// on a glibc host without musl-gcc rather than silently falling back
+// to a glibc-linked build.
+func TestBuildStaticScriptRequiresMusl(t *testing.T) {
+	data, err := os.ReadFile("build-static.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The script must check for musl-gcc first and fail without it
+	// (except on Alpine where gcc uses musl natively).
+	if !strings.Contains(content, "musl-gcc") {
+		t.Fatal("build-static.sh must reference musl-gcc")
+	}
+	// Must have an Alpine check to allow gcc fallback only there.
+	if !strings.Contains(content, "alpine") {
+		t.Fatal("build-static.sh must check for Alpine to allow gcc fallback")
+	}
+}
+
 // TestBuildBundleScriptSyntax verifies build-bundle.sh has valid bash syntax.
 func TestBuildBundleScriptSyntax(t *testing.T) {
 	cmd := exec.Command("bash", "-n", "build-bundle.sh")
@@ -750,23 +785,70 @@ func TestBundleLayoutExpected(t *testing.T) {
 	}
 }
 
+// TestBundleScriptFailsOnUnconfirmedStatic verifies that build-bundle.sh
+// treats an unconfirmed static binary as a hard failure, not a warning.
+func TestBundleScriptFailsOnUnconfirmedStatic(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The script must check STATIC_CONFIRMED and fail if not confirmed.
+	if !strings.Contains(content, "STATIC_CONFIRMED") {
+		t.Fatal("build-bundle.sh must track static linking confirmation state")
+	}
+	// Must exit 1 when not confirmed (not just warn).
+	if !strings.Contains(content, "cannot confirm static linking") {
+		t.Fatal("build-bundle.sh must fail on unconfirmed static linking")
+	}
+}
+
+// TestBundleScriptVerifiesExactPaths verifies build-bundle.sh checks
+// the exact mandatory set of paths in the tarball, not just listing them.
+func TestBundleScriptVerifiesExactPaths(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must have an expected paths array and iterate over it.
+	if !strings.Contains(content, "EXPECTED_PATHS") {
+		t.Fatal("build-bundle.sh must define expected mandatory paths")
+	}
+	// Must check each path exists in the tarball.
+	if !strings.Contains(content, "missing required path") {
+		t.Fatal("build-bundle.sh must fail when a required path is missing")
+	}
+}
+
 // TestStaticBuildProducesStaticBinary verifies that build-static.sh
 // produces a statically linked binary when build tools are available.
+// This test fails closed: if go and a C compiler are present, the build
+// must succeed and produce a valid static binary.
 func TestStaticBuildProducesStaticBinary(t *testing.T) {
-	// Check if we can build at all
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("go not available")
+	hasGo := false
+	if _, err := exec.LookPath("go"); err == nil {
+		hasGo = true
 	}
-	if _, err := exec.LookPath("gcc"); err != nil {
-		t.Skip("gcc not available")
+	hasCC := false
+	if _, err := exec.LookPath("musl-gcc"); err == nil {
+		hasCC = true
+	} else if _, err := exec.LookPath("gcc"); err == nil {
+		hasCC = true
 	}
 
-	// Build with a test version
+	if !hasGo || !hasCC {
+		t.Skip("build tools not available (go or C compiler missing)")
+	}
+
+	// Build tools are present — the build must succeed, not skip.
 	testVersion := "test-" + t.Name()
 	cmd := exec.Command("bash", "build-static.sh", testVersion)
 	cmd.Dir = "."
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Skipf("static build not possible: %v (%s)", err, string(out))
+		t.Fatalf("static build failed with available tools: %v\n%s", err, out)
 	}
 
 	binPath := "dist/docker-helper"
@@ -791,20 +873,26 @@ func TestStaticBuildProducesStaticBinary(t *testing.T) {
 		t.Errorf("version = %q, want %q", got, testVersion)
 	}
 
-	// Verify static linking using 'file'
+	// Verify static linking — must be confirmed, not skipped.
+	staticConfirmed := false
+
 	fileCmd := exec.Command("file", binPath)
-	fileOut, err := fileCmd.Output()
-	if err != nil {
-		// 'file' may not be available; try ldd
-		lddCmd := exec.Command("ldd", binPath)
-		lddOut, _ := lddCmd.CombinedOutput()
-		if !strings.Contains(string(lddOut), "not a dynamic") {
-			t.Skipf("cannot verify static linking: ldd output: %s", string(lddOut))
+	if fileOut, err := fileCmd.Output(); err == nil {
+		if strings.Contains(string(fileOut), "statically linked") {
+			staticConfirmed = true
+			t.Log("static linking confirmed via file")
 		}
-		t.Log("static linking confirmed via ldd")
-	} else if !strings.Contains(string(fileOut), "statically linked") {
-		t.Errorf("binary is not statically linked: %s", string(fileOut))
-	} else {
-		t.Log("static linking confirmed via file")
+	}
+
+	if !staticConfirmed {
+		lddCmd := exec.Command("ldd", binPath)
+		if lddOut, _ := lddCmd.CombinedOutput(); strings.Contains(string(lddOut), "not a dynamic") {
+			staticConfirmed = true
+			t.Log("static linking confirmed via ldd")
+		}
+	}
+
+	if !staticConfirmed {
+		t.Fatal("cannot confirm static linking — release build must produce a static binary")
 	}
 }
