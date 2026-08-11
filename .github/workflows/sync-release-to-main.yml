@@ -1,0 +1,56 @@
+name: Sync release to main
+
+on:
+  push:
+    branches:
+      - 'release/**'
+
+concurrency:
+  group: sync-release-to-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch main
+        run: git fetch origin main
+
+      - name: Checkout main
+        run: git switch -C main origin/main
+
+      - name: Merge release commit
+        run: |
+          git merge --no-ff "${{ github.sha }}" \
+            -m "merge release commit ${{ github.sha }}"
+
+      - name: Formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf 'Files requiring gofmt:\n%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Tests
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Push to main
+        run: git push origin main
