@@ -18,6 +18,7 @@ Install and initialize docker-helper:
 
 ```bash
 ./install.sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Verify that the user service is running:
@@ -78,7 +79,9 @@ filesystem. The exact paths depend on your agent runtime:
 ```bash
 # Example: copy binary and skill to an agent container
 cp docker-helper /path/to/agent/bin/
-cp .claude/skills/docker-helper/SKILL.md /path/to/agent/skills/
+mkdir -p /path/to/agent/skills/docker-helper
+cp .claude/skills/docker-helper/SKILL.md \
+  /path/to/agent/skills/docker-helper/SKILL.md
 ```
 
 The agent does not need Docker CLI or docker.sock access — docker-helper
