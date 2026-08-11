@@ -22,6 +22,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
@@ -51,6 +56,9 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Whitespace errors
+        run: git diff --check
 
       - name: Push to main
         run: git push origin main
