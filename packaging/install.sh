@@ -46,7 +46,15 @@ ask() {
 	local answer
 
 	if $interactive; then
-		printf '%s [%s/n]: ' "$prompt" "$default"
+		local y_opt n_opt
+		if [[ "$default" == "y" ]]; then
+			y_opt="Y"
+			n_opt="n"
+		else
+			y_opt="y"
+			n_opt="N"
+		fi
+		printf '%s [%s/%s]: ' "$prompt" "$y_opt" "$n_opt"
 		read -r answer
 		if [[ -z "$answer" ]]; then
 			answer="$default"

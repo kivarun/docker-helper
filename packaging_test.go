@@ -965,3 +965,154 @@ func TestBuildStaticCwdIndependence(t *testing.T) {
 		t.Errorf("version = %q, want %q", got, testVersion)
 	}
 }
+
+// TestInstallPromptDefaultYes verifies install.sh ask() displays [Y/n]
+// and treats Enter (empty input) as yes.
+func TestInstallPromptDefaultYes(t *testing.T) {
+	// Extract the ask function from the actual script to test real code.
+	scriptData, err := os.ReadFile("packaging/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Isolate the ask function: extract from "ask() {" to the closing "}"
+	start := strings.Index(string(scriptData), "ask() {")
+	if start < 0 {
+		t.Fatal("cannot find ask() in install.sh")
+	}
+	// Find the function body end: look for the standalone "}" after "ask() {"
+	rest := scriptData[start:]
+	end := 0
+	depth := 0
+	inFunc := false
+	for i, c := range rest {
+		if c == '{' {
+			depth++
+			inFunc = true
+		} else if c == '}' {
+			depth--
+			if inFunc && depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+		_ = i
+	}
+	askFn := string(rest[:end])
+
+	// Test prompt format: verify [Y/n] appears in output
+	promptScript := "#!/usr/bin/env bash\n" +
+		"interactive=true\n" +
+		askFn + "\n" +
+		"ask \"test?\" y\n"
+	tmpScript := filepath.Join(t.TempDir(), "test_install_ask.sh")
+	if err := os.WriteFile(tmpScript, []byte(promptScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", tmpScript)
+	cmd.Stdin = strings.NewReader("\n\n")
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = cmd.Stdout
+	_ = cmd.Run() // may exit non-zero from [[ ]] or read, that's fine for format check
+
+	output := stdout.String()
+	if !strings.Contains(output, "[Y/n]") {
+		t.Errorf("install prompt should show [Y/n], got: %s", output)
+	}
+
+	// Test default behavior: empty input -> yes (exit 0)
+	behaviorScript := "#!/usr/bin/env bash\n" +
+		"interactive=true\n" +
+		askFn + "\n" +
+		"ask \"test?\" y && echo yes || echo no\n"
+	tmpScript2 := filepath.Join(t.TempDir(), "test_install_ask2.sh")
+	if err := os.WriteFile(tmpScript2, []byte(behaviorScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd = exec.Command("bash", tmpScript2)
+	cmd.Stdin = strings.NewReader("\n\n")
+	var buf2 strings.Builder
+	cmd.Stdout = &buf2
+	cmd.Stderr = cmd.Stdout
+	_ = cmd.Run()
+	if !strings.Contains(buf2.String(), "yes") {
+		t.Errorf("install ask with empty input should yield yes, got: %s", buf2.String())
+	}
+}
+
+// TestUninstallPromptDefaultNo verifies uninstall.sh ask() displays [y/N]
+// when default is n and treats Enter (empty input) as no.
+func TestUninstallPromptDefaultNo(t *testing.T) {
+	scriptData, err := os.ReadFile("packaging/uninstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := strings.Index(string(scriptData), "ask() {")
+	if start < 0 {
+		t.Fatal("cannot find ask() in uninstall.sh")
+	}
+	rest := scriptData[start:]
+	end := 0
+	depth := 0
+	inFunc := false
+	for i, c := range rest {
+		if c == '{' {
+			depth++
+			inFunc = true
+		} else if c == '}' {
+			depth--
+			if inFunc && depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+		_ = i
+	}
+	askFn := string(rest[:end])
+
+	// Test prompt format: verify [y/N] appears
+	promptScript := "#!/usr/bin/env bash\n" +
+		"interactive=true\n" +
+		askFn + "\n" +
+		"ask \"test?\" n\n"
+	tmpScript := filepath.Join(t.TempDir(), "test_uninstall_ask.sh")
+	if err := os.WriteFile(tmpScript, []byte(promptScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", tmpScript)
+	cmd.Stdin = strings.NewReader("\n\n")
+	var stdout strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = cmd.Stdout
+	_ = cmd.Run()
+
+	output := stdout.String()
+	if !strings.Contains(output, "[y/N]") {
+		t.Errorf("uninstall prompt should show [y/N], got: %s", output)
+	}
+
+	// Test default behavior: empty input -> no (exit non-zero)
+	behaviorScript := "#!/usr/bin/env bash\n" +
+		"interactive=true\n" +
+		askFn + "\n" +
+		"ask \"test?\" n && echo yes || echo no\n"
+	tmpScript2 := filepath.Join(t.TempDir(), "test_uninstall_ask2.sh")
+	if err := os.WriteFile(tmpScript2, []byte(behaviorScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd = exec.Command("bash", tmpScript2)
+	cmd.Stdin = strings.NewReader("\n\n")
+	var buf2 strings.Builder
+	cmd.Stdout = &buf2
+	cmd.Stderr = cmd.Stdout
+	_ = cmd.Run()
+	if !strings.Contains(buf2.String(), "no") {
+		t.Errorf("uninstall ask with empty input should yield no, got: %s", buf2.String())
+	}
+}
