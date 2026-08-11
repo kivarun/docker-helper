@@ -319,10 +319,22 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cmdArgCount = &n
 	}
 
-	// Create run operation and register it.
+	// Ensure the session Docker config directory exists before registering
+	// the operation so that a failure here does not leave a zombie operation.
 	cfg := a.getConfig()
+	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
+	if err != nil {
+		opLog(ctx).Error("cannot create session Docker directory",
+			slog.String("operation", "run"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
 	bufSize := cfg.OperationLogMaxBytes
 
+	// Create run operation and register it.
 	op := newRunOperation(session.ID, req.Image, bufSize)
 	op.auditCommandArgCount = cmdArgCount
 	op.auditMounts = mountAudit
@@ -355,17 +367,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		EnvKeys:         envNames,
 		ShmSize:         op.auditShmSize,
 	})
-
-	// Ensure the session Docker config directory exists.
-	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
-	if err != nil {
-		opLog(ctx).Error("cannot create session Docker directory",
-			slog.String("operation", "run"),
-			slog.String("error", err.Error()),
-		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
 
 	// Build docker run command.
 	args := []string{
