@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -974,14 +975,14 @@ func TestAskPrompts(t *testing.T) {
 		script     string
 		input      string
 		wantPrompt string
-		wantOK     bool
+		wantStatus int
 	}
 
 	tests := []testCase{
-		{"install enter", "packaging/install.sh", "\n", "[Y/n]", true},
-		{"install n", "packaging/install.sh", "n\n", "[Y/n]", false},
-		{"uninstall enter", "packaging/uninstall.sh", "\n", "[y/N]", false},
-		{"uninstall y", "packaging/uninstall.sh", "y\n", "[y/N]", true},
+		{"install enter", "packaging/install.sh", "\n", "test? [Y/n]: ", 0},
+		{"install n", "packaging/install.sh", "n\n", "test? [Y/n]: ", 1},
+		{"uninstall enter", "packaging/uninstall.sh", "\n", "test? [y/N]: ", 1},
+		{"uninstall y", "packaging/uninstall.sh", "y\n", "test? [y/N]: ", 0},
 	}
 
 	for _, tc := range tests {
@@ -992,23 +993,26 @@ func TestAskPrompts(t *testing.T) {
 			}
 
 			cmd := exec.Command("bash", "-c",
-				"source '"+scriptPath+"' && if ask 'test?'; then echo ok; else echo fail; fi",
+				"source '"+scriptPath+"' && ask 'test?'",
 			)
 			cmd.Stdin = strings.NewReader(tc.input)
-			var buf strings.Builder
-			cmd.Stdout = &buf
-			cmd.Stderr = cmd.Stdout
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("bash failed: %v: %s", err, buf.String())
+			out, err := cmd.CombinedOutput()
+			gotStatus := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if ok := errors.As(err, &exitErr); ok {
+					gotStatus = exitErr.ExitCode()
+				} else {
+					t.Fatalf("bash failed: %v: %s", err, out)
+				}
 			}
 
-			output := buf.String()
-			if !strings.Contains(output, tc.wantPrompt) {
-				t.Errorf("want prompt %s in output, got: %s", tc.wantPrompt, output)
+			gotPrompt := string(out)
+			if gotPrompt != tc.wantPrompt {
+				t.Errorf("prompt = %q, want %q", gotPrompt, tc.wantPrompt)
 			}
-			gotOK := strings.Contains(output, "ok")
-			if gotOK != tc.wantOK {
-				t.Errorf("wantOK=%v, gotOK=%v, output: %s", tc.wantOK, gotOK, output)
+			if gotStatus != tc.wantStatus {
+				t.Errorf("status = %d, want %d", gotStatus, tc.wantStatus)
 			}
 		})
 	}
