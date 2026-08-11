@@ -21,18 +21,32 @@ The agent cannot escalate beyond the workspace boundary.
 ## High-level architecture
 
 ```
-Agent
-  ├─ reference CLI (docker-helper pull/build/run/registry)
-  └─ native/direct adapter
-          |
-     capability/API contract
-          |
-     docker-helper daemon
-          |
-       Docker CLI
-          |
-      Docker Engine
+Consumer / agent
+     │
+  +--+--+
+  │     │
+  ▼     ▼
+docker-helper CLI    direct HTTP client
+reference client     curl / native adapter
+  │     │
+  +--+--+
+     │
+  daemon HTTP API
+     │
+docker-helper daemon
+     │
+   Docker CLI
+     │
+ Docker Engine
 ```
+
+The daemon HTTP API is the single capability contract. The CLI is a
+shipped reference/convenience client of that API. Curl and native adapters
+are direct clients of the same API.
+
+The presence of the `docker-helper` binary in the agent image is not a
+requirement. Choosing a client interface does not change daemon policy
+or security semantics.
 
 The launcher creates a session and passes the client token to the agent.
 It is not a mandatory daemon or control plane component.

@@ -90,7 +90,7 @@ Agents need to build from and run images from private registries.
 **Completed.** `POST /registry/login` authenticates per-session using
 a session-scoped Docker config directory. Credentials are isolated per
 session and cleaned up on session delete. CLI supports interactive
-password prompt and `--password` flag. Audit events track login
+password prompt and `--password-stdin` flag. Audit events track login
 attempts without exposing credentials.
 
 ### 4. Installation / service packaging
@@ -175,14 +175,16 @@ to reproduce hand-written curl instructions.
 `registry login`) with signal cancellation, synchronous UX, and log streaming.
 Real CLI dogfood completed.
 
-Reusable agent skills remain Release 1 work. Native adapter is a subsequent
-experiment, not a blocker.
+Release 1 intentionally supports both:
+- reference CLI;
+- direct HTTP API.
 
-Use dogfood to choose the smallest useful form:
+Neither is deprecated or fallback. Reusable agent skills should cover both
+interfaces, since the presence of the `docker-helper` binary in the agent
+image is not guaranteed.
 
-- a reusable agent skill;
-- a tool integration;
-- or both only if both provide demonstrated value.
+Native adapter is a subsequent experiment, implementing the same HTTP
+capability contract.
 
 Do not build a mandatory shared runtime or control plane around this integration.
 The goal is discoverability and reliable use of docker-helper by agents while

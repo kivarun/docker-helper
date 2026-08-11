@@ -29,7 +29,19 @@ directly, access `docker.sock`, or attempt to start or manage the helper.
 The launcher has already created a Docker Helper session and provided its
 session token in `DOCKER_HELPER_SESSION_TOKEN`.
 
-### Discovery
+### Client interfaces
+
+Docker Helper can be used through either:
+
+- the `docker-helper` CLI, when it is available in the environment;
+- the HTTP API over the mounted Unix socket.
+
+Both are supported interfaces. Neither is a legacy or fallback interface.
+Use the interface selected for the environment or workflow.
+
+If the launcher or user explicitly specifies an interface, follow it.
+
+### CLI interface
 
 Use `docker-helper help` to discover available commands:
 
@@ -37,10 +49,6 @@ Use `docker-helper help` to discover available commands:
 docker-helper help
 docker-helper help <command>
 ```
-
-### CLI commands
-
-The docker-helper CLI is the primary way to interact with the daemon.
 
 **Pull an image:**
 
@@ -88,26 +96,28 @@ docker-helper registry login \
 ```
 
 Interactive mode prompts for the password. Use `--password-stdin` for
-automation.
+automation:
 
-### CLI semantics
+```bash
+printf '%s\n' "$REGISTRY_PASSWORD" | \
+  docker-helper registry login \
+    --registry registry.example.com \
+    --username user \
+    --password-stdin
+```
+
+**CLI semantics:**
 
 - `build` and `run` appear synchronous: the CLI waits for the operation to
   complete, streams logs, and returns the final exit status.
-- The CLI handles operation polling and log offsets internally. Do not manage
-  them manually.
+- The CLI handles operation polling and log offsets internally.
 - Container non-zero exit is propagated as the CLI exit code.
 - SIGINT (Ctrl+C) or SIGTERM cancels the current operation:
   - SIGINT -> best-effort cancel + exit 130;
   - SIGTERM -> best-effort cancel + exit 143;
   - cancel failure prints a diagnostic but does not change the exit code.
 
-### Path model
-
-There are two filesystem namespaces:
-
-1. The agent container (typically `/workspace`).
-2. The host workspace associated with the Docker Helper session.
+**Path model:**
 
 - Build context and mount source are relative to the session workspace on the
   host. Use `.` or a workspace-relative path.
@@ -115,25 +125,12 @@ There are two filesystem namespaces:
 - Do not use `/workspace/...` as a mount source. The helper runs on the host,
   where that path may not exist.
 
-### Operator commands
+**Operator commands:**
 
 Do not use operator commands: `serve`, `init`, `reload`, `session`, `config`.
 These are for the developer who manages the daemon, not for the agent.
 
-### Security rules
-
-- Never invoke Docker directly.
-- Never access or expose `docker.sock`.
-- Never print or expose `DOCKER_HELPER_SESSION_TOKEN`.
-- Do not attempt to create, list, or delete helper sessions.
-- Do not look for or use the Docker Helper administrative token.
-- Do not start, stop, reload, or reconfigure Docker Helper.
-- Use only the session and API made available by the launcher.
-
-### Protocol fallback / diagnostics
-
-The HTTP API can be accessed directly via `curl` for debugging, smoke testing,
-or when the CLI is unavailable. This is not the preferred agent workflow.
+### HTTP API
 
 Send HTTP requests through the Unix socket:
 
@@ -150,7 +147,7 @@ Content-Type: application/json
 
 Never print, log, echo, or otherwise expose `DOCKER_HELPER_SESSION_TOKEN`.
 
-A typical request:
+**Pull:**
 
 ```bash
 curl --silent --show-error \
@@ -161,18 +158,7 @@ curl --silent --show-error \
   http://localhost/pull
 ```
 
-#### Pull (HTTP)
-
-```bash
-curl --silent --show-error \
-  --unix-socket /run/docker-helper/docker-helper.sock \
-  -H "Authorization: Bearer $DOCKER_HELPER_SESSION_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"image":"alpine:3.24"}' \
-  http://localhost/pull
-```
-
-#### Build (HTTP)
+**Build:**
 
 `POST /build` starts an asynchronous Docker build and returns immediately.
 The build runs in the background.
@@ -236,7 +222,7 @@ and the logs to diagnose the problem.
 
 Do not fall back to invoking Docker directly if the build fails.
 
-#### Run (HTTP)
+**Run:**
 
 `POST /run` starts an asynchronous container run and returns immediately.
 The container runs in the background.
@@ -333,9 +319,7 @@ Run-specific result codes:
 If the status is `failed`, inspect `result_code`, `exit_code`
 and the logs to diagnose the problem.
 
-#### Cancel an operation (HTTP)
-
-To cancel a running build or run operation:
+**Cancel an operation:**
 
 ```bash
 curl --unix-socket /run/docker-helper/docker-helper.sock \
@@ -350,9 +334,7 @@ with the current terminal state).
 Do not fall back to invoking Docker directly (no `docker kill`, no manual
 container removal). Cancel must go through the helper.
 
-#### Private registry authentication (HTTP)
-
-To pull images from a private registry, authenticate first:
+**Private registry authentication:**
 
 ```bash
 curl --silent --show-error \
@@ -382,7 +364,7 @@ On failure (HTTP 400):
 After successful login, subsequent `POST /pull` requests for images from
 that registry will use the stored credentials automatically.
 
-#### Responses and errors (HTTP)
+**Responses and errors:**
 
 Inspect both the HTTP status and the JSON response body. If you need the HTTP
 status code, obtain it explicitly with `curl --write-out "%{http_code}"` — do
@@ -432,3 +414,15 @@ Run-specific `result_code` values on failure:
 
 Do not retry failed helper operations by invoking Docker directly. Report the
 helper error and its response when it prevents completion of the task.
+
+### Security rules
+
+These invariants apply regardless of which interface is used:
+
+- Never invoke Docker directly.
+- Never access or expose `docker.sock`.
+- Never print or expose `DOCKER_HELPER_SESSION_TOKEN`.
+- Do not attempt to create, list, or delete helper sessions.
+- Do not look for or use the Docker Helper administrative token.
+- Do not start, stop, reload, or reconfigure Docker Helper.
+- Use only the session and API made available by the launcher.

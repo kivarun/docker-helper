@@ -366,7 +366,16 @@ value; this command is useful for explicitly reclaiming storage during
 long daemon uptimes. The daemon also removes expired sessions
 automatically at startup. No running daemon or admin token is required.
 
-## Agent/client CLI
+## Client interfaces
+
+Docker Helper has two supported client interfaces:
+
+- **CLI** — `docker-helper pull/build/run/registry login`
+- **HTTP API** — direct protocol access over the Unix socket
+
+Neither is deprecated or fallback. Choice depends on deployment and environment.
+
+### CLI
 
 The `docker-helper` binary includes a client CLI for agent use. The client
 commands use `DOCKER_HELPER_SESSION_TOKEN` (provided by the session launcher)
@@ -393,9 +402,11 @@ Agent instructions template: [docs/agent-instructions.md](docs/agent-instruction
 
 ## Using the HTTP API
 
-The HTTP API is the protocol-level interface. The `curl` examples below are
-useful for smoke testing, debugging, and as a fallback when the CLI is
-unavailable. The CLI is the preferred agent UX.
+The HTTP API is the direct protocol interface and is fully supported for
+agent integrations, custom clients, and environments where the CLI binary
+is not installed.
+
+The `curl` examples below demonstrate direct HTTP use.
 
 ### Pull
 
@@ -548,7 +559,7 @@ docker-helper registry login \
 ```
 
 When run interactively, the CLI prompts for the password via the terminal.
-Use `--password` only in non-interactive contexts.
+Use `--password-stdin` for non-interactive automation.
 
 After successful login, subsequent `POST /pull` requests for images from
 that registry use the stored credentials automatically.
