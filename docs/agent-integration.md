@@ -56,15 +56,18 @@ authentication are Release 2 concerns and are intentionally not designed here.
 
 ## Skills
 
-The CLI and HTTP API are both completed and dogfooded. Reusable agent skills
-remain Release 1 work for at least:
+A portable skill is available at `.claude/skills/docker-helper/SKILL.md`.
 
-- OpenCode;
-- Claude Code.
+One skill covers both the CLI and HTTP API interfaces for Claude Code and
+OpenCode. The skill is auto-discovered by the agent runtime — no manual
+installation or configuration is required.
 
-A skill should teach the agent the capability-level workflow and security
-rules. It should cover both the CLI and HTTP API interfaces, since the
-presence of the `docker-helper` binary in the agent image is not guaranteed.
+OpenCode dogfood completed for both interfaces:
+- CLI interface (full `docker-helper` binary present);
+- HTTP-only interface (no `docker-helper` binary, curl over Unix socket).
+
+Claude Code compatibility is provided by the portable skill format and path,
+but Claude Code dogfood has not been executed yet.
 
 Skills must preserve these invariants:
 

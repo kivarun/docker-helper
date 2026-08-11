@@ -378,8 +378,7 @@ Neither is deprecated or fallback. Choice depends on deployment and environment.
 ### CLI
 
 The `docker-helper` binary includes a client CLI for agent use. The client
-commands use `DOCKER_HELPER_SESSION_TOKEN` (provided by the session launcher)
-and communicate with the running daemon.
+commands use `DOCKER_HELPER_SESSION_TOKEN` available in the client environment and communicate with the running daemon.
 
 ```bash
 docker-helper pull IMAGE
@@ -398,7 +397,8 @@ SIGINT (Ctrl+C) or SIGTERM cancels the current operation:
 
 Use `docker-helper help` and `docker-helper help <command>` for discovery.
 
-Agent instructions template: [docs/agent-instructions.md](docs/agent-instructions.md)
+Portable agent skill for Claude Code and OpenCode:
+[.claude/skills/docker-helper/SKILL.md](.claude/skills/docker-helper/SKILL.md)
 
 ## Using the HTTP API
 
@@ -637,9 +637,9 @@ event schema, request correlation, and sensitive-data handling — is in
 ## Agent instructions
 
 Agents using docker-helper need explicit operating instructions because the
-helper enforces policy that the agent must not bypass. A ready-to-copy
-`AGENTS.md` template is available at
-[docs/agent-instructions.md](docs/agent-instructions.md).
+helper enforces policy that the agent must not bypass. A portable skill is
+available at
+[.claude/skills/docker-helper/SKILL.md](.claude/skills/docker-helper/SKILL.md).
 
 ## More information
 

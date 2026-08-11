@@ -232,8 +232,8 @@ Do not assume a test is parallel-safe just because it uses `t.Setenv`.
 - detailed API/CLI behavior;
 - design decisions and future work.
 
-`docs/agent-instructions.md` owns:
-- instructions for agents USING docker-helper.
+`.claude/skills/docker-helper/SKILL.md` owns:
+- canonical reusable instructions for agents USING docker-helper.
 
 `AGENTS.md` owns:
 - instructions for agents DEVELOPING docker-helper.

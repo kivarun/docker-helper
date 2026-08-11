@@ -36,7 +36,7 @@ Verified against current implementation:
 - global bounded shutdown lifecycle (one absolute deadline, concurrent drain
   + operation termination, force cleanup);
 - developer rules in root `AGENTS.md`;
-- documentation cleanup (README, architecture, agent instructions);
+- documentation cleanup (README, architecture, portable agent skill);
 - version source prepared for ldflags release injection (`var version = "dev"`);
 - image-reference syntax delegated to Docker (no home-grown regex);
 - private-registry authentication (`POST /registry/login`, per-session
@@ -171,17 +171,11 @@ help/documentation, logging, and private-registry handling.
 Ship a reusable agent-facing integration rather than requiring every deployment
 to reproduce hand-written curl instructions.
 
-**Completed:** client-facing reference CLI (`pull`, `build`, `run`,
+**Completed:** reference CLI (`pull`, `build`, `run`,
 `registry login`) with signal cancellation, synchronous UX, and log streaming.
-Real CLI dogfood completed.
-
-Release 1 intentionally supports both:
-- reference CLI;
-- direct HTTP API.
-
-Neither is deprecated or fallback. Reusable agent skills should cover both
-interfaces, since the presence of the `docker-helper` binary in the agent
-image is not guaranteed.
+Direct HTTP API with full async operation lifecycle.
+Portable agent skill at `.claude/skills/docker-helper/SKILL.md` covering both
+interfaces. OpenCode dogfood completed for both CLI and HTTP-only environments.
 
 Native adapter is a subsequent experiment, implementing the same HTTP
 capability contract.
@@ -367,5 +361,6 @@ See `docs/manifesto.md` for the project-level rationale behind these constraints
 - `docs/roadmap.md` = planned work and release scope;
 - `docs/architecture.md` = current architecture/invariants/rationale;
 - `README.md` = operator quickstart;
-- `docs/agent-instructions.md` = instructions for agents using docker-helper;
+- `.claude/skills/docker-helper/SKILL.md` =
+  canonical reusable instructions for agents using docker-helper;
 - `AGENTS.md` = rules for agents developing docker-helper.
