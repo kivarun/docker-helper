@@ -59,26 +59,11 @@ already solved elsewhere.
 
 Its distinctive value is semantic policy at the capability level.
 
-## Release philosophy
+## Development philosophy
 
-### 1.0 — Local tool
-
-Prove and polish the capability for local agent work: a stable user service,
-local Docker access, clear installation, agent integration, and a narrow
-security boundary.
-
-### 2.0 — Professional system/server tool
-
-Turn the proven local capability into a system component for controlled access
-to server resources. Remote access is the defining goal. System deployment,
-multi-user authorization, distribution packaging and delivery, and
-server-oriented security are enabling work toward that goal.
-
-### 3.0+ — Use-case-driven development
-
-Do not invent a platform in advance. Develop from observed use cases after 2.0.
-A use case demonstrated by one real operator is still evidence; scale of
-adoption is not a prerequisite for solving a real problem.
+Develop from demonstrated use cases rather than inventing a platform in
+advance. A use case demonstrated by one real operator is still evidence; scale
+of adoption is not a prerequisite for solving a real problem.
 
 ## Architectural constraints
 
