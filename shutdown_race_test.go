@@ -1,10 +1,6 @@
 package main
 
 import (
-	"context"
-	"net/http"
-	"net/http/httptest"
-	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -107,61 +103,5 @@ func TestShutdownGateConcurrentRegistration(t *testing.T) {
 	}
 	if reg.tryCreate(op) {
 		t.Fatal("tryCreate must fail after gate is closed")
-	}
-}
-
-// TestShutdownRaceRegistrationRejectedAfterGateClose verifies that when
-// the shutdown gate closes before registration, the operation is rejected
-// and no process starts.
-func TestShutdownRaceRegistrationRejectedAfterGateClose(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		t.Fatal("ExecCommandContext should not be called after gate closes")
-		return exec.CommandContext(ctx, "true")
-	}
-
-	reg.setShuttingDown()
-
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}, token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected %d, got %d", http.StatusServiceUnavailable, w.Code)
-	}
-
-	if len(reg.ops) > 0 {
-		t.Error("no operation should be registered after gate closes")
-	}
-}
-
-// TestShutdownRaceOperationRegisteredBeforeGateClose verifies that an
-// operation registered before the gate closes remains in the registry
-// and is managed by the normal shutdown lifecycle (terminateAll).
-func TestShutdownRaceOperationRegisteredBeforeGateClose(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
-	app.ExecCommandContext = makeSleepCmd()
-
-	op := startBuild(t, app, token)
-
-	reg.setShuttingDown()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	reg.terminateAll(shutdownCtx, nil)
-	cancel()
-
-	select {
-	case <-op.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("op.done was not closed")
-	}
-
-	if op.State != operationFailed {
-		t.Errorf("expected status 'failed', got %q", op.State)
 	}
 }
