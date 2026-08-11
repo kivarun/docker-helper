@@ -157,7 +157,7 @@ Git tag/release tag should be the authoritative release version source.
 
 Do not introduce generated version files.
 
-**Partially completed.** Static Linux amd64 build (`build-static.sh`) and
+**Completed.** Static Linux amd64 build (`build-static.sh`) and
 release tarball bundling (`build-bundle.sh`) are implemented. The static
 build uses `CGO_ENABLED=1` with musl-gcc (or gcc on Alpine) and
 `-extldflags '-static'` for external static linking. Version is injected
@@ -166,8 +166,10 @@ via `-ldflags '-X main.version=<version>'`. The release bundle produces
 `install.sh`, `uninstall.sh`, systemd user unit, AppArmor profile,
 and the agent skill. A release-specific README is included in the bundle.
 
-GitHub Release automation (tag-driven CI workflow, artifact upload) is
-not yet implemented.
+Tag-driven GitHub Release workflow (`.github/workflows/release.yml`) is
+implemented. Pushing a `v*` tag runs CI checks, builds the static bundle,
+and creates a GitHub Release with the tar.gz asset. Prerelease tags
+(e.g., `v1.0.0-rc1`) are automatically marked as prerelease.
 
 ### 6. Agent-facing integration / dogfood
 
