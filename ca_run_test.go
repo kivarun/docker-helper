@@ -76,55 +76,40 @@ func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
 
 	waitRun(t, app, w)
 
-	// Verify CA mount is present and readonly.
-	foundMount := false
-	expectedMount := "type=bind,source=" + preparedDir + ",target=/run/docker-helper/trusted-ca,readonly"
+	// Verify exactly one CA mount with the correct value.
+	var mountValues []string
 	for i, arg := range capturedArgs {
 		if arg == "--mount" && i+1 < len(capturedArgs) {
-			if capturedArgs[i+1] == expectedMount {
-				foundMount = true
-			}
+			mountValues = append(mountValues, capturedArgs[i+1])
 		}
 	}
-	if !foundMount {
-		t.Errorf("expected CA mount %q not found in args: %v", expectedMount, capturedArgs)
+	expectedMount := "type=bind,source=" + preparedDir + ",target=/run/docker-helper/trusted-ca,readonly"
+	if len(mountValues) != 1 || mountValues[0] != expectedMount {
+		t.Errorf("expected exactly 1 mount %q, got %v", expectedMount, mountValues)
 	}
 
-	// Verify SSL_CERT_DIR env var.
-	foundSSLDir := false
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) {
-			next := capturedArgs[i+1]
-			if strings.HasPrefix(next, "SSL_CERT_DIR=") {
-				val := strings.TrimPrefix(next, "SSL_CERT_DIR=")
-				if val != trustedCAEnvSSLDirValue {
-					t.Errorf("SSL_CERT_DIR = %q, want %q", val, trustedCAEnvSSLDirValue)
+	// Verify exactly one SSL_CERT_DIR with the correct value.
+	checkEnvArg := func(name, want string) {
+		var found []string
+		for i, arg := range capturedArgs {
+			if arg == "--env" && i+1 < len(capturedArgs) {
+				next := capturedArgs[i+1]
+				if strings.HasPrefix(next, name+"=") {
+					found = append(found, strings.TrimPrefix(next, name+"="))
 				}
-				foundSSLDir = true
 			}
 		}
-	}
-	if !foundSSLDir {
-		t.Errorf("SSL_CERT_DIR env not found in args: %v", capturedArgs)
+		if len(found) != 1 {
+			t.Errorf("expected exactly 1 %s, got %d: %v", name, len(found), found)
+			return
+		}
+		if found[0] != want {
+			t.Errorf("%s = %q, want %q", name, found[0], want)
+		}
 	}
 
-	// Verify NODE_EXTRA_CA_CERTS env var.
-	foundNodeExtra := false
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) {
-			next := capturedArgs[i+1]
-			if strings.HasPrefix(next, "NODE_EXTRA_CA_CERTS=") {
-				val := strings.TrimPrefix(next, "NODE_EXTRA_CA_CERTS=")
-				if val != trustedCAEnvNodeExtraValue {
-					t.Errorf("NODE_EXTRA_CA_CERTS = %q, want %q", val, trustedCAEnvNodeExtraValue)
-				}
-				foundNodeExtra = true
-			}
-		}
-	}
-	if !foundNodeExtra {
-		t.Errorf("NODE_EXTRA_CA_CERTS env not found in args: %v", capturedArgs)
-	}
+	checkEnvArg("SSL_CERT_DIR", trustedCAEnvSSLDirValue)
+	checkEnvArg("NODE_EXTRA_CA_CERTS", trustedCAEnvNodeExtraValue)
 }
 
 func TestRunCAExplicitEnvWins(t *testing.T) {
