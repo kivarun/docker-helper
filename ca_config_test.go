@@ -2,18 +2,11 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestCAInjectionDefaultDisabled(t *testing.T) {
@@ -157,230 +150,97 @@ func TestCAConfigRelativePath(t *testing.T) {
 	}
 }
 
-func TestCAConfigMissingFile(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	tokenPath := filepath.Join(dir, "admin.token")
-	runtimeDir := filepath.Join(dir, "xdg_runtime")
-	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
-	stateHome := filepath.Join(dir, "xdg_state")
-	stateSubDir := filepath.Join(stateHome, "docker-helper")
-
-	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(stateSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := map[string]any{
-		"allowed_root":         "/tmp/work",
-		"session_ttl":          "12h",
-		"trusted_ca_path":      "/nonexistent/ca.crt",
-		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(configPath, data, 0600)
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_STATE_HOME", stateHome)
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for missing CA file")
-	}
-}
-
-func TestCAConfigNonRegularFile(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	tokenPath := filepath.Join(dir, "admin.token")
-	runtimeDir := filepath.Join(dir, "xdg_runtime")
-	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
-	stateHome := filepath.Join(dir, "xdg_state")
-	stateSubDir := filepath.Join(stateHome, "docker-helper")
-
-	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(stateSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	caDir := filepath.Join(dir, "ca-dir")
-	if err := os.MkdirAll(caDir, 0755); err != nil {
-		t.Fatal(err)
+func TestCAConfigInvalidCA(t *testing.T) {
+	tests := []struct {
+		name    string
+		caSetup func(t *testing.T) string // returns caPath
+		errSub  string
+	}{
+		{
+			name: "missing file",
+			caSetup: func(t *testing.T) string {
+				return "/nonexistent/ca.crt"
+			},
+			errSub: "cannot access trusted_ca_path",
+		},
+		{
+			name: "directory instead of regular file",
+			caSetup: func(t *testing.T) string {
+				d := t.TempDir()
+				return d
+			},
+			errSub: "trusted_ca_path must be a regular file",
+		},
+		{
+			name: "malformed PEM",
+			caSetup: func(t *testing.T) string {
+				caPath := filepath.Join(t.TempDir(), "malformed.crt")
+				if err := os.WriteFile(caPath, []byte("not valid PEM data"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return caPath
+			},
+			errSub: "does not contain valid PEM",
+		},
+		{
+			name: "two certificates",
+			caSetup: func(t *testing.T) string {
+				dir := t.TempDir()
+				ca1 := filepath.Join(dir, "ca1.pem")
+				ca2 := filepath.Join(dir, "ca2.pem")
+				generateTestCAPEM(t, ca1)
+				generateTestCAPEM(t, ca2)
+				data1, err := os.ReadFile(ca1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data2, err := os.ReadFile(ca2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				caPath := filepath.Join(dir, "multi-ca.crt")
+				if err := os.WriteFile(caPath, append(data1, data2...), 0644); err != nil {
+					t.Fatal(err)
+				}
+				return caPath
+			},
+			errSub: "extra content after certificate",
+		},
 	}
 
-	fakeBinDir := filepath.Join(dir, "fake_bin")
-	os.MkdirAll(fakeBinDir, 0755)
-	os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho abcd1234\n"), 0755)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			runtimeDir := filepath.Join(dir, "runtime")
 
-	cfg := map[string]any{
-		"allowed_root":         "/tmp/work",
-		"session_ttl":          "12h",
-		"trusted_ca_path":      caDir,
-		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(configPath, data, 0600)
+			caPath := tt.caSetup(t)
 
-	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	oldState := os.Getenv("XDG_STATE_HOME")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_STATE_HOME", stateHome)
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
-	defer func() {
-		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
-		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
-		os.Setenv("XDG_STATE_HOME", oldState)
-		os.Setenv("PATH", oldPath)
-	}()
+			cfg, err := json.MarshalIndent(map[string]any{
+				"allowed_root":         "/tmp/work",
+				"session_ttl":          "12h",
+				"trusted_ca_path":      caPath,
+				"trusted_ca_injection": "auto",
+			}, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, cfg, 0600); err != nil {
+				t.Fatal(err)
+			}
 
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for non-regular CA file")
-	}
-}
+			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+			t.Setenv("XDG_STATE_HOME", "")
 
-func TestCAConfigMalformedPEM(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	tokenPath := filepath.Join(dir, "admin.token")
-	runtimeDir := filepath.Join(dir, "xdg_runtime")
-	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
-	stateHome := filepath.Join(dir, "xdg_state")
-	stateSubDir := filepath.Join(stateHome, "docker-helper")
-
-	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(stateSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	caPath := filepath.Join(dir, "malformed.crt")
-	os.WriteFile(caPath, []byte("not valid PEM data"), 0644)
-
-	fakeBinDir := filepath.Join(dir, "fake_bin")
-	os.MkdirAll(fakeBinDir, 0755)
-	os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho abcd1234\n"), 0755)
-
-	cfg := map[string]any{
-		"allowed_root":         "/tmp/work",
-		"session_ttl":          "12h",
-		"trusted_ca_path":      caPath,
-		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(configPath, data, 0600)
-
-	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	oldState := os.Getenv("XDG_STATE_HOME")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_STATE_HOME", stateHome)
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
-	defer func() {
-		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
-		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
-		os.Setenv("XDG_STATE_HOME", oldState)
-		os.Setenv("PATH", oldPath)
-	}()
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for malformed PEM")
-	}
-}
-
-func TestCAConfigMultipleCerts(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	tokenPath := filepath.Join(dir, "admin.token")
-	runtimeDir := filepath.Join(dir, "xdg_runtime")
-	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
-	stateHome := filepath.Join(dir, "xdg_state")
-	stateSubDir := filepath.Join(stateHome, "docker-helper")
-
-	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(stateSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Generate two certificates and concatenate them as PEM.
-	priv1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	priv2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-
-	template := x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	cert1, _ := x509.CreateCertificate(rand.Reader, &template, &template, &priv1.PublicKey, priv1)
-	template.SerialNumber = big.NewInt(2)
-	cert2, _ := x509.CreateCertificate(rand.Reader, &template, &template, &priv2.PublicKey, priv2)
-
-	caPath := filepath.Join(dir, "multi-ca.crt")
-	var buf bytes.Buffer
-	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert1}))
-	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert2}))
-	os.WriteFile(caPath, buf.Bytes(), 0644)
-
-	fakeBinDir := filepath.Join(dir, "fake_bin")
-	os.MkdirAll(fakeBinDir, 0755)
-	os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho abcd1234\n"), 0755)
-
-	cfg := map[string]any{
-		"allowed_root":         "/tmp/work",
-		"session_ttl":          "12h",
-		"trusted_ca_path":      caPath,
-		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(configPath, data, 0600)
-
-	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	oldState := os.Getenv("XDG_STATE_HOME")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_STATE_HOME", stateHome)
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
-	defer func() {
-		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
-		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
-		os.Setenv("XDG_STATE_HOME", oldState)
-		os.Setenv("PATH", oldPath)
-	}()
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for multiple certificates")
+			_, err = loadConfig()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.errSub) {
+				t.Fatalf("expected error containing %q, got: %v", tt.errSub, err)
+			}
+		})
 	}
 }
 
