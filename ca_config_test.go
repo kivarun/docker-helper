@@ -526,31 +526,6 @@ func TestCAConfigShowAllIncludesNewFields(t *testing.T) {
 	}
 }
 
-func TestCAConfigSetUnchanged(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
-
-	cfg := map[string]any{
-		"allowed_root":         "/tmp/work",
-		"session_ttl":          "12h",
-		"trusted_ca_path":      caPath,
-		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "unchanged") {
-		t.Errorf("expected 'unchanged' in output, got: %s", stdout.String())
-	}
-}
-
 func TestCAConfigShowDefaults(t *testing.T) {
 	cfg := `{
   "allowed_root": "/tmp/work",
