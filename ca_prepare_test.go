@@ -10,8 +10,7 @@ import (
 )
 
 func TestCAPrepareSuccess(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",
@@ -81,8 +80,7 @@ func TestCAPrepareSuccess(t *testing.T) {
 }
 
 func TestCAPrepareIdempotent(t *testing.T) {
-	configPath, caPath, runtimeDir, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, runtimeDir, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",
@@ -129,8 +127,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 	oldUmask := syscall.Umask(0077)
 	defer syscall.Umask(oldUmask)
 
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",
@@ -188,8 +185,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 }
 
 func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",
@@ -231,8 +227,7 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 }
 
 func TestCAReloadChangesCA(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",

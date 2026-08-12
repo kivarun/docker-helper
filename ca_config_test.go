@@ -28,8 +28,7 @@ func TestCAInjectionDefaultDisabled(t *testing.T) {
 }
 
 func TestCAConfigShowSetUnset(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",
@@ -262,8 +261,7 @@ func TestCAConfigAutoEmptyPath(t *testing.T) {
 }
 
 func TestCAConfigSetValidation(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root": "/tmp/work",
@@ -303,8 +301,7 @@ func TestCAConfigSetValidation(t *testing.T) {
 }
 
 func TestCAUnsetPathWhenAutoActive(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",
@@ -353,8 +350,7 @@ func TestCAInitNoInjectionDefault(t *testing.T) {
 }
 
 func TestCAConfigShowAllIncludesNewFields(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",

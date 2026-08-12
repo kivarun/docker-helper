@@ -10,8 +10,7 @@ import (
 )
 
 func TestCAPreflightAutoMissingCA(t *testing.T) {
-	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, caPath, _ := setupCAConfigPreflightTest(t)
 
 	// Remove the CA file so it's missing.
 	if err := os.Remove(caPath); err != nil {
@@ -56,8 +55,7 @@ func TestCAPreflightAutoMissingCA(t *testing.T) {
 }
 
 func TestCAPreflightAutoMalformedCA(t *testing.T) {
-	configPath, _, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, _, _ := setupCAConfigPreflightTest(t)
 
 	// Create a malformed CA file.
 	badCAPath := filepath.Join(filepath.Dir(configPath), "bad-ca.crt")
@@ -103,8 +101,7 @@ func TestCAPreflightAutoMalformedCA(t *testing.T) {
 }
 
 func TestCAPreflightAutoLeafCA(t *testing.T) {
-	configPath, _, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, _, _ := setupCAConfigPreflightTest(t)
 
 	// Create a leaf certificate.
 	leafPath := filepath.Join(filepath.Dir(configPath), "leaf.crt")
@@ -151,8 +148,7 @@ func TestCAPreflightAutoLeafCA(t *testing.T) {
 }
 
 func TestCAPreflightAutoNoOpenSSL(t *testing.T) {
-	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, caPath, _ := setupCAConfigPreflightTest(t)
 
 	// Set PATH to empty dir (no openssl).
 	emptyBin := filepath.Join(filepath.Dir(configPath), "empty_bin")
@@ -199,8 +195,7 @@ func TestCAPreflightAutoNoOpenSSL(t *testing.T) {
 }
 
 func TestCAPreflightAutoOpenSSLFailure(t *testing.T) {
-	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, caPath, _ := setupCAConfigPreflightTest(t)
 
 	// Replace fake openssl with one that fails.
 	fakeBinDir := filepath.Join(filepath.Dir(configPath), "fake_bin")
@@ -246,8 +241,7 @@ func TestCAPreflightAutoOpenSSLFailure(t *testing.T) {
 }
 
 func TestCAPreflightAutoOpenSSLInvalidOutput(t *testing.T) {
-	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, caPath, _ := setupCAConfigPreflightTest(t)
 
 	// Replace fake openssl with one that returns invalid output.
 	fakeBinDir := filepath.Join(filepath.Dir(configPath), "fake_bin")
@@ -293,8 +287,7 @@ func TestCAPreflightAutoOpenSSLInvalidOutput(t *testing.T) {
 }
 
 func TestCAPreflightReplacePathInvalidWhileAuto(t *testing.T) {
-	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, caPath, _ := setupCAConfigPreflightTest(t)
 
 	// First set path and enable auto (should succeed with valid CA).
 	var stdout, stderr bytes.Buffer
@@ -341,8 +334,7 @@ func TestCAPreflightReplacePathInvalidWhileAuto(t *testing.T) {
 }
 
 func TestCAPreflightValidCASucceeds(t *testing.T) {
-	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, caPath, _ := setupCAConfigPreflightTest(t)
 
 	// Set path and enable auto (should succeed).
 	var stdout, stderr bytes.Buffer
@@ -437,8 +429,7 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 }
 
 func TestCAPreflightUnchangedWithBrokenCA(t *testing.T) {
-	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
-	defer cleanup()
+	configPath, caPath, _ := setupCAConfigPreflightTest(t)
 
 	// Set up valid config first.
 	var stdout, stderr bytes.Buffer
@@ -489,8 +480,7 @@ func TestCAPreflightUnchangedWithBrokenCA(t *testing.T) {
 }
 
 func TestCAPreflightSetUnchanged(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",
@@ -517,8 +507,7 @@ func TestCAPreflightSetUnchanged(t *testing.T) {
 }
 
 func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
-	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
-	defer cleanup()
+	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
 		"allowed_root":         "/tmp/work",

@@ -164,7 +164,7 @@ func createFakeOpenSSL(t *testing.T, fakeBinDir, hash string) {
 }
 
 // setupCAConfigTest creates a test environment with config, runtime dir, and a fake openssl.
-func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir string, cleanup func()) {
+func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir string) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -193,28 +193,17 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir
 		t.Fatal(err)
 	}
 
-	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	oldState := os.Getenv("XDG_STATE_HOME")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	os.Setenv("XDG_STATE_HOME", stateHome)
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cleanup = func() {
-		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
-		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
-		os.Setenv("XDG_STATE_HOME", oldState)
-		os.Setenv("PATH", oldPath)
-	}
-
-	return configPath, caPath, runtimeDir, fakeBinDir, cleanup
+	return configPath, caPath, runtimeDir, fakeBinDir
 }
 
 // setupCAConfigPreflightTest creates a minimal test environment for testing
 // config set/unset CA preflight without XDG_RUNTIME_DIR.
-func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir string, cleanup func()) {
+func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir string) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -245,15 +234,8 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 		t.Fatal(err)
 	}
 
-	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	cleanup = func() {
-		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
-		os.Setenv("PATH", oldPath)
-	}
-
-	return configPath, caPath, fakeBinDir, cleanup
+	return configPath, caPath, fakeBinDir
 }
