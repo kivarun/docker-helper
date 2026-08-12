@@ -633,3 +633,43 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 
 	return nil
 }
+
+// validateCAConfig performs a CA-specific preflight check before the config
+// is persisted. It only runs when the effective trusted_ca_injection is "auto".
+// It validates the CA file and openssl availability without requiring
+// XDG_RUNTIME_DIR, creating directories, or materializing artifacts.
+func validateCAConfig(raw map[string]json.RawMessage) error {
+	injRaw, ok := raw["trusted_ca_injection"]
+	if !ok {
+		return nil
+	}
+	var inj string
+	if err := json.Unmarshal(injRaw, &inj); err != nil {
+		return nil // validation error will be caught by validateRawConfig
+	}
+	if inj != "auto" {
+		return nil
+	}
+
+	pathRaw, ok := raw["trusted_ca_path"]
+	if !ok {
+		return nil // validation error will be caught by validateRawConfig
+	}
+	var caPath string
+	if err := json.Unmarshal(pathRaw, &caPath); err != nil {
+		return nil
+	}
+	if caPath == "" {
+		return nil
+	}
+
+	if _, err := validateCAFile(caPath); err != nil {
+		return err
+	}
+
+	if _, err := computeOpenSSLHash(caPath); err != nil {
+		return err
+	}
+
+	return nil
+}

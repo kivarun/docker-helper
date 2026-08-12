@@ -275,6 +275,9 @@ func persistRawConfig(configPath string, raw map[string]json.RawMessage) error {
 	if err := validateRawConfig(raw); err != nil {
 		return err
 	}
+	if err := validateCAConfig(raw); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("cannot encode JSON: %w", err)
@@ -623,6 +626,10 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 	if existing, ok := raw[field]; ok && bytes.Equal(existing, newValue) {
 		// Validate the existing configuration before returning unchanged.
 		if err := validateRawConfig(raw); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		if err := validateCAConfig(raw); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}

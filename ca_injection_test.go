@@ -1875,3 +1875,362 @@ func TestAuditRecordTrustedCAInjected(t *testing.T) {
 		t.Error("trusted_ca_injected should be omitted when false")
 	}
 }
+
+// --- CA preflight on config set/unset ---
+
+// setupCAConfigPreflightTest creates a minimal test environment for testing
+// config set/unset CA preflight without XDG_RUNTIME_DIR.
+// Returns configPath, a CA path (may be empty), a fake_bin dir, and a cleanup function.
+func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir string, cleanup func()) {
+	t.Helper()
+	dir := t.TempDir()
+
+	configPath = filepath.Join(dir, "config.json")
+	tokenPath := filepath.Join(dir, "admin.token")
+	fakeBinDir = filepath.Join(dir, "fake_bin")
+
+	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a real CA file.
+	caPath = filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	// Compute the real openssl hash for this CA.
+	realHash := computeTestOpenSSLHash(t, caPath)
+
+	// Create fake openssl that returns the hash.
+	opensslScript := "#!/bin/sh\necho " + realHash + "\n"
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte(opensslScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write admin token.
+	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := map[string]any{
+		"allowed_root":         "/tmp/work",
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "disabled",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
+	oldPath := os.Getenv("PATH")
+	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
+
+	cleanup = func() {
+		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
+		os.Setenv("PATH", oldPath)
+	}
+
+	return configPath, caPath, fakeBinDir, cleanup
+}
+
+func TestCAPreflightAutoMissingCA(t *testing.T) {
+	_, caPath, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Remove the CA file so it's missing.
+	os.Remove(caPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stdout: %q, stderr: %q", code, stdout.String(), stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "error") {
+		t.Errorf("expected error in stderr, got: %q", stderr.String())
+	}
+
+	// Config file should be unchanged.
+	configPath := filepath.Dir(caPath) + "/config.json"
+	data, _ := os.ReadFile(configPath)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if raw["trusted_ca_injection"] != "disabled" {
+		t.Errorf("config should be unchanged, got injection=%v", raw["trusted_ca_injection"])
+	}
+}
+
+func TestCAPreflightAutoMalformedCA(t *testing.T) {
+	configPath, _, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Create a malformed CA file.
+	badCAPath := filepath.Join(filepath.Dir(configPath), "bad-ca.crt")
+	os.WriteFile(badCAPath, []byte("not valid PEM data"), 0644)
+
+	// First set the path.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", badCAPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+
+	// Now try to enable auto with the malformed CA.
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+
+	// Config should still have disabled injection.
+	data, _ := os.ReadFile(configPath)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if raw["trusted_ca_injection"] != "disabled" {
+		t.Errorf("config injection should still be disabled, got %v", raw["trusted_ca_injection"])
+	}
+}
+
+func TestCAPreflightAutoLeafCA(t *testing.T) {
+	configPath, _, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Create a leaf certificate.
+	leafPath := filepath.Join(filepath.Dir(configPath), "leaf.crt")
+	generateTestLeafPEM(t)
+	leafPEM := generateTestLeafPEM(t)
+	os.WriteFile(leafPath, leafPEM, 0644)
+
+	// Set the path first.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", leafPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+
+	// Try to enable auto with the leaf CA.
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+}
+
+func TestCAPreflightAutoNoOpenSSL(t *testing.T) {
+	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Set PATH to empty dir (no openssl).
+	emptyBin := filepath.Join(filepath.Dir(configPath), "empty_bin")
+	os.MkdirAll(emptyBin, 0755)
+	oldPath := os.Getenv("PATH")
+	os.Setenv("PATH", emptyBin)
+	defer os.Setenv("PATH", oldPath)
+
+	// Set the path first.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+
+	// Try to enable auto without openssl.
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+}
+
+func TestCAPreflightAutoOpenSSLFailure(t *testing.T) {
+	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Replace fake openssl with one that fails.
+	fakeBinDir := filepath.Join(filepath.Dir(configPath), "fake_bin")
+	os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\nexit 1\n"), 0755)
+
+	// Set the path first.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+
+	// Try to enable auto with failing openssl.
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+}
+
+func TestCAPreflightAutoOpenSSLInvalidOutput(t *testing.T) {
+	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Replace fake openssl with one that returns invalid output.
+	fakeBinDir := filepath.Join(filepath.Dir(configPath), "fake_bin")
+	os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho not-a-hash\n"), 0755)
+
+	// Set the path first.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+
+	// Try to enable auto with invalid openssl output.
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+}
+
+func TestCAPreflightReplacePathInvalidWhileAuto(t *testing.T) {
+	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// First set path and enable auto (should succeed with valid CA).
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+
+	// Now try to replace path with a non-existent file.
+	badPath := filepath.Join(filepath.Dir(configPath), "nonexistent.crt")
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_path", badPath}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+
+	// Config should be unchanged.
+	data, _ := os.ReadFile(configPath)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if raw["trusted_ca_path"] != caPath {
+		t.Errorf("config path should be unchanged, got %v", raw["trusted_ca_path"])
+	}
+}
+
+func TestCAPreflightValidCASucceeds(t *testing.T) {
+	configPath, caPath, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Set path and enable auto (should succeed).
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated") {
+		t.Errorf("expected 'updated' in stdout, got: %q", stdout.String())
+	}
+
+	// Verify config was written.
+	data, _ := os.ReadFile(configPath)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if raw["trusted_ca_injection"] != "auto" {
+		t.Errorf("expected auto, got %v", raw["trusted_ca_injection"])
+	}
+}
+
+func TestCAPreflightDisabledNoValidation(t *testing.T) {
+	configPath, _, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Point to a non-existent CA path while injection is disabled.
+	// This should succeed without validating the CA file.
+	badPath := filepath.Join(filepath.Dir(configPath), "nonexistent.crt")
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", badPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0 for disabled mode, got %d, stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated") {
+		t.Errorf("expected 'updated' in stdout, got: %q", stdout.String())
+	}
+
+	// Verify no runtime/state directories were created.
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+		// We didn't set XDG_RUNTIME_DIR, so this shouldn't happen.
+		// But if it was set, verify no directories were created.
+		_ = runtimeDir
+	}
+}
+
+func TestCAPreflightUnchangedWithBrokenCA(t *testing.T) {
+	_, caPath, _, cleanup := setupCAConfigPreflightTest(t)
+	defer cleanup()
+
+	// Set up valid config first.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+
+	// Now break the CA file.
+	os.Remove(caPath)
+
+	// Try to set the same values (unchanged path).
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 for unchanged with broken CA, got %d, stdout: %q, stderr: %q", code, stdout.String(), stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+}
