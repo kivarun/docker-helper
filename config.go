@@ -216,11 +216,7 @@ func loadConfig() (*Config, error) {
 		operationLogMaxBytes = *fc.OperationLogMaxBytes
 	}
 
-	// Parse trusted_ca_injection (default: "disabled").
-	trustedCAInjection := fc.TrustedCAInjection
-	if trustedCAInjection == "" {
-		trustedCAInjection = "disabled"
-	}
+	trustedCAInjection := resolveTrustedCAInjection(fc.TrustedCAInjection)
 
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
