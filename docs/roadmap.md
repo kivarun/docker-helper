@@ -262,63 +262,32 @@ Do not design their APIs here.
 
 ## 2.0
 
-### Main goal: remote build and run
+### Main goal: multi-user system service and distribution
 
-See [`docs/release-2-plan.md`](release-2-plan.md) for the staged implementation
-and acceptance plan.
+Release 2 turns docker-helper from a per-user service into a normally
+installable multi-user system service. System deployment, the local access
+model, and native distribution are one architectural block and should be
+designed and accepted together.
 
-Release 2 adds remote builds and image runs without turning docker-helper into
-a distributed workspace or control plane.
+Release 2 remains local-only. The supported network transport is loopback HTTP;
+TLS and non-loopback exposure are outside this release.
 
-The supported deployment remains single-owner and user-managed. One client is
-configured for either the local Unix socket or one remote HTTPS endpoint.
-Multiple helper contexts, routing, and helper-to-helper forwarding are outside
-Release 2.
-
-Remote-operation scope:
-
-- preserve the existing admin/session token model, session lifecycle, and async
-  build/run operation lifecycle;
-- require authenticated HTTPS for the remote endpoint with normal certificate
-  validation; do not add an insecure-TLS mode;
-- have the client assemble the Docker build context with `.dockerignore`
-  semantics and stream it as tar;
-- use one multipart build request with JSON metadata first and an
-  `application/x-tar` context part second;
-- do not introduce a separate upload resource or a second build-job lifecycle;
-- build in the Docker daemon attached to the selected helper;
-- keep the resulting image and build cache on that remote daemon;
-- do not automatically export/download the image or push it to a registry;
-- run images on the selected helper with the existing command, entrypoint,
-  container workdir, environment, `shm_size`, logs, status, result, and
-  cancellation behavior;
-- reject host mounts for remote sessions: remote `run` operates on the image
-  and its container-local filesystem only.
-
-Explicitly outside Release 2:
-
-- mutable remote workspaces, host mounts, or bidirectional workspace
-  synchronization;
-- multi-helper selection or routing;
-- system-service and multi-user deployment;
-- native distribution packages and package repositories.
-
-## 3.0
-
-### Main goal: system distribution
-
-Release 3 makes docker-helper a normally installable multi-user system service.
-System deployment, the access model, and native packages are one architectural
-block and should not be split into independent deliverables.
+The existing [`docs/release-2-plan.md`](release-2-plan.md) predates this scope
+change and must be rewritten before implementation work relies on it.
 
 Expected scope:
 
 - decide whether the daemon runs as root or under a dedicated service account;
-- define system config, state, runtime, token, and socket paths;
-- define local multi-user authentication and authorization;
-- define Unix-socket ownership and permissions;
-- authorize workspaces per user without widening one global `allowed_root` to
-  all of `/home`;
+- define system config, state, runtime, credential, and service paths;
+- define an explicit local principal/credential model for multiple users and
+  agents, preserving session-scoped authorization where it remains useful;
+- authorize workspace roots per principal without widening one global
+  `allowed_root` to all of `/home`;
+- expose the supported local HTTP endpoint on loopback only, with no TLS and no
+  supported non-loopback bind in Release 2;
+- preserve the existing pull/build/run and async operation lifecycle unless the
+  multi-user review identifies a concrete correctness or authorization need to
+  change it;
 - provide a systemd system unit and the operational hardening required by a
   packaged system daemon;
 - provide native DEB and RPM packages;
@@ -332,6 +301,49 @@ Expected scope:
 Administrative operations may initially rely on `sudo`. Do not introduce a
 separate administrative control plane without a demonstrated need.
 
+Explicitly outside Release 2:
+
+- remote or non-loopback access;
+- TLS configuration and certificate lifecycle;
+- remote build-context upload or workspace synchronization;
+- multiple helper contexts, routing, or helper-to-helper forwarding;
+- durable operation recovery across daemon restarts.
+
+## 3.0
+
+### Main goal: authenticated remote access over TLS
+
+Release 3 exposes docker-helper remotely over HTTPS after the local multi-user
+identity and authorization model is established in Release 2.
+
+Remote access must reuse the same principal, credential, authorization, and
+operation-lifecycle concepts rather than introducing a parallel "remote
+session" model or a mandatory control plane.
+
+Expected scope:
+
+- add an explicitly configured non-loopback network listener protected by TLS;
+- require normal certificate and hostname validation; do not add an
+  insecure-TLS mode;
+- reuse the Release 2 identity/authorization model for both local and remote
+  clients and enforce route authorization on the server;
+- define remote build semantics for client-side build contexts without turning
+  the helper into a distributed mutable workspace;
+- support image-based remote run without host mounts from the client machine;
+- preserve existing async status, logs, result, and cancellation semantics
+  where practical;
+- keep resulting images and build cache on the selected helper unless the user
+  explicitly pushes or exports them.
+
+Explicitly outside Release 3:
+
+- mutable remote workspace synchronization;
+- remote runs coupled to a synchronized mutable workspace;
+- multiple helper contexts, target routing, or helper-to-helper forwarding;
+- a mandatory shared runtime or control plane;
+- durable operation recovery across daemon restarts unless real use justifies
+  pulling it forward.
+
 ## 4.0
 
 ### Main goal: full remote environment
@@ -343,7 +355,7 @@ execution into a full remote working environment:
 - remote runs coupled to a delivered workspace;
 - multiple helper contexts and target selection;
 - routing or optional helper-to-helper integration;
-- richer asynchronous upload/job protocols if the one-request build upload
+- richer asynchronous upload/job protocols if the Release 3 remote-build path
   proves insufficient;
 - cancellation and recovery across interrupted uploads, connections, or daemon
   restarts;
