@@ -164,7 +164,7 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 	// If the directory already exists with the correct content, skip.
 	if info, err := os.Stat(fpDir); err == nil && info.IsDir() {
 		if existing, err := os.ReadFile(caFile); err == nil && bytes.Equal(existing, caData) {
-			if _, err := os.Lstat(symlinkPath); err == nil {
+			if target, err := os.Readlink(symlinkPath); err == nil && target == "ca.pem" {
 				// Ensure the fingerprint directory mode is 0755 regardless of umask.
 				if err := os.Chmod(fpDir, 0755); err != nil {
 					return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
@@ -210,8 +210,10 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 	}
 
 	// Create the openssl hash symlink.
-	// Remove existing symlink if present (different hash or stale).
-	os.Remove(symlinkPath)
+	// Remove existing entry if present (different hash or stale).
+	if err := os.Remove(symlinkPath); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("cannot remove existing CA hash entry: %w", err)
+	}
 	if err := os.Symlink("ca.pem", symlinkPath); err != nil {
 		return "", fmt.Errorf("cannot create CA hash symlink: %w", err)
 	}

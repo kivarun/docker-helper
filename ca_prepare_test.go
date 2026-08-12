@@ -321,3 +321,103 @@ func TestCAOpenSSLInvalidOutput(t *testing.T) {
 		t.Fatal("expected error for invalid openssl output")
 	}
 }
+
+func TestCAPrepareFixesWrongSymlink(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "xdg_runtime")
+	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
+	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	hash := computeTestOpenSSLHash(t, caPath)
+	fakeBinDir := filepath.Join(dir, "fake_bin")
+	createFakeOpenSSL(t, fakeBinDir, hash)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// First preparation succeeds.
+	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	symlinkPath := filepath.Join(preparedDir, hash+".0")
+
+	// Corrupt: replace symlink with one pointing to wrong.pem.
+	if err := os.Remove(symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("wrong.pem", symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-prepare should fix the symlink.
+	preparedDir2, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preparedDir2 != preparedDir {
+		t.Error("expected same prepared dir")
+	}
+
+	target, err := os.Readlink(symlinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "ca.pem" {
+		t.Errorf("symlink target = %q, want ca.pem", target)
+	}
+}
+
+func TestCAPrepareFixesRegularFileHashEntry(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "xdg_runtime")
+	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
+	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	hash := computeTestOpenSSLHash(t, caPath)
+	fakeBinDir := filepath.Join(dir, "fake_bin")
+	createFakeOpenSSL(t, fakeBinDir, hash)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// First preparation succeeds.
+	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	symlinkPath := filepath.Join(preparedDir, hash+".0")
+
+	// Corrupt: replace symlink with a regular file.
+	if err := os.Remove(symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(symlinkPath, []byte("not-a-symlink"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-prepare should restore the symlink.
+	preparedDir2, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preparedDir2 != preparedDir {
+		t.Error("expected same prepared dir")
+	}
+
+	target, err := os.Readlink(symlinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "ca.pem" {
+		t.Errorf("symlink target = %q, want ca.pem", target)
+	}
+}
