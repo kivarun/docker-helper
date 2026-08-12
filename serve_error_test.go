@@ -2,31 +2,45 @@ package main
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// TestServeErrorPathTerminatesOperations verifies that when server.Serve()
-// returns an error without a shutdown signal, running operations are still
-// terminated and no panic occurs.
-func TestServeErrorPathTerminatesOperations(t *testing.T) {
+// TestServeErrorPathDrainsAndClosesGate verifies that when server.Serve()
+// returns an error without a shutdown signal, the daemon:
+//  1. closes the operation gate automatically (no manual setShuttingDown);
+//  2. drains in-flight HTTP connections;
+//  3. returns the original Serve error.
+func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := dir + "/test.sock"
 
 	reg := newOperationRegistry()
 
-	// Create a running operation that hasn't started a process yet.
-	op := newBuildOperation("test_session", "example:test", ".", "Dockerfile", 1024)
-	// Use tryCreate to register (gate is open, so it succeeds).
-	if !reg.tryCreate(op) {
-		t.Fatal("tryCreate should succeed when gate is open")
-	}
-	// op.started is false by default — simulate pre-start state.
+	// Track whether the shutdown callback was invoked.
+	var callbackCalled atomic.Bool
 
-	// Create a server and listener.
+	// Create a handler that blocks until released.
+	var handlerEntered sync.WaitGroup
+	handlerEntered.Add(1)
+	releaseHandler := make(chan struct{})
+
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /block", func(w http.ResponseWriter, r *http.Request) {
+		// Drain the request body so the connection stays clean.
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		handlerEntered.Done()
+		// Block until the test releases us.
+		<-releaseHandler
+		w.WriteHeader(http.StatusOK)
+	})
+
 	server := &http.Server{Handler: mux}
 
 	listener, err := net.Listen("unix", socketPath)
@@ -37,36 +51,86 @@ func TestServeErrorPathTerminatesOperations(t *testing.T) {
 	signalCtx, signalCancel := context.WithCancel(context.Background())
 	defer signalCancel()
 
-	// Close the listener to force Serve to error out.
+	// Start serveWithShutdown in a goroutine so we can close the listener
+	// to trigger the Serve error path.
+	type result struct {
+		shutdownCtx    context.Context
+		shutdownCancel func()
+		drainDone      <-chan error
+		serveErr       error
+	}
+	resultCh := make(chan result, 1)
+
+	go func() {
+		sc, scancel, dd, e := serveWithShutdown(signalCtx, server, listener, 3*time.Second, func() {
+			callbackCalled.Store(true)
+			reg.setShuttingDown()
+		})
+		resultCh <- result{sc, scancel, dd, e}
+	}()
+
+	// Wait a moment for Serve to start accepting connections.
+	time.Sleep(50 * time.Millisecond)
+
+	// Connect a client that enters the blocking handler.
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Send the blocking request.
+	go func() {
+		req, _ := http.NewRequest("POST", "/block", nil)
+		req.Write(conn) //nolint:errcheck // best effort
+	}()
+
+	// Wait for the handler to enter.
+	handlerEntered.Wait()
+
+	// Close the listener to force Serve() to return an error.
 	listener.Close()
 
-	// serveWithShutdown will get the serve error (not signal path).
-	shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdown(signalCtx, server, listener, 2*time.Second, func() {
-		reg.setShuttingDown()
-	})
-	<-drainDone
-	shutdownCancel()
+	// Collect the result from serveWithShutdown.
+	res := <-resultCh
 
-	// serveWithShutdown should return the serve error.
-	if err == nil {
+	// Verify the Serve error was returned.
+	if res.serveErr == nil {
 		t.Fatal("expected serve error")
 	}
 
-	// shutdownCtx should be valid (not nil).
-	if shutdownCtx == nil {
-		t.Fatal("shutdownCtx must not be nil on serve error path")
+	// Verify the shutdown callback was called (operation gate closed).
+	if !callbackCalled.Load() {
+		t.Fatal("shutdown callback was not called on Serve error")
 	}
 
-	// terminateAll should not panic with the returned context.
-	reg.setShuttingDown()
-	reg.terminateAll(shutdownCtx, nil)
-
-	// The operation should have been handled (no panic).
-	// Since op.cmd is nil, terminateAll marks it as terminated.
-	op.mu.Lock()
-	terminated := op.terminated
-	op.mu.Unlock()
-	if !terminated {
-		t.Error("operation should be marked as terminated")
+	// Verify that the operation gate is now closed.
+	op := newBuildOperation("test_session", "example:test", ".", "Dockerfile", 1024)
+	if reg.tryCreate(op) {
+		t.Error("tryCreate should fail after shutdown callback closes gate")
 	}
+
+	// Verify that drain is still in progress (handler hasn't finished yet).
+	select {
+	case <-res.drainDone:
+		t.Fatal("drain should not complete while handler is still running")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: drain is still waiting.
+	}
+
+	// Release the handler.
+	close(releaseHandler)
+
+	// Drain should now complete.
+	select {
+	case drainErr := <-res.drainDone:
+		if drainErr != nil {
+			t.Logf("drain error (may be expected): %v", drainErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain did not complete after handler released")
+	}
+
+	// Clean up.
+	res.shutdownCancel()
 }
