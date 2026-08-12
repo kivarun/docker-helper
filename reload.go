@@ -10,25 +10,15 @@ import (
 
 // runReload is the CLI entry point for the reload command.
 func runReload(stdout, stderr io.Writer) int {
-	cfg, err := loadConfig()
+	socketPath, adminTokenPath := adminAPIPaths()
+
+	tokenSource, err := adminAPITokenSource(adminTokenPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	tokenSource, err := func() (func() (string, error), error) {
-		src, err := readAdminTokenPlain(cfg.AdminTokenPath)
-		if err != nil {
-			return nil, err
-		}
-		return func() (string, error) { return src, nil }, nil
-	}()
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	client := newReloadClient(cfg.SocketPath, tokenSource)
+	client := newReloadClient(socketPath, tokenSource)
 	if err := client.reload(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

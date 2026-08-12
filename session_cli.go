@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 )
@@ -36,15 +37,15 @@ var sessionCreateCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				cfg, err := loadConfig()
+				socketPath, adminTokenPath := adminAPIPaths()
+
+				tokenSource, err := adminAPITokenSource(adminTokenPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
-				client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
-					return readAdminTokenPlain(cfg.AdminTokenPath)
-				}, nil)
+				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				result, err := client.createSession(*workspace)
 				if err != nil {
@@ -89,15 +90,15 @@ var sessionListCommand = &Command{
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				cfg, err := loadConfig()
+				socketPath, adminTokenPath := adminAPIPaths()
+
+				tokenSource, err := adminAPITokenSource(adminTokenPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
-				client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
-					return readAdminTokenPlain(cfg.AdminTokenPath)
-				}, nil)
+				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				result, err := client.listSessions()
 				if err != nil {
@@ -138,15 +139,15 @@ var sessionDeleteCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				cfg, err := loadConfig()
+				socketPath, adminTokenPath := adminAPIPaths()
+
+				tokenSource, err := adminAPITokenSource(adminTokenPath)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
-				client := newUnixAPIClient(cfg.SocketPath, func() (string, error) {
-					return readAdminTokenPlain(cfg.AdminTokenPath)
-				}, nil)
+				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				if err := client.deleteSession(*id); err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
@@ -218,13 +219,9 @@ The daemon also removes expired sessions automatically at startup.`,
 }
 
 func runSessionCleanup(stdout, stderr io.Writer) int {
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
+	dbPath := filepath.Join(getStateDir(), "docker-helper.db")
 
-	db, err := openDatabase(cfg.DatabasePath)
+	db, err := openDatabase(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
