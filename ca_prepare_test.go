@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -503,5 +505,63 @@ func TestCAPrepareFixesPemSymlink(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0644 {
 		t.Errorf("ca.pem mode = %o, want 0644", info.Mode().Perm())
+	}
+}
+
+func TestCAPrepareSnapshotConsistency(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "xdg_runtime")
+	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
+	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+	originalData, err := os.ReadFile(caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a fake openssl that captures stdin and corrupts the source file.
+	capturePath := filepath.Join(dir, "captured.pem")
+	fakeBinDir := filepath.Join(dir, "fake_bin")
+	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake openssl: reads stdin to capture file, corrupts source, outputs hash.
+	script := fmt.Sprintf("#!/bin/sh\ncat > %s && echo 'not a cert' > %s && echo %s\n",
+		filepath.ToSlash(capturePath),
+		filepath.ToSlash(caPath),
+		testOpenSSLHash)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// prepareCAInjection should succeed using the original snapshot.
+	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatalf("prepareCAInjection failed: %v", err)
+	}
+
+	// Verify captured stdin matches original bytes.
+	capturedData, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(capturedData, originalData) {
+		t.Error("captured stdin does not match original CA bytes")
+	}
+
+	// Verify prepared ca.pem matches original bytes.
+	preparedCAFile := filepath.Join(preparedDir, "ca.pem")
+	preparedData, err := os.ReadFile(preparedCAFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(preparedData, originalData) {
+		t.Error("prepared ca.pem does not match original CA bytes")
 	}
 }

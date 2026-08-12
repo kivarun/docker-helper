@@ -33,6 +33,38 @@ const trustedCAEnvNodeExtraValue = "/run/docker-helper/trusted-ca/ca.pem"
 // opensslHashPattern validates the output of `openssl x509 -hash -noout`.
 var opensslHashPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
 
+// readValidatedCAFile opens the file at caPath, verifies it is a regular file,
+// reads its contents, and validates them as a single PEM-encoded X.509 CA
+// certificate. Returns the file bytes and the parsed certificate.
+// The file is opened once; the fd is used for Stat to avoid TOCTOU.
+func readValidatedCAFile(caPath string) ([]byte, *x509.Certificate, error) {
+	f, err := os.Open(caPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot access trusted_ca_path: %w", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot access trusted_ca_path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
+	}
+
+	data, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read trusted_ca_path: %w", err)
+	}
+
+	cert, err := validateCAPEM(data)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return data, cert, nil
+}
+
 // validateCAFile reads the file at caPath and verifies it is a readable
 // regular file containing exactly one valid PEM-encoded X.509 CA certificate.
 // The file must contain exactly one PEM block of type CERTIFICATE, with only
@@ -40,20 +72,8 @@ var opensslHashPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
 // BasicConstraintsValid=true and IsCA=true.
 // Returns the parsed certificate, or an error if validation fails.
 func validateCAFile(caPath string) (*x509.Certificate, error) {
-	info, err := os.Stat(caPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot access trusted_ca_path: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
-	}
-
-	data, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read trusted_ca_path: %w", err)
-	}
-
-	return validateCAPEM(data)
+	_, cert, err := readValidatedCAFile(caPath)
+	return cert, err
 }
 
 // validateCAPEM validates that data contains exactly one PEM-encoded X.509
@@ -103,12 +123,13 @@ func validateCAPEM(data []byte) (*x509.Certificate, error) {
 	return cert, nil
 }
 
-// computeOpenSSLHash runs `openssl x509 -hash -noout -in CA_FILE` and returns
-// the 8-character hex hash. It uses exec.Command (no shell).
-// Returns an error if openssl is missing, the command fails, or the output
-// does not match the expected format.
-func computeOpenSSLHash(caPath string) (string, error) {
-	cmd := exec.Command("openssl", "x509", "-hash", "-noout", "-in", caPath)
+// computeOpenSSLHash runs `openssl x509 -hash -noout` with the CA certificate
+// passed via stdin. It uses exec.Command (no shell).
+// Returns the 8-character hex hash, or an error if openssl is missing, the
+// command fails, or the output does not match the expected format.
+func computeOpenSSLHash(caData []byte) (string, error) {
+	cmd := exec.Command("openssl", "x509", "-hash", "-noout")
+	cmd.Stdin = bytes.NewReader(caData)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("openssl x509 -hash failed")
@@ -139,19 +160,14 @@ func fingerprintDir(runtimeDir string, caData []byte) string {
 // Returns the prepared directory path, or an error if preparation fails.
 // Idempotent: re-preparing the same CA is a no-op.
 func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err error) {
-	// Validate the source CA file.
-	if _, err := validateCAFile(caPath); err != nil {
+	// Read and validate the source CA file once.
+	caData, _, err := readValidatedCAFile(caPath)
+	if err != nil {
 		return "", err
 	}
 
-	// Read source data for fingerprinting.
-	caData, err := os.ReadFile(caPath)
-	if err != nil {
-		return "", fmt.Errorf("cannot read trusted_ca_path: %w", err)
-	}
-
-	// Compute openssl hash (requires openssl binary).
-	hash, err := computeOpenSSLHash(caPath)
+	// Compute openssl hash from the same snapshot.
+	hash, err := computeOpenSSLHash(caData)
 	if err != nil {
 		return "", err
 	}

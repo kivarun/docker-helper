@@ -663,11 +663,12 @@ func validateCAConfig(raw map[string]json.RawMessage) error {
 		return nil
 	}
 
-	if _, err := validateCAFile(caPath); err != nil {
+	caData, _, err := readValidatedCAFile(caPath)
+	if err != nil {
 		return err
 	}
 
-	if _, err := computeOpenSSLHash(caPath); err != nil {
+	if _, err := computeOpenSSLHash(caData); err != nil {
 		return err
 	}
 
