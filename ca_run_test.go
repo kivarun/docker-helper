@@ -296,7 +296,7 @@ func TestRunCAOverlappingMountRejected(t *testing.T) {
 		"command": []string{"echo", "hello"},
 		"mounts": []map[string]any{
 			{
-				"source": "/tmp/data",
+				"source": ".",
 				"target": "/run/docker-helper/trusted-ca",
 			},
 		},
