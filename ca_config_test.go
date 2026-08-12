@@ -584,3 +584,53 @@ func TestCAReservedFieldRejection(t *testing.T) {
 		t.Errorf("expected exit code 2 for reserved field, got %d", code)
 	}
 }
+
+func TestCAUnsetAbsentFieldPreflightFailsOnBrokenCA(t *testing.T) {
+	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
+	defer cleanup()
+
+	cfg := map[string]any{
+		"allowed_root":         "/tmp/work",
+		"session_ttl":          "12h",
+		"trusted_ca_path":      caPath,
+		"trusted_ca_injection": "auto",
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Break the CA file so preflight validation fails.
+	if err := os.Remove(caPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unset a field that is already absent to hit the "already absent" branch.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stdout: %q, stderr: %q", code, stdout.String(), stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got %q", stdout.String())
+	}
+	if stderr.String() == "" {
+		t.Error("expected non-empty stderr")
+	}
+
+	afterData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeData, afterData) {
+		t.Error("config.json should not be modified when preflight fails")
+	}
+}

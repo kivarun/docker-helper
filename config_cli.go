@@ -680,6 +680,10 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
+		if err := validateCAConfig(raw); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
 		fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
 		return 0
 	}
