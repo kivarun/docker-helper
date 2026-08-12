@@ -163,13 +163,19 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 
 	// If the directory already exists with the correct content, skip.
 	if info, err := os.Stat(fpDir); err == nil && info.IsDir() {
-		if existing, err := os.ReadFile(caFile); err == nil && bytes.Equal(existing, caData) {
-			if target, err := os.Readlink(symlinkPath); err == nil && target == "ca.pem" {
-				// Ensure the fingerprint directory mode is 0755 regardless of umask.
-				if err := os.Chmod(fpDir, 0755); err != nil {
-					return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
+		caInfo, statErr := os.Lstat(caFile)
+		if statErr == nil && caInfo.Mode().IsRegular() {
+			if existing, err := os.ReadFile(caFile); err == nil && bytes.Equal(existing, caData) {
+				if target, err := os.Readlink(symlinkPath); err == nil && target == "ca.pem" {
+					// Ensure modes are correct regardless of umask or external chmod.
+					if err := os.Chmod(fpDir, 0755); err != nil {
+						return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
+					}
+					if err := os.Chmod(caFile, 0644); err != nil {
+						return "", fmt.Errorf("cannot set trusted CA file permissions: %w", err)
+					}
+					return fpDir, nil
 				}
-				return fpDir, nil
 			}
 		}
 	}

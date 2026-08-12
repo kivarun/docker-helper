@@ -421,3 +421,111 @@ func TestCAPrepareFixesRegularFileHashEntry(t *testing.T) {
 		t.Errorf("symlink target = %q, want ca.pem", target)
 	}
 }
+
+func TestCAPrepareRestoresPemMode(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "xdg_runtime")
+	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
+	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	hash := computeTestOpenSSLHash(t, caPath)
+	fakeBinDir := filepath.Join(dir, "fake_bin")
+	createFakeOpenSSL(t, fakeBinDir, hash)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// First preparation succeeds.
+	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caFile := filepath.Join(preparedDir, "ca.pem")
+
+	// Corrupt: change mode to 0600.
+	if err := os.Chmod(caFile, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-prepare should restore mode 0644.
+	preparedDir2, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preparedDir2 != preparedDir {
+		t.Error("expected same prepared dir")
+	}
+
+	info, err := os.Stat(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Errorf("ca.pem mode = %o, want 0644", info.Mode().Perm())
+	}
+}
+
+func TestCAPrepareFixesPemSymlink(t *testing.T) {
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "xdg_runtime")
+	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
+	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	hash := computeTestOpenSSLHash(t, caPath)
+	fakeBinDir := filepath.Join(dir, "fake_bin")
+	createFakeOpenSSL(t, fakeBinDir, hash)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// First preparation succeeds.
+	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caFile := filepath.Join(preparedDir, "ca.pem")
+	caData, err := os.ReadFile(caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt: replace ca.pem with a symlink to another file with the same content.
+	targetFile := filepath.Join(preparedDir, "target-ca.pem")
+	if err := os.WriteFile(targetFile, caData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(caFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target-ca.pem", caFile); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-prepare should restore ca.pem as a regular file with mode 0644.
+	preparedDir2, err := prepareCAInjection(runtimeSubDir, caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preparedDir2 != preparedDir {
+		t.Error("expected same prepared dir")
+	}
+
+	info, err := os.Lstat(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("ca.pem should be a regular file, got mode %v", info.Mode())
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Errorf("ca.pem mode = %o, want 0644", info.Mode().Perm())
+	}
+}
