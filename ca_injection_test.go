@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -717,6 +718,73 @@ func TestCAPrepareIdempotent(t *testing.T) {
 	}
 	if dirCount != 1 {
 		t.Errorf("expected 1 fingerprint dir, got %d", dirCount)
+	}
+}
+
+func TestCAPrepareUmaskResilient(t *testing.T) {
+	// Set restrictive umask so MkdirAll would produce 0700 instead of 0755.
+	oldUmask := syscall.Umask(0077)
+	defer syscall.Umask(oldUmask)
+
+	configPath, caPath, _, _, cleanup := setupCAConfigTest(t)
+	defer cleanup()
+
+	cfg := map[string]any{
+		"allowed_root":         "/tmp/work",
+		"session_ttl":          "12h",
+		"trusted_ca_path":      caPath,
+		"trusted_ca_injection": "auto",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgObj, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpDir := cfgObj.TrustedCAPreparedDir
+
+	// Verify fingerprint directory mode is 0755 despite umask 0077.
+	dirInfo, err := os.Stat(fpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm() != 0755 {
+		t.Errorf("fingerprint dir mode = %o, want 0755", dirInfo.Mode().Perm())
+	}
+
+	// Verify ca.pem mode is 0644.
+	caFile := filepath.Join(fpDir, "ca.pem")
+	caInfo, err := os.Stat(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caInfo.Mode().Perm() != 0644 {
+		t.Errorf("ca.pem mode = %o, want 0644", caInfo.Mode().Perm())
+	}
+
+	// Simulate a degraded directory mode and verify idempotent path restores it.
+	if err := os.Chmod(fpDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reload config with the same CA (idempotent path).
+	cfgObj2, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfgObj2.TrustedCAPreparedDir != fpDir {
+		t.Error("expected same prepared dir for same CA")
+	}
+
+	dirInfo2, err := os.Stat(fpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo2.Mode().Perm() != 0755 {
+		t.Errorf("fingerprint dir mode after idempotent reload = %o, want 0755", dirInfo2.Mode().Perm())
 	}
 }
 

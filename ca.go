@@ -165,6 +165,10 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 	if info, err := os.Stat(fpDir); err == nil && info.IsDir() {
 		if existing, err := os.ReadFile(caFile); err == nil && bytes.Equal(existing, caData) {
 			if _, err := os.Lstat(symlinkPath); err == nil {
+				// Ensure the fingerprint directory mode is 0755 regardless of umask.
+				if err := os.Chmod(fpDir, 0755); err != nil {
+					return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
+				}
 				return fpDir, nil
 			}
 		}
@@ -173,6 +177,10 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 	// Create the fingerprint directory with mode 0755.
 	if err := os.MkdirAll(fpDir, 0755); err != nil {
 		return "", fmt.Errorf("cannot create trusted CA directory: %w", err)
+	}
+	// Explicitly set mode to guarantee 0755 regardless of process umask.
+	if err := os.Chmod(fpDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
 	}
 
 	// Write ca.pem atomically with mode 0644.
