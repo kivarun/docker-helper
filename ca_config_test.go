@@ -14,7 +14,7 @@ func TestCAInjectionDefaultDisabled(t *testing.T) {
   "allowed_root": "/tmp/work",
   "session_ttl": "12h"
 }`
-	_ = setupConfigTestWithData(t, []byte(cfg))
+	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	var stdout, stderr bytes.Buffer

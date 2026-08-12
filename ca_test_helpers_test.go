@@ -131,8 +131,7 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir
 	caPath = filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := testOpenSSLHash
-	createFakeOpenSSL(t, fakeBinDir, hash)
+	createFakeOpenSSL(t, fakeBinDir, testOpenSSLHash)
 
 	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -159,8 +158,7 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	caPath = filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := testOpenSSLHash
-	createFakeOpenSSL(t, fakeBinDir, hash)
+	createFakeOpenSSL(t, fakeBinDir, testOpenSSLHash)
 
 	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
 		t.Fatal(err)

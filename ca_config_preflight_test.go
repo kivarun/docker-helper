@@ -370,7 +370,6 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	tokenPath := filepath.Join(dir, "admin.token")
-	_ = filepath.Join(dir, "fake_bin")
 	nonexistentRuntime := filepath.Join(dir, "nonexistent_runtime")
 	nonexistentState := filepath.Join(dir, "nonexistent_state")
 	emptyBin := filepath.Join(dir, "empty_bin")
