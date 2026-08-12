@@ -26,6 +26,7 @@ readonly SKILL_INSTALL_DIR="$HOME/.claude/skills/docker-helper"
 # --- State ---
 interactive=true
 script_dir=""
+service_was_active=false
 
 # --- Helpers ---
 
@@ -101,6 +102,56 @@ check_binary() {
 		error "Run this script from the release tarball directory or place the binary alongside it."
 		exit 1
 	fi
+}
+
+# --- Service check ---
+
+check_active_service() {
+	if ! systemctl --user is-active --quiet "$UNIT_NAME" 2>/dev/null; then
+		return
+	fi
+
+	local current_version=""
+	local new_version=""
+
+	if [[ -x "$INSTALL_DIR/$BINARY_NAME" ]]; then
+		current_version="$("$INSTALL_DIR/$BINARY_NAME" version 2>/dev/null || true)"
+	fi
+	new_version="$("$script_dir/$BINARY_NAME" version 2>/dev/null || true)"
+
+	info ""
+	info "$UNIT_NAME is currently active."
+	info ""
+
+	if [[ -n "$current_version" && -n "$new_version" ]]; then
+		if [[ "$current_version" == "$new_version" ]]; then
+			info "This will reinstall the same version: $current_version"
+		else
+			info "Current version: $current_version"
+			info "New version:     $new_version"
+		fi
+	else
+		info "Unable to determine version(s). This may be an upgrade or reinstall."
+	fi
+	info ""
+
+	if ! ask "Stop the service and continue installation"; then
+		info "Aborting without changes."
+		info ""
+		info "To reinstall later, stop the service first:"
+		info "  systemctl --user stop $UNIT_NAME"
+		info ""
+		exit 0
+	fi
+
+	info "Stopping $UNIT_NAME"
+	if ! systemctl --user stop "$UNIT_NAME" 2>/dev/null; then
+		error "Failed to stop $UNIT_NAME"
+		error "Aborting without changes. Stop the service manually and retry."
+		exit 1
+	fi
+
+	service_was_active=true
 }
 
 # --- Installation steps ---
@@ -204,6 +255,7 @@ main() {
 
 	check_docker
 	check_binary
+	check_active_service
 
 	install_binary
 	install_unit
@@ -215,7 +267,23 @@ main() {
 	info ""
 
 	run_init
-	enable_service
+
+	if $service_was_active; then
+		if ! systemctl --user daemon-reload 2>/dev/null; then
+			warn "systemctl --user daemon-reload failed"
+		else
+			if ! systemctl --user start "$UNIT_NAME" 2>/dev/null; then
+				warn "Failed to start $UNIT_NAME"
+			else
+				info ""
+				info "Service restarted."
+				info "Check status with:  systemctl --user status $UNIT_NAME"
+				info "View logs with:     journalctl --user -u $UNIT_NAME"
+			fi
+		fi
+	else
+		enable_service
+	fi
 
 	info ""
 	info "Installation complete."
