@@ -21,54 +21,6 @@ import (
 	"time"
 )
 
-// generateTestCA creates a self-signed CA certificate and writes it to caPath.
-// Returns the CA certificate.
-func generateTestCA(t *testing.T, caPath string) *x509.Certificate {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization: []string{"Test CA"},
-		},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	certPEM := pemEncode(certDER, "CERTIFICATE")
-	if err := os.WriteFile(caPath, certPEM, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cert
-}
-
-// pemEncode encodes data as a PEM block with the given type.
-func pemEncode(data []byte, typ string) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("-----BEGIN " + typ + "-----\n")
-	buf.WriteString("LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJZVENDQVRhZ0F3SUJBZ0lSQU8K")
-	buf.Write(data)
-	buf.WriteString("\n-----END " + typ + "-----\n")
-	return buf.Bytes()
-}
-
 // generateTestCAPEM creates a proper PEM-encoded self-signed CA and writes it to caPath.
 func generateTestCAPEM(t *testing.T, caPath string) *x509.Certificate {
 	t.Helper()
@@ -111,8 +63,6 @@ func generateTestCAPEM(t *testing.T, caPath string) *x509.Certificate {
 	}
 	return cert
 }
-
-var base64Std = []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 
 // setupCAConfigTest creates a test environment with config, runtime dir, and a fake openssl.
 // Returns configPath, caPath, runtimeDir, and a cleanup function.
@@ -1243,22 +1193,282 @@ func TestValidateCAFileNotRegular(t *testing.T) {
 	}
 }
 
-// --- Additional: parseCAPEM tests ---
+// --- Additional: validateCAPEM tests ---
 
-func TestParseCAPEMEmpty(t *testing.T) {
-	certs, err := parseCAPEM([]byte{})
+// generateTestLeafPEM creates a PEM-encoded leaf (non-CA) certificate.
+func generateTestLeafPEM(t *testing.T) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
-	if len(certs) != 0 {
-		t.Errorf("expected 0 certs, got %d", len(certs))
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(10),
+		Subject: pkix.Name{
+			Organization: []string{"Test Leaf"},
+		},
+		NotBefore: time.Now().Add(-time.Hour),
+		NotAfter:  time.Now().Add(time.Hour),
+		KeyUsage:  x509.KeyUsageDigitalSignature,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+}
+
+// generateTestCAPrivateKeyPEM creates PEM data containing a CA cert followed
+// by a PRIVATE KEY block.
+func generateTestCAPrivateKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test CA"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	// Append a PRIVATE KEY block (raw DER is not valid PKCS8, but it's a valid PEM block).
+	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("secret-key-data")}))
+	return buf.Bytes()
+}
+
+// generateTestCASecondPEMBlock creates PEM data containing a CA cert followed
+// by an arbitrary second PEM block.
+func generateTestCASecondPEMBlock(t *testing.T) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test CA"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
+	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "ARBITRARY", Bytes: []byte("extra")}))
+	return buf.Bytes()
+}
+
+func TestValidateCAPEMValidCA(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test CA"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	cert, err := validateCAPEM(data)
+	if err != nil {
+		t.Fatalf("expected valid CA, got error: %v", err)
+	}
+	if cert == nil {
+		t.Fatal("expected non-nil certificate")
+	}
+	if !cert.IsCA {
+		t.Error("expected IsCA=true")
 	}
 }
 
-func TestParseCAPEMInvalid(t *testing.T) {
-	_, err := parseCAPEM([]byte("not PEM data at all"))
+func TestValidateCAPEMWhitespaceAround(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test CA"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	data := append([]byte("\n\n\n"), append(pemData, '\n', '\n')...)
+	cert, err := validateCAPEM(data)
+	if err != nil {
+		t.Fatalf("expected valid CA with whitespace, got error: %v", err)
+	}
+	if cert == nil {
+		t.Fatal("expected non-nil certificate")
+	}
+}
+
+func TestValidateCAPEMLeadingGarbageRejected(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test CA"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	data := append([]byte("garbage before cert\n"), pemData...)
+	_, err = validateCAPEM(data)
 	if err == nil {
-		t.Fatal("expected error for invalid PEM")
+		t.Fatal("expected error for leading garbage before certificate")
+	}
+}
+
+func TestValidateCAPEMLeafRejected(t *testing.T) {
+	data := generateTestLeafPEM(t)
+	_, err := validateCAPEM(data)
+	if err == nil {
+		t.Fatal("expected error for leaf certificate")
+	}
+}
+
+func TestValidateCAPEMCAPlusPrivateKeyRejected(t *testing.T) {
+	data := generateTestCAPrivateKeyPEM(t)
+	_, err := validateCAPEM(data)
+	if err == nil {
+		t.Fatal("expected error for CA + private key")
+	}
+}
+
+func TestValidateCAPEMCAPlusSecondPEMBlockRejected(t *testing.T) {
+	data := generateTestCASecondPEMBlock(t)
+	_, err := validateCAPEM(data)
+	if err == nil {
+		t.Fatal("expected error for CA + second PEM block")
+	}
+}
+
+func TestValidateCAPEMCAPlusTrailingGarbageRejected(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test CA"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pemData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	data := append(pemData, []byte(" trailing garbage")...)
+	_, err = validateCAPEM(data)
+	if err == nil {
+		t.Fatal("expected error for CA + trailing garbage")
+	}
+}
+
+func TestValidateCAPEMInvalidBase64Rejected(t *testing.T) {
+	data := []byte("-----BEGIN CERTIFICATE-----\n!!!not-base64!!!\n-----END CERTIFICATE-----\n")
+	_, err := validateCAPEM(data)
+	if err == nil {
+		t.Fatal("expected error for invalid base64 in PEM")
+	}
+}
+
+func TestValidateCAPEMEmptyDataRejected(t *testing.T) {
+	_, err := validateCAPEM([]byte{})
+	if err == nil {
+		t.Fatal("expected error for empty data")
+	}
+}
+
+func TestValidateCAPEMNoPEMRejected(t *testing.T) {
+	_, err := validateCAPEM([]byte("not PEM data at all"))
+	if err == nil {
+		t.Fatal("expected error for non-PEM data")
+	}
+}
+
+func TestValidateCAPEMNonCertificateBlockRejected(t *testing.T) {
+	data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("secret")})
+	_, err := validateCAPEM(data)
+	if err == nil {
+		t.Fatal("expected error for non-CERTIFICATE block")
 	}
 }
 

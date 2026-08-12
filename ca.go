@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,7 +34,10 @@ const trustedCAEnvNodeExtraValue = "/run/docker-helper/trusted-ca/ca.pem"
 var opensslHashPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
 
 // validateCAFile reads the file at caPath and verifies it is a readable
-// regular file containing exactly one valid PEM-encoded X.509 certificate.
+// regular file containing exactly one valid PEM-encoded X.509 CA certificate.
+// The file must contain exactly one PEM block of type CERTIFICATE, with only
+// whitespace before and after the block. The certificate must have
+// BasicConstraintsValid=true and IsCA=true.
 // Returns the parsed certificate, or an error if validation fails.
 func validateCAFile(caPath string) (*x509.Certificate, error) {
 	info, err := os.Stat(caPath)
@@ -49,174 +53,54 @@ func validateCAFile(caPath string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("cannot read trusted_ca_path: %w", err)
 	}
 
-	certs, err := parseCAPEM(data)
-	if err != nil {
-		return nil, err
-	}
-	if len(certs) == 0 {
-		return nil, fmt.Errorf("trusted_ca_path contains no X.509 certificates")
-	}
-	if len(certs) > 1 {
-		return nil, fmt.Errorf("trusted_ca_path must contain exactly one certificate, found %d", len(certs))
-	}
-	return certs[0], nil
+	return validateCAPEM(data)
 }
 
-// pemBlock represents a decoded PEM block.
-type pemBlock struct {
-	Type  string
-	Bytes []byte
-}
-
-// parseCAPEM parses PEM-encoded X.509 certificates from data.
-// Returns the parsed certificates, or an error if the data is not valid PEM.
-func parseCAPEM(data []byte) ([]*x509.Certificate, error) {
-	var certs []*x509.Certificate
-	remaining := data
-
-	for len(remaining) > 0 {
-		block, rest := pemDecode(remaining)
-		if block == nil {
-			break
-		}
-		remaining = rest
-
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("trusted_ca_path contains invalid X.509 certificate: %w", err)
-		}
-		certs = append(certs, cert)
+// validateCAPEM validates that data contains exactly one PEM-encoded X.509
+// CA certificate. Returns the parsed certificate, or an error.
+func validateCAPEM(data []byte) (*x509.Certificate, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("trusted_ca_path contains no PEM data")
 	}
 
-	if len(certs) == 0 && len(data) > 0 {
+	// Reject any non-whitespace prefix before the PEM block.
+	// pem.Decode silently skips leading bytes, so we enforce that
+	// the trimmed content starts exactly with the PEM header.
+	if !bytes.HasPrefix(trimmed, []byte("-----BEGIN CERTIFICATE-----")) {
 		return nil, fmt.Errorf("trusted_ca_path does not contain valid PEM data")
 	}
 
-	return certs, nil
-}
-
-// pemDecode extracts the next PEM block from data.
-// Returns the block (with Type and Bytes) and the remaining data,
-// or (nil, data) if no block is found.
-func pemDecode(data []byte) (block *pemBlock, rest []byte) {
-	start := bytesIndex(data, []byte("-----BEGIN "))
-	if start < 0 {
-		return nil, data
-	}
-	// Find the closing dashes after the type: "-----BEGIN TYPE-----\n"
-	dashEnd := bytesIndex(data[start+11:], []byte("-----\n"))
-	if dashEnd < 0 {
-		// Try CRLF
-		dashEnd = bytesIndex(data[start+11:], []byte("-----\r\n"))
-		if dashEnd < 0 {
-			return nil, data
-		}
-	}
-	blockType := string(data[start+11 : start+11+dashEnd])
-
-	end := bytesIndex(data[start:], []byte("-----END "))
-	if end < 0 {
-		return nil, data
-	}
-	end += start
-	// Find the closing dashes and newline: "-----END TYPE-----\n"
-	var blockEnd int
-	for i := end + 9; i < len(data); i++ {
-		if data[i] == '-' && i+1 < len(data) && data[i+1] == '\n' {
-			blockEnd = i + 2
-			break
-		}
-		if data[i] == '-' && i+1 < len(data) && data[i+1] == '\r' && i+2 < len(data) && data[i+2] == '\n' {
-			blockEnd = i + 3
-			break
-		}
-	}
-	if blockEnd == 0 {
-		return nil, data
+	block, rest := pem.Decode(trimmed)
+	if block == nil {
+		return nil, fmt.Errorf("trusted_ca_path does not contain valid PEM data")
 	}
 
-	// Extract the base64 content between BEGIN and END lines.
-	contentStart := start + 11 + dashEnd
-	// Skip the newline after "-----BEGIN TYPE-----"
-	if contentStart < len(data) && data[contentStart] == '\n' {
-		contentStart++
-	} else if contentStart < len(data) && data[contentStart] == '\r' && contentStart+1 < len(data) && data[contentStart+1] == '\n' {
-		contentStart += 2
+	if block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("trusted_ca_path contains invalid PEM block type, expected CERTIFICATE")
 	}
-	contentEnd := end // up to "-----END "
-	rawContent := bytes.TrimSpace(data[contentStart:contentEnd])
 
-	// Decode base64.
-	decoded, err := base64Decode(rawContent)
+	// After the PEM block only whitespace is allowed (trimmed has none,
+	// so rest must be empty).
+	if len(rest) > 0 {
+		return nil, fmt.Errorf("trusted_ca_path contains extra content after certificate")
+	}
+
+	// Parse the DER bytes as an X.509 certificate.
+	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return nil, data[blockEnd:]
+		return nil, fmt.Errorf("trusted_ca_path contains invalid X.509 certificate")
 	}
 
-	return &pemBlock{Type: blockType, Bytes: decoded}, data[blockEnd:]
-}
+	// Verify it's a CA certificate.
+	if !cert.BasicConstraintsValid {
+		return nil, fmt.Errorf("trusted_ca_path certificate is not a CA (missing basic constraints)")
+	}
+	if !cert.IsCA {
+		return nil, fmt.Errorf("trusted_ca_path certificate is not a CA")
+	}
 
-// base64Decode decodes standard base64 data.
-func base64Decode(data []byte) ([]byte, error) {
-	dec := make([]byte, 0, len(data))
-	var val uint32
-	var bits int
-	for _, c := range data {
-		if c == '=' {
-			break
-		}
-		v := base64Value(c)
-		if v < 0 {
-			continue // skip whitespace
-		}
-		val = (val << 6) | uint32(v)
-		bits += 6
-		if bits >= 8 {
-			bits -= 8
-			dec = append(dec, byte(val>>(bits)))
-		}
-	}
-	return dec, nil
-}
-
-func base64Value(c byte) int {
-	if c >= 'A' && c <= 'Z' {
-		return int(c - 'A')
-	}
-	if c >= 'a' && c <= 'z' {
-		return int(c - 'a' + 26)
-	}
-	if c >= '0' && c <= '9' {
-		return int(c - '0' + 52)
-	}
-	if c == '+' {
-		return 62
-	}
-	if c == '/' {
-		return 63
-	}
-	return -1
-}
-
-func bytesIndex(data, sub []byte) int {
-	for i := 0; i <= len(data)-len(sub); i++ {
-		if data[i] == sub[0] {
-			match := true
-			for j := 1; j < len(sub); j++ {
-				if data[i+j] != sub[j] {
-					match = false
-					break
-				}
-			}
-			if match {
-				return i
-			}
-		}
-	}
-	return -1
+	return cert, nil
 }
 
 // computeOpenSSLHash runs `openssl x509 -hash -noout -in CA_FILE` and returns
