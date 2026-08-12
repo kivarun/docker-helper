@@ -35,7 +35,8 @@ func runReload(stdout, stderr io.Writer) int {
 // handleReload reloads the configuration from disk and updates the daemon's
 // runtime configuration. Configurable fields updated: allowed_root,
 // session_ttl, log_level, audit_enabled, shutdown_timeout,
-// operation_retention_ttl, operation_max_completed, operation_log_max_bytes.
+// operation_retention_ttl, operation_max_completed, operation_log_max_bytes,
+// trusted_ca_path, trusted_ca_injection.
 // Computed paths (socket, database, etc.) remain unchanged.
 //
 // If the new configuration is invalid, the daemon keeps its current

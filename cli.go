@@ -460,6 +460,8 @@ The following configurable fields are applied at runtime:
   operation_retention_ttl   completed operation retention period
   operation_max_completed   max completed operations in memory
   operation_log_max_bytes   max bytes per operation log
+  trusted_ca_path           CA certificate file path
+  trusted_ca_injection      CA injection mode ("disabled" or "auto")
 
 Runtime paths (socket, database, state) are not changed.
 

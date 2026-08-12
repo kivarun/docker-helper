@@ -161,6 +161,14 @@ var configSetCommand = &Command{
   trusted_ca_path         absolute path to a single PEM X.509 CA file (optional)
   trusted_ca_injection    "disabled" or "auto" (default "disabled")
 
+Trusted CA injection:
+  To enable, set trusted_ca_path first, then set trusted_ca_injection to auto.
+  The host "openssl" binary must be available in PATH.
+  CA injection only affects containers started via POST /run.
+
+To disable, set trusted_ca_injection to disabled first, then optionally
+unset trusted_ca_path.
+
 A successful command reports either "updated" or "unchanged".
 If the daemon is running, the change is applied immediately.
 If the daemon is not running, the change is written to disk and
@@ -190,6 +198,9 @@ var configUnsetCommand = &Command{
   operation_log_max_bytes removing it restores the default 4 MiB
   trusted_ca_path         removing it clears the CA file path
   trusted_ca_injection    removing it restores the default "disabled"
+
+trusted_ca_path cannot be unset while trusted_ca_injection is "auto".
+Set trusted_ca_injection to "disabled" first.
 
 A successful command reports either "unset" or "unchanged".
 If the daemon is running, the change is applied immediately.

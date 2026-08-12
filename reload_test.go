@@ -184,6 +184,12 @@ func TestReloadHelp(t *testing.T) {
 	if !strings.Contains(output, "audit_enabled") {
 		t.Fatalf("expected help to mention audit_enabled, got: %s", output)
 	}
+	if !strings.Contains(output, "trusted_ca_path") {
+		t.Fatalf("expected help to mention trusted_ca_path, got: %s", output)
+	}
+	if !strings.Contains(output, "trusted_ca_injection") {
+		t.Fatalf("expected help to mention trusted_ca_injection, got: %s", output)
+	}
 }
 
 func TestConfigSetHelpReloadMention(t *testing.T) {
@@ -196,6 +202,12 @@ func TestConfigSetHelpReloadMention(t *testing.T) {
 	if !strings.Contains(output, "daemon") {
 		t.Fatalf("expected config set help to mention daemon, got: %s", output)
 	}
+	if !strings.Contains(output, "openssl") {
+		t.Fatalf("expected config set help to mention openssl, got: %s", output)
+	}
+	if !strings.Contains(output, "trusted_ca_path") && !strings.Contains(output, "trusted_ca_injection") {
+		t.Fatalf("expected config set help to mention CA fields, got: %s", output)
+	}
 }
 
 func TestConfigUnsetHelpReloadMention(t *testing.T) {
@@ -207,6 +219,9 @@ func TestConfigUnsetHelpReloadMention(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "daemon") {
 		t.Fatalf("expected config unset help to mention daemon, got: %s", output)
+	}
+	if !strings.Contains(output, "disabled") {
+		t.Fatalf("expected config unset help to mention disabling auto first, got: %s", output)
 	}
 }
 

@@ -230,8 +230,10 @@ Configuration fields:
 | `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`) |
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. Requires host `openssl` binary for hash computation. |
 
-`allowed_root` and `session_ttl` are required and cannot be unset. All other
-fields may be unset to restore their defaults.
+`allowed_root` and `session_ttl` are required and cannot be unset.
+Other fields may be unset to restore their defaults, except that
+`trusted_ca_path` cannot be unset while `trusted_ca_injection` is `auto`
+— set it to `disabled` first.
 
 Runtime reload: after `config set` or `config unset`, the change is written
 to disk immediately. If the daemon is running, the new configuration is
@@ -263,6 +265,31 @@ The following fields are applied at runtime:
 - `trusted_ca_injection`
 
 Runtime paths (socket, database, state) are not changed by reload.
+
+### Trusted CA injection
+
+Inject a company or internal CA certificate into agent containers so they
+trust your internal services. The CA file must be a single PEM-encoded
+X.509 CA certificate. The host `openssl` binary must be available in PATH
+for fingerprint computation. Injection only affects containers started via
+`POST /run`.
+
+Enable:
+
+```bash
+docker-helper config set trusted_ca_path /absolute/path/to/company-root-ca.pem
+docker-helper config set trusted_ca_injection auto
+```
+
+Disable:
+
+```bash
+docker-helper config set trusted_ca_injection disabled
+docker-helper config unset trusted_ca_path
+```
+
+Each command triggers a daemon reload automatically when the daemon is
+running.
 
 **Computed/output-only fields** are read-only and must not be added to
 config.json. If present, configuration validation and daemon startup fail:
