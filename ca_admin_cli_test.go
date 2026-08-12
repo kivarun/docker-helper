@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,19 +13,12 @@ import (
 // pointing to a nonexistent CA file, so CA preflight would fail if attempted.
 func writeBrokenAutoCAConfig(t *testing.T, configPath string) {
 	t.Helper()
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      "/nonexistent/ca.pem",
 		"trusted_ca_injection": "auto",
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 }
 
 func TestReloadNoCASideEffectCLI(t *testing.T) {

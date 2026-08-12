@@ -226,6 +226,17 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 		"session_ttl":          "12h",
 		"trusted_ca_injection": "disabled",
 	}
+	writeCAConfig(t, configPath, cfg)
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	return configPath, caPath, fakeBinDir
+}
+
+// writeCAConfig marshals cfg as indented JSON and writes it to configPath.
+func writeCAConfig(t *testing.T, configPath string, cfg map[string]any) {
+	t.Helper()
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -233,9 +244,4 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	return configPath, caPath, fakeBinDir
 }

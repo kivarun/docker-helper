@@ -386,18 +386,11 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 	}
 
 	// Write initial config with disabled injection.
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_injection": "disabled",
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatalf("cannot marshal config: %v", err)
-	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatalf("cannot write config: %v", err)
-	}
+	})
 
 	// Set environment: nonexistent runtime/state, PATH with no openssl.
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
@@ -482,19 +475,12 @@ func TestCAPreflightUnchangedWithBrokenCA(t *testing.T) {
 func TestCAPreflightSetUnchanged(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
@@ -509,19 +495,12 @@ func TestCAPreflightSetUnchanged(t *testing.T) {
 func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	beforeData, err := os.ReadFile(configPath)
 	if err != nil {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,16 +11,12 @@ import (
 func TestCAPrepareSuccess(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	cfgObj, err := loadConfig()
 	if err != nil {
@@ -82,16 +77,12 @@ func TestCAPrepareSuccess(t *testing.T) {
 func TestCAPrepareIdempotent(t *testing.T) {
 	configPath, caPath, runtimeDir, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	cfgObj1, err := loadConfig()
 	if err != nil {
@@ -129,16 +120,12 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	cfgObj, err := loadConfig()
 	if err != nil {
@@ -187,16 +174,12 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	cfgObj1, err := loadConfig()
 	if err != nil {
@@ -207,11 +190,12 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 	newCAPath := filepath.Join(filepath.Dir(configPath), "new-ca.crt")
 	generateTestCAPEM(t, newCAPath)
 
-	cfg["trusted_ca_path"] = newCAPath
-	data, _ = json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         "/tmp/work",
+		"session_ttl":          "12h",
+		"trusted_ca_path":      newCAPath,
+		"trusted_ca_injection": "auto",
+	})
 
 	cfgObj2, err := loadConfig()
 	if err != nil {
@@ -229,16 +213,12 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 func TestCAReloadChangesCA(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	cfgObj1, err := loadConfig()
 	if err != nil {
@@ -249,11 +229,12 @@ func TestCAReloadChangesCA(t *testing.T) {
 	newCAPath := filepath.Join(filepath.Dir(configPath), "new-ca.crt")
 	generateTestCAPEM(t, newCAPath)
 
-	cfg["trusted_ca_path"] = newCAPath
-	data, _ = json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         "/tmp/work",
+		"session_ttl":          "12h",
+		"trusted_ca_path":      newCAPath,
+		"trusted_ca_injection": "auto",
+	})
 
 	cfgObj2, err := loadConfig()
 	if err != nil {

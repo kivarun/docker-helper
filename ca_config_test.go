@@ -36,13 +36,7 @@ func TestCAConfigShowSetUnset(t *testing.T) {
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeCAConfig(t, configPath, cfg)
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "show", "trusted_ca_path"}, &stdout, &stderr)
@@ -215,24 +209,18 @@ func TestCAConfigInvalidCA(t *testing.T) {
 
 			caPath := tt.caSetup(t)
 
-			cfg, err := json.MarshalIndent(map[string]any{
+			writeCAConfig(t, configPath, map[string]any{
 				"allowed_root":         "/tmp/work",
 				"session_ttl":          "12h",
 				"trusted_ca_path":      caPath,
 				"trusted_ca_injection": "auto",
-			}, "", "  ")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(configPath, cfg, 0600); err != nil {
-				t.Fatal(err)
-			}
+			})
 
 			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 			t.Setenv("XDG_STATE_HOME", "")
 
-			_, err = loadConfig()
+			_, err := loadConfig()
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -263,14 +251,10 @@ func TestCAConfigAutoEmptyPath(t *testing.T) {
 func TestCAConfigSetValidation(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root": "/tmp/work",
 		"session_ttl":  "12h",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", "relative/path"}, &stdout, &stderr)
@@ -303,16 +287,12 @@ func TestCAConfigSetValidation(t *testing.T) {
 func TestCAUnsetPathWhenAutoActive(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "unset", "trusted_ca_path"}, &stdout, &stderr)
@@ -352,16 +332,12 @@ func TestCAInitNoInjectionDefault(t *testing.T) {
 func TestCAConfigShowAllIncludesNewFields(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
-	cfg := map[string]any{
+	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         "/tmp/work",
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
