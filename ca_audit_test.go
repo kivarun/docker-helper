@@ -30,6 +30,7 @@ func TestRunAuditCAInjectedAuto(t *testing.T) {
 		t.Fatalf("cannot write ca.pem: %v", err)
 	}
 	app.Config.TrustedCAInjection = "auto"
+	app.Config.TrustedCAPath = "/test-docker-helper-ca-path/ca.pem"
 	app.Config.TrustedCAPreparedDir = preparedDir
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -98,17 +99,17 @@ func TestRunAuditCAInjectedAuto(t *testing.T) {
 		t.Error("run.finish raw JSON should contain trusted_ca_injected:true")
 	}
 
-	// Check raw JSON does not contain TrustedCAPath or TrustedCAPreparedDir.
+	// Check raw JSON does not leak host CA paths.
 	for _, label := range []string{"run.start", "run.finish"} {
 		raw := startRaw
 		if label == "run.finish" {
 			raw = finishRaw
 		}
-		if strings.Contains(raw, "trusted_ca_path") {
-			t.Errorf("%s raw JSON should not contain trusted_ca_path", label)
+		if strings.Contains(raw, app.Config.TrustedCAPath) {
+			t.Errorf("%s raw JSON should not leak TrustedCAPath", label)
 		}
-		if strings.Contains(raw, "trusted_ca_prepared_dir") {
-			t.Errorf("%s raw JSON should not contain trusted_ca_prepared_dir", label)
+		if strings.Contains(raw, app.Config.TrustedCAPreparedDir) {
+			t.Errorf("%s raw JSON should not leak TrustedCAPreparedDir", label)
 		}
 	}
 }
