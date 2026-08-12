@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -16,8 +15,10 @@ import (
 	"time"
 )
 
-// generateTestCAPEM creates a proper PEM-encoded self-signed CA and writes it to caPath.
-func generateTestCAPEM(t *testing.T, caPath string) *x509.Certificate {
+// generateTestCAPEMData generates a self-signed CA certificate and returns
+// its PEM-encoded bytes. The certificate is valid for 2 hours (1 hour before
+// and 1 hour after the current time).
+func generateTestCAPEMData(t *testing.T) []byte {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -41,21 +42,15 @@ func generateTestCAPEM(t *testing.T, caPath string) *x509.Certificate {
 		t.Fatal(err)
 	}
 
-	pemBlock := &pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: certDER,
-	}
-	pemData := pem.EncodeToMemory(pemBlock)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+}
 
-	if err := os.WriteFile(caPath, pemData, 0644); err != nil {
+// generateTestCAPEM creates a proper PEM-encoded self-signed CA and writes it to caPath.
+func generateTestCAPEM(t *testing.T, caPath string) {
+	t.Helper()
+	if err := os.WriteFile(caPath, generateTestCAPEMData(t), 0644); err != nil {
 		t.Fatal(err)
 	}
-
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cert
 }
 
 // generateTestLeafPEM creates a PEM-encoded leaf (non-CA) certificate.
@@ -88,64 +83,14 @@ func generateTestLeafPEM(t *testing.T) []byte {
 // by a PRIVATE KEY block.
 func generateTestCAPrivateKeyPEM(t *testing.T) []byte {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	caTemplate := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization: []string{"Test CA"},
-		},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
-	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("secret-key-data")}))
-	return buf.Bytes()
+	return append(generateTestCAPEMData(t), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("secret-key-data")})...)
 }
 
 // generateTestCASecondPEMBlock creates PEM data containing a CA cert followed
 // by an arbitrary second PEM block.
 func generateTestCASecondPEMBlock(t *testing.T) []byte {
 	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	caTemplate := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization: []string{"Test CA"},
-		},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
-	buf.Write(pem.EncodeToMemory(&pem.Block{Type: "ARBITRARY", Bytes: []byte("extra")}))
-	return buf.Bytes()
+	return append(generateTestCAPEMData(t), pem.EncodeToMemory(&pem.Block{Type: "ARBITRARY", Bytes: []byte("extra")})...)
 }
 
 // testOpenSSLHash is the fixed hash returned by fake openssl scripts.

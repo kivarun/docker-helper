@@ -1,16 +1,9 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
-	"math/big"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestValidateCAFileSuccess(t *testing.T) {
@@ -45,35 +38,8 @@ func TestValidateCAFileNotRegular(t *testing.T) {
 	}
 }
 
-func generateCAPEMForTest(t *testing.T) []byte {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	caTemplate := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization: []string{"Test CA"},
-		},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-}
-
 func TestValidateCAPEMValidCA(t *testing.T) {
-	data := generateCAPEMForTest(t)
+	data := generateTestCAPEMData(t)
 	cert, err := validateCAPEM(data)
 	if err != nil {
 		t.Fatalf("expected valid CA, got error: %v", err)
@@ -87,7 +53,7 @@ func TestValidateCAPEMValidCA(t *testing.T) {
 }
 
 func TestValidateCAPEMWhitespaceAround(t *testing.T) {
-	pemData := generateCAPEMForTest(t)
+	pemData := generateTestCAPEMData(t)
 	data := append([]byte("\n\n\n"), append(pemData, '\n', '\n')...)
 	cert, err := validateCAPEM(data)
 	if err != nil {
@@ -99,7 +65,7 @@ func TestValidateCAPEMWhitespaceAround(t *testing.T) {
 }
 
 func TestValidateCAPEMLeadingGarbageRejected(t *testing.T) {
-	pemData := generateCAPEMForTest(t)
+	pemData := generateTestCAPEMData(t)
 	data := append([]byte("garbage before cert\n"), pemData...)
 	_, err := validateCAPEM(data)
 	if err == nil {
@@ -132,7 +98,7 @@ func TestValidateCAPEMCAPlusSecondPEMBlockRejected(t *testing.T) {
 }
 
 func TestValidateCAPEMCAPlusTrailingGarbageRejected(t *testing.T) {
-	pemData := generateCAPEMForTest(t)
+	pemData := generateTestCAPEMData(t)
 	data := append(pemData, []byte(" trailing garbage")...)
 	_, err := validateCAPEM(data)
 	if err == nil {
