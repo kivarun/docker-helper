@@ -37,7 +37,11 @@ var sessionCreateCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				socketPath, adminTokenPath := adminAPIPaths()
+				socketPath, adminTokenPath, err := adminAPIPaths()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
 
 				tokenSource, err := adminAPITokenSource(adminTokenPath)
 				if err != nil {
@@ -90,7 +94,11 @@ var sessionListCommand = &Command{
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				socketPath, adminTokenPath := adminAPIPaths()
+				socketPath, adminTokenPath, err := adminAPIPaths()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
 
 				tokenSource, err := adminAPITokenSource(adminTokenPath)
 				if err != nil {
@@ -139,7 +147,11 @@ var sessionDeleteCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				socketPath, adminTokenPath := adminAPIPaths()
+				socketPath, adminTokenPath, err := adminAPIPaths()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
 
 				tokenSource, err := adminAPITokenSource(adminTokenPath)
 				if err != nil {

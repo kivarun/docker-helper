@@ -297,11 +297,12 @@ func getRuntimeDirSafe() string {
 // adminAPIPaths returns the socket and admin token paths without reading
 // config.json or creating directories. Used by CLI commands that only need
 // to talk to the daemon or read the admin token.
-func adminAPIPaths() (socketPath, adminTokenPath string) {
-	runtimeDir := getRuntimeDirSafe()
-	if runtimeDir != "" {
-		socketPath = filepath.Join(runtimeDir, "docker-helper.sock")
+func adminAPIPaths() (socketPath, adminTokenPath string, err error) {
+	runtimeDir, err := getRuntimeDir()
+	if err != nil {
+		return "", "", err
 	}
+	socketPath = filepath.Join(runtimeDir, "docker-helper.sock")
 	adminTokenPath = filepath.Join(getConfigDir(), "admin.token")
 	return
 }

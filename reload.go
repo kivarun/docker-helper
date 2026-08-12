@@ -10,7 +10,11 @@ import (
 
 // runReload is the CLI entry point for the reload command.
 func runReload(stdout, stderr io.Writer) int {
-	socketPath, adminTokenPath := adminAPIPaths()
+	socketPath, adminTokenPath, err := adminAPIPaths()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
 
 	tokenSource, err := adminAPITokenSource(adminTokenPath)
 	if err != nil {

@@ -1446,3 +1446,71 @@ func setupFakeSessionListServer(t *testing.T, socketPath string) (net.Listener, 
 	time.Sleep(100 * time.Millisecond)
 	return listener, srv
 }
+
+func TestReloadNoXDGRuntimeDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	cfg := map[string]any{
+		"allowed_root": "/tmp/work",
+		"session_ttl":  "12h",
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "")
+
+	reloadOut, reloadErr := &bytes.Buffer{}, &bytes.Buffer{}
+	code := runCommandWithWriters([]string{"reload"}, reloadOut, reloadErr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d: stdout=%s stderr=%s", code, reloadOut.String(), reloadErr.String())
+	}
+	if !strings.Contains(reloadErr.String(), "XDG_RUNTIME_DIR") {
+		t.Fatalf("expected stderr to contain 'XDG_RUNTIME_DIR', got: %s", reloadErr.String())
+	}
+}
+
+func TestSessionListNoXDGRuntimeDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	cfg := map[string]any{
+		"allowed_root": "/tmp/work",
+		"session_ttl":  "12h",
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "")
+
+	listOut, listErr := &bytes.Buffer{}, &bytes.Buffer{}
+	code := runCommandWithWriters([]string{"session", "list"}, listOut, listErr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d: stdout=%s stderr=%s", code, listOut.String(), listErr.String())
+	}
+	if !strings.Contains(listErr.String(), "XDG_RUNTIME_DIR") {
+		t.Fatalf("expected stderr to contain 'XDG_RUNTIME_DIR', got: %s", listErr.String())
+	}
+}
