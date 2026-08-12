@@ -30,6 +30,10 @@ type Config struct {
 	OperationRetentionTTL time.Duration
 	OperationMaxCompleted int
 	OperationLogMaxBytes  int64
+	// Trusted CA injection (runtime-only, computed from file config).
+	TrustedCAInjection   string // "disabled" or "auto"
+	TrustedCAPath        string // absolute path to CA file (only when auto)
+	TrustedCAPreparedDir string // computed: prepared runtime directory (not in JSON/show)
 }
 
 type fileConfig struct {
@@ -41,6 +45,8 @@ type fileConfig struct {
 	OperationRetentionTTL string `json:"operation_retention_ttl,omitempty"`
 	OperationMaxCompleted *int   `json:"operation_max_completed,omitempty"`
 	OperationLogMaxBytes  *int64 `json:"operation_log_max_bytes,omitempty"`
+	TrustedCAPath         string `json:"trusted_ca_path,omitempty"`
+	TrustedCAInjection    string `json:"trusted_ca_injection,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -210,6 +216,12 @@ func loadConfig() (*Config, error) {
 		operationLogMaxBytes = *fc.OperationLogMaxBytes
 	}
 
+	// Parse trusted_ca_injection (default: "disabled").
+	trustedCAInjection := fc.TrustedCAInjection
+	if trustedCAInjection == "" {
+		trustedCAInjection = "disabled"
+	}
+
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
 		return nil, err
@@ -228,7 +240,7 @@ func loadConfig() (*Config, error) {
 
 	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
 
-	return &Config{
+	cfg := &Config{
 		AllowedRoot:           fc.AllowedRoot,
 		SessionTTL:            ttl,
 		LogLevel:              level,
@@ -243,7 +255,23 @@ func loadConfig() (*Config, error) {
 		OperationRetentionTTL: opRetentionTTL,
 		OperationMaxCompleted: opMaxCompleted,
 		OperationLogMaxBytes:  operationLogMaxBytes,
-	}, nil
+		TrustedCAInjection:    trustedCAInjection,
+		TrustedCAPath:         fc.TrustedCAPath,
+	}
+
+	// Prepare CA injection if enabled.
+	if trustedCAInjection == "auto" {
+		if cfg.TrustedCAPath == "" {
+			return nil, fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
+		}
+		preparedDir, err := prepareCAInjection(runtimeDir, cfg.TrustedCAPath)
+		if err != nil {
+			return nil, err
+		}
+		cfg.TrustedCAPreparedDir = preparedDir
+	}
+
+	return cfg, nil
 }
 
 func resolveAuditEnabled(cfg *bool, level slog.Level) bool {
@@ -251,6 +279,15 @@ func resolveAuditEnabled(cfg *bool, level slog.Level) bool {
 		return *cfg
 	}
 	return level == slog.LevelDebug
+}
+
+// resolveTrustedCAInjection returns the effective injection mode.
+// Default is "disabled" when the field is absent.
+func resolveTrustedCAInjection(s string) string {
+	if s == "" {
+		return "disabled"
+	}
+	return s
 }
 
 // parseDurationPositive parses a Go duration string and returns an error if
@@ -552,6 +589,45 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		}
 		if n <= 0 {
 			return fmt.Errorf("operation_log_max_bytes must be a positive integer")
+		}
+	}
+
+	// Validate trusted_ca_injection if present.
+	if v, ok := raw["trusted_ca_injection"]; ok {
+		var s string
+		if err := json.Unmarshal(v, &s); err != nil {
+			return fmt.Errorf("trusted_ca_injection must be a JSON string")
+		}
+		if s != "disabled" && s != "auto" {
+			return fmt.Errorf("trusted_ca_injection must be \"disabled\" or \"auto\"")
+		}
+		// "auto" requires trusted_ca_path.
+		if s == "auto" {
+			if pv, ok := raw["trusted_ca_path"]; ok {
+				var p string
+				if err := json.Unmarshal(pv, &p); err != nil {
+					return fmt.Errorf("trusted_ca_path must be a JSON string")
+				}
+				if p == "" {
+					return fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
+				}
+				if !filepath.IsAbs(p) {
+					return fmt.Errorf("trusted_ca_path must be an absolute path")
+				}
+			} else {
+				return fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
+			}
+		}
+	}
+
+	// Validate trusted_ca_path if present (must be absolute).
+	if v, ok := raw["trusted_ca_path"]; ok {
+		var p string
+		if err := json.Unmarshal(v, &p); err != nil {
+			return fmt.Errorf("trusted_ca_path must be a JSON string")
+		}
+		if p != "" && !filepath.IsAbs(p) {
+			return fmt.Errorf("trusted_ca_path must be an absolute path")
 		}
 	}
 

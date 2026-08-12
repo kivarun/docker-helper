@@ -227,6 +227,8 @@ Configuration fields:
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log (bounded buffer, default: `4194304` = 4 MiB) |
+| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`) |
+| `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. Requires host `openssl` binary for hash computation. |
 
 `allowed_root` and `session_ttl` are required and cannot be unset. All other
 fields may be unset to restore their defaults.
@@ -257,6 +259,8 @@ The following fields are applied at runtime:
 - `operation_retention_ttl`
 - `operation_max_completed`
 - `operation_log_max_bytes`
+- `trusted_ca_path`
+- `trusted_ca_injection`
 
 Runtime paths (socket, database, state) are not changed by reload.
 

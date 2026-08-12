@@ -263,8 +263,9 @@ only that field's scalar value.
 `docker-helper config set FIELD VALUE` — sets a writable field
 (`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`,
 `shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
-`operation_log_max_bytes`). Reports `updated` or `unchanged`. If the daemon
-is running, the change is applied immediately.
+`operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`).
+Reports `updated` or `unchanged`. If the daemon is running, the change is
+applied immediately.
 
 `docker-helper config unset FIELD` — removes an optional field to restore
 its default. `allowed_root` and `session_ttl` are required and cannot be
@@ -277,10 +278,11 @@ Ask the running daemon to re-read `config.json` and apply changes without
 restarting. All configurable fields are applied at runtime:
 `allowed_root`, `session_ttl`, `log_level`, `audit_enabled`,
 `shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
-`operation_log_max_bytes`. Computed paths (socket, database, state) are not
-changed. If the daemon is not running, the command fails with a non-zero
-exit code. If the new configuration is invalid, the daemon keeps its current
-configuration and the command returns an error.
+`operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`.
+Computed paths (socket, database, state) are not changed. If the daemon is
+not running, the command fails with a non-zero exit code. If the new
+configuration is invalid, the daemon keeps its current configuration and
+the command returns an error.
 
 ### `docker-helper session <subcommand>`
 
@@ -764,6 +766,65 @@ Values are never logged. Only variable names appear in `env_keys`.
 Environment variables are sorted by name before being passed to Docker.
 This makes the command line deterministic and reproducible.
 
+### Trusted CA injection
+
+When `trusted_ca_injection` is set to `"auto"` and `trusted_ca_path` points
+to a valid single PEM X.509 CA certificate, docker-helper injects the CA
+into containers started via `POST /run`:
+
+1. **CA validation** — The CA file must be a regular file containing exactly
+   one valid PEM-encoded X.509 certificate.
+
+2. **OpenSSL hash** — docker-helper runs `openssl x509 -hash -noout -in CA_FILE`
+   to compute the 8-character hex hash. This requires the `openssl` binary
+   on the host. Missing `openssl`, execution failure, or invalid output makes
+   configuration invalid.
+
+3. **Runtime artifact** — The CA is materialized in the helper-owned runtime
+   directory:
+   ```
+   $RUNTIME_DIR/trusted-ca/<sha256-of-source-bytes>/
+       ├── ca.pem (0644)
+       └── <openssl-hash>.0 -> ca.pem
+   ```
+   The directory is created with mode `0755`. The fingerprint directory is
+   immutable by content; re-preparing the same CA is idempotent. Changing the
+   CA creates a new fingerprint directory.
+
+4. **Mount injection** — A read-only bind mount is added:
+   ```
+   --mount type=bind,source=<prepared-dir>,target=/run/docker-helper/trusted-ca,readonly
+   ```
+
+5. **Environment injection** — The following environment variables are added
+   (if not already set by the user):
+   ```
+   SSL_CERT_DIR=/run/docker-helper/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs
+   NODE_EXTRA_CA_CERTS=/run/docker-helper/trusted-ca/ca.pem
+   ```
+
+6. **Explicit-env-wins** — If the user explicitly sets `SSL_CERT_DIR` or
+   `NODE_EXTRA_CA_CERTS`, their values are preserved and not overwritten.
+
+7. **Mount overlap rejection** — Agent mounts whose target overlaps with
+   `/run/docker-helper/trusted-ca` (exact match, ancestor, or descendant)
+   are rejected as `invalid_mount` when injection is enabled.
+
+8. **Audit** — Both `run.start` and `run.finish` audit records include a
+   boolean field `trusted_ca_injected` (true when injection is active).
+   The audit does not disclose the host CA path or runtime source.
+
+9. **Disabled mode** — When `trusted_ca_injection` is `"disabled"` (the
+   effective default), no mount, environment injection, or audit field is
+   added. The existing run contract remains unchanged.
+
+10. **Scope** — CA injection applies only to `POST /run`. It does not affect
+    `POST /build`, `POST /pull`, or other endpoints.
+
+11. **Limitations** — Only one CA is supported. Java `cacerts` is not
+    supported. Other CA-related environment variables like `SSL_CERT_FILE`,
+    `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` are not used.
+
 ## Error handling
 
 The API returns JSON errors with a stable `code` field. Clients can
@@ -1016,6 +1077,7 @@ Emitted before a container starts.
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set; values are never logged) |
 | `shm_size` | string | /dev/shm size from the request (present when set) |
+| `trusted_ca_injected` | boolean | true when trusted CA injection is active for this run |
 
 No `result` or `duration` field.
 
@@ -1041,6 +1103,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `mounts` | object[] | bind mounts (present when set) |
 | `env_keys` | string[] | environment variable names, sorted (present when set) |
 | `shm_size` | string | /dev/shm size from the request (present when set) |
+| `trusted_ca_injected` | boolean | true when trusted CA injection was active for this run |
 | `result` | string | outcome code |
 | `exit_code` | number | container exit code (present when available) |
 | `duration` | string | container run attempt wall-clock time |

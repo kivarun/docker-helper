@@ -72,6 +72,18 @@ Both interfaces share the same path semantics. Define once, apply everywhere.
 - **`--workdir`** / **`workdir`** is an absolute path inside the launched
   container.
 
+### Trusted CA injection
+
+When the administrator enables `trusted_ca_injection` to `"auto"`, Docker
+Helper automatically injects a trusted CA certificate into containers
+started via `POST /run`. The agent does not need to configure this.
+
+Do not attempt to mount host CA files or set `SSL_CERT_DIR` or
+`NODE_EXTRA_CA_CERTS` to override the injection, unless the workload
+explicitly requires a different value. If the agent mounts a path that
+overlaps with `/run/docker-helper/trusted-ca`, the request will be
+rejected as `invalid_mount`.
+
 # CLI interface
 
 When the `docker-helper` command is available, its built-in help is the

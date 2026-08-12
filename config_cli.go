@@ -32,6 +32,8 @@ var (
 		"operation_retention_ttl",
 		"operation_max_completed",
 		"operation_log_max_bytes",
+		"trusted_ca_path",
+		"trusted_ca_injection",
 	}
 	requiredFields = map[string]bool{"allowed_root": true, "session_ttl": true}
 	allFields      = []string{
@@ -53,6 +55,8 @@ var (
 		"operation_retention_ttl",
 		"operation_max_completed",
 		"operation_log_max_bytes",
+		"trusted_ca_path",
+		"trusted_ca_injection",
 	}
 )
 
@@ -123,7 +127,9 @@ Fields:
   shutdown_timeout
   operation_retention_ttl
   operation_max_completed
-  operation_log_max_bytes`,
+  operation_log_max_bytes
+  trusted_ca_path
+  trusted_ca_injection`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -152,6 +158,8 @@ var configSetCommand = &Command{
   operation_retention_ttl positive Go duration, for example 10m (default 10m)
   operation_max_completed positive integer (default 200)
   operation_log_max_bytes positive integer, bytes (default 4194304 = 4 MiB)
+  trusted_ca_path         absolute path to a single PEM X.509 CA file (optional)
+  trusted_ca_injection    "disabled" or "auto" (default "disabled")
 
 A successful command reports either "updated" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -180,6 +188,8 @@ var configUnsetCommand = &Command{
   operation_retention_ttl removing it restores the default 10m
   operation_max_completed removing it restores the default 200
   operation_log_max_bytes removing it restores the default 4 MiB
+  trusted_ca_path         removing it clears the CA file path
+  trusted_ca_injection    removing it restores the default "disabled"
 
 A successful command reports either "unset" or "unchanged".
 If the daemon is running, the change is applied immediately.
@@ -340,6 +350,8 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"operation_retention_ttl": fc.OperationRetentionTTL,
 		"operation_max_completed": fc.OperationMaxCompleted,
 		"operation_log_max_bytes": fc.OperationLogMaxBytes,
+		"trusted_ca_path":         fc.TrustedCAPath,
+		"trusted_ca_injection":    resolveTrustedCAInjection(fc.TrustedCAInjection),
 	}
 
 	enc := json.NewEncoder(stdout)
@@ -488,6 +500,10 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 			olmb = ptrOf(int64(4 * 1024 * 1024))
 		}
 		fmt.Fprintln(stdout, *olmb)
+	case "trusted_ca_path":
+		fmt.Fprintln(stdout, fc.TrustedCAPath)
+	case "trusted_ca_injection":
+		fmt.Fprintln(stdout, resolveTrustedCAInjection(fc.TrustedCAInjection))
 	default:
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
@@ -556,6 +572,16 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: operation_log_max_bytes must be a positive integer\n")
 			return 2
 		}
+	case "trusted_ca_path":
+		if value != "" && !filepath.IsAbs(value) {
+			fmt.Fprintf(stderr, "error: trusted_ca_path must be an absolute path\n")
+			return 2
+		}
+	case "trusted_ca_injection":
+		if value != "disabled" && value != "auto" {
+			fmt.Fprintf(stderr, "error: trusted_ca_injection must be \"disabled\" or \"auto\"\n")
+			return 2
+		}
 	}
 
 	raw, configPath, err := loadRawConfig()
@@ -587,6 +613,10 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		var n int64
 		fmt.Sscanf(value, "%d", &n)
 		newValue, _ = json.Marshal(n)
+	case "trusted_ca_path":
+		newValue, _ = json.Marshal(value)
+	case "trusted_ca_injection":
+		newValue, _ = json.Marshal(value)
 	}
 
 	// Compare with the existing explicit JSON member.

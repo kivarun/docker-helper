@@ -304,6 +304,19 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		resolvedMounts = append(resolvedMounts, *resolved)
 	}
 
+	// Get config to check trusted CA injection mode.
+	cfg := a.getConfig()
+
+	// Check for trusted CA mount overlap when injection is active.
+	if cfg.TrustedCAInjection == "auto" {
+		for _, m := range req.Mounts {
+			if isTrustedCAMountOverlap(m.Target) {
+				writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+				return
+			}
+		}
+	}
+
 	mountAudit := make([]auditMount, 0, len(req.Mounts))
 	for _, m := range req.Mounts {
 		mountAudit = append(mountAudit, auditMount{
@@ -319,9 +332,34 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cmdArgCount = &n
 	}
 
+	// Determine trusted CA injection.
+	trustedCAInjected := cfg.TrustedCAInjection == "auto" && cfg.TrustedCAPreparedDir != ""
+
+	// Build environment list: user env + injected CA env (only if not already set).
+	allEnv := make(map[string]string)
+	for k, v := range req.Environment {
+		allEnv[k] = v
+	}
+	if trustedCAInjected {
+		if _, exists := allEnv[trustedCAEnvSSLDir]; !exists {
+			allEnv[trustedCAEnvSSLDir] = trustedCAEnvSSLDirValue
+		}
+		if _, exists := allEnv[trustedCAEnvNodeExtra]; !exists {
+			allEnv[trustedCAEnvNodeExtra] = trustedCAEnvNodeExtraValue
+		}
+	}
+
+	// Sort all environment names for deterministic argv.
+	sortedEnvNames := make([]string, 0, len(allEnv))
+	for name := range allEnv {
+		sortedEnvNames = append(sortedEnvNames, name)
+	}
+	sort.Strings(sortedEnvNames)
+
+	// Audit env keys are only the user-provided ones (already sorted above).
+
 	// Ensure the session Docker config directory exists before registering
 	// the operation so that a failure here does not leave a zombie operation.
-	cfg := a.getConfig()
 	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
 	if err != nil {
 		opLog(ctx).Error("cannot create session Docker directory",
@@ -339,6 +377,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	op.auditCommandArgCount = cmdArgCount
 	op.auditMounts = mountAudit
 	op.auditEnvKeys = envNames
+	op.auditTrustedCAInjected = trustedCAInjected
 	if shmSizeBytes > 0 {
 		op.auditShmSize = req.ShmSize
 	}
@@ -358,14 +397,15 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:           "run.start",
-		SessionID:       session.ID,
-		OperationID:     op.ID,
-		Image:           req.Image,
-		CommandArgCount: cmdArgCount,
-		Mounts:          mountAudit,
-		EnvKeys:         envNames,
-		ShmSize:         op.auditShmSize,
+		Event:             "run.start",
+		SessionID:         session.ID,
+		OperationID:       op.ID,
+		Image:             req.Image,
+		CommandArgCount:   cmdArgCount,
+		Mounts:            mountAudit,
+		EnvKeys:           envNames,
+		ShmSize:           op.auditShmSize,
+		TrustedCAInjected: trustedCAInjected,
 	})
 
 	// Build docker run command.
@@ -389,8 +429,16 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--workdir", req.Workdir)
 	}
 
-	for _, name := range envNames {
-		args = append(args, "--env", name+"="+req.Environment[name])
+	// Add all environment variables (user + injected CA) in sorted order.
+	for _, name := range sortedEnvNames {
+		args = append(args, "--env", name+"="+allEnv[name])
+	}
+
+	// Add trusted CA injection mount (not included in user mounts audit).
+	if trustedCAInjected {
+		caMountSpec := fmt.Sprintf("type=bind,source=%s,target=%s,readonly",
+			cfg.TrustedCAPreparedDir, trustedCAContainerDir)
+		args = append(args, "--mount", caMountSpec)
 	}
 
 	for _, m := range resolvedMounts {

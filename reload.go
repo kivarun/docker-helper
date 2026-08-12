@@ -81,6 +81,8 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 		slog.String("operation_retention_ttl", newCfg.OperationRetentionTTL.String()),
 		slog.Int("operation_max_completed", newCfg.OperationMaxCompleted),
 		slog.Int64("operation_log_max_bytes", newCfg.OperationLogMaxBytes),
+		slog.String("trusted_ca_injection", newCfg.TrustedCAInjection),
+		slog.String("trusted_ca_path", newCfg.TrustedCAPath),
 	)
 
 	writeJSON(r.Context(), w, http.StatusOK, response{

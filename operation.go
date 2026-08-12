@@ -74,11 +74,12 @@ type operation struct {
 	// completes regardless of outcome.
 	cidfile string
 	// audit metadata for finish event, set by operation-specific factory.
-	auditCommandArgCount *int
-	auditMounts          []auditMount
-	auditEnvKeys         []string
-	auditBuildArgKeys    []string
-	auditShmSize         string
+	auditCommandArgCount   *int
+	auditMounts            []auditMount
+	auditEnvKeys           []string
+	auditBuildArgKeys      []string
+	auditShmSize           string
+	auditTrustedCAInjected bool
 }
 
 func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64) *operation {
@@ -628,20 +629,21 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 		dur = *duration
 	}
 	writeAuditWithRequestID(context.Background(), auditRecord{
-		Event:           op.Kind + ".finish",
-		SessionID:       op.SessionID,
-		OperationID:     op.ID,
-		Image:           op.Image,
-		Context:         op.Context,
-		Dockerfile:      op.Dockerfile,
-		CommandArgCount: op.auditCommandArgCount,
-		Mounts:          op.auditMounts,
-		EnvKeys:         op.auditEnvKeys,
-		BuildArgKeys:    op.auditBuildArgKeys,
-		ShmSize:         op.auditShmSize,
-		Result:          *op.ResultCode,
-		ExitCode:        exitCode,
-		Duration:        dur,
+		Event:             op.Kind + ".finish",
+		SessionID:         op.SessionID,
+		OperationID:       op.ID,
+		Image:             op.Image,
+		Context:           op.Context,
+		Dockerfile:        op.Dockerfile,
+		CommandArgCount:   op.auditCommandArgCount,
+		Mounts:            op.auditMounts,
+		EnvKeys:           op.auditEnvKeys,
+		BuildArgKeys:      op.auditBuildArgKeys,
+		ShmSize:           op.auditShmSize,
+		TrustedCAInjected: op.auditTrustedCAInjected,
+		Result:            *op.ResultCode,
+		ExitCode:          exitCode,
+		Duration:          dur,
 	})
 }
 
