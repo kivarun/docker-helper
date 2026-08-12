@@ -227,12 +227,6 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 	return fpDir, nil
 }
 
-// isTrustedCAEnvVar returns true if envKey is one of the helper-injected
-// CA environment variable names.
-func isTrustedCAEnvVar(envKey string) bool {
-	return envKey == trustedCAEnvSSLDir || envKey == trustedCAEnvNodeExtra
-}
-
 // isTrustedCAMountOverlap returns true if the agent mount target overlaps
 // with the trusted CA injection target. This includes exact match, ancestor,
 // and descendant relationships.

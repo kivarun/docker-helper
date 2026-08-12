@@ -148,11 +148,8 @@ func generateTestCASecondPEMBlock(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// computeTestOpenSSLHash returns a fixed valid hash for fake openssl scripts.
-func computeTestOpenSSLHash(t *testing.T, caPath string) string {
-	t.Helper()
-	return "abcd1234"
-}
+// testOpenSSLHash is the fixed hash returned by fake openssl scripts.
+const testOpenSSLHash = "abcd1234"
 
 // createFakeOpenSSL creates a fake openssl script in fakeBinDir that returns the given hash.
 func createFakeOpenSSL(t *testing.T, fakeBinDir, hash string) {
@@ -189,7 +186,7 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir
 	caPath = filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := computeTestOpenSSLHash(t, caPath)
+	hash := testOpenSSLHash
 	createFakeOpenSSL(t, fakeBinDir, hash)
 
 	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
@@ -228,7 +225,7 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	caPath = filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := computeTestOpenSSLHash(t, caPath)
+	hash := testOpenSSLHash
 	createFakeOpenSSL(t, fakeBinDir, hash)
 
 	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
@@ -259,17 +256,4 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	}
 
 	return configPath, caPath, fakeBinDir, cleanup
-}
-
-// stringSliceEqual compares two string slices for equality.
-func stringSliceEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

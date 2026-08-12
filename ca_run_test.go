@@ -88,28 +88,22 @@ func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
 		t.Errorf("expected exactly 1 mount %q, got %v", expectedMount, mountValues)
 	}
 
-	// Verify exactly one SSL_CERT_DIR with the correct value.
-	checkEnvArg := func(name, want string) {
-		var found []string
-		for i, arg := range capturedArgs {
-			if arg == "--env" && i+1 < len(capturedArgs) {
-				next := capturedArgs[i+1]
-				if strings.HasPrefix(next, name+"=") {
-					found = append(found, strings.TrimPrefix(next, name+"="))
-				}
-			}
-		}
-		if len(found) != 1 {
-			t.Errorf("expected exactly 1 %s, got %d: %v", name, len(found), found)
-			return
-		}
-		if found[0] != want {
-			t.Errorf("%s = %q, want %q", name, found[0], want)
+	// Verify exactly two CA env vars with the correct values and no extras.
+	var envValues []string
+	for i, arg := range capturedArgs {
+		if arg == "--env" && i+1 < len(capturedArgs) {
+			envValues = append(envValues, capturedArgs[i+1])
 		}
 	}
-
-	checkEnvArg("SSL_CERT_DIR", trustedCAEnvSSLDirValue)
-	checkEnvArg("NODE_EXTRA_CA_CERTS", trustedCAEnvNodeExtraValue)
+	if len(envValues) != 2 {
+		t.Fatalf("expected exactly 2 env vars, got %d: %v", len(envValues), envValues)
+	}
+	if envValues[0] != "NODE_EXTRA_CA_CERTS=/run/docker-helper/trusted-ca/ca.pem" {
+		t.Errorf("env[0] = %q, want NODE_EXTRA_CA_CERTS=/run/docker-helper/trusted-ca/ca.pem", envValues[0])
+	}
+	if envValues[1] != "SSL_CERT_DIR=/run/docker-helper/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs" {
+		t.Errorf("env[1] = %q, want SSL_CERT_DIR=/run/docker-helper/trusted-ca:/etc/ssl/certs:/etc/pki/tls/certs", envValues[1])
+	}
 }
 
 func TestRunCAExplicitEnvWins(t *testing.T) {
@@ -290,50 +284,5 @@ func TestCAMountOverlapRejected(t *testing.T) {
 		if got != tc.overlap {
 			t.Errorf("isTrustedCAMountOverlap(%q) = %v, want %v", tc.target, got, tc.overlap)
 		}
-	}
-}
-
-func TestIsTrustedCAEnvVar(t *testing.T) {
-	if !isTrustedCAEnvVar("SSL_CERT_DIR") {
-		t.Error("SSL_CERT_DIR should be a trusted CA env var")
-	}
-	if !isTrustedCAEnvVar("NODE_EXTRA_CA_CERTS") {
-		t.Error("NODE_EXTRA_CA_CERTS should be a trusted CA env var")
-	}
-	if isTrustedCAEnvVar("SSL_CERT_FILE") {
-		t.Error("SSL_CERT_FILE should NOT be a trusted CA env var")
-	}
-	if isTrustedCAEnvVar("CUSTOM_VAR") {
-		t.Error("CUSTOM_VAR should NOT be a trusted CA env var")
-	}
-}
-
-func TestCAInjectionConstants(t *testing.T) {
-	if trustedCAContainerDir != "/run/docker-helper/trusted-ca" {
-		t.Errorf("trustedCAContainerDir = %s", trustedCAContainerDir)
-	}
-	if trustedCAEnvSSLDir != "SSL_CERT_DIR" {
-		t.Errorf("trustedCAEnvSSLDir = %s", trustedCAEnvSSLDir)
-	}
-	if trustedCAEnvNodeExtra != "NODE_EXTRA_CA_CERTS" {
-		t.Errorf("trustedCAEnvNodeExtra = %s", trustedCAEnvNodeExtra)
-	}
-	if !strings.Contains(trustedCAEnvSSLDirValue, "/run/docker-helper/trusted-ca") {
-		t.Error("SSL_CERT_DIR value should contain trusted CA dir")
-	}
-	if !strings.Contains(trustedCAEnvSSLDirValue, "/etc/ssl/certs") {
-		t.Error("SSL_CERT_DIR value should contain /etc/ssl/certs")
-	}
-	if !strings.Contains(trustedCAEnvSSLDirValue, "/etc/pki/tls/certs") {
-		t.Error("SSL_CERT_DIR value should contain /etc/pki/tls/certs")
-	}
-	if trustedCAEnvNodeExtraValue != "/run/docker-helper/trusted-ca/ca.pem" {
-		t.Errorf("NODE_EXTRA_CA_CERTS value = %s", trustedCAEnvNodeExtraValue)
-	}
-}
-
-func TestCAInjectionNoSSL_CERT_FILE(t *testing.T) {
-	if isTrustedCAEnvVar("SSL_CERT_FILE") {
-		t.Error("SSL_CERT_FILE should NOT be a trusted CA env var")
 	}
 }

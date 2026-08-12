@@ -333,7 +333,7 @@ func TestCAPrepareFixesWrongSymlink(t *testing.T) {
 	caPath := filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := computeTestOpenSSLHash(t, caPath)
+	hash := testOpenSSLHash
 	fakeBinDir := filepath.Join(dir, "fake_bin")
 	createFakeOpenSSL(t, fakeBinDir, hash)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -383,7 +383,7 @@ func TestCAPrepareFixesRegularFileHashEntry(t *testing.T) {
 	caPath := filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := computeTestOpenSSLHash(t, caPath)
+	hash := testOpenSSLHash
 	fakeBinDir := filepath.Join(dir, "fake_bin")
 	createFakeOpenSSL(t, fakeBinDir, hash)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -433,7 +433,7 @@ func TestCAPrepareRestoresPemMode(t *testing.T) {
 	caPath := filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := computeTestOpenSSLHash(t, caPath)
+	hash := testOpenSSLHash
 	fakeBinDir := filepath.Join(dir, "fake_bin")
 	createFakeOpenSSL(t, fakeBinDir, hash)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -480,7 +480,7 @@ func TestCAPrepareFixesPemSymlink(t *testing.T) {
 	caPath := filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	hash := computeTestOpenSSLHash(t, caPath)
+	hash := testOpenSSLHash
 	fakeBinDir := filepath.Join(dir, "fake_bin")
 	createFakeOpenSSL(t, fakeBinDir, hash)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))

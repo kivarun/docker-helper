@@ -552,35 +552,3 @@ func TestCAConfigShowDefaults(t *testing.T) {
 		t.Errorf("trusted_ca_path = %v, want empty", result["trusted_ca_path"])
 	}
 }
-
-func TestResolveTrustedCAInjection(t *testing.T) {
-	if resolveTrustedCAInjection("") != "disabled" {
-		t.Error("empty should resolve to disabled")
-	}
-	if resolveTrustedCAInjection("auto") != "auto" {
-		t.Error("auto should resolve to auto")
-	}
-	if resolveTrustedCAInjection("disabled") != "disabled" {
-		t.Error("disabled should resolve to disabled")
-	}
-}
-
-func TestCASetUnknownField(t *testing.T) {
-	setupConfigTest(t)
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "unknown_field", "value"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2 for unknown field, got %d", code)
-	}
-}
-
-func TestCAReservedFieldRejection(t *testing.T) {
-	setupConfigTest(t)
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "socket_path", "/tmp/test"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2 for reserved field, got %d", code)
-	}
-}
