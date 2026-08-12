@@ -66,17 +66,6 @@ func readValidatedCAFile(caPath string) ([]byte, *x509.Certificate, error) {
 	return data, cert, nil
 }
 
-// validateCAFile reads the file at caPath and verifies it is a readable
-// regular file containing exactly one valid PEM-encoded X.509 CA certificate.
-// The file must contain exactly one PEM block of type CERTIFICATE, with only
-// whitespace before and after the block. The certificate must have
-// BasicConstraintsValid=true and IsCA=true.
-// Returns the parsed certificate, or an error if validation fails.
-func validateCAFile(caPath string) (*x509.Certificate, error) {
-	_, cert, err := readValidatedCAFile(caPath)
-	return cert, err
-}
-
 // validateCAPEM validates that data contains exactly one PEM-encoded X.509
 // CA certificate. Returns the parsed certificate, or an error.
 func validateCAPEM(data []byte) (*x509.Certificate, error) {

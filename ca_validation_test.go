@@ -6,14 +6,17 @@ import (
 	"testing"
 )
 
-func TestValidateCAFileSuccess(t *testing.T) {
+func TestReadValidatedCAFileSuccess(t *testing.T) {
 	dir := t.TempDir()
 	caPath := filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	cert, err := validateCAFile(caPath)
+	data, cert, err := readValidatedCAFile(caPath)
 	if err != nil {
-		t.Fatalf("validateCAFile failed: %v", err)
+		t.Fatalf("readValidatedCAFile failed: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected non-empty bytes")
 	}
 	if cert == nil {
 		t.Fatal("expected non-nil certificate")
@@ -23,16 +26,16 @@ func TestValidateCAFileSuccess(t *testing.T) {
 	}
 }
 
-func TestValidateCAFileMissing(t *testing.T) {
-	_, err := validateCAFile("/nonexistent/ca.crt")
+func TestReadValidatedCAFileMissing(t *testing.T) {
+	_, _, err := readValidatedCAFile("/nonexistent/ca.crt")
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
 }
 
-func TestValidateCAFileNotRegular(t *testing.T) {
+func TestReadValidatedCAFileNotRegular(t *testing.T) {
 	dir := t.TempDir()
-	_, err := validateCAFile(dir)
+	_, _, err := readValidatedCAFile(dir)
 	if err == nil {
 		t.Fatal("expected error for directory")
 	}
