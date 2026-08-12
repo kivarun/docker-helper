@@ -1096,55 +1096,26 @@ func TestInstallYesSkill(t *testing.T) {
 	}
 }
 
-// setupInstallTestEnv creates a test environment for install.sh with fake
-// docker, systemctl, and a docker-helper binary. Returns (tempHome, scriptDir,
-// fakeDir, callLog).
-func setupInstallTestEnv(t *testing.T, serviceActive bool, stopFails bool,
-	currentVer, newVer string, stdinData string) (tempHome, scriptDir, fakeDir, callLog string) {
+// setupInstallEnv creates a minimal test environment for install.sh.
+// Returns (tempHome, scriptDir, fakeDir, callLog).
+// Each test writes its own systemctl script to fakeDir.
+func setupInstallEnv(t *testing.T, currentVer, newVer string) (tempHome, scriptDir, fakeDir, callLog string) {
 	t.Helper()
 	tempHome = t.TempDir()
 	scriptDir = t.TempDir()
 	fakeDir = t.TempDir()
 	callLog = filepath.Join(fakeDir, "systemctl_calls.log")
 
-	// Create fake docker
 	if err := os.WriteFile(filepath.Join(fakeDir, "docker"),
 		[]byte("#!/bin/bash\necho ok\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create fake systemctl
-	systemctlScript := fmt.Sprintf(`#!/bin/bash
-log_file="%s"
-echo "$@" >> "$log_file"
-case "$*" in
-  *"is-active"*)
-    if [ "%v" = "true" ]; then exit 0; else exit 1; fi
-    ;;
-  *"stop"*)
-    if [ "%v" = "true" ]; then exit 1; else exit 0; fi
-    ;;
-  *"is-enabled"*)
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`, callLog, serviceActive, stopFails)
-	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
-		[]byte(systemctlScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create fake docker-helper binary in script_dir
-	binScript := fmt.Sprintf("#!/bin/bash\necho '%s'\n", newVer)
 	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"),
-		[]byte(binScript), 0755); err != nil {
+		[]byte(fmt.Sprintf("#!/bin/bash\necho '%s'\n", newVer)), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create systemd unit source
 	unitDir := filepath.Join(scriptDir, "systemd", "user")
 	if err := os.MkdirAll(unitDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1154,7 +1125,6 @@ esac
 		t.Fatal(err)
 	}
 
-	// Create skill source
 	skillDir := filepath.Join(scriptDir, "skills", "docker-helper")
 	if err := os.MkdirAll(skillDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1164,20 +1134,26 @@ esac
 		t.Fatal(err)
 	}
 
-	// If current version is set, create an existing installed binary
 	if currentVer != "" {
 		installDir := filepath.Join(tempHome, ".local", "bin")
 		if err := os.MkdirAll(installDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		currentBinScript := fmt.Sprintf("#!/bin/bash\necho '%s'\n", currentVer)
 		if err := os.WriteFile(filepath.Join(installDir, "docker-helper"),
-			[]byte(currentBinScript), 0755); err != nil {
+			[]byte(fmt.Sprintf("#!/bin/bash\necho '%s'\n", currentVer)), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		unitInstallDir := filepath.Join(tempHome, ".config", "systemd", "user")
+		if err := os.MkdirAll(unitInstallDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(unitInstallDir, "docker-helper.service"),
+			[]byte("[Unit]\nDescription=Old\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Create existing config so run_init is skipped
 	configDir := filepath.Join(tempHome, ".config", "docker-helper")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		t.Fatal(err)
@@ -1187,7 +1163,6 @@ esac
 		t.Fatal(err)
 	}
 
-	// Copy install.sh into scriptDir so script_dir resolves correctly
 	installData, err := os.ReadFile("packaging/install.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -1197,16 +1172,13 @@ esac
 		t.Fatal(err)
 	}
 
-	_ = stdinData // set by caller via cmd.Stdin
 	return
 }
 
-// readSystemctlCalls reads and returns the systemctl call log lines.
 func readSystemctlCalls(t *testing.T, callLog string) []string {
 	t.Helper()
 	data, err := os.ReadFile(callLog)
 	if err != nil {
-		t.Helper()
 		return nil
 	}
 	var lines []string
@@ -1218,19 +1190,12 @@ func readSystemctlCalls(t *testing.T, callLog string) []string {
 	return lines
 }
 
-// TestInstallActiveServiceConfirmed verifies that when the service is active
-// and the user confirms, stop is called before any file copy, then daemon-reload
-// and start follow.
-func TestInstallActiveServiceConfirmed(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallTestEnv(
-		t, true, false, "1.0.0", "1.1.0", "")
-
-	installedBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-	origData, _ := os.ReadFile(installedBin) // save original
-
-	installScript := filepath.Join(scriptDir, "install.sh")
-	cmd := exec.Command("bash", installScript)
-	cmd.Stdin = strings.NewReader("\n\n\n\n") // accept all prompts
+func runInstall(t *testing.T, scriptDir, tempHome, fakeDir string, args []string, stdin string) ([]byte, error) {
+	t.Helper()
+	cmd := exec.Command("bash", append([]string{filepath.Join(scriptDir, "install.sh")}, args...)...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	cmd.Env = append(os.Environ(),
 		"HOME="+tempHome,
 		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
@@ -1238,83 +1203,101 @@ func TestInstallActiveServiceConfirmed(t *testing.T) {
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 	)
 	cmd.Dir = scriptDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install failed: %v", err)
+	return cmd.CombinedOutput()
+}
+
+// TestInstallActiveServiceConfirmed verifies that when the service is active
+// and the user confirms, stop is called before any file copy, then daemon-reload
+// and start follow. The fake systemctl asserts the binary state at each step.
+func TestInstallActiveServiceConfirmed(t *testing.T) {
+	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
+	installBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
+
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+install_bin="%s"
+echo "$@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 0 ;;
+  *"stop"*)
+    grep -q '1.0.0' "$install_bin" 2>/dev/null || exit 1
+    exit 0 ;;
+  *"daemon-reload"*)
+    grep -q '1.1.0' "$install_bin" 2>/dev/null || exit 1
+    exit 0 ;;
+  *) exit 0 ;;
+esac
+`, callLog, installBin)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
 	calls := readSystemctlCalls(t, callLog)
 
-	// stop must appear before any install output
-	stopIdx := -1
+	stopIdx, reloadIdx, startIdx := -1, -1, -1
 	for i, c := range calls {
-		if strings.Contains(c, "stop") {
+		if strings.Contains(c, "stop") && stopIdx < 0 {
 			stopIdx = i
-			break
+		}
+		if strings.Contains(c, "daemon-reload") && reloadIdx < 0 {
+			reloadIdx = i
+		}
+		if strings.Contains(c, "start") && startIdx < 0 {
+			startIdx = i
 		}
 	}
 	if stopIdx < 0 {
 		t.Fatal("stop was not called")
 	}
-
-	// daemon-reload and start must be called
-	foundReload := false
-	foundStart := false
-	for _, c := range calls {
-		if strings.Contains(c, "daemon-reload") {
-			foundReload = true
-		}
-		if strings.Contains(c, "start") {
-			foundStart = true
-		}
-	}
-	if !foundReload {
-		t.Error("daemon-reload not called after install")
-	}
-	if !foundStart {
-		t.Error("start not called after install")
+	if !(stopIdx < reloadIdx && reloadIdx < startIdx) {
+		t.Errorf("expected stop(%d) < daemon-reload(%d) < start(%d)", stopIdx, reloadIdx, startIdx)
 	}
 
-	// enable must NOT be called (service was already active)
 	for _, c := range calls {
 		if strings.Contains(c, "enable") {
 			t.Error("enable must not be called when service was previously active")
 		}
-	}
-
-	// Binary was replaced (new version)
-	newData, err := os.ReadFile(installedBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(newData) == string(origData) {
-		t.Error("binary should have been replaced")
 	}
 }
 
 // TestInstallActiveServiceRefused verifies that when the user refuses to stop
 // the service, no files are changed and stop is never called.
 func TestInstallActiveServiceRefused(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallTestEnv(
-		t, true, false, "1.0.0", "1.1.0", "")
+	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
+
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 0 ;;
+  *) exit 0 ;;
+esac
+`, callLog)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	installedBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-	origData, err := os.ReadFile(installedBin)
+	origBin, err := os.ReadFile(installedBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedUnit := filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")
+	origUnit, err := os.ReadFile(installedUnit)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	installScript := filepath.Join(scriptDir, "install.sh")
-	cmd := exec.Command("bash", installScript)
-	cmd.Stdin = strings.NewReader("n\n") // refuse stop prompt
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+fakeDir+":"+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install should exit 0 on refusal, got: %v", err)
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "n\n")
+	if err != nil {
+		t.Fatalf("install should exit 0 on refusal, got: %v\n%s", err, out)
 	}
 
 	calls := readSystemctlCalls(t, callLog)
@@ -1324,49 +1307,54 @@ func TestInstallActiveServiceRefused(t *testing.T) {
 		}
 	}
 
-	// Binary unchanged
-	newData, err := os.ReadFile(installedBin)
+	newBin, err := os.ReadFile(installedBin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(newData) != string(origData) {
+	if string(newBin) != string(origBin) {
 		t.Error("binary should not be changed when user refuses")
+	}
+
+	newUnit, err := os.ReadFile(installedUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(newUnit) != string(origUnit) {
+		t.Error("unit should not be changed when user refuses")
 	}
 }
 
 // TestInstallActiveServiceYesFlag verifies that --yes auto-confirms the
 // stop prompt and proceeds without reading stdin.
 func TestInstallActiveServiceYesFlag(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallTestEnv(
-		t, true, false, "1.0.0", "1.1.0", "")
+	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
 
-	installScript := filepath.Join(scriptDir, "install.sh")
-	cmd := exec.Command("bash", installScript, "--yes")
-	cmd.Stdin = nil // no stdin at all
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+fakeDir+":"+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install --yes failed: %v", err)
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 0
+`, callLog)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, []string{"--yes"}, "")
+	if err != nil {
+		t.Fatalf("install --yes failed: %v\n%s", err, out)
 	}
 
 	calls := readSystemctlCalls(t, callLog)
-	foundStop := false
-	foundStart := false
-	foundReload := false
+	foundStop, foundReload, foundStart := false, false, false
 	for _, c := range calls {
 		if strings.Contains(c, "stop") {
 			foundStop = true
 		}
-		if strings.Contains(c, "start") {
-			foundStart = true
-		}
 		if strings.Contains(c, "daemon-reload") {
 			foundReload = true
+		}
+		if strings.Contains(c, "start") {
+			foundStart = true
 		}
 	}
 	if !foundStop {
@@ -1383,26 +1371,28 @@ func TestInstallActiveServiceYesFlag(t *testing.T) {
 // TestInstallInactiveServicePreservesFlow verifies that when the service is
 // not active, the normal enable + start flow is used.
 func TestInstallInactiveServicePreservesFlow(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallTestEnv(
-		t, false, false, "", "1.0.0", "")
+	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "", "1.0.0")
 
-	installScript := filepath.Join(scriptDir, "install.sh")
-	cmd := exec.Command("bash", installScript, "--yes")
-	cmd.Stdin = nil
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+fakeDir+":"+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install failed: %v", err)
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+`, callLog)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, []string{"--yes"}, "")
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
 	calls := readSystemctlCalls(t, callLog)
-	foundEnable := false
-	foundStart := false
+	foundEnable, foundStart := false, false
 	for _, c := range calls {
 		if strings.Contains(c, "enable") {
 			foundEnable = true
@@ -1422,30 +1412,27 @@ func TestInstallInactiveServicePreservesFlow(t *testing.T) {
 // TestInstallSameVersionOutput verifies that when current and new versions
 // match, the output mentions reinstalling the same version.
 func TestInstallSameVersionOutput(t *testing.T) {
-	tempHome, scriptDir, fakeDir, callLog := setupInstallTestEnv(
-		t, true, false, "1.0.0", "1.0.0", "")
+	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.0.0")
 
-	installScript := filepath.Join(scriptDir, "install.sh")
-	cmd := exec.Command("bash", installScript)
-	cmd.Stdin = strings.NewReader("\n\n\n\n") // accept all prompts
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+fakeDir+":"+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-	out, err := cmd.CombinedOutput()
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 0
+`, callLog)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
 	if err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
-	output := string(out)
-	if !strings.Contains(output, "reinstall") || !strings.Contains(output, "same version") {
-		t.Errorf("output should mention reinstalling the same version, got:\n%s", output)
+	if !strings.Contains(string(out), "reinstall") || !strings.Contains(string(out), "same version") {
+		t.Errorf("output should mention reinstalling the same version, got:\n%s", out)
 	}
 
-	// Verify stop was still called (reinstall still needs restart)
 	calls := readSystemctlCalls(t, callLog)
 	foundStop := false
 	for _, c := range calls {
@@ -1462,41 +1449,121 @@ func TestInstallSameVersionOutput(t *testing.T) {
 // TestInstallStopFailureAborts verifies that if systemctl stop fails,
 // no files are modified and the installer exits with an error.
 func TestInstallStopFailureAborts(t *testing.T) {
-	tempHome, scriptDir, fakeDir, _ := setupInstallTestEnv(
-		t, true, true, "1.0.0", "1.1.0", "") // stopFails=true
+	tempHome, scriptDir, fakeDir, _ := setupInstallEnv(t, "1.0.0", "1.1.0")
+
+	systemctlScript := `#!/bin/bash
+case "$*" in
+  *"is-active"*) exit 0 ;;
+  *"stop"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	installedBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-	origData, err := os.ReadFile(installedBin)
+	origBin, err := os.ReadFile(installedBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installedUnit := filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")
+	origUnit, err := os.ReadFile(installedUnit)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	installScript := filepath.Join(scriptDir, "install.sh")
-	cmd := exec.Command("bash", installScript)
-	cmd.Stdin = strings.NewReader("\n\n") // accept stop prompt
-	cmd.Env = append(os.Environ(),
-		"HOME="+tempHome,
-		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
-		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
-		"PATH="+fakeDir+":"+os.Getenv("PATH"),
-	)
-	cmd.Dir = scriptDir
-	out, err := cmd.CombinedOutput()
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n")
 	if err == nil {
 		t.Fatal("install should fail when stop fails")
 	}
 
-	output := string(out)
-	if !strings.Contains(output, "Failed to stop") {
-		t.Errorf("should report stop failure, got:\n%s", output)
+	if !strings.Contains(string(out), "Failed to stop") {
+		t.Errorf("should report stop failure, got:\n%s", out)
 	}
 
-	// Binary unchanged
-	newData, err := os.ReadFile(installedBin)
+	newBin, err := os.ReadFile(installedBin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(newData) != string(origData) {
+	if string(newBin) != string(origBin) {
 		t.Error("binary should not be changed when stop fails")
+	}
+
+	newUnit, err := os.ReadFile(installedUnit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(newUnit) != string(origUnit) {
+		t.Error("unit should not be changed when stop fails")
+	}
+}
+
+// TestInstallDaemonReloadFailure verifies that when daemon-reload fails,
+// the installer exits non-zero, start is not called, and no false
+// "Installation complete" is printed.
+func TestInstallDaemonReloadFailure(t *testing.T) {
+	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
+
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 0 ;;
+  *"stop"*) exit 0 ;;
+  *"daemon-reload"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+`, callLog)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
+	if err == nil {
+		t.Fatal("install should fail when daemon-reload fails")
+	}
+
+	calls := readSystemctlCalls(t, callLog)
+	for _, c := range calls {
+		if strings.Contains(c, "start") {
+			t.Error("start must not be called after daemon-reload failure")
+		}
+	}
+
+	if strings.Contains(string(out), "Installation complete") {
+		t.Error("must not print Installation complete on daemon-reload failure")
+	}
+}
+
+// TestInstallStartFailure verifies that when start fails after daemon-reload,
+// the installer exits non-zero and no false "Installation complete" is printed.
+func TestInstallStartFailure(t *testing.T) {
+	tempHome, scriptDir, fakeDir, callLog := setupInstallEnv(t, "1.0.0", "1.1.0")
+
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 0 ;;
+  *"stop"*) exit 0 ;;
+  *"start"*) exit 1 ;;
+  *) exit 0 ;;
+esac
+`, callLog)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"),
+		[]byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runInstall(t, scriptDir, tempHome, fakeDir, nil, "\n\n\n\n")
+	if err == nil {
+		t.Fatal("install should fail when start fails")
+	}
+
+	if strings.Contains(string(out), "Installation complete") {
+		t.Error("must not print Installation complete on start failure")
 	}
 }

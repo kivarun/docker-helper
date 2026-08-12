@@ -270,17 +270,23 @@ main() {
 
 	if $service_was_active; then
 		if ! systemctl --user daemon-reload 2>/dev/null; then
-			warn "systemctl --user daemon-reload failed"
-		else
-			if ! systemctl --user start "$UNIT_NAME" 2>/dev/null; then
-				warn "Failed to start $UNIT_NAME"
-			else
-				info ""
-				info "Service restarted."
-				info "Check status with:  systemctl --user status $UNIT_NAME"
-				info "View logs with:     journalctl --user -u $UNIT_NAME"
-			fi
+			error "systemctl --user daemon-reload failed"
+			error "Service is stopped. Start it manually:"
+			error "  systemctl --user start $UNIT_NAME"
+			exit 1
 		fi
+
+		if ! systemctl --user start "$UNIT_NAME" 2>/dev/null; then
+			error "Failed to start $UNIT_NAME"
+			error "Service is stopped. Start it manually:"
+			error "  systemctl --user start $UNIT_NAME"
+			exit 1
+		fi
+
+		info ""
+		info "Service restarted."
+		info "Check status with:  systemctl --user status $UNIT_NAME"
+		info "View logs with:     journalctl --user -u $UNIT_NAME"
 	else
 		enable_service
 	fi
