@@ -163,64 +163,28 @@ func TestRunCAExplicitEnvWins(t *testing.T) {
 
 	waitRun(t, app, w)
 
-	// Verify user values are preserved.
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) {
-			next := capturedArgs[i+1]
-			if strings.HasPrefix(next, "SSL_CERT_DIR=") {
-				val := strings.TrimPrefix(next, "SSL_CERT_DIR=")
-				if val != "/custom/certs" {
-					t.Errorf("SSL_CERT_DIR = %q, want /custom/certs", val)
+	// Verify user values are the only ones present.
+	checkEnvArg := func(name, want string) {
+		var found []string
+		for i, arg := range capturedArgs {
+			if arg == "--env" && i+1 < len(capturedArgs) {
+				next := capturedArgs[i+1]
+				if strings.HasPrefix(next, name+"=") {
+					found = append(found, strings.TrimPrefix(next, name+"="))
 				}
 			}
-			if strings.HasPrefix(next, "NODE_EXTRA_CA_CERTS=") {
-				val := strings.TrimPrefix(next, "NODE_EXTRA_CA_CERTS=")
-				if val != "/custom/ca.pem" {
-					t.Errorf("NODE_EXTRA_CA_CERTS = %q, want /custom/ca.pem", val)
-				}
-			}
+		}
+		if len(found) != 1 {
+			t.Errorf("expected exactly 1 %s, got %d: %v", name, len(found), found)
+			return
+		}
+		if found[0] != want {
+			t.Errorf("%s = %q, want %q", name, found[0], want)
 		}
 	}
 
-	// Verify no default values leaked.
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) {
-			next := capturedArgs[i+1]
-			if strings.HasPrefix(next, "SSL_CERT_DIR=") {
-				val := strings.TrimPrefix(next, "SSL_CERT_DIR=")
-				if val == trustedCAEnvSSLDirValue {
-					t.Error("default SSL_CERT_DIR should not be injected when user provides value")
-				}
-			}
-			if strings.HasPrefix(next, "NODE_EXTRA_CA_CERTS=") {
-				val := strings.TrimPrefix(next, "NODE_EXTRA_CA_CERTS=")
-				if val == trustedCAEnvNodeExtraValue {
-					t.Error("default NODE_EXTRA_CA_CERTS should not be injected when user provides value")
-				}
-			}
-		}
-	}
-
-	// Verify no duplicates.
-	sslDirCount := 0
-	nodeExtraCount := 0
-	for i, arg := range capturedArgs {
-		if arg == "--env" && i+1 < len(capturedArgs) {
-			next := capturedArgs[i+1]
-			if strings.HasPrefix(next, "SSL_CERT_DIR=") {
-				sslDirCount++
-			}
-			if strings.HasPrefix(next, "NODE_EXTRA_CA_CERTS=") {
-				nodeExtraCount++
-			}
-		}
-	}
-	if sslDirCount > 1 {
-		t.Errorf("expected at most 1 SSL_CERT_DIR, got %d", sslDirCount)
-	}
-	if nodeExtraCount > 1 {
-		t.Errorf("expected at most 1 NODE_EXTRA_CA_CERTS, got %d", nodeExtraCount)
-	}
+	checkEnvArg("SSL_CERT_DIR", "/custom/certs")
+	checkEnvArg("NODE_EXTRA_CA_CERTS", "/custom/ca.pem")
 }
 
 func TestRunCADisabledNoMountOrEnv(t *testing.T) {
