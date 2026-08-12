@@ -175,10 +175,13 @@ func runWithLock(lockPath, socketPath string, fn func(net.Listener) error) error
 
 // serveWithShutdown runs server.Serve(listener) in a background goroutine and
 // waits for either signalCtx cancellation (graceful shutdown) or a Serve error.
-// On signalCtx cancellation it invokes onSignal (if non-nil), creates a shutdown
-// context with the given timeout, and starts server.Shutdown in a goroutine.
-// Returns the shutdown context, its cancel func, and a drain-done channel that
-// carries the drain result (nil on success, timeout error on deadline expiry).
+// On either path it invokes onShutdown (if non-nil), creates a shutdown
+// context with the given timeout, and starts server.Shutdown in a goroutine
+// to drain in-flight HTTP connections.
+// Returns the shutdown context, its cancel func, a drain-done channel that
+// carries the drain result (nil on success, timeout error on deadline expiry),
+// and the original Serve error (non-nil only when Serve returned an error
+// without a shutdown signal).
 // The caller runs operation termination concurrently, then waits for drain.
 // The caller must call shutdownCancel() after both terminateAll and drain complete.
 // The callback in runWithLock must not return until drain completes so the
@@ -188,7 +191,7 @@ func serveWithShutdown(
 	server *http.Server,
 	listener net.Listener,
 	timeout time.Duration,
-	onSignal func(),
+	onShutdown func(),
 ) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error, err error) {
 	serveDone := make(chan error, 1)
 	go func() {
@@ -197,10 +200,13 @@ func serveWithShutdown(
 
 	drainDoneCh := make(chan error, 1)
 
-	select {
-	case <-signalCtx.Done():
-		if onSignal != nil {
-			onSignal()
+	// startShutdown closes the operation gate, starts HTTP drain, and
+	// sends the drain result to drainDoneCh.
+	// serveErr is the Serve error if Serve already returned, or nil if
+	// Serve is still running (signal path).
+	startShutdown := func(serveErr error) {
+		if onShutdown != nil {
+			onShutdown()
 		}
 		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
 
@@ -216,19 +222,28 @@ func serveWithShutdown(
 				drainErr = shutdownErr
 			}
 			// Drain serveDone to avoid leaking the goroutine.
-			<-serveDone
+			// If serveErr is non-nil, Serve already returned and we consumed
+			// the value; skip the receive in that case.
+			if serveErr == nil {
+				<-serveDone
+			}
 			drainDoneCh <- drainErr
 		}()
+	}
 
+	select {
+	case <-signalCtx.Done():
+		// Signal received — start graceful shutdown.
+		startShutdown(nil)
 		drainDone = drainDoneCh
 		return
 
 	case serveErr := <-serveDone:
 		// Serve returned an error without a shutdown signal.
-		// Create a bounded cleanup context so terminateAll can still
-		// shut down running operations without panicking on nil ctx.
-		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
-		drainDoneCh <- nil
+		// Start the same graceful shutdown sequence so that the operation
+		// gate is closed and in-flight HTTP connections are drained before
+		// the lock, listener, and socket are released.
+		startShutdown(serveErr)
 		drainDone = drainDoneCh
 		err = serveErr
 		return
@@ -321,7 +336,8 @@ func runServe(stdout, stderr io.Writer) error {
 		defer stop()
 
 		shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout, func() {
-			// Signal received — close the operation gate before shutdown starts.
+			// Shutdown triggered (signal or Serve error) — close the operation
+			// gate so no new operations are accepted.
 			if app.OperationRegistry != nil {
 				app.OperationRegistry.setShuttingDown()
 			}
