@@ -10,8 +10,6 @@ import (
 )
 
 func TestCAInjectionAddsMountAndEnv(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	caPath := filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
@@ -24,9 +22,7 @@ func TestCAInjectionAddsMountAndEnv(t *testing.T) {
 	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
 	os.MkdirAll(runtimeSubDir, 0700)
 
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
-	defer os.Setenv("PATH", oldPath)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
 	if err != nil {
@@ -169,9 +165,7 @@ func TestRunHandlerWithCAInjection(t *testing.T) {
 	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
 	os.MkdirAll(runtimeSubDir, 0700)
 
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
-	defer os.Setenv("PATH", oldPath)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
 	if err != nil {
@@ -235,9 +229,7 @@ func TestRunHandlerCAInjectionFull(t *testing.T) {
 	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
 	os.MkdirAll(runtimeSubDir, 0700)
 
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
-	defer os.Setenv("PATH", oldPath)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
 	if err != nil {

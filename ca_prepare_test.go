@@ -284,10 +284,10 @@ func TestCAOpenSSLMissing(t *testing.T) {
 	generateTestCAPEM(t, caPath)
 
 	emptyBin := filepath.Join(dir, "empty_bin")
-	os.MkdirAll(emptyBin, 0755)
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", emptyBin)
-	defer os.Setenv("PATH", oldPath)
+	if err := os.MkdirAll(emptyBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", emptyBin)
 
 	_, err := prepareCAInjection(runtimeSubDir, caPath)
 	if err == nil {
@@ -307,12 +307,14 @@ func TestCAOpenSSLInvalidOutput(t *testing.T) {
 	generateTestCAPEM(t, caPath)
 
 	fakeBinDir := filepath.Join(dir, "fake_bin")
-	os.MkdirAll(fakeBinDir, 0755)
-	os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho invalid-hash\n"), 0755)
+	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho invalid-hash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+oldPath)
-	defer os.Setenv("PATH", oldPath)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	_, err := prepareCAInjection(runtimeSubDir, caPath)
 	if err == nil {
