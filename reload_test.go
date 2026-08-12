@@ -205,8 +205,8 @@ func TestConfigSetHelpReloadMention(t *testing.T) {
 	if !strings.Contains(output, "openssl") {
 		t.Fatalf("expected config set help to mention openssl, got: %s", output)
 	}
-	if !strings.Contains(output, "first") {
-		t.Fatalf("expected config set help to explain CA enablement order (first), got: %s", output)
+	if !strings.Contains(output, "set trusted_ca_path first, then set trusted_ca_injection to auto") {
+		t.Fatalf("expected config set help to explain CA enablement order, got: %s", output)
 	}
 }
 
@@ -220,8 +220,11 @@ func TestConfigUnsetHelpReloadMention(t *testing.T) {
 	if !strings.Contains(output, "daemon") {
 		t.Fatalf("expected config unset help to mention daemon, got: %s", output)
 	}
-	if !strings.Contains(output, "cannot") || !strings.Contains(output, "auto") {
-		t.Fatalf("expected config unset help to state trusted_ca_path cannot be unset while auto, got: %s", output)
+	if !strings.Contains(output, `trusted_ca_path cannot be unset while trusted_ca_injection is "auto"`) {
+		t.Fatalf("expected config unset help to state CA path/auto dependency, got: %s", output)
+	}
+	if !strings.Contains(output, `Set trusted_ca_injection to "disabled" first`) {
+		t.Fatalf("expected config unset help to require disabling auto first, got: %s", output)
 	}
 }
 
