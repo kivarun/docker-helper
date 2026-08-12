@@ -36,34 +36,33 @@ var opensslHashPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
 
 // readValidatedCAFile opens the file at caPath, verifies it is a regular file,
 // reads its contents, and validates them as a single PEM-encoded X.509 CA
-// certificate. Returns the file bytes and the parsed certificate.
+// certificate. Returns the file bytes.
 // The file is opened once; the fd is used for Stat to avoid TOCTOU.
-func readValidatedCAFile(caPath string) ([]byte, *x509.Certificate, error) {
+func readValidatedCAFile(caPath string) ([]byte, error) {
 	f, err := os.Open(caPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot access trusted_ca_path: %w", err)
+		return nil, fmt.Errorf("cannot access trusted_ca_path: %w", err)
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot access trusted_ca_path: %w", err)
+		return nil, fmt.Errorf("cannot access trusted_ca_path: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
+		return nil, fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
 	}
 
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read trusted_ca_path: %w", err)
+		return nil, fmt.Errorf("cannot read trusted_ca_path: %w", err)
 	}
 
-	cert, err := validateCAPEM(data)
-	if err != nil {
-		return nil, nil, err
+	if _, err := validateCAPEM(data); err != nil {
+		return nil, err
 	}
 
-	return data, cert, nil
+	return data, nil
 }
 
 // validateCAPEM validates that data contains exactly one PEM-encoded X.509
@@ -151,7 +150,7 @@ func fingerprintDir(runtimeDir string, caData []byte) string {
 // Idempotent: re-preparing the same CA is a no-op.
 func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err error) {
 	// Read and validate the source CA file once.
-	caData, _, err := readValidatedCAFile(caPath)
+	caData, err := readValidatedCAFile(caPath)
 	if err != nil {
 		return "", err
 	}

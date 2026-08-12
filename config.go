@@ -659,7 +659,7 @@ func validateCAConfig(raw map[string]json.RawMessage) error {
 		return nil
 	}
 
-	caData, _, err := readValidatedCAFile(caPath)
+	caData, err := readValidatedCAFile(caPath)
 	if err != nil {
 		return err
 	}
