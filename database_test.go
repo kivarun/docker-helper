@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -104,7 +106,7 @@ func TestJournalModeWAL(t *testing.T) {
 	}
 }
 
-func TestForeignKeysEnabled(t *testing.T) {
+func TestForeignKeyEnforcementPooledConnection(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.db"
 
@@ -114,18 +116,57 @@ func TestForeignKeysEnabled(t *testing.T) {
 	}
 	defer db.Close()
 
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
+	db.SetMaxOpenConns(4)
 
-	var enabled int
-	err = db.QueryRow("PRAGMA foreign_keys;").Scan(&enabled)
+	_, err = db.Exec("CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
 	if err != nil {
-		t.Fatalf("cannot query foreign_keys: %v", err)
+		t.Fatalf("create parent table: %v", err)
 	}
 
-	if enabled != 1 {
-		t.Errorf("expected foreign_keys enabled (1), got %d", enabled)
+	_, err = db.Exec("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL, FOREIGN KEY (parent_id) REFERENCES parent(id))")
+	if err != nil {
+		t.Fatalf("create child table: %v", err)
+	}
+
+	ctx := context.Background()
+
+	conn1, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn() error: %v", err)
+	}
+	defer conn1.Close()
+
+	_, err = db.Exec("INSERT INTO parent (id, name) VALUES (1, 'parent1')")
+	if err != nil {
+		t.Fatalf("insert parent: %v", err)
+	}
+
+	_, err = db.Exec("INSERT INTO child (id, parent_id) VALUES (1, 999)")
+	if err == nil {
+		t.Fatal("expected foreign key constraint violation, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "FOREIGN KEY constraint") {
+		t.Fatalf("expected FOREIGN KEY constraint error, got: %v", err)
+	}
+}
+
+func TestOpenDatabaseDSNSpecialCharacters(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test file?weird#hash.db"
+
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatalf("openDatabase() with special chars error: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		t.Fatalf("database not reachable: %v", err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database file not found at expected path: %v", err)
 	}
 }
 

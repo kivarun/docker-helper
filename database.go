@@ -3,13 +3,17 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 func openDatabase(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", path)
+	encoded := url.PathEscape(path)
+	dsn := "file:" + encoded + "?_foreign_keys=on"
+
+	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open database: %w", err)
 	}
@@ -25,10 +29,6 @@ func openDatabase(path string) (*sql.DB, error) {
 func initializeDatabase(db *sql.DB) error {
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		return fmt.Errorf("cannot set journal_mode: %w", err)
-	}
-
-	if _, err := db.Exec("PRAGMA foreign_keys=ON;"); err != nil {
-		return fmt.Errorf("cannot enable foreign_keys: %w", err)
 	}
 
 	_, err := db.Exec(`
