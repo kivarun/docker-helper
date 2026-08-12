@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,7 +53,7 @@ func readValidatedCAFile(caPath string) ([]byte, *x509.Certificate, error) {
 		return nil, nil, fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
 	}
 
-	data, err := os.ReadFile(caPath)
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read trusted_ca_path: %w", err)
 	}
