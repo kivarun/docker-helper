@@ -240,9 +240,9 @@ func TestBlackBoxExactUsageStrings(t *testing.T) {
 		{"serve help", []string{"serve", "--help"}, "Usage: docker-helper serve"},
 		{"init help", []string{"init", "--help"}, "Usage: docker-helper init [--allowed-root PATH]"},
 		{"version help", []string{"version", "--help"}, "Usage: docker-helper version"},
-		{"session list help", []string{"session", "list", "--help"}, "Usage: docker-helper session list [--json]"},
-		{"session create help", []string{"session", "create", "--help"}, "Usage: docker-helper session create --workspace PATH [--json]"},
-		{"session delete help", []string{"session", "delete", "--help"}, "Usage: docker-helper session delete --id SESSION_ID [--json]"},
+		{"session list help", []string{"session", "list", "--help"}, "Usage: docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]"},
+		{"session create help", []string{"session", "create", "--help"}, "Usage: docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--json]"},
+		{"session delete help", []string{"session", "delete", "--help"}, "Usage: docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]"},
 		{"session cleanup help", []string{"session", "cleanup", "--help"}, "Usage: docker-helper session cleanup"},
 	}
 	for _, tt := range tests {

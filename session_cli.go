@@ -24,8 +24,9 @@ var sessionCommand = &Command{
 var sessionCreateCommand = &Command{
 	Name:    "create",
 	Summary: "Create a new session",
-	Usage:   "docker-helper session create --workspace PATH [--json]",
+	Usage:   "docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		workspace := fs.String("workspace", "", "Workspace directory")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
@@ -37,19 +38,15 @@ var sessionCreateCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				result, err := client.createSession(*workspace)
 				if err != nil {
@@ -88,25 +85,22 @@ var sessionCreateCommand = &Command{
 var sessionListCommand = &Command{
 	Name:    "list",
 	Summary: "List active sessions",
-	Usage:   "docker-helper session list [--json]",
+	Usage:   "docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				result, err := client.listSessions()
 				if err != nil {
@@ -134,8 +128,9 @@ var sessionListCommand = &Command{
 var sessionDeleteCommand = &Command{
 	Name:    "delete",
 	Summary: "Delete a session",
-	Usage:   "docker-helper session delete --id SESSION_ID [--json]",
+	Usage:   "docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		id := fs.String("id", "", "Session ID to delete")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 
@@ -147,19 +142,15 @@ var sessionDeleteCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				if err := client.deleteSession(*id); err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)

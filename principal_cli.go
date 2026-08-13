@@ -33,28 +33,25 @@ var credentialCommand = &Command{
 var principalCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new principal",
-	Usage:      "docker-helper principal create USER",
+	Usage:      "docker-helper principal create [--system] [--endpoint ENDPOINT] [--token-file PATH] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				body, err := json.Marshal(createPrincipalRequest{Username: username})
 				if err != nil {
@@ -109,28 +106,25 @@ var principalCreateCommand = &Command{
 var principalShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show principal details",
-	Usage:      "docker-helper principal show USER [FIELD]",
+	Usage:      "docker-helper principal show [--system] [--endpoint ENDPOINT] [--token-file PATH] USER [FIELD]",
 	MinPosArgs: 1,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				resp, err := client.doAuthenticatedRequest("GET", "/principals/"+username, nil)
 				if err != nil {
@@ -205,10 +199,11 @@ func extractPrincipalField(p *principalResponse, field string) (string, bool) {
 var principalSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Modify principal settings",
-	Usage:      "docker-helper principal set USER FIELD VALUE",
+	Usage:      "docker-helper principal set [--system] [--endpoint ENDPOINT] [--token-file PATH] USER FIELD VALUE",
 	MinPosArgs: 3,
 	MaxPosArgs: 3,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
@@ -232,19 +227,15 @@ var principalSetCommand = &Command{
 					return 1
 				}
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				body, err := json.Marshal(setPrincipalRequest{Enabled: &enabled})
 				if err != nil {
@@ -299,29 +290,26 @@ var principalAllowedRootCommand = &Command{
 var principalAllowedRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root add USER PATH",
+	Usage:      "docker-helper principal allowed-root add [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
 				path := args[1]
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				body, err := json.Marshal(allowedRootRequest{Path: path})
 				if err != nil {
@@ -367,29 +355,26 @@ var principalAllowedRootAddCommand = &Command{
 var principalAllowedRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove an allowed root for a principal",
-	Usage:      "docker-helper principal allowed-root remove USER PATH",
+	Usage:      "docker-helper principal allowed-root remove [--system] [--endpoint ENDPOINT] [--token-file PATH] USER PATH",
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
 				path := args[1]
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				body, err := json.Marshal(allowedRootRequest{Path: path})
 				if err != nil {
@@ -435,10 +420,11 @@ var principalAllowedRootRemoveCommand = &Command{
 var credentialCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new credential for a principal",
-	Usage:      "docker-helper credential create --name NAME USER",
+	Usage:      "docker-helper credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] --name NAME USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		name := fs.String("name", "", "Credential name")
 
 		return Invocation{
@@ -456,19 +442,15 @@ var credentialCreateCommand = &Command{
 				}
 				username := args[0]
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				body, err := json.Marshal(createCredentialRequest{Name: *name})
 				if err != nil {
@@ -516,28 +498,25 @@ var credentialCreateCommand = &Command{
 var credentialListCommand = &Command{
 	Name:       "list",
 	Summary:    "List credentials for a principal",
-	Usage:      "docker-helper credential list USER",
+	Usage:      "docker-helper credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				resp, err := client.doAuthenticatedRequest("GET", "/principals/"+username+"/credentials", nil)
 				if err != nil {
@@ -585,28 +564,25 @@ var credentialListCommand = &Command{
 var credentialRevokeCommand = &Command{
 	Name:       "revoke",
 	Summary:    "Revoke a credential",
-	Usage:      "docker-helper credential revoke CREDENTIAL_ID",
+	Usage:      "docker-helper credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] CREDENTIAL_ID",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				id := args[0]
 
-				socketPath, adminTokenPath, err := adminAPIPaths()
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-
-				tokenSource, err := adminAPITokenSource(adminTokenPath)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				client := newUnixAPIClient(socketPath, tokenSource, nil)
 
 				resp, err := client.doAuthenticatedRequest("POST", "/credentials/"+id+"/revoke", nil)
 				if err != nil {
