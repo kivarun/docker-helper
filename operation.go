@@ -80,37 +80,40 @@ type operation struct {
 	auditBuildArgKeys      []string
 	auditShmSize           string
 	auditTrustedCAInjected bool
+	auditPrincipalName     string
 }
 
-func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64) *operation {
+func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64, principalName string) *operation {
 	opID := generateOperationID()
 	now := time.Now()
 	return &operation{
-		ID:         opID,
-		SessionID:  sessionID,
-		Kind:       "build",
-		State:      operationRunning,
-		CreatedAt:  now,
-		Image:      image,
-		Context:    ctxPath,
-		Dockerfile: dockerfile,
-		LogBuffer:  newBoundedBuffer(bufSize),
-		done:       make(chan struct{}),
+		ID:                 opID,
+		SessionID:          sessionID,
+		Kind:               "build",
+		State:              operationRunning,
+		CreatedAt:          now,
+		Image:              image,
+		Context:            ctxPath,
+		Dockerfile:         dockerfile,
+		LogBuffer:          newBoundedBuffer(bufSize),
+		done:               make(chan struct{}),
+		auditPrincipalName: principalName,
 	}
 }
 
-func newRunOperation(sessionID, image string, bufSize int64) *operation {
+func newRunOperation(sessionID, image string, bufSize int64, principalName string) *operation {
 	opID := generateOperationID()
 	now := time.Now()
 	return &operation{
-		ID:        opID,
-		SessionID: sessionID,
-		Kind:      "run",
-		State:     operationRunning,
-		CreatedAt: now,
-		Image:     image,
-		LogBuffer: newBoundedBuffer(bufSize),
-		done:      make(chan struct{}),
+		ID:                 opID,
+		SessionID:          sessionID,
+		Kind:               "run",
+		State:              operationRunning,
+		CreatedAt:          now,
+		Image:              image,
+		LogBuffer:          newBoundedBuffer(bufSize),
+		done:               make(chan struct{}),
+		auditPrincipalName: principalName,
 	}
 }
 
@@ -641,6 +644,7 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 		BuildArgKeys:      op.auditBuildArgKeys,
 		ShmSize:           op.auditShmSize,
 		TrustedCAInjected: op.auditTrustedCAInjected,
+		PrincipalName:     op.auditPrincipalName,
 		Result:            *op.ResultCode,
 		ExitCode:          exitCode,
 		Duration:          dur,

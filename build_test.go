@@ -748,7 +748,7 @@ func TestOperationForSessionUnknownID(t *testing.T) {
 // returns nil when the operation belongs to a different session.
 func TestOperationForSessionForeignSession(t *testing.T) {
 	reg := newOperationRegistry()
-	op := newRunOperation("other-session", "alpine:latest", 1024)
+	op := newRunOperation("other-session", "alpine:latest", 1024, "")
 	reg.tryCreate(op)
 
 	app := &App{OperationRegistry: reg}
@@ -762,7 +762,7 @@ func TestOperationForSessionForeignSession(t *testing.T) {
 // returns the operation when the session matches.
 func TestOperationForSessionOwner(t *testing.T) {
 	reg := newOperationRegistry()
-	op := newRunOperation("session-1", "alpine:latest", 1024)
+	op := newRunOperation("session-1", "alpine:latest", 1024, "")
 	reg.tryCreate(op)
 
 	app := &App{OperationRegistry: reg}

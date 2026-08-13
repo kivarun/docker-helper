@@ -49,9 +49,10 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:     "registry.login.start",
-		SessionID: session.ID,
-		Registry:  req.Registry,
+		Event:         "registry.login.start",
+		SessionID:     session.ID,
+		Registry:      req.Registry,
+		PrincipalName: session.PrincipalName,
 	})
 
 	// Execute docker login with password via stdin.
@@ -78,11 +79,12 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Generic error — do not return Docker output.
 		writeAuditWithRequestID(ctx, auditRecord{
-			Event:     "registry.login.finish",
-			SessionID: session.ID,
-			Registry:  req.Registry,
-			Result:    "login_failed",
-			Duration:  duration,
+			Event:         "registry.login.finish",
+			SessionID:     session.ID,
+			Registry:      req.Registry,
+			Result:        "login_failed",
+			Duration:      duration,
+			PrincipalName: session.PrincipalName,
 		})
 
 		opLog(ctx).Warn("registry login failed",
@@ -100,11 +102,12 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:     "registry.login.finish",
-		SessionID: session.ID,
-		Registry:  req.Registry,
-		Result:    "success",
-		Duration:  duration,
+		Event:         "registry.login.finish",
+		SessionID:     session.ID,
+		Registry:      req.Registry,
+		Result:        "success",
+		Duration:      duration,
+		PrincipalName: session.PrincipalName,
 	})
 
 	writeJSON(ctx, w, http.StatusOK, response{

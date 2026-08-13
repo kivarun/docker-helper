@@ -329,3 +329,17 @@ When the task explicitly requests push:
 
 Do not push merely because implementation is complete unless the task requests
 it.
+
+21. Architecture cleanup after feature blocks.
+
+After a significant feature block (multiple commits adding new capabilities),
+before starting the next major phase, do an architecture cleanup/review:
+- duplicate paths/abstractions;
+- obsolete compatibility code;
+- contract drift between implementation and documentation;
+- help/docs drift;
+- tests freezing accidental implementation details.
+
+Do not require cleanup after every small commit.
+
+Focus on deletion and simplification over new abstractions.

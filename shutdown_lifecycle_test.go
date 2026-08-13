@@ -78,7 +78,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 
 	// Start first operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile1)
-	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024)
+	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "")
 	if !reg.tryCreate(op1) {
 		t.Fatal("tryCreate op1 failed")
 	}
@@ -96,7 +96,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 
 	// Start second operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile2)
-	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024)
+	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "")
 	if !reg.tryCreate(op2) {
 		t.Fatal("tryCreate op2 failed")
 	}
@@ -201,7 +201,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	}
 
 	// Create two run operations with cidfiles.
-	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024)
+	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "")
 	op1.cidfile = cidfile1
 	op1.started = true
 	cmd1 := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")
@@ -213,7 +213,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	reg.ops[op1.ID] = op1
 	reg.mu.Unlock()
 
-	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024)
+	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "")
 	op2.cidfile = cidfile2
 	op2.started = true
 	cmd2 := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")

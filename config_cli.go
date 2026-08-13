@@ -725,7 +725,11 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
-	tryReloadConfig(stdout, stderr)
+	if field == "http_address" {
+		fmt.Fprintln(stdout, "restart required")
+	} else {
+		tryReloadConfig(stdout, stderr)
+	}
 	return 0
 }
 
@@ -776,7 +780,11 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintln(stdout, "unset", field)
-	tryReloadConfig(stdout, stderr)
+	if field == "http_address" {
+		fmt.Fprintln(stdout, "restart required")
+	} else {
+		tryReloadConfig(stdout, stderr)
+	}
 	return 0
 }
 
@@ -786,43 +794,26 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 // If the daemon is running but reload fails (e.g., invalid config), the error
 // is printed but the config change is not rolled back.
 func tryReloadConfig(stdout, stderr io.Writer) {
-	// Use safe path resolution without creating directories.
-	configPath := getConfigPath()
-	configDir := filepath.Dir(configPath)
-	adminTokenPath := filepath.Join(configDir, "admin.token")
-
-	tokenData, err := os.ReadFile(adminTokenPath)
+	client, err := resolveOperatorClient(operatorClientOptions{})
 	if err != nil {
-		// Cannot read token - assume daemon not running
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-		return
-	}
-	token := strings.TrimSpace(string(tokenData))
-	if token == "" {
-		// Empty token - assume daemon not running
 		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		return
 	}
 
-	runtimeDir := getRuntimeDirSafe()
-	if runtimeDir == "" {
-		// No runtime dir - assume daemon not running
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-		return
-	}
-	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
-
-	client := newReloadClient(socketPath, func() (string, error) {
-		return token, nil
-	})
-	if err := client.reload(); err != nil {
-		// Check if the error is due to the daemon not running.
+	resp, err := client.doAuthenticatedRequest("POST", "/reload", nil)
+	if err != nil {
 		if isDaemonNotRunning(err) {
 			fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		} else {
-			// Real reload error - print warning
 			fmt.Fprintf(stderr, "warning: reload failed: %v\n", err)
 		}
+		return
+	}
+	defer resp.Body.Close()
+
+	_, err = client.readResponseBody(resp)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: reload failed: %v\n", err)
 	}
 }
 

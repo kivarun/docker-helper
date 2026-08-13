@@ -67,7 +67,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize)
+	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName)
 	op.auditBuildArgKeys = buildArgKeys
 
 	if a.OperationRegistry != nil {
@@ -79,13 +79,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:        "build.start",
-		SessionID:    session.ID,
-		OperationID:  op.ID,
-		Image:        req.Image,
-		Context:      req.Context,
-		Dockerfile:   req.Dockerfile,
-		BuildArgKeys: buildArgKeys,
+		Event:         "build.start",
+		SessionID:     session.ID,
+		OperationID:   op.ID,
+		Image:         req.Image,
+		Context:       req.Context,
+		Dockerfile:    req.Dockerfile,
+		BuildArgKeys:  buildArgKeys,
+		PrincipalName: session.PrincipalName,
 	})
 
 	// Build the command synchronously and start it.

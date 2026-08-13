@@ -363,7 +363,7 @@ func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 // TestWaitForContainerIDReturnsOnDone verifies that waitForContainerID
 // returns empty string when the operation completes during polling.
 func TestWaitForContainerIDReturnsOnDone(t *testing.T) {
-	op := newRunOperation("session1", "alpine:latest", 1024)
+	op := newRunOperation("session1", "alpine:latest", 1024, "")
 	op.cidfile = filepath.Join(t.TempDir(), op.ID+".cid")
 
 	// Complete the operation immediately.
@@ -381,7 +381,7 @@ func TestWaitForContainerIDReturnsOnDone(t *testing.T) {
 // TestWaitForContainerIDReturnsOnContextExpire verifies that waitForContainerID
 // returns empty string when the context expires without the cidfile appearing.
 func TestWaitForContainerIDReturnsOnContextExpire(t *testing.T) {
-	op := newRunOperation("session1", "alpine:latest", 1024)
+	op := newRunOperation("session1", "alpine:latest", 1024, "")
 	op.cidfile = filepath.Join(t.TempDir(), op.ID+".cid")
 
 	// Use a very short context.
@@ -397,7 +397,7 @@ func TestWaitForContainerIDReturnsOnContextExpire(t *testing.T) {
 // TestWaitForContainerIDReturnsID verifies that waitForContainerID
 // returns the container ID when the cidfile is published.
 func TestWaitForContainerIDReturnsID(t *testing.T) {
-	op := newRunOperation("session1", "alpine:latest", 1024)
+	op := newRunOperation("session1", "alpine:latest", 1024, "")
 	cidfilePath := filepath.Join(t.TempDir(), op.ID+".cid")
 	op.cidfile = cidfilePath
 

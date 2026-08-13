@@ -27,9 +27,10 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:     "pull.start",
-		SessionID: session.ID,
-		Image:     req.Image,
+		Event:         "pull.start",
+		SessionID:     session.ID,
+		Image:         req.Image,
+		PrincipalName: session.PrincipalName,
 	})
 
 	started := time.Now()
@@ -87,11 +88,12 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:     "pull.finish",
-		SessionID: session.ID,
-		Image:     req.Image,
-		Result:    result,
-		ExitCode:  exitCode,
-		Duration:  duration,
+		Event:         "pull.finish",
+		SessionID:     session.ID,
+		Image:         req.Image,
+		Result:        result,
+		ExitCode:      exitCode,
+		Duration:      duration,
+		PrincipalName: session.PrincipalName,
 	})
 }

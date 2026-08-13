@@ -37,7 +37,8 @@ func initializeDatabase(db *sql.DB) error {
 			token_hash TEXT NOT NULL UNIQUE,
 			workspace TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL
+			expires_at INTEGER NOT NULL,
+			principal_id INTEGER REFERENCES principals(id)
 		);
 
 		CREATE TABLE IF NOT EXISTS principals (

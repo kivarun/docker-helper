@@ -105,7 +105,7 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	}
 
 	// Verify that the operation gate is now closed.
-	op := newBuildOperation("test_session", "example:test", ".", "Dockerfile", 1024)
+	op := newBuildOperation("test_session", "example:test", ".", "Dockerfile", 1024, "")
 	if reg.tryCreate(op) {
 		t.Error("tryCreate should fail after shutdown callback closes gate")
 	}

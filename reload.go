@@ -1,29 +1,38 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"time"
 )
 
 // runReload is the CLI entry point for the reload command.
-func runReload(stdout, stderr io.Writer) int {
-	socketPath, adminTokenPath, err := adminAPIPaths()
+func runReload(stdout, stderr io.Writer, flags *flag.FlagSet) int {
+	system := flags.Bool("system", false, "Connect to system daemon")
+	endpoint := flags.String("endpoint", "", "Explicit endpoint (unix:///path or http://127.0.0.1:port)")
+	tokenFile := flags.String("token-file", "", "Token file path")
+
+	client, err := resolveOperatorClient(operatorClientOptions{
+		System:    *system,
+		Endpoint:  *endpoint,
+		TokenFile: *tokenFile,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	tokenSource, err := adminAPITokenSource(adminTokenPath)
+	resp, err := client.doAuthenticatedRequest("POST", "/reload", nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	defer resp.Body.Close()
 
-	client := newReloadClient(socketPath, tokenSource)
-	if err := client.reload(); err != nil {
+	_, err = client.readResponseBody(resp)
+	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
@@ -37,7 +46,8 @@ func runReload(stdout, stderr io.Writer) int {
 // session_ttl, log_level, audit_enabled, shutdown_timeout,
 // operation_retention_ttl, operation_max_completed, operation_log_max_bytes,
 // trusted_ca_path, trusted_ca_injection.
-// Computed paths (socket, database, etc.) remain unchanged.
+// Computed paths (socket, database, etc.) and startup-only fields (http_address)
+// remain unchanged.
 //
 // If the new configuration is invalid, the daemon keeps its current
 // configuration and returns an error.
@@ -58,6 +68,10 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+
+	// Preserve startup-only fields that cannot be changed at runtime.
+	oldCfg := a.getConfig()
+	newCfg.HTTPAddress = oldCfg.HTTPAddress
 
 	a.setConfig(newCfg)
 
@@ -84,28 +98,4 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 		OK:      true,
 		Message: "configuration reloaded",
 	})
-}
-
-// reloadClient provides the CLI-side HTTP client for the reload endpoint.
-type reloadClient struct {
-	client *apiClient
-}
-
-var reloadTimeout = 5 * time.Second
-
-func newReloadClient(socketPath string, tokenSource func() (string, error)) *reloadClient {
-	return &reloadClient{
-		client: newUnixAPIClient(socketPath, tokenSource, &reloadTimeout),
-	}
-}
-
-func (c *reloadClient) reload() error {
-	resp, err := c.client.doAuthenticatedRequest("POST", "/reload", nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	_, err = c.client.readResponseBody(resp)
-	return err
 }

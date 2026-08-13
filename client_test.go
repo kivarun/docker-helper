@@ -1067,11 +1067,17 @@ func TestReloadErrorStructured(t *testing.T) {
 		})
 	})
 
-	client := newReloadClient(socketPath, func() (string, error) {
+	client := newUnixAPIClient(socketPath, func() (string, error) {
 		return readAdminTokenPlain(tokenPath)
-	})
+	}, nil)
 
-	err := client.reload()
+	resp, err := client.doAuthenticatedRequest("POST", "/reload", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	_, err = client.readResponseBody(resp)
 	if err == nil {
 		t.Fatal("expected error")
 	}
