@@ -73,6 +73,9 @@ type operation struct {
 	// docker run CLI process. The file is removed after the operation
 	// completes regardless of outcome.
 	cidfile string
+	// pinnedMounts are the inode-pinned mount destinations for system-mode
+	// run operations. They are cleaned up after cmd.Wait completes.
+	pinnedMounts []*pinnedMount
 	// audit metadata for finish event, set by operation-specific factory.
 	auditCommandArgCount   *int
 	auditMounts            []auditMount

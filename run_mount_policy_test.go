@@ -159,6 +159,14 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
+	// Mock PinMount to return a fake pinnedMount.
+	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			HostPath: sourcePath,
+			cleanup:  func() error { return nil },
+		}, nil
+	}
+
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"subdir","target":"/data"}]}`)))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()

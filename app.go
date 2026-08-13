@@ -16,6 +16,18 @@ type App struct {
 	ExecCommand        func(string, ...string) ([]byte, error)
 	ExecCommandContext func(context.Context, string, ...string) *exec.Cmd
 	OperationRegistry  *operationRegistry
+	// PinMountFn is a test seam for the inode-pinning primitive.
+	// Production default calls the real PinMount; tests can return
+	// a fake pinnedMount with controlled Cleanup behavior.
+	PinMountFn func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error)
+}
+
+// pinMount calls PinMountFn if set, otherwise the real PinMount.
+func (a *App) pinMount(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	if a.PinMountFn != nil {
+		return a.PinMountFn(workspace, sourcePath, runtimeDir, operationID, mountIndex)
+	}
+	return PinMount(workspace, sourcePath, runtimeDir, operationID, mountIndex)
 }
 
 // getConfig returns a snapshot copy of the current configuration under a read lock.
