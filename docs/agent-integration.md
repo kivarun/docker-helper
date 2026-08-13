@@ -9,6 +9,17 @@ The integration belongs at the client edge of the project. Agent-specific
 behavior must not be added to the daemon core or change the daemon capability
 contract.
 
+## Launcher invariant for user mode
+
+In user mode, the security of the workspace-root bind mount relies on the
+launcher invariant: the sandboxed agent must not have host-side write access
+to the parent directory of the session workspace. This ensures the workspace
+directory entry cannot be replaced between validation and Docker mount.
+
+If the agent has write access to the workspace parent directory, the TOCTOU
+gap is exploitable. In that scenario, use system mode with `CAP_SYS_ADMIN`
+for inode-pinned mounts (future implementation).
+
 ## Client interfaces
 
 docker-helper exposes two first-class client interfaces:

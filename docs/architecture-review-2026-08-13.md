@@ -56,7 +56,8 @@ Relevant code: `run.go`, `api_contract.go`, `pull.go`, `registry.go`.
 
 ### P1 — Path validation has a TOCTOU gap
 
-**Status: closed for `POST /run` mounts in user mode; open for build context.**
+**Status: closed for `POST /run` mounts in user mode; open for `POST /run`
+in system mode and `POST /build` in both modes.**
 
 `resolveMount` and `validateBuildRequest` resolve symlinks and verify
 containment, but later pass the validated pathname to Docker as a string. A
@@ -72,9 +73,17 @@ the workspace directory entry (no write access to the parent directory), the
 pathname remains stable between validation and the Docker bind mount.
 Subdirectory and file mounts are rejected in user mode.
 
-**Open for build context:** `validateBuildRequest` still has the TOCTOU gap
-for both user and system mode. A separate security design decision is needed.
-Possible work includes evaluating inode-pinned mounts using `open_tree`/`move_mount`.
+**Open for `POST /run` mounts (system mode):** the TOCTOU gap remains. The
+confirmed resolution is inode-pinned helper-owned mount via `open_tree` +
+`move_mount` (requires `CAP_SYS_ADMIN`).
+
+**Open for `POST /build` (both modes):** `validateBuildRequest` still has the
+TOCTOU gap. `open_tree`/`move_mount` does not directly solve this because
+Docker CLI independently processes the build context and Dockerfile paths.
+A separate design decision is needed.
+
+Phase 8 system packaging is not ready until system-mode mount pinning is
+implemented and verified.
 
 Relevant code: `run.go:resolveMount`, `build.go:validateBuildRequest`.
 

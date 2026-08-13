@@ -911,16 +911,25 @@ access to the parent directory of the workspace. Since the agent cannot
 replace the workspace directory entry, the pathname remains stable between
 validation and the Docker bind mount.
 
-System mode has no such restriction and accepts any source inside the
-workspace. System mode may later use `open_tree`/`move_mount` for
-inode-pinned mounts to close the remaining TOCTOU gap.
+### System-mode mount TOCTOU gap
+
+System mode accepts any mount source inside the workspace. The TOCTOU gap
+remains: the helper validates canonical paths but passes them to Docker as
+strings. A workspace owner can replace the validated object with a symlink
+between validation and Docker mount.
+
+The confirmed resolution is inode-pinned helper-owned mount via
+`open_tree` + `move_mount` (requires `CAP_SYS_ADMIN`). Until this is
+implemented and verified, system-mode mounts have the same TOCTOU gap as
+build context in both modes.
 
 ### Build context TOCTOU
 
 The build context and Dockerfile paths have a time-of-check/time-of-use
 gap: the helper validates canonical paths but passes them to Docker as
 strings. The build context TOCTOU gap remains open for both user and
-system mode.
+system mode. `open_tree`/`move_mount` does not directly solve this because
+Docker CLI independently processes the build context and Dockerfile paths.
 
 ### Why source must be relative
 
