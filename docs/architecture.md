@@ -361,8 +361,8 @@ for full syntax:
   `cleanup`.
 - `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
   `unset`.
-- `principal` — Manage principals. Subcommands: `create`, `list`, `delete`,
-  `disable`, `allowed-root`.
+- `principal` — Manage principals. Subcommands: `create`, `show`, `set`,
+  `allowed-root`.
 - `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
   `revoke`.
 
@@ -563,7 +563,8 @@ Three credential classes provide different levels of access:
 - required for Docker operations: `POST /build`, `POST /run`, `POST /pull`,
   `POST /registry/login`;
 - sent as `Authorization: Bearer <session-token>`;
-- looked up by hash, checked for expiration and revocation.
+- looked up by hash and checked for expiration;
+- deletion removes the session and invalidates subsequent requests.
 
 Session management is dual-authenticated:
 - admin token -> global session management (create, list all, delete any);
