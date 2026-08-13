@@ -286,7 +286,7 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		case isErrInvalidAllowedRoot(err):
-			writeError(ctx, w, http.StatusBadRequest, "invalid_path", "invalid path")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		default:
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
@@ -375,7 +375,7 @@ func (a *App) handleRemoveAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		case isErrInvalidAllowedRoot(err):
-			writeError(ctx, w, http.StatusBadRequest, "invalid_path", "invalid path")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		default:
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}

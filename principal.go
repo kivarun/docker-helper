@@ -60,20 +60,21 @@ func resolveOSUser(username string) (uid int, gid int, home string, err error) {
 // canonicalizePath resolves a path to its canonical absolute form.
 // The path must already be absolute. Symlinks are resolved via EvalSymlinks.
 // The path must exist and be a directory.
+// All errors wrap ErrInvalidAllowedRoot.
 func canonicalizePath(path string) (string, error) {
 	cleaned, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("path does not exist: %s", path)
+			return "", fmt.Errorf("path does not exist: %s: %w", path, ErrInvalidAllowedRoot)
 		}
-		return "", fmt.Errorf("cannot resolve path: %w", err)
+		return "", fmt.Errorf("cannot resolve path: %w: %w", err, ErrInvalidAllowedRoot)
 	}
 	info, err := os.Stat(cleaned)
 	if err != nil {
-		return "", fmt.Errorf("cannot stat path: %w", err)
+		return "", fmt.Errorf("cannot stat path: %w: %w", err, ErrInvalidAllowedRoot)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("path is not a directory: %s", cleaned)
+		return "", fmt.Errorf("path is not a directory: %s: %w", cleaned, ErrInvalidAllowedRoot)
 	}
 	return cleaned, nil
 }
@@ -142,6 +143,10 @@ func createPrincipal(db *sql.DB, username string) (*PrincipalWithRoots, error) {
 	uid, gid, home, err := resolveOSUser(username)
 	if err != nil {
 		return nil, err
+	}
+
+	if home == "" || !filepath.IsAbs(home) {
+		return nil, fmt.Errorf("OS user %q has invalid home %q: must be an absolute path", username, home)
 	}
 
 	// Canonicalize the home directory for storage as default allowed_root.
@@ -302,12 +307,15 @@ func removeAllowedRoot(db *sql.DB, username string, rootPath string) (changed bo
 	if rootPath == "" {
 		return false, "", fmt.Errorf("path is required: %w", ErrInvalidAllowedRoot)
 	}
+	if !filepath.IsAbs(rootPath) {
+		return false, "", fmt.Errorf("path must be absolute: %w", ErrInvalidAllowedRoot)
+	}
 
 	// For REMOVE, we do NOT require the path to exist on the filesystem.
 	// We match against the stored canonical path.
 	resolved, err := filepath.Abs(rootPath)
 	if err != nil {
-		return false, "", fmt.Errorf("cannot resolve path: %w", err)
+		return false, "", fmt.Errorf("cannot resolve path: %w: %w", err, ErrInvalidAllowedRoot)
 	}
 	if canonical, err := filepath.EvalSymlinks(resolved); err == nil {
 		resolved = canonical

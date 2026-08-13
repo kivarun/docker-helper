@@ -998,6 +998,224 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 	}
 }
 
+func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "nonexistuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1042", "1042", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "nonexistuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+
+	reqBody, _ := json.Marshal(allowedRootRequest{Path: "/no/such/path/that/exists"})
+
+	req := httptest.NewRequest(http.MethodPost, "/principals/nonexistuser/allowed-roots", bytes.NewReader(reqBody))
+	withAuth(req)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp map[string]json.RawMessage
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	var code string
+		if err := json.Unmarshal(resp["code"], &code); err != nil {
+			t.Fatalf("cannot decode code: %v", err)
+		}
+		if code != "invalid_allowed_root" {
+		t.Errorf("expected code 'invalid_allowed_root', got %q", resp["code"])
+	}
+}
+
+func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "fileuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	regFile := filepath.Join(app.Config.AllowedRoot, "a-file")
+	if err := os.WriteFile(regFile, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1043", "1043", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "fileuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+
+	reqBody, _ := json.Marshal(allowedRootRequest{Path: regFile})
+
+	req := httptest.NewRequest(http.MethodPost, "/principals/fileuser/allowed-roots", bytes.NewReader(reqBody))
+	withAuth(req)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp map[string]json.RawMessage
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	var code string
+		if err := json.Unmarshal(resp["code"], &code); err != nil {
+			t.Fatalf("cannot decode code: %v", err)
+		}
+		if code != "invalid_allowed_root" {
+		t.Errorf("expected code 'invalid_allowed_root', got %q", resp["code"])
+	}
+}
+
+func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "relremuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1044", "1044", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "relremuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
+
+	reqBody, _ := json.Marshal(allowedRootRequest{Path: "relative/path"})
+
+	req := httptest.NewRequest(http.MethodDelete, "/principals/relremuser/allowed-roots", bytes.NewReader(reqBody))
+	withAuth(req)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp map[string]json.RawMessage
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	var code string
+		if err := json.Unmarshal(resp["code"], &code); err != nil {
+			t.Fatalf("cannot decode code: %v", err)
+		}
+		if code != "invalid_allowed_root" {
+		t.Errorf("expected code 'invalid_allowed_root', got %q", resp["code"])
+	}
+}
+
+func TestRemoveAllowedRootRelativeRejected(t *testing.T) {
+	app := newTestApp(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "relremuser2")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1045", "1045", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "relremuser2"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, _, err := removeAllowedRoot(app.DB, "relremuser2", "relative/path")
+	if err == nil {
+		t.Fatal("expected error for relative path in remove")
+	}
+	if !isErrInvalidAllowedRoot(err) {
+		t.Errorf("expected ErrInvalidAllowedRoot, got: %v", err)
+	}
+}
+
+func TestValidateAllowedRootForAddWrapsSentinel(t *testing.T) {
+	// Nonexistent absolute path
+	_, err := validateAllowedRootForAdd("/no/such/path")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !isErrInvalidAllowedRoot(err) {
+		t.Errorf("expected ErrInvalidAllowedRoot for nonexistent path, got: %v", err)
+	}
+
+	// Regular file
+	tmpFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(tmpFile, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = validateAllowedRootForAdd(tmpFile)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !isErrInvalidAllowedRoot(err) {
+		t.Errorf("expected ErrInvalidAllowedRoot for file path, got: %v", err)
+	}
+
+	// Relative path
+	_, err = validateAllowedRootForAdd("relative")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !isErrInvalidAllowedRoot(err) {
+		t.Errorf("expected ErrInvalidAllowedRoot for relative path, got: %v", err)
+	}
+}
+
+func TestCreatePrincipalRelativeHomeRejected(t *testing.T) {
+	app := newTestApp(t)
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1050", "1050", "relative/home", nil
+	}
+
+	_, err := createPrincipal(app.DB, "relhomeuser")
+	if err == nil {
+		t.Fatal("expected error for relative home")
+	}
+}
+
 func TestPrincipalCLIHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"principal", "--help"}, &stdout, &stderr)
