@@ -57,6 +57,7 @@ var (
 		"operation_log_max_bytes",
 		"trusted_ca_path",
 		"trusted_ca_injection",
+		"mode",
 	}
 )
 
@@ -87,10 +88,10 @@ func isRuntimeDependent(name string) bool {
 }
 
 // isPureComputed returns true for fields that can be resolved without
-// reading config.json (config_path, config_dir, admin_token_path).
+// reading config.json (config_path, config_dir, admin_token_path, mode).
 func isPureComputed(name string) bool {
 	switch name {
-	case "config_path", "config_dir", "admin_token_path":
+	case "config_path", "config_dir", "admin_token_path", "mode":
 		return true
 	default:
 		return false
@@ -129,7 +130,8 @@ Fields:
   operation_max_completed
   operation_log_max_bytes
   trusted_ca_path
-  trusted_ca_injection`,
+  trusted_ca_injection
+  mode`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -298,6 +300,9 @@ func persistRawConfig(configPath string, raw map[string]json.RawMessage) error {
 }
 
 func getRuntimeDirSafe() string {
+	if resolveDeploymentMode() == ModeSystem {
+		return "/run/docker-helper"
+	}
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		return ""
@@ -389,6 +394,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"operation_log_max_bytes": fc.OperationLogMaxBytes,
 		"trusted_ca_path":         fc.TrustedCAPath,
 		"trusted_ca_injection":    resolveTrustedCAInjection(fc.TrustedCAInjection),
+		"mode":                    resolveDeploymentMode(),
 	}
 
 	enc := json.NewEncoder(stdout)
@@ -442,6 +448,8 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, configDir)
 		case "admin_token_path":
 			fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
+		case "mode":
+			fmt.Fprintln(stdout, resolveDeploymentMode())
 		}
 		return 0
 	}
@@ -458,6 +466,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	}
 
 	// Runtime-dependent fields: validate config first, then check XDG_RUNTIME_DIR.
+	// In system mode, runtime dir is always available (/run/docker-helper).
 	if isRuntimeDependent(field) {
 		runtimeDir := getRuntimeDirSafe()
 		if runtimeDir == "" {

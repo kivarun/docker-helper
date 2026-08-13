@@ -15,6 +15,26 @@ import (
 	"time"
 )
 
+// DeploymentMode represents the deployment mode of the daemon.
+type DeploymentMode string
+
+const (
+	ModeUser   DeploymentMode = "user"
+	ModeSystem DeploymentMode = "system"
+)
+
+// EffectiveUID returns the effective UID of the process.
+// Can be replaced in tests.
+var EffectiveUID = func() int { return os.Geteuid() }
+
+// resolveDeploymentMode determines the deployment mode from the effective UID.
+func resolveDeploymentMode() DeploymentMode {
+	if EffectiveUID() == 0 {
+		return ModeSystem
+	}
+	return ModeUser
+}
+
 type Config struct {
 	AllowedRoot           string
 	SessionTTL            time.Duration
@@ -30,6 +50,8 @@ type Config struct {
 	OperationRetentionTTL time.Duration
 	OperationMaxCompleted int
 	OperationLogMaxBytes  int64
+	// Deployment mode (computed from effective UID).
+	Mode DeploymentMode
 	// Trusted CA injection (runtime-only, computed from file config).
 	TrustedCAInjection   string // "disabled" or "auto"
 	TrustedCAPath        string // absolute path to CA file (only when auto)
@@ -80,6 +102,7 @@ var reservedConfigFields = map[string]bool{
 	"database_path":        true,
 	"admin_token_path":     true,
 	"admin_token":          true,
+	"mode":                 true,
 }
 
 // deprecatedConfigFields were renamed and must not appear in config.json.
@@ -114,6 +137,11 @@ func getConfigPath() string {
 		return p
 	}
 
+	mode := resolveDeploymentMode()
+	if mode == ModeSystem {
+		return "/etc/docker-helper/config.json"
+	}
+
 	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
 	if xdgConfig == "" {
 		home, err := os.UserHomeDir()
@@ -131,6 +159,11 @@ func getConfigDir() string {
 }
 
 func getRuntimeDir() (string, error) {
+	mode := resolveDeploymentMode()
+	if mode == ModeSystem {
+		return "/run/docker-helper", nil
+	}
+
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		return "", errors.New("XDG_RUNTIME_DIR is not set, cannot determine runtime directory")
@@ -139,6 +172,11 @@ func getRuntimeDir() (string, error) {
 }
 
 func getStateDir() string {
+	mode := resolveDeploymentMode()
+	if mode == ModeSystem {
+		return "/var/lib/docker-helper"
+	}
+
 	xdgState := os.Getenv("XDG_STATE_HOME")
 	if xdgState == "" {
 		home, err := os.UserHomeDir()
@@ -218,13 +256,21 @@ func loadConfig() (*Config, error) {
 
 	trustedCAInjection := resolveTrustedCAInjection(fc.TrustedCAInjection)
 
+	mode := resolveDeploymentMode()
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		return nil, fmt.Errorf("cannot create runtime directory: %w", err)
+	// Create runtime directory with mode-appropriate permissions.
+	if mode == ModeSystem {
+		if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+			return nil, fmt.Errorf("cannot create runtime directory: %w", err)
+		}
+	} else {
+		if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+			return nil, fmt.Errorf("cannot create runtime directory: %w", err)
+		}
 	}
 
 	stateDir := getStateDir()
@@ -251,6 +297,7 @@ func loadConfig() (*Config, error) {
 		OperationRetentionTTL: opRetentionTTL,
 		OperationMaxCompleted: opMaxCompleted,
 		OperationLogMaxBytes:  operationLogMaxBytes,
+		Mode:                  mode,
 		TrustedCAInjection:    trustedCAInjection,
 		TrustedCAPath:         fc.TrustedCAPath,
 	}
@@ -341,12 +388,20 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		}
 	}
 
+	mode := resolveDeploymentMode()
 	configPath := getConfigPath()
 	configDir := filepath.Dir(configPath)
 	stateDir := getStateDir()
 
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("cannot create config directory: %w", err)
+	// Create directories with mode-appropriate permissions.
+	if mode == ModeSystem {
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			return fmt.Errorf("cannot create config directory: %w", err)
+		}
+	} else {
+		if err := os.MkdirAll(configDir, 0700); err != nil {
+			return fmt.Errorf("cannot create config directory: %w", err)
+		}
 	}
 
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
