@@ -58,6 +58,7 @@ var (
 		"trusted_ca_path",
 		"trusted_ca_injection",
 		"mode",
+		"http_address",
 	}
 )
 
@@ -88,10 +89,10 @@ func isRuntimeDependent(name string) bool {
 }
 
 // isPureComputed returns true for fields that can be resolved without
-// reading config.json (config_path, config_dir, admin_token_path, mode).
+// reading config.json (config_path, config_dir, admin_token_path, mode, http_address).
 func isPureComputed(name string) bool {
 	switch name {
-	case "config_path", "config_dir", "admin_token_path", "mode":
+	case "config_path", "config_dir", "admin_token_path", "mode", "http_address":
 		return true
 	default:
 		return false
@@ -131,7 +132,8 @@ Fields:
   operation_log_max_bytes
   trusted_ca_path
   trusted_ca_injection
-  mode`,
+  mode
+  http_address`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -450,6 +452,11 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
 		case "mode":
 			fmt.Fprintln(stdout, resolveDeploymentMode())
+		case "http_address":
+			if resolveDeploymentMode() == ModeSystem {
+				fmt.Fprintln(stdout, DefaultHTTPAddress)
+			}
+			// user mode: empty
 		}
 		return 0
 	}

@@ -144,33 +144,18 @@ func checkSocket(socketPath string) (bool, error) {
 	return true, nil
 }
 
-// runWithLock acquires the lock, prepares a listener, runs the callback,
-// and performs production cleanup: close listener → remove socket → release lock.
-// If prepareListener fails, the lock is released and the error is returned.
-// If the callback fails, the listener is closed, the socket is removed (if created),
-// and the lock is released.
-func runWithLock(lockPath, socketPath string, fn func(net.Listener) error) error {
+// runWithLock acquires the daemon lock and runs the callback with the lock held.
+// The callback is responsible for creating and managing listeners.
+// The lock is released when the callback returns.
+func runWithLock(lockPath string, fn func() error) error {
 	lockFile, err := acquireLock(lockPath)
 	if err != nil {
 		return err
 	}
 
-	listener, created, err := prepareListener(socketPath)
-	if err != nil {
-		lockFile.Close()
-		return err
-	}
-
-	// Cleanup order: close listener → remove socket → release lock.
 	defer lockFile.Close()
-	defer func() {
-		if created {
-			os.Remove(socketPath)
-		}
-	}()
-	defer listener.Close()
 
-	return fn(listener)
+	return fn()
 }
 
 // serveWithShutdown runs server.Serve(listener) in a background goroutine and
@@ -250,6 +235,92 @@ func serveWithShutdown(
 	}
 }
 
+// serveWithShutdownMulti is like serveWithShutdown but handles both Unix and TCP listeners.
+// In user mode, tcpListener is nil and only unixListener is served.
+// In system mode, both listeners are served concurrently.
+// A signal or error on ANY listener triggers shutdown of all.
+func serveWithShutdownMulti(
+	signalCtx context.Context,
+	server *http.Server,
+	unixListener net.Listener,
+	tcpListener net.Listener,
+	timeout time.Duration,
+	onShutdown func(),
+) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error, err error) {
+	serveDone := make(chan error, 1)
+
+	go func() {
+		serveDone <- server.Serve(unixListener)
+	}()
+
+	var tcpDone chan error
+	if tcpListener != nil {
+		tcpDone = make(chan error, 1)
+		go func() {
+			tcpDone <- server.Serve(tcpListener)
+		}()
+	}
+
+	drainDoneCh := make(chan error, 1)
+
+	startShutdown := func(serveErr error) {
+		if onShutdown != nil {
+			onShutdown()
+		}
+		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
+
+		go func() {
+			shutdownErr := server.Shutdown(shutdownCtx)
+			var drainErr error
+			if shutdownErr == context.DeadlineExceeded {
+				server.Close()
+				drainErr = fmt.Errorf("graceful shutdown timeout after %v", timeout)
+			} else if shutdownErr != nil {
+				drainErr = shutdownErr
+			}
+			// Drain serve goroutines.
+			<-serveDone
+			if tcpDone != nil {
+				<-tcpDone
+			}
+			drainDoneCh <- drainErr
+		}()
+	}
+
+	// Wait for signal or any listener error.
+	if tcpListener != nil {
+		select {
+		case <-signalCtx.Done():
+			startShutdown(nil)
+			drainDone = drainDoneCh
+			return
+		case serveErr := <-serveDone:
+			startShutdown(serveErr)
+			drainDone = drainDoneCh
+			err = serveErr
+			return
+		case tcpErr := <-tcpDone:
+			startShutdown(tcpErr)
+			drainDone = drainDoneCh
+			err = tcpErr
+			return
+		}
+	} else {
+		// User mode: only Unix listener.
+		select {
+		case <-signalCtx.Done():
+			startShutdown(nil)
+			drainDone = drainDoneCh
+			return
+		case serveErr := <-serveDone:
+			startShutdown(serveErr)
+			drainDone = drainDoneCh
+			err = serveErr
+			return
+		}
+	}
+}
+
 func runServe(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
 	initLoggers(stderr, stdout, slog.LevelInfo, false)
@@ -268,7 +339,7 @@ func runServe(stdout, stderr io.Writer) error {
 	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
 
 	callbackEntered := false
-	err = runWithLock(cfg.LockPath, cfg.SocketPath, func(listener net.Listener) error {
+	err = runWithLock(cfg.LockPath, func() error {
 		callbackEntered = true
 		adminHash, err := loadAdminToken(cfg.AdminTokenPath)
 		if err != nil {
@@ -332,18 +403,33 @@ func runServe(stdout, stderr io.Writer) error {
 
 		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 
+		// Prepare listeners based on deployment mode.
+		unixListener, tcpListener, err := prepareListeners(cfg.Mode, cfg.SocketPath)
+		if err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+		defer cleanupListeners(unixListener, tcpListener, cfg.SocketPath)
+
 		logger := logging.snapshotLogger()
 
 		if logger != nil {
-			logger.Info("daemon listening",
-				slog.String("socket", cfg.SocketPath),
-			)
+			if cfg.Mode == ModeSystem {
+				logger.Info("daemon listening",
+					slog.String("socket", cfg.SocketPath),
+					slog.String("http", DefaultHTTPAddress),
+				)
+			} else {
+				logger.Info("daemon listening",
+					slog.String("socket", cfg.SocketPath),
+				)
+			}
 		}
 
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdown(ctx, server, listener, cfg.ShutdownTimeout, func() {
+		shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdownMulti(ctx, server, unixListener, tcpListener, cfg.ShutdownTimeout, func() {
 			// Shutdown triggered (signal or Serve error) — close the operation
 			// gate so no new operations are accepted.
 			if app.OperationRegistry != nil {

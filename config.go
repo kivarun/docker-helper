@@ -103,6 +103,7 @@ var reservedConfigFields = map[string]bool{
 	"admin_token_path":     true,
 	"admin_token":          true,
 	"mode":                 true,
+	"http_address":         true,
 }
 
 // deprecatedConfigFields were renamed and must not appear in config.json.

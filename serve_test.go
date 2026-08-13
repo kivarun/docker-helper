@@ -400,7 +400,7 @@ func TestStartupErrorReleasesLock(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+	err := runWithLock(lockPath, func() error {
 		return errors.New("simulated startup error")
 	})
 	if err == nil {
@@ -431,7 +431,7 @@ func TestCallbackReturnCleansSocket(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+	err := runWithLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
@@ -467,16 +467,18 @@ func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 	}
 	before := mustStat(t, socketPath)
 
+	// Callback that tries to create a listener where a regular file exists.
 	called := false
-	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+	err := runWithLock(lockPath, func() error {
 		called = true
-		return nil
+		_, err := net.Listen("unix", socketPath)
+		return err
 	})
 	if err == nil {
 		t.Fatal("expected error from runWithLock")
 	}
-	if called {
-		t.Error("callback must not be called on prepareListener error")
+	if !called {
+		t.Error("callback must be called; listener creation error should propagate")
 	}
 
 	// Regular file must be untouched: size, mode, and content.
@@ -511,14 +513,14 @@ func TestSubsequentStartupAfterShutdown(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+	err := runWithLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("first runWithLock: %v", err)
 	}
 
-	err = runWithLock(lockPath, socketPath, func(net.Listener) error {
+	err = runWithLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
@@ -543,8 +545,15 @@ func TestParallelStartupRace(t *testing.T) {
 
 	go func() {
 		defer close(holderDone)
-		holderResult <- runWithLock(lockPath, socketPath, func(net.Listener) error {
+		holderResult <- runWithLock(lockPath, func() error {
 			close(holderStarted)
+			// Create a listener so the socket exists.
+			listener, err := net.Listen("unix", socketPath)
+			if err != nil {
+				return err
+			}
+			defer listener.Close()
+			defer os.Remove(socketPath)
 			<-holderProceed
 			return nil
 		})
@@ -580,7 +589,7 @@ func TestParallelStartupRace(t *testing.T) {
 			compReady <- struct{}{}
 			<-compGo
 
-			err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+			err := runWithLock(lockPath, func() error {
 				compCallbackCalled <- true
 				return nil
 			})
@@ -631,7 +640,7 @@ func TestParallelStartupRace(t *testing.T) {
 	}
 
 	// --- Phase 4: subsequent startup must work ---
-	err := runWithLock(lockPath, socketPath, func(net.Listener) error {
+	err := runWithLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
@@ -704,7 +713,13 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- runWithLock(lockPath, socketPath, func(listener net.Listener) error {
+		serveDone <- runWithLock(lockPath, func() error {
+			listener, err := net.Listen("unix", socketPath)
+			if err != nil {
+				return err
+			}
+			defer listener.Close()
+			defer os.Remove(socketPath)
 			_, shutdownCancel, drainCh, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
 			<-drainCh
 			shutdownCancel()
@@ -721,7 +736,7 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 	}
 
 	// Subsequent startup must work.
-	err = runWithLock(lockPath, socketPath, func(net.Listener) error {
+	err = runWithLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
@@ -793,7 +808,13 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 	// Start server in a goroutine via runWithLock.
 	go func() {
 		defer close(serverDone)
-		serverErr = runWithLock(lockPath, socketPath, func(listener net.Listener) error {
+		serverErr = runWithLock(lockPath, func() error {
+			listener, err := net.Listen("unix", socketPath)
+			if err != nil {
+				return err
+			}
+			defer listener.Close()
+			defer os.Remove(socketPath)
 			close(listenerReady)
 			_, shutdownCancel, drainCh, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
 			<-drainCh
@@ -897,7 +918,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 
 	// Attempt second runWithLock — must fail because lock is held.
 	secondCalled := false
-	secondLockErr := runWithLock(lockPath, socketPath, func(net.Listener) error {
+	secondLockErr := runWithLock(lockPath, func() error {
 		secondCalled = true
 		return nil
 	})
@@ -923,7 +944,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 	}
 
 	// Subsequent runWithLock must succeed.
-	subErr = runWithLock(lockPath, socketPath, func(net.Listener) error {
+	subErr = runWithLock(lockPath, func() error {
 		return nil
 	})
 	if subErr != nil {
