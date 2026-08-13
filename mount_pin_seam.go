@@ -57,7 +57,7 @@ type moveMountArgs struct {
 	fromPath string
 	toFD     int
 	toPath   string
-	flags    uint
+	flags    int
 }
 
 // mountSeam abstracts the Linux syscalls used by the inode-pinning primitive.
@@ -66,12 +66,11 @@ type mountSeam interface {
 	// resolve flags, returning the fd.
 	openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error)
 
-	// openTreeClone creates a detached cloned mount from sourceFD.
-	openTreeClone(sourceFD int) (int, error)
+	// openTree creates a detached cloned mount.
+	openTree(dirfd int, path string, flags uint) (int, error)
 
-	// moveMount moves a detached mount treeFD onto the destination at
-	// destPath (destDirfd is the parent directory fd).
-	moveMount(treeFD, destDirfd int, destPath string) error
+	// moveMount moves a detached mount.
+	moveMount(fromFD int, fromPath string, toFD int, toPath string, flags int) error
 
 	// fstat returns the stat result for an open fd.
 	fstat(fd int) (*unixStat, error)
@@ -81,15 +80,6 @@ type mountSeam interface {
 
 	// umountDetach performs umount2(path, MNT_DETACH).
 	umountDetach(path string) error
-
-	// lastOpenat2 returns the most recent openat2 call arguments.
-	lastOpenat2() *openat2Args
-
-	// lastOpenTree returns the most recent open_tree call arguments.
-	lastOpenTree() *openTreeArgs
-
-	// lastMoveMount returns the most recent move_mount call arguments.
-	lastMoveMount() *moveMountArgs
 }
 
 // unixStat holds the minimal stat fields needed for inode type checking.

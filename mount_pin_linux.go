@@ -7,16 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
 // linuxMountSeam implements mountSeam using real Linux syscalls.
-type linuxMountSeam struct {
-	lastOpenat2Val   *openat2Args
-	lastOpenTreeVal  *openTreeArgs
-	lastMoveMountVal *moveMountArgs
-}
+type linuxMountSeam struct{}
 
 func (s *linuxMountSeam) openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 	how := &unix.OpenHow{
@@ -24,20 +21,15 @@ func (s *linuxMountSeam) openat2(dirfd int, path string, flags uint, mode uint32
 		Mode:    uint64(mode),
 		Resolve: resolveFlags,
 	}
-	s.lastOpenat2Val = &openat2Args{dirfd, path, flags, mode, resolveFlags}
 	return unix.Openat2(dirfd, path, how)
 }
 
-func (s *linuxMountSeam) openTreeClone(sourceFD int) (int, error) {
-	flags := uint(unix.AT_EMPTY_PATH | unix.OPEN_TREE_CLONE | unix.OPEN_TREE_CLOEXEC)
-	s.lastOpenTreeVal = &openTreeArgs{sourceFD, "", flags}
-	return unix.OpenTree(sourceFD, "", flags)
+func (s *linuxMountSeam) openTree(dirfd int, path string, flags uint) (int, error) {
+	return unix.OpenTree(dirfd, path, flags)
 }
 
-func (s *linuxMountSeam) moveMount(treeFD, destDirfd int, destPath string) error {
-	flags := uint(unix.MOVE_MOUNT_F_EMPTY_PATH)
-	s.lastMoveMountVal = &moveMountArgs{treeFD, "", destDirfd, destPath, flags}
-	return unix.MoveMount(treeFD, "", destDirfd, destPath, int(flags))
+func (s *linuxMountSeam) moveMount(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
+	return unix.MoveMount(fromFD, fromPath, toFD, toPath, flags)
 }
 
 func (s *linuxMountSeam) fstat(fd int) (*unixStat, error) {
@@ -54,18 +46,6 @@ func (s *linuxMountSeam) close(fd int) error {
 
 func (s *linuxMountSeam) umountDetach(path string) error {
 	return unix.Unmount(path, unix.MNT_DETACH)
-}
-
-func (s *linuxMountSeam) lastOpenat2() *openat2Args {
-	return s.lastOpenat2Val
-}
-
-func (s *linuxMountSeam) lastOpenTree() *openTreeArgs {
-	return s.lastOpenTreeVal
-}
-
-func (s *linuxMountSeam) lastMoveMount() *moveMountArgs {
-	return s.lastMoveMountVal
 }
 
 // defaultSeam returns the real Linux syscall seam.
@@ -205,46 +185,31 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 	// Open the parent directory of destPath for move_mount.
 	relMountsDir, err := relToRoot(mountsDir)
 	if err != nil {
-		if createdDest {
-			os.Remove(destPath)
-		}
-		removeEmptyDir(mountsDir)
-		return nil, err
+		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
+		return nil, errors.Join(err, cleanupErr)
 	}
 
 	destDirFD, err := seam.openat2(rootFD, relMountsDir, openFlags, 0, resolveFlags)
 	if err != nil {
-		if createdDest {
-			os.Remove(destPath)
-		}
-		removeEmptyDir(mountsDir)
-		return nil, fmt.Errorf("openat2(mountsDir): %w", err)
+		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
+		return nil, errors.Join(fmt.Errorf("openat2(mountsDir): %w", err), cleanupErr)
 	}
 	defer seam.close(destDirFD)
 
 	// Create detached cloned mount via open_tree.
-	treeFD, err := seam.openTreeClone(sourceFD)
+	treeFD, err := seam.openTree(sourceFD, "", uint(unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC))
 	if err != nil {
-		if createdDest {
-			os.Remove(destPath)
-		}
-		removeEmptyDir(mountsDir)
+		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
 		if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
-			return nil, fmt.Errorf("open_tree not supported: %w", err)
+			return nil, errors.Join(fmt.Errorf("open_tree not supported: %w", err), cleanupErr)
 		}
-		return nil, fmt.Errorf("open_tree: %w", err)
+		return nil, errors.Join(fmt.Errorf("open_tree: %w", err), cleanupErr)
 	}
 
 	// Move mount to destination.
-	if err := seam.moveMount(treeFD, destDirFD, index); err != nil {
+	if err := seam.moveMount(treeFD, "", destDirFD, index, unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
 		seam.close(treeFD)
-		var cleanupErr error
-		if createdDest {
-			if rerr := os.Remove(destPath); rerr != nil && !os.IsNotExist(rerr) {
-				cleanupErr = fmt.Errorf("remove dest: %w", rerr)
-			}
-		}
-		removeEmptyDir(mountsDir)
+		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
 		if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
 			return nil, errors.Join(fmt.Errorf("move_mount not supported: %w", err), cleanupErr)
 		}
@@ -263,6 +228,33 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 	}, nil
 }
 
+// rollbackDest removes the destination if it was created by the current call
+// and removes the operation directory if empty. Returns any cleanup errors.
+func rollbackDest(createdDest bool, destPath, mountsDir string) error {
+	var errs []error
+
+	if createdDest {
+		if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove dest: %w", err))
+		}
+	}
+
+	if err := os.Remove(mountsDir); err != nil && !os.IsNotExist(err) {
+		// Ignore ENOTEMPTY; report other errors.
+		if pathErr, ok := err.(*os.PathError); ok {
+			if errno, ok := pathErr.Err.(syscall.Errno); errno == syscall.ENOTEMPTY || !ok {
+				return errors.Join(errs...)
+			}
+		}
+		errs = append(errs, fmt.Errorf("remove mounts dir: %w", err))
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
 // cleanupPinnedMount detaches the mount and removes the destination.
 func cleanupPinnedMount(seam mountSeam, destPath, mountsDir string) error {
 	if err := seam.umountDetach(destPath); err != nil && err != unix.EINVAL {
@@ -274,14 +266,15 @@ func cleanupPinnedMount(seam mountSeam, destPath, mountsDir string) error {
 	}
 
 	// Remove operation directory if empty.
-	removeEmptyDir(mountsDir)
+	if err := os.Remove(mountsDir); err != nil && !os.IsNotExist(err) {
+		if pathErr, ok := err.(*os.PathError); ok {
+			if errno, ok := pathErr.Err.(syscall.Errno); errno != syscall.ENOTEMPTY && ok {
+				return fmt.Errorf("remove mounts dir: %w", err)
+			}
+		}
+	}
 
 	return nil
-}
-
-// removeEmptyDir removes the directory if it exists and is empty.
-func removeEmptyDir(path string) {
-	os.Remove(path)
 }
 
 // isOperationIDSafe checks that the operation ID cannot be used for path traversal.

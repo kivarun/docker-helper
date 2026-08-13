@@ -16,8 +16,8 @@ import (
 // mockSeam implements mountSeam for unit tests without root/CAP_SYS_ADMIN.
 type mockSeam struct {
 	openat2Fn   func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error)
-	openTreeFn  func(sourceFD int) (int, error)
-	moveMountFn func(treeFD, destDirfd int, destPath string) error
+	openTreeFn  func(dirfd int, path string, flags uint) (int, error)
+	moveMountFn func(fromFD int, fromPath string, toFD int, toPath string, flags int) error
 	fstatFn     func(fd int) (*unixStat, error)
 	closeFn     func(fd int) error
 	umountFn    func(path string) error
@@ -48,20 +48,20 @@ func (m *mockSeam) openat2(dirfd int, path string, flags uint, mode uint32, reso
 	return fd, nil
 }
 
-func (m *mockSeam) openTreeClone(sourceFD int) (int, error) {
+func (m *mockSeam) openTree(dirfd int, path string, flags uint) (int, error) {
 	if m.openTreeFn != nil {
-		return m.openTreeFn(sourceFD)
+		return m.openTreeFn(dirfd, path, flags)
 	}
 	fd := m.nextFd()
-	m.openTreeCalls = append(m.openTreeCalls, openTreeArgs{fd, "", uint(unix.AT_EMPTY_PATH | unix.OPEN_TREE_CLONE | unix.OPEN_TREE_CLOEXEC)})
+	m.openTreeCalls = append(m.openTreeCalls, openTreeArgs{dirfd, path, flags})
 	return fd, nil
 }
 
-func (m *mockSeam) moveMount(treeFD, destDirfd int, destPath string) error {
+func (m *mockSeam) moveMount(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
 	if m.moveMountFn != nil {
-		return m.moveMountFn(treeFD, destDirfd, destPath)
+		return m.moveMountFn(fromFD, fromPath, toFD, toPath, flags)
 	}
-	m.moveMountCalls = append(m.moveMountCalls, moveMountArgs{treeFD, "", destDirfd, destPath, uint(unix.MOVE_MOUNT_F_EMPTY_PATH)})
+	m.moveMountCalls = append(m.moveMountCalls, moveMountArgs{fromFD, fromPath, toFD, toPath, flags})
 	return nil
 }
 
@@ -86,30 +86,6 @@ func (m *mockSeam) umountDetach(path string) error {
 	}
 	m.umountCalls = append(m.umountCalls, path)
 	return nil
-}
-
-func (m *mockSeam) lastOpenat2() *openat2Args {
-	if len(m.openat2Calls) == 0 {
-		return nil
-	}
-	last := m.openat2Calls[len(m.openat2Calls)-1]
-	return &last
-}
-
-func (m *mockSeam) lastOpenTree() *openTreeArgs {
-	if len(m.openTreeCalls) == 0 {
-		return nil
-	}
-	last := m.openTreeCalls[len(m.openTreeCalls)-1]
-	return &last
-}
-
-func (m *mockSeam) lastMoveMount() *moveMountArgs {
-	if len(m.moveMountCalls) == 0 {
-		return nil
-	}
-	last := m.moveMountCalls[len(m.moveMountCalls)-1]
-	return &last
 }
 
 func TestPinMountDirectory(t *testing.T) {
@@ -146,7 +122,7 @@ func TestPinMountDirectory(t *testing.T) {
 	if seam.openat2Calls[0].path != "/" {
 		t.Errorf("openat2[0].path = %q, want %q", seam.openat2Calls[0].path, "/")
 	}
-	// Second call: open source with root FD (mock returns 3 for root)
+	// Second call: open source with root FD
 	if seam.openat2Calls[1].dirfd != 3 {
 		t.Errorf("openat2[1].dirfd = %d, want 3 (root FD from mock)", seam.openat2Calls[1].dirfd)
 	}
@@ -178,15 +154,27 @@ func TestPinMountDirectory(t *testing.T) {
 	if seam.moveMountCalls[0].toPath != "0" {
 		t.Errorf("move_mount toPath = %q, want %q", seam.moveMountCalls[0].toPath, "0")
 	}
-	if seam.moveMountCalls[0].flags != uint(unix.MOVE_MOUNT_F_EMPTY_PATH) {
+	if seam.moveMountCalls[0].flags != unix.MOVE_MOUNT_F_EMPTY_PATH {
 		t.Errorf("move_mount flags = 0x%x, want 0x%x",
 			seam.moveMountCalls[0].flags, unix.MOVE_MOUNT_F_EMPTY_PATH)
 	}
 
-	// Verify FDs were closed exactly once.
-	// root(3), source(4), destDir(5), tree(6) = 4 closes
-	if len(seam.closeCalls) != 4 {
-		t.Errorf("closeCalls = %v, want 4 closes", seam.closeCalls)
+	// Verify FDs were closed exactly once: 3,4,5,6
+	expectedFDs := map[int]bool{3: true, 4: true, 5: true, 6: true}
+	closeSet := make(map[int]int)
+	for _, fd := range seam.closeCalls {
+		closeSet[fd]++
+	}
+	if len(closeSet) != len(expectedFDs) {
+		t.Errorf("close FDs = %v, want %v", closeSet, expectedFDs)
+	}
+	for fd, count := range closeSet {
+		if !expectedFDs[fd] {
+			t.Errorf("unexpected FD %d closed", fd)
+		}
+		if count != 1 {
+			t.Errorf("FD %d closed %d times, want 1", fd, count)
+		}
 	}
 
 	// Cleanup should not error.
@@ -228,7 +216,6 @@ func TestPinMountRegularFile(t *testing.T) {
 	}
 
 	// Verify file destination was created with correct mode.
-	// The openat2 call for file destination should have mode 0600.
 	foundFileCreate := false
 	for _, call := range seam.openat2Calls {
 		if call.mode == 0600 && (call.flags&unix.O_CREAT) != 0 {
@@ -422,18 +409,14 @@ func TestPinMountExistingFilePreserved(t *testing.T) {
 		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 			callCount++
 			if callCount == 1 {
-				// First call: open /
 				return 3, nil
 			}
 			if callCount == 2 {
-				// Second call: open source
 				return 4, nil
 			}
 			if callCount == 3 {
-				// Third call: create file destination - fails with EEXIST
 				return -1, unix.EEXIST
 			}
-			// Fourth call: open dest dir
 			return 5, nil
 		},
 		fstatFn: func(fd int) (*unixStat, error) {
@@ -554,10 +537,8 @@ func TestPinMountOpenat2FailureCleansUp(t *testing.T) {
 		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 			callCount++
 			if callCount == 1 {
-				// First call: open /
 				return 3, nil
 			}
-			// Second call: open source
 			return -1, unix.EPERM
 		},
 	}
@@ -583,7 +564,7 @@ func TestPinMountOpenTreeFailureCleansUp(t *testing.T) {
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
-		openTreeFn: func(sourceFD int) (int, error) {
+		openTreeFn: func(dirfd int, path string, flags uint) (int, error) {
 			return -1, unix.ENOSYS
 		},
 	}
@@ -612,7 +593,7 @@ func TestPinMountMoveMountFailureCleansUp(t *testing.T) {
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
-		moveMountFn: func(treeFD, destDirfd int, destPath string) error {
+		moveMountFn: func(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
 			return unix.EPERM
 		},
 	}
@@ -620,6 +601,66 @@ func TestPinMountMoveMountFailureCleansUp(t *testing.T) {
 	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should fail with move_mount error")
+	}
+}
+
+func TestPinMountFstatFailureCleansUp(t *testing.T) {
+	work := t.TempDir()
+	workspace := filepath.Join(work, "workspace")
+	runtimeDir := filepath.Join(work, "runtime")
+	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(runtimeDir, 0755)
+
+	sourceDir := filepath.Join(workspace, "src")
+	os.MkdirAll(sourceDir, 0755)
+
+	seam := &mockSeam{
+		nextFD: 3,
+		fstatFn: func(fd int) (*unixStat, error) {
+			return nil, unix.EBADF
+		},
+	}
+
+	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	if err == nil {
+		t.Fatal("should fail with fstat error")
+	}
+	if !strings.Contains(err.Error(), "fstat") {
+		t.Errorf("error = %v, want 'fstat'", err)
+	}
+}
+
+func TestPinMountDestDirOpenFailureCleansUp(t *testing.T) {
+	work := t.TempDir()
+	workspace := filepath.Join(work, "workspace")
+	runtimeDir := filepath.Join(work, "runtime")
+	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(runtimeDir, 0755)
+
+	sourceDir := filepath.Join(workspace, "src")
+	os.MkdirAll(sourceDir, 0755)
+
+	callCount := 0
+	seam := &mockSeam{
+		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
+			callCount++
+			if callCount == 1 {
+				return 3, nil // root
+			}
+			if callCount == 2 {
+				return 4, nil // source
+			}
+			// Third call: dest dir open fails
+			return -1, unix.EPERM
+		},
+		fstatFn: func(fd int) (*unixStat, error) {
+			return &unixStat{mode: unix.S_IFDIR}, nil
+		},
+	}
+
+	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	if err == nil {
+		t.Fatal("should fail with dest dir open error")
 	}
 }
 
@@ -787,7 +828,7 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
-		moveMountFn: func(treeFD, destDirfd int, destPath string) error {
+		moveMountFn: func(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
 			return unix.EPERM
 		},
 	}
@@ -802,7 +843,7 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 	}
 }
 
-func TestPinMountCloseCount(t *testing.T) {
+func TestPinMountDirectoryCloseSet(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -824,33 +865,30 @@ func TestPinMountCloseCount(t *testing.T) {
 		t.Fatalf("pinMount: %v", err)
 	}
 
-	// Expected closes: root(3), source(4), destDir(5), tree(6) = 4 closes
-	if len(seam.closeCalls) != 4 {
-		t.Errorf("closeCalls = %d, want 4", len(seam.closeCalls))
-	}
-
-	// Verify each FD was closed exactly once.
+	// Directory: 3,4,5,6 — each exactly once
+	expectedFDs := map[int]bool{3: true, 4: true, 5: true, 6: true}
 	closeSet := make(map[int]int)
 	for _, fd := range seam.closeCalls {
 		closeSet[fd]++
 	}
+	if len(closeSet) != len(expectedFDs) {
+		t.Errorf("close FDs = %v, want %v", closeSet, expectedFDs)
+	}
 	for fd, count := range closeSet {
+		if !expectedFDs[fd] {
+			t.Errorf("unexpected FD %d closed", fd)
+		}
 		if count != 1 {
 			t.Errorf("FD %d closed %d times, want 1", fd, count)
 		}
 	}
 
-	// Cleanup should not close any FDs (they're already closed).
 	if err := pm.Cleanup(); err != nil {
 		t.Errorf("Cleanup: %v", err)
 	}
-	closeAfterCleanup := len(seam.closeCalls)
-	if closeAfterCleanup != 4 {
-		t.Errorf("closeCalls after cleanup = %d, want 4", closeAfterCleanup)
-	}
 }
 
-func TestPinMountFileCloseCount(t *testing.T) {
+func TestPinMountFileCloseSet(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -872,17 +910,19 @@ func TestPinMountFileCloseCount(t *testing.T) {
 		t.Fatalf("pinMount: %v", err)
 	}
 
-	// For file: root(3), source(4), fileDest(5), destDir(6), tree(7) = 5 closes
-	if len(seam.closeCalls) != 5 {
-		t.Errorf("closeCalls = %d, want 5", len(seam.closeCalls))
-	}
-
-	// Verify each FD was closed exactly once.
+	// File: 3,4,5,6,7 — each exactly once
+	expectedFDs := map[int]bool{3: true, 4: true, 5: true, 6: true, 7: true}
 	closeSet := make(map[int]int)
 	for _, fd := range seam.closeCalls {
 		closeSet[fd]++
 	}
+	if len(closeSet) != len(expectedFDs) {
+		t.Errorf("close FDs = %v, want %v", closeSet, expectedFDs)
+	}
 	for fd, count := range closeSet {
+		if !expectedFDs[fd] {
+			t.Errorf("unexpected FD %d closed", fd)
+		}
 		if count != 1 {
 			t.Errorf("FD %d closed %d times, want 1", fd, count)
 		}
