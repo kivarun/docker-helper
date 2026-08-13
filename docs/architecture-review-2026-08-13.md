@@ -56,6 +56,8 @@ Relevant code: `run.go`, `api_contract.go`, `pull.go`, `registry.go`.
 
 ### P1 — Path validation has a TOCTOU gap
 
+**Status: closed for `POST /run` mounts in user mode; open for build context.**
+
 `resolveMount` and `validateBuildRequest` resolve symlinks and verify
 containment, but later pass the validated pathname to Docker as a string. A
 workspace owner can rename the validated object and replace it with a symlink
@@ -64,13 +66,15 @@ after validation but before Docker traverses the path.
 `filepath.EvalSymlinks` prevents a static symlink escape. It does not bind the
 subsequent Docker operation to the inode that was validated.
 
-This needs a separate security design decision rather than a superficial
-validation helper. Possible work includes evaluating inode-pinned or
-helper-owned mounts using appropriate Linux APIs. If a robust mechanism is not
-implemented, the documentation and threat model must state the remaining race
-explicitly.
+**Resolution for `POST /run` mounts (user mode):** the resolved mount source
+must equal the canonical `session.Workspace`. Since the agent cannot replace
+the workspace directory entry (no write access to the parent directory), the
+pathname remains stable between validation and the Docker bind mount.
+Subdirectory and file mounts are rejected in user mode.
 
-Phase 8 system packaging should not proceed without recording that decision.
+**Open for build context:** `validateBuildRequest` still has the TOCTOU gap
+for both user and system mode. A separate security design decision is needed.
+Possible work includes evaluating inode-pinned mounts using `open_tree`/`move_mount`.
 
 Relevant code: `run.go:resolveMount`, `build.go:validateBuildRequest`.
 

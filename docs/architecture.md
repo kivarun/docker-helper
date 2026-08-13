@@ -898,6 +898,30 @@ Forbidden:
 - `target` is not absolute;
 - two mounts use the same `target`.
 
+### User-mode mount restriction
+
+In user mode, the resolved mount source must equal the canonical
+`session.Workspace`. Subdirectory and file mounts are rejected as
+`invalid_mount`.
+
+This restriction exists because user mode lacks `CAP_SYS_ADMIN` for
+inode-pinned mounts. The security of the workspace-root mount relies on
+the launcher invariant: the sandboxed agent does not have host-side write
+access to the parent directory of the workspace. Since the agent cannot
+replace the workspace directory entry, the pathname remains stable between
+validation and the Docker bind mount.
+
+System mode has no such restriction and accepts any source inside the
+workspace. System mode may later use `open_tree`/`move_mount` for
+inode-pinned mounts to close the remaining TOCTOU gap.
+
+### Build context TOCTOU
+
+The build context and Dockerfile paths have a time-of-check/time-of-use
+gap: the helper validates canonical paths but passes them to Docker as
+strings. The build context TOCTOU gap remains open for both user and
+system mode.
+
 ### Why source must be relative
 
 Requiring a relative source ensures the mount is always scoped to the

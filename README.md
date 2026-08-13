@@ -720,6 +720,9 @@ Note: `docker-helper config show` (without a field) displays
 
 - docker-helper does not sandbox a coding tool that already has direct
   access to the host filesystem.
+- In user mode, bind-mount sources are restricted to the workspace root.
+  Subdirectory and file mounts are not available; use system mode for
+  broader mount sources.
 - Builds and containers use Docker's default networking; docker-helper
   does not provide network isolation.
 - docker-helper is a highly trusted component because it has access to

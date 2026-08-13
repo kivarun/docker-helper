@@ -290,12 +290,20 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(envNames)
 
+	// Get config for deployment mode and trusted CA injection.
+	cfg := a.getConfig()
+
 	targetSeen := make(map[string]bool)
 	resolvedMounts := make([]resolvedMount, 0, len(req.Mounts))
 
 	for _, mount := range req.Mounts {
 		resolved, err := resolveMount(mount, session.Workspace)
 		if err != nil {
+			writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+			return
+		}
+
+		if cfg.Mode == ModeUser && resolved.HostPath != session.Workspace {
 			writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
 			return
 		}
@@ -308,9 +316,6 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 		resolvedMounts = append(resolvedMounts, *resolved)
 	}
-
-	// Get config to check trusted CA injection mode.
-	cfg := a.getConfig()
 
 	// Check for trusted CA mount overlap when injection is active.
 	if cfg.TrustedCAInjection == "auto" {
