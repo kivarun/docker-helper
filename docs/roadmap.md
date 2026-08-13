@@ -109,7 +109,9 @@ Release 1 packaging is intentionally user-only:
 
 Installer direction:
 
-- no root is required for the helper binary, user unit, init, or user service;
+- the helper binary, init, and user service do not themselves require root;
+- host preparation may require `sudo`, for example AppArmor policy installation
+  or granting the user Docker access/group membership;
 - interactive install should offer to continue directly into `docker-helper init`
   and then enable/start the systemd user service;
 - installer checks Docker access but must not automatically add the user to the
@@ -256,7 +258,9 @@ Include:
 
 - richer log streaming if polling becomes insufficient;
 - network/proxy capability as a separate tool/project;
-- notification helper with restricted DBus access.
+- notification helper with restricted DBus access;
+- immediate re-evaluation/revocation of already-issued sessions after principal
+  policy changes only if real use demonstrates a need.
 
 Do not design their APIs here.
 
@@ -264,42 +268,58 @@ Do not design their APIs here.
 
 ### Main goal: multi-user system service and distribution
 
-Release 2 turns docker-helper from a per-user service into a normally
-installable multi-user system service. System deployment, the local access
-model, and native distribution are one architectural block and should be
-designed and accepted together.
+Release 2 adds a normally installable multi-user **system mode** while preserving
+the existing Release 1 **user mode**. Both deployment profiles use the same
+binary and share the same HTTP capability API and operation/session semantics
+where practical.
 
-Release 2 remains local-only. The supported network transport is loopback HTTP;
-TLS and non-loopback exposure are outside this release.
+Release 2 remains local-only. Remote/non-loopback access and TLS are outside this
+release.
 
-The existing [`docs/release-2-plan.md`](release-2-plan.md) predates this scope
-change and must be rewritten before implementation work relies on it.
+The Release 2 architecture review is complete and the binding implementation
+plan is [`docs/release-2-plan.md`](release-2-plan.md).
 
-Expected scope:
+Accepted direction:
 
-- decide whether the daemon runs as root or under a dedicated service account;
-- define system config, state, runtime, credential, and service paths;
-- define an explicit local principal/credential model for multiple users and
-  agents, preserving session-scoped authorization where it remains useful;
-- authorize workspace roots per principal without widening one global
-  `allowed_root` to all of `/home`;
-- expose the supported local HTTP endpoint on loopback only, with no TLS and no
-  supported non-loopback bind in Release 2;
-- preserve the existing pull/build/run and async operation lifecycle unless the
-  multi-user review identifies a concrete correctness or authorization need to
-  change it;
+- preserve user mode: daemon runs as the user, uses XDG paths, and listens on the
+  per-user Unix socket;
+- add system mode: daemon runs as root and uses conventional system config,
+  state, and runtime paths;
+- system mode exposes the same HTTP API over two local transports:
+  - a system Unix socket, suitable for bind-mounting into sandbox containers;
+  - loopback HTTP on configurable `127.0.0.1:52375` by default;
+- transport does not establish identity; authorization is credential-based;
+- introduce explicit principals provisioned by a system administrator through
+  the daemon API;
+- resolve principal OS username -> UID/GID/home on the daemon side; never trust
+  launcher-supplied UID/GID or root claims;
+- each principal has an `allowed_roots` array, defaulting to that user's home;
+- allow multiple independently revocable opaque launcher credentials per
+  principal;
+- keep session tokens as narrow workspace-scoped capabilities owned by a
+  principal;
+- launcher credentials may create/manage only their principal's sessions;
+- removing an allowed root affects future session creation but does not
+  dynamically revoke already-issued sessions;
+- deleting/expiring a session does not terminate Docker operations that were
+  already started;
+- in system mode, Docker `--user` comes from the authenticated principal UID/GID,
+  not the root daemon UID/GID and not request fields;
+- multi-user audit records include principal identity;
+- principal/credential administration remains API-first: CLI is a reference
+  client and must not write SQLite state directly;
+- administrative provisioning/policy changes may initially rely on root/sudo;
+  do not introduce a separate administrative control plane;
+- CLI administrative UX should reuse the existing `show`/`set` pattern, with
+  explicit `allowed-root add/remove` operations for the array;
+- old Release 1 sessions are not migrated into system mode;
 - provide a systemd system unit and the operational hardening required by a
-  packaged system daemon;
-- provide native DEB and RPM packages;
-- publish packages through selected repository/update channels so normal package
-  manager install and upgrade workflows work;
+  root system daemon;
+- provide native DEB and RPM packages and selected repository/update channels;
 - keep openSUSE and Ubuntu as important targets and select the exact RHEL-family
-  target when implementation begins; Fedora is not currently committed;
-- provide at least `docker-helper(1)` and `docker-helper-config(5)` manual
-  pages.
-
-Administrative operations may initially rely on `sudo`. Do not introduce a
-separate administrative control plane without a demonstrated need.
+  target when implementation reaches packaging; Fedora is not currently
+  committed;
+- provide at least `docker-helper(1)` and `docker-helper-config(5)` manual pages.
 
 Explicitly outside Release 2:
 
@@ -307,7 +327,13 @@ Explicitly outside Release 2:
 - TLS configuration and certificate lifecycle;
 - remote build-context upload or workspace synchronization;
 - multiple helper contexts, routing, or helper-to-helper forwarding;
-- durable operation recovery across daemon restarts.
+- durable operation recovery across daemon restarts;
+- dynamic revocation/re-evaluation of existing sessions after principal policy
+  changes;
+- termination of already-started operations solely because their session later
+  expires or is deleted;
+- dedicated unprivileged service-account architecture unless real use justifies
+  the extra filesystem/privilege complexity.
 
 ## 3.0
 
