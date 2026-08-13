@@ -28,18 +28,21 @@ func (s *linuxMountSeam) openTreeClone(sourceFD int) (int, error) {
 	return unix.OpenTree(sourceFD, "", uint(flags))
 }
 
-func (s *linuxMountSeam) moveMountFile(treeFD, destDirfd int, destPath string) error {
+func (s *linuxMountSeam) moveMount(treeFD, destDirfd int, destPath string) error {
 	flags := unix.MOVE_MOUNT_F_EMPTY_PATH
 	return unix.MoveMount(treeFD, "", destDirfd, destPath, flags)
 }
 
-func (s *linuxMountSeam) moveMountDir(treeFD, destDirfd int, destPath string) error {
-	flags := unix.MOVE_MOUNT_F_EMPTY_PATH | unix.MOVE_MOUNT_T_EMPTY_PATH
-	return unix.MoveMount(treeFD, "", destDirfd, destPath, flags)
+func (s *linuxMountSeam) fstat(fd int) (*unixStat, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil, err
+	}
+	return &unixStat{mode: uint32(stat.Mode)}, nil
 }
 
-func (s *linuxMountSeam) fstat(fd int) (os.FileInfo, error) {
-	return os.NewFile(uintptr(fd), "").Stat()
+func (s *linuxMountSeam) close(fd int) error {
+	return unix.Close(fd)
 }
 
 func (s *linuxMountSeam) umountDetach(path string) error {
@@ -63,42 +66,55 @@ func defaultSeam() mountSeam {
 //   - mountIndex: numeric index for this mount within the operation
 //
 // Returns a pinnedMount with the stable HostPath and Cleanup, or an error
-// with all resources cleaned up.
+// with all resources cleaned up. No fallback to the original pathname.
 func PinMount(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 	return pinMount(defaultSeam(), workspace, sourcePath, runtimeDir, operationID, mountIndex)
 }
 
 func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 	// Validate operationID: must not allow path traversal.
-	if operationID == "" || strings.Contains(operationID, "..") || strings.Contains(operationID, "/") {
+	if !isOperationIDSafe(operationID) {
 		return nil, fmt.Errorf("invalid operation ID: %q", operationID)
 	}
 
-	// Verify sourcePath is still inside workspace (post-openat2 check).
+	// Reject negative mount index.
+	if mountIndex < 0 {
+		return nil, fmt.Errorf("negative mount index: %d", mountIndex)
+	}
+
+	// Verify sourcePath is still inside workspace.
 	if !isInside(workspace, sourcePath) {
 		return nil, fmt.Errorf("source escapes workspace: %s", sourcePath)
 	}
 
-	// Open source via openat2 with / as directory fd.
-	// O_PATH | O_CLOEXEC
+	// Open / with O_PATH | O_DIRECTORY | O_CLOEXEC.
+	rootFD, err := seam.openat2(unix.AT_FDCWD, "/", uint(unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC), 0)
+	if err != nil {
+		return nil, fmt.Errorf("openat2(/): %w", err)
+	}
+	defer seam.close(rootFD)
+
+	// Strip leading "/" to get relative path for openat2 with root FD.
+	relPath := sourcePath[1:]
+
+	// Open source via openat2 with root FD.
 	openFlags := uint(unix.O_PATH | unix.O_CLOEXEC)
-	// RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS
 	resolveFlags := uint64(unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS)
 
-	sourceFD, err := seam.openat2(unix.AT_FDCWD, sourcePath, openFlags, resolveFlags)
+	sourceFD, err := seam.openat2(rootFD, relPath, openFlags, resolveFlags)
 	if err != nil {
 		return nil, fmt.Errorf("openat2(%s): %w", sourcePath, err)
 	}
-	defer unix.Close(sourceFD)
+	defer seam.close(sourceFD)
 
 	// Verify inode type via fstat.
-	info, err := seam.fstat(sourceFD)
+	stat, err := seam.fstat(sourceFD)
 	if err != nil {
 		return nil, fmt.Errorf("fstat(sourceFD): %w", err)
 	}
 
-	isDir := info.IsDir()
-	isRegular := info.Mode().IsRegular()
+	isDir := stat.isDir()
+	isRegular := stat.isRegular()
 	if !isDir && !isRegular {
 		return nil, fmt.Errorf("source is not a directory or regular file: %s", sourcePath)
 	}
@@ -115,42 +131,37 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 
 	// Create destination: directory for directory source, regular file for file source.
 	if isDir {
-		if err := os.MkdirAll(destPath, 0700); err != nil {
-			cleanupMounts(mountsDir)
+		if err := os.Mkdir(destPath, 0700); err != nil {
+			removeMountpoint(destPath)
+			removeEmptyDir(mountsDir)
 			return nil, fmt.Errorf("create directory mountpoint: %w", err)
 		}
 	} else {
-		f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY, 0600)
+		fd, err := seam.openat2(unix.AT_FDCWD, destPath,
+			uint(unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_WRONLY), 0)
 		if err != nil {
-			cleanupMounts(mountsDir)
+			removeMountpoint(destPath)
+			removeEmptyDir(mountsDir)
 			return nil, fmt.Errorf("create file mountpoint: %w", err)
 		}
-		f.Close()
-	}
-
-	// Verify destination is not a symlink (race check).
-	destInfo, err := os.Lstat(destPath)
-	if err != nil {
-		cleanupMounts(mountsDir)
-		return nil, fmt.Errorf("lstat destination: %w", err)
-	}
-	if destInfo.Mode()&os.ModeSymlink != 0 {
-		cleanupMounts(mountsDir)
-		return nil, fmt.Errorf("destination is a symlink: %s", destPath)
+		seam.close(fd)
 	}
 
 	// Open the parent directory of destPath for move_mount.
-	destDirFD, err := seam.openat2(unix.AT_FDCWD, mountsDir, openFlags, resolveFlags)
+	relMountsDir := mountsDir[1:]
+	destDirFD, err := seam.openat2(rootFD, relMountsDir, openFlags, resolveFlags)
 	if err != nil {
-		cleanupMounts(mountsDir)
+		removeMountpoint(destPath)
+		removeEmptyDir(mountsDir)
 		return nil, fmt.Errorf("openat2(mountsDir): %w", err)
 	}
-	defer unix.Close(destDirFD)
+	defer seam.close(destDirFD)
 
 	// Create detached cloned mount via open_tree.
 	treeFD, err := seam.openTreeClone(sourceFD)
 	if err != nil {
-		cleanupMounts(mountsDir)
+		removeMountpoint(destPath)
+		removeEmptyDir(mountsDir)
 		if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
 			return nil, fmt.Errorf("open_tree not supported: %w", err)
 		}
@@ -158,28 +169,18 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 	}
 
 	// Move mount to destination.
-	if isDir {
-		if err := seam.moveMountDir(treeFD, destDirFD, index); err != nil {
-			unix.Close(treeFD)
-			cleanupMounts(mountsDir)
-			if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
-				return nil, fmt.Errorf("move_mount not supported: %w", err)
-			}
-			return nil, fmt.Errorf("move_mount(dir): %w", err)
+	if err := seam.moveMount(treeFD, destDirFD, index); err != nil {
+		seam.close(treeFD)
+		removeMountpoint(destPath)
+		removeEmptyDir(mountsDir)
+		if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
+			return nil, fmt.Errorf("move_mount not supported: %w", err)
 		}
-	} else {
-		if err := seam.moveMountFile(treeFD, destDirFD, index); err != nil {
-			unix.Close(treeFD)
-			cleanupMounts(mountsDir)
-			if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
-				return nil, fmt.Errorf("move_mount not supported: %w", err)
-			}
-			return nil, fmt.Errorf("move_mount(file): %w", err)
-		}
+		return nil, fmt.Errorf("move_mount: %w", err)
 	}
 
 	// Close treeFD — the mount is now at destPath.
-	unix.Close(treeFD)
+	seam.close(treeFD)
 
 	// Return pinned mount with cleanup.
 	return &pinnedMount{
@@ -196,6 +197,7 @@ func cleanupPinnedMount(seam mountSeam, destPath, mountsDir string) error {
 
 	if err := seam.umountDetach(destPath); err != nil && err != unix.EINVAL {
 		errs = append(errs, fmt.Errorf("umount2(%s): %w", destPath, err))
+		return fmt.Errorf("cleanup: %v", errs)
 	}
 
 	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
@@ -203,9 +205,7 @@ func cleanupPinnedMount(seam mountSeam, destPath, mountsDir string) error {
 	}
 
 	// Remove operation directory if empty.
-	if err := os.Remove(mountsDir); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("remove(%s): %w", mountsDir, err))
-	}
+	removeEmptyDir(mountsDir)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("cleanup: %v", errs)
@@ -213,9 +213,14 @@ func cleanupPinnedMount(seam mountSeam, destPath, mountsDir string) error {
 	return nil
 }
 
-// cleanupMounts removes the entire mounts directory tree on error.
-func cleanupMounts(mountsDir string) {
-	os.RemoveAll(mountsDir)
+// removeMountpoint removes the mountpoint if it exists.
+func removeMountpoint(path string) {
+	os.Remove(path)
+}
+
+// removeEmptyDir removes the directory if it exists and is empty.
+func removeEmptyDir(path string) {
+	os.Remove(path)
 }
 
 // isOperationIDSafe checks that the operation ID cannot be used for path traversal.
