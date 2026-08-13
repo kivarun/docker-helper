@@ -1036,10 +1036,10 @@ func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
 		t.Fatalf("cannot decode response: %v", err)
 	}
 	var code string
-		if err := json.Unmarshal(resp["code"], &code); err != nil {
-			t.Fatalf("cannot decode code: %v", err)
-		}
-		if code != "invalid_allowed_root" {
+	if err := json.Unmarshal(resp["code"], &code); err != nil {
+		t.Fatalf("cannot decode code: %v", err)
+	}
+	if code != "invalid_allowed_root" {
 		t.Errorf("expected code 'invalid_allowed_root', got %q", resp["code"])
 	}
 }
@@ -1087,10 +1087,10 @@ func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
 		t.Fatalf("cannot decode response: %v", err)
 	}
 	var code string
-		if err := json.Unmarshal(resp["code"], &code); err != nil {
-			t.Fatalf("cannot decode code: %v", err)
-		}
-		if code != "invalid_allowed_root" {
+	if err := json.Unmarshal(resp["code"], &code); err != nil {
+		t.Fatalf("cannot decode code: %v", err)
+	}
+	if code != "invalid_allowed_root" {
 		t.Errorf("expected code 'invalid_allowed_root', got %q", resp["code"])
 	}
 }
@@ -1133,10 +1133,10 @@ func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
 		t.Fatalf("cannot decode response: %v", err)
 	}
 	var code string
-		if err := json.Unmarshal(resp["code"], &code); err != nil {
-			t.Fatalf("cannot decode code: %v", err)
-		}
-		if code != "invalid_allowed_root" {
+	if err := json.Unmarshal(resp["code"], &code); err != nil {
+		t.Fatalf("cannot decode code: %v", err)
+	}
+	if code != "invalid_allowed_root" {
 		t.Errorf("expected code 'invalid_allowed_root', got %q", resp["code"])
 	}
 }
