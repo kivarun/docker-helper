@@ -2,14 +2,22 @@
 
 ## Goal
 
-Release 2 adds remote image builds and image runs through one authenticated
-HTTPS endpoint. The client streams a local Docker build context to the selected
-helper; the resulting image and build cache remain in that helper's Docker
-daemon. Images can then be run there without access to the client's workspace.
+Release 2 adds a normally installable multi-user system deployment while
+preserving the existing per-user deployment.
 
-The supported deployment remains single-owner and user-managed. Release 2 does
-not add mutable remote workspaces, host mounts for remote runs, multiple helper
-contexts, system-wide deployment, multi-user authorization, or native packages.
+The same `docker-helper` binary supports two deployment profiles:
+
+- **user mode** — Release 1 style: daemon runs as the user, uses XDG paths, and
+  listens on that user's Unix socket;
+- **system mode** — daemon runs as root, uses system paths, serves multiple
+  principals, and exposes both a system Unix socket and loopback HTTP.
+
+Release 2 remains local-only. Remote/non-loopback access and TLS are Release 3
+work.
+
+The HTTP API remains the capability contract. CLI commands are reference clients
+of that API and must not bypass the daemon by editing SQLite state directly for
+new Release 2 administration features.
 
 ## Release branch policy
 
@@ -24,194 +32,330 @@ contexts, system-wide deployment, multi-user authorization, or native packages.
 Changing the default branch is an operator action and is not part of the code
 changes below.
 
-## Phase 0: architecture and repository review
+## Phase 0: architecture and repository review — completed
 
-Review the current implementation before changing behavior. Refactoring is an
-outcome only where the review identifies a concrete obstacle to Release 2.
+The review was completed before changing Release 2 behavior. Findings were
+classified as current correctness issues, Release 2 blockers, or maintenance
+preferences. No cleanup was performed merely for style.
 
-### Code architecture
+Accepted Release 2 decisions:
 
-- Trace daemon startup, listener ownership, shutdown, reload, and process lock
-  lifecycle.
-- Trace how the CLI constructs its HTTP client and where Unix-socket assumptions
-  enter command behavior.
-- Trace session creation, workspace authorization, and build/run request
-  handling.
-- Trace async build and run operations from request decoding through Docker
-  process startup, log capture, polling, cancellation, and shutdown.
-- Identify the smallest boundary between the HTTP application and its listener.
-- Decide whether Unix and HTTPS listeners may be enabled together or are
-  mutually exclusive in Release 2.
-- Decide how a remote session is represented and authorized without inventing
-  a server-side workspace or allowing host mounts.
-- Decide which existing routes are exposed through HTTPS and enforce that
-  boundary on the server rather than relying on client behavior.
-- Decide how the multipart upload joins the existing async operation lifecycle,
-  especially what happens when upload or client connectivity is interrupted.
-- Separate server configuration from client connection configuration without
-  introducing multiple named contexts.
+### Deployment
 
-### Repository architecture
+- Preserve user mode as a supported deployment profile.
+- Add system mode as the normal multi-user packaged deployment.
+- The system daemon runs as **root**. This is the simplest model compatible with
+  private user workspaces and rootful Docker. A dedicated service account may be
+  revisited later if stronger privilege separation is justified.
+- Daemon path defaults depend on effective UID:
+  - non-root daemon -> user/XDG paths;
+  - root daemon -> system paths.
+- Existing Release 1 sessions are ephemeral and are not migrated into system
+  mode.
 
-- Review whether the current single `package main` remains workable for the
-  Release 2 changes; do not split packages merely for style.
-- Review ownership and duplication across README, architecture, roadmap,
-  developer instructions, and the agent skill.
-- Review CI boundaries for Unix transport, HTTPS transport, protocol, and
-  end-to-end tests.
-- Review release-branch automation against the branch policy above.
-- Review whether generated artifacts, packaging files, and release-only
-  documentation are clearly separated from source and operational docs.
+### Local transports
 
-### Deliverable
+- User mode keeps the Release 1 Unix socket.
+- System mode exposes two local transports for the same HTTP API and the same
+  authorization model:
+  - Unix socket, convenient for bind-mounting into sandbox containers;
+  - loopback HTTP on `127.0.0.1:52375` by default.
+- Port `52375` is configurable. Listener bind failure is fatal; the daemon must
+  not silently select another port.
+- Unix and loopback transports do not imply identity or authorization. They are
+  only transports.
+- CLI endpoint selection must be deterministic. Non-root defaults resolve to
+  user-mode paths; root defaults resolve to system-mode paths. Explicit system
+  or endpoint selection must be available instead of silently falling back to a
+  different daemon.
 
-- A review report separating correctness problems, Release 2 blockers, and
-  maintenance preferences.
-- Explicit decisions for the listener, configuration, session, upload, and
-  operation-lifecycle questions above.
-- A small set of preparatory refactors only if required by those decisions.
-- No external behavior changes during review/refactoring.
-- Existing tests remain green.
+### Principal and credential model
 
-## Phase 1: network listener lifecycle
+- Multi-user system mode introduces explicit **principals**.
+- A system administrator provisions principals through the daemon API using the
+  administrative credential; the CLI is only a client of that API.
+- A principal is created from an existing OS user. The daemon resolves the OS
+  username to UID, GID, and home directory server-side.
+- UID, GID, and filesystem policy are never trusted from launcher/client claims.
+- Each principal has `allowed_roots`, represented as an array. The default is the
+  principal user's home directory.
+- Administrative CLI UX should follow the same memorable pattern as config
+  management, including `show` and `set`, with addressable add/remove operations
+  for `allowed_roots` so the whole array does not need to be rewritten.
+- A principal may have multiple opaque launcher credentials. Credentials are
+  separate revocable entities, stored only as hashes, and the secret value is
+  returned only at creation.
+- Launcher credentials identify a principal. The daemon obtains UID/GID and
+  `allowed_roots` from its own principal state; the launcher sends only its
+  credential and requested workspace.
+- Session tokens remain narrow workspace-scoped capabilities and inherit owner
+  principal identity.
 
-- Separate HTTP application construction from Unix-listener creation.
-- Preserve the Unix socket as the default local transport.
-- Add an explicitly configured TCP bind address.
-- Integrate all enabled listeners with one startup, shutdown, and error
-  lifecycle.
-- Ensure partial startup failure closes already-created listeners and leaves no
-  stale Unix socket or process lock.
-- Keep plaintext TCP limited to internal loopback tests; do not expose it as a
-  supported operator mode.
+### Policy-change semantics
 
-### Completion criteria
+- Removing an `allowed_root` prevents creation of new sessions using that root.
+- Existing sessions are not dynamically re-evaluated against later principal
+  root-policy changes. They remain valid until normal expiry or deletion.
+- Immediate revocation/re-evaluation of existing sessions after principal policy
+  changes is deferred unless a real need appears.
+- Deleting or expiring a session prevents subsequent authenticated requests with
+  that session token but does not terminate Docker operations that were already
+  started.
 
-- Existing Unix-socket behavior and contracts are unchanged.
-- TCP listener lifecycle tests cover startup, failure, and bounded shutdown.
-- Network exposure cannot be enabled accidentally without the TLS configuration
-  required by Phase 2.
+### Runtime identity
 
-## Phase 2: TLS configuration and security boundary
+- In system mode, container UID/GID must come from the authenticated principal,
+  not from the daemon process UID/GID and not from request fields.
+- Filesystem authorization must be checked against the session workspace and the
+  principal's server-side `allowed_roots` when the session is created.
 
-- Require a server certificate and private key for the network listener.
-- Use HTTPS only for supported network access.
-- Require an explicit bind address; do not introduce an implicit `0.0.0.0`
-  default.
-- Treat bind and certificate settings as startup configuration; runtime reload
-  does not replace listeners or certificates in Release 2.
-- Preserve the current admin-token and session-token model over TLS.
-- Use normal hostname and certificate-chain validation.
-- Support system trust and, if required for private infrastructure, one
-  explicitly configured additional CA file.
-- Do not add insecure TLS or mTLS in Release 2.
-- Ensure logs and errors do not expose tokens, authorization headers, or key
-  material.
+### Administration and audit
 
-### Completion criteria
+- New principal/credential administration is exposed through HTTP API routes;
+  the CLI must not modify the system database directly.
+- Root/sudo is the initial administrative boundary for provisioning and policy
+  changes. Do not add a separate administrative control plane in Release 2.
+- Multi-user audit records must carry principal identity in addition to session,
+  request, and operation identifiers.
 
-- Positive tests cover a trusted CA and matching hostname.
-- Negative tests cover unknown CA, hostname mismatch, malformed/missing
-  certificate files, plaintext requests, and missing authentication.
-- Local Unix operation remains unchanged.
+## Phase 1: principal persistence and administrative API
 
-## Phase 3: remote build and run protocol
+Introduce the multi-user identity objects without changing existing session
+behavior yet.
 
-### Remote session boundary
+### Principal model
 
-- Introduce an explicit remote session kind or scope without a server-side
-  workspace.
-- Authorize remote sessions server-side for image pull, registry login, build,
-  run, and their own operation status/log/result/cancel endpoints.
-- Deny workspace-dependent behavior and host mounts for remote sessions; a
-  client-side omission of unsupported options is not sufficient.
+- Add persistent principal state with at least:
+  - stable identity/name;
+  - OS username;
+  - UID;
+  - GID;
+  - enabled state;
+  - `allowed_roots` array.
+- Resolve OS user identity on the daemon side during principal creation.
+- Default `allowed_roots` to the user's home directory.
+- Store roots in normalized/canonical form appropriate for later workspace
+  containment checks.
+- Adding Release 2 tables to an existing Release 1 SQLite database must be safe;
+  do not introduce a generic migration framework without a concrete schema need.
 
-### Remote build
+### Administrative API and CLI
 
-- Preserve the current JSON build request for local workspace builds.
-- Add one streaming multipart build request for remote builds:
-  1. JSON `metadata` part;
-  2. `application/x-tar` `context` part.
-- Validate metadata before consuming and forwarding the context.
-- Stream the tar body to Docker without buffering the complete context in
-  memory or a temporary archive.
-- Reuse the current operation registry, status, logs, result, and cancellation
-  contract rather than adding upload resources or a second job model.
-- Define deterministic cleanup for malformed multipart bodies, interrupted
-  uploads, Docker startup failure, and shutdown during upload/build.
-- Keep the resulting image and cache on the helper's Docker daemon.
+- Add admin-authenticated principal routes and matching CLI commands.
+- Preserve the existing project rule: HTTP API is authoritative, CLI is a
+  reference client.
+- CLI UX should include:
 
-### Remote run
+      docker-helper principal create USER
+      docker-helper principal show USER [FIELD]
+      docker-helper principal set USER FIELD VALUE
+      docker-helper principal allowed-root add USER PATH
+      docker-helper principal allowed-root remove USER PATH
 
-- Preserve the existing JSON run request and async operation lifecycle.
-- Support the existing image, command, entrypoint, container workdir,
-  environment, and `shm_size` behavior over HTTPS.
-- Reject any host mounts for remote sessions.
-- Preserve existing logs, status, result, exit-code, cancellation, and shutdown
-  behavior.
-
-### Completion criteria
-
-- A test HTTP client can upload a context, receive the existing operation
-  identity, follow logs/status, and verify build completion.
-- A remote session can run an image on the helper and follow the existing
-  operation lifecycle without access to any host workspace.
-- Interrupted or rejected uploads leave no orphan Docker process or operation.
-- Remote sessions cannot request host mounts or other workspace-dependent
-  behavior.
-
-## Phase 4: network client and launcher integration
-
-- Generalize the API client to use either the local Unix socket or one HTTPS
-  endpoint.
-- Add minimal client settings for endpoint and trust without named contexts or
-  routing.
-- Preserve the existing admin-token flow for launcher-driven session creation.
-- Build the tar context on the client with Docker-compatible `.dockerignore`
-  semantics and preserved file modes, symlinks, empty files, and Dockerfile
-  selection.
-- Stream multipart output without materializing the full tar in memory or on
-  disk.
-- Reuse existing polling, log display, result handling, and cancellation UX.
-- Support remote `run` through the existing client UX while rejecting mounts
-  consistently and explaining the no-workspace limitation in CLI errors/help.
+- Prefer the external term `allowed-root` / JSON field `allowed_roots`; avoid the
+  overloaded bare term `root`.
+- `show`/`set` should follow the existing config-command shape where practical so
+  operators do not need to remember unrelated command conventions.
 
 ### Completion criteria
 
-- A launcher on one host creates a remote session for a helper on another host.
-- The client builds a local context remotely over HTTPS.
-- The client runs the resulting image on the remote helper without host mounts.
-- The image exists on the remote Docker daemon and is not automatically
-  downloaded or pushed.
+- Existing Release 1 user-mode behavior is unchanged.
+- Principal creation resolves UID/GID/home server-side.
+- A client cannot supply or override UID/GID.
+- Default root is the resolved home directory.
+- Principal show/set and allowed-root add/remove operate only through the daemon
+  API.
+- Unit tests cover unknown users, duplicate principals, root normalization,
+  authorization failures, and CLI/API round trips.
 
-## Phase 5: pre-release cleanup and acceptance
+## Phase 2: launcher credentials
 
-- Run the full Unix-mode regression suite, race tests, vet, formatting, and
-  whitespace checks.
-- Add an end-to-end test with client and helper on separate hosts or equivalent
-  isolated environments.
-- Exercise small and large contexts, `.dockerignore`, symlinks, executable
-  modes, empty files, alternate Dockerfiles, and private base images.
-- Exercise remote runs with command, entrypoint, workdir, environment,
-  `shm_size`, exit codes, cancellation, and rejected mounts.
-- Exercise upload interruption, loss of connectivity after operation creation,
-  cancellation, daemon shutdown, and restart limitations.
-- Review operational and audit logs for secret leakage and useful failure
-  diagnostics.
-- Reconcile CLI help, config help, README, architecture, roadmap, and the agent
-  skill with the final behavior.
-- Verify old Release 1 configuration still starts in local Unix mode without
-  migration steps.
-- Build and test a release candidate before creating `release/2.0` and the
-  final tag.
+Add multiple revocable credentials per principal.
 
-## Deferred beyond Release 2
+- Add a credential table related to principals.
+- Generate opaque high-entropy credentials; store only cryptographic hashes.
+- Return the secret only once at creation.
+- Support multiple named credentials per principal so separate launchers/agents
+  can be revoked independently.
+- Add admin-authenticated API + CLI operations to create, list, and revoke/delete
+  credentials.
+- Never expose credential secrets in list/show output, logs, audit, URLs, or
+  database plaintext.
 
-- Mutable remote workspace synchronization and remote runs coupled to a
-  delivered workspace.
-- Multiple helper contexts, selection, routing, or helper-to-helper forwarding.
-- Separate upload resources, resumable uploads, or a second build-job model.
-- Durable operation state and recovery across daemon restarts.
-- System service account, multi-user authorization, DEB/RPM packages, package
-  repositories, and man pages (Release 3).
-- Full remote environment capabilities (Release 4).
+### Completion criteria
+
+- Two credentials for the same principal authenticate as the same principal but
+  can be revoked independently.
+- Revocation of one credential does not affect another credential or an already
+  issued session token.
+- Audit identifies both the principal and, where useful, the credential ID/name
+  without exposing its secret.
+
+## Phase 3: principal-owned sessions and authorization
+
+Replace the system-mode launcher dependency on the global admin token with
+principal credentials for ordinary session lifecycle.
+
+- Principal credentials may create sessions only for their own principal.
+- Session creation request contains a workspace, not UID/GID or roots.
+- The daemon validates the requested workspace against the principal's current
+  `allowed_roots` and stores the owning principal with the session.
+- Principals may list/delete their own sessions; administrative credentials may
+  retain broader management rights.
+- Session-authenticated operation endpoints keep the existing session ownership
+  boundary.
+- Existing sessions are not re-evaluated if principal roots later change.
+- Session deletion/expiry does not terminate already-started operations.
+
+### Completion criteria
+
+- A principal cannot create a session in another principal's allowed root unless
+  that root was explicitly granted to it too.
+- A forged client UID/GID/root claim has no effect because those fields are not
+  accepted as authority.
+- One principal cannot list/delete another principal's sessions with its
+  launcher credential.
+- Existing async operation semantics remain unchanged.
+
+## Phase 4: deployment profiles, system paths, and runtime UID/GID
+
+Introduce the root system-daemon profile while preserving Release 1 user mode.
+
+### User mode
+
+Preserve current behavior:
+
+- daemon runs as the user;
+- XDG config/state/runtime paths;
+- per-user Unix socket;
+- existing single-owner config/session workflows remain supported.
+
+### System mode
+
+Use conventional Linux/systemd paths, with final concrete filenames documented
+before packaging. Expected layout:
+
+- configuration under `/etc/docker-helper`;
+- persistent state under `/var/lib/docker-helper`;
+- runtime socket/lock/session runtime data under `/run/docker-helper`.
+
+System mode:
+
+- runs as root;
+- uses principal UID/GID for Docker `--user` instead of daemon UID/GID;
+- uses principal-aware workspace authorization;
+- keeps service-owned runtime state isolated between sessions/principals.
+
+### Completion criteria
+
+- Existing non-root user mode continues to pass its regression suite.
+- Root/system defaults do not reuse a caller's XDG state accidentally.
+- Containers started for principal A run with principal A's configured UID/GID.
+- Private user workspaces work without requiring ACL changes for a dedicated
+  helper service account.
+
+## Phase 5: dual local listener lifecycle and client discovery
+
+Generalize the listener lifecycle only as far as required for the accepted two
+local transports.
+
+- Keep the Unix listener.
+- Add loopback HTTP at configurable `127.0.0.1:52375` in system mode.
+- Both listeners serve the same handler/API/authentication model.
+- Startup is atomic enough that partial listener failure closes listeners that
+  were already opened and releases/removes owned runtime artifacts.
+- Shutdown, HTTP drain, operation termination, and process lock continue to use
+  one bounded daemon lifecycle.
+- Preserve a deterministic CLI endpoint selection model; never silently switch
+  between user and system daemons after a failed connection.
+- Keep explicit endpoint selection available for host users and integrations.
+
+### Unix socket access
+
+For the first system-mode implementation, the socket may be connectable by all
+local users because authentication/authorization is credential-based. A
+`docker-helper` group may later be added as an additional coarse access layer if
+operational experience justifies it.
+
+### Completion criteria
+
+- User-mode Unix behavior is unchanged.
+- System mode serves the same authenticated API over both system Unix socket and
+  loopback HTTP.
+- A sandbox container can use the bind-mounted Unix socket without host-network
+  mode.
+- A host client can use either system local transport.
+- Listener startup/failure/shutdown tests cover both listeners together.
+
+## Phase 6: systemd system service and hardening
+
+- Add a system service unit for root system mode.
+- Keep the existing user unit for user mode.
+- Apply systemd hardening compatible with Docker access, user-workspace access,
+  runtime files, and the two local listeners.
+- Document the security consequence of rootful Docker access explicitly.
+- Ensure audit records include principal identity for multi-user operations.
+
+### Completion criteria
+
+- User and system services have separate paths/state and can be intentionally
+  installed on the same host without accidental cross-use.
+- System service restart/stop obeys the existing bounded shutdown contract.
+- Effective permissions for config, credentials, database, sockets, and runtime
+  directories are documented and tested.
+
+## Phase 7: native distribution and manuals
+
+- Build native DEB and RPM packages.
+- Keep openSUSE and Ubuntu as important targets; select the exact RHEL-family
+  target before final package acceptance. Fedora is not currently committed.
+- Publish packages through selected repository/update channels so normal package
+  manager install and upgrade workflows work.
+- Include both system and supported user deployment assets as appropriate.
+- Provide at least:
+  - `docker-helper(1)`;
+  - `docker-helper-config(5)`.
+- Add package/service upgrade tests, including an existing Release 1 user-mode
+  installation on the same machine.
+
+Release 1 sessions are not migrated to the Release 2 system service. User-mode
+state remains user-mode state.
+
+## Phase 8: Release 2 acceptance
+
+Run the complete regression and system acceptance pass:
+
+- gofmt;
+- go test ./...;
+- go test -race ./...;
+- go vet ./...;
+- git diff --check;
+- existing user-mode install/start/session/pull/build/run/registry workflows;
+- system package install/upgrade/remove;
+- principal create/show/set and allowed-root add/remove;
+- multiple credentials per principal and independent revocation;
+- cross-principal authorization negative tests;
+- system Unix socket and `127.0.0.1:52375` HTTP;
+- container UID/GID ownership behavior;
+- audit attribution by principal;
+- bounded restart/shutdown with active operations;
+- coexistence of user and system deployment profiles.
+
+Reconcile README, architecture, roadmap, agent skill, package documentation, and
+manual pages with the implemented behavior before creating `release/2.0`.
+
+## Explicitly deferred beyond Release 2
+
+- remote or non-loopback access;
+- TLS configuration and certificate lifecycle;
+- remote build-context upload or mutable workspace synchronization;
+- multiple helper contexts, routing, or helper-to-helper forwarding;
+- durable operation recovery across daemon restarts;
+- immediate re-evaluation or termination of already-issued sessions when a
+  principal's `allowed_roots` changes;
+- termination of already-started Docker operations merely because their session
+  is later deleted or expires;
+- dedicated unprivileged service-account architecture unless practical security
+  benefit justifies the added filesystem/privilege complexity;
+- mandatory `docker-helper` Unix group as an authorization mechanism;
+- a separate administrative control plane.
