@@ -61,7 +61,7 @@ func initializeDatabase(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			principal_id INTEGER NOT NULL,
 			name TEXT NOT NULL,
-			token_hash TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL,
 			revoked_at INTEGER,
 			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,

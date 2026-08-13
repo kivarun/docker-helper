@@ -435,7 +435,7 @@ var principalAllowedRootRemoveCommand = &Command{
 var credentialCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new credential for a principal",
-	Usage:      "docker-helper credential create USER --name NAME",
+	Usage:      "docker-helper credential create --name NAME USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -450,6 +450,10 @@ var credentialCreateCommand = &Command{
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
+				if len(args) == 0 || args[0] == "" {
+					fmt.Fprintf(stderr, "error: principal username is required\n")
+					return 1
+				}
 				username := args[0]
 
 				socketPath, adminTokenPath, err := adminAPIPaths()

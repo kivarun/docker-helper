@@ -45,10 +45,12 @@ func hashCredentialToken(token string) string {
 }
 
 // generateCredentialID returns a random 16-byte hex ID prefixed with "dhcr_".
-func generateCredentialID() string {
+func generateCredentialID() (string, error) {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return "dhcr_" + hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("cannot generate random bytes: %w", err)
+	}
+	return "dhcr_" + hex.EncodeToString(b), nil
 }
 
 func createCredential(db *sql.DB, username string, name string) (*CredentialWithPrincipal, string, error) {
@@ -66,7 +68,10 @@ func createCredential(db *sql.DB, username string, name string) (*CredentialWith
 		return nil, "", err
 	}
 	tokenHash := hashCredentialToken(token)
-	credID := generateCredentialID()
+	credID, err := generateCredentialID()
+	if err != nil {
+		return nil, "", err
+	}
 	now := time.Now().Unix()
 
 	_, err = db.Exec(
@@ -170,22 +175,37 @@ func findCredentialByID(db *sql.DB, id string) (*CredentialWithPrincipal, error)
 }
 
 func revokeCredential(db *sql.DB, id string) (bool, error) {
-	cred, err := findCredentialByID(db, id)
-	if err != nil {
-		return false, err
+	if id == "" {
+		return false, fmt.Errorf("credential id is required: %w", ErrCredentialNotFound)
 	}
 
-	if cred.RevokedAt != nil {
-		return false, nil
-	}
-
+	// Atomic update: only set revoked_at if it's currently NULL.
 	now := time.Now().Unix()
-	_, err = db.Exec(
-		`UPDATE credentials SET revoked_at = ? WHERE id = ?`,
+	result, err := db.Exec(
+		`UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
 		now, id,
 	)
 	if err != nil {
 		return false, fmt.Errorf("cannot revoke credential: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("cannot check revoke result: %w", err)
+	}
+
+	if affected == 0 {
+		// Check if the credential exists at all.
+		var exists int
+		err = db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE id = ?`, id).Scan(&exists)
+		if err != nil {
+			return false, fmt.Errorf("cannot check credential existence: %w", err)
+		}
+		if exists == 0 {
+			return false, fmt.Errorf("credential %q not found: %w", id, ErrCredentialNotFound)
+		}
+		// Credential exists but already revoked.
+		return false, nil
 	}
 
 	return true, nil

@@ -427,6 +427,10 @@ func isErrCredentialExists(err error) bool {
 	return errors.Is(err, ErrCredentialExists)
 }
 
+func isErrInvalidCredentialName(err error) bool {
+	return errors.Is(err, ErrInvalidCredentialName)
+}
+
 type createCredentialRequest struct {
 	Name string `json:"name"`
 }
@@ -511,10 +515,10 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:         "principal.credential_create",
 			PrincipalName: username,
-			Result:        "missing_name",
+			Result:        "invalid_credential_name",
 			Duration:      duration,
 		})
-		writeError(ctx, w, http.StatusBadRequest, "missing_name", "credential name is required")
+		writeError(ctx, w, http.StatusBadRequest, "invalid_credential_name", "credential name is required")
 		return
 	}
 
@@ -612,30 +616,35 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred, err := findCredentialByID(a.DB, id)
+	changed, err := revokeCredential(a.DB, id)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		writeAuditWithRequestID(ctx, auditRecord{
-			Event:    "principal.credential_revoke",
-			Result:   "credential_not_found",
-			Duration: duration,
-		})
-		writeError(ctx, w, http.StatusNotFound, "credential_not_found", "credential not found")
+		if isErrCredentialNotFound(err) {
+			writeAuditWithRequestID(ctx, auditRecord{
+				Event:    "principal.credential_revoke",
+				Result:   "credential_not_found",
+				Duration: duration,
+			})
+			writeError(ctx, w, http.StatusNotFound, "credential_not_found", "credential not found")
+		} else {
+			writeAuditWithRequestID(ctx, auditRecord{
+				Event:    "principal.credential_revoke",
+				Result:   "error",
+				Duration: duration,
+			})
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
 		return
 	}
 
-	changed, err := revokeCredential(a.DB, id)
-	duration = time.Since(started).Round(time.Millisecond).String()
-
+	// Fetch credential metadata for audit.
+	cred, err := findCredentialByID(a.DB, id)
 	if err != nil {
 		writeAuditWithRequestID(ctx, auditRecord{
-			Event:          "principal.credential_revoke",
-			PrincipalName:  cred.Principal,
-			CredentialID:   cred.ID,
-			CredentialName: cred.Name,
-			Result:         "error",
-			Duration:       duration,
+			Event:    "principal.credential_revoke",
+			Result:   "error",
+			Duration: duration,
 		})
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
