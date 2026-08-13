@@ -472,9 +472,14 @@ If the daemon is not running, this command fails with a non-zero exit code.
 If the new configuration is invalid, the daemon keeps its current
 configuration and this command returns an error.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runReload(stdout, stderr, fs)
+				return runReload(stdout, stderr, operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
 			},
 		}
 	},

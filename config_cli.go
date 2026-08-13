@@ -164,6 +164,7 @@ var configSetCommand = &Command{
   operation_log_max_bytes positive integer, bytes (default 4194304 = 4 MiB)
   trusted_ca_path         absolute path to a single PEM X.509 CA file (optional)
   trusted_ca_injection    "disabled" or "auto" (default "disabled")
+  http_address            127.0.0.1:PORT, system mode only, restart required
 
 Trusted CA injection:
   To enable, set trusted_ca_path first, then set trusted_ca_injection to auto.
@@ -173,8 +174,12 @@ Trusted CA injection:
 To disable, set trusted_ca_injection to disabled first, then optionally
 unset trusted_ca_path.
 
+http_address is startup-only: the change is written to disk and
+requires a daemon restart to take effect.
+
 A successful command reports either "updated" or "unchanged".
-If the daemon is running, the change is applied immediately.
+If the daemon is running, the change is applied immediately,
+except for startup-only fields such as http_address.
 If the daemon is not running, the change is written to disk and
 will apply on the next start.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -202,12 +207,17 @@ var configUnsetCommand = &Command{
   operation_log_max_bytes removing it restores the default 4 MiB
   trusted_ca_path         removing it clears the CA file path
   trusted_ca_injection    removing it restores the default "disabled"
+  http_address            removing it restores the default 127.0.0.1:52375
 
 trusted_ca_path cannot be unset while trusted_ca_injection is "auto".
 Set trusted_ca_injection to "disabled" first.
 
+http_address is startup-only: unsetting it requires a daemon restart
+to take effect. The default 127.0.0.1:52375 is restored after restart.
+
 A successful command reports either "unset" or "unchanged".
-If the daemon is running, the change is applied immediately.
+If the daemon is running, the change is applied immediately,
+except for startup-only fields such as http_address.
 If the daemon is not running, the change is written to disk and
 will apply on the next start.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,16 +8,8 @@ import (
 )
 
 // runReload is the CLI entry point for the reload command.
-func runReload(stdout, stderr io.Writer, flags *flag.FlagSet) int {
-	system := flags.Bool("system", false, "Connect to system daemon")
-	endpoint := flags.String("endpoint", "", "Explicit endpoint (unix:///path or http://127.0.0.1:port)")
-	tokenFile := flags.String("token-file", "", "Token file path")
-
-	client, err := resolveOperatorClient(operatorClientOptions{
-		System:    *system,
-		Endpoint:  *endpoint,
-		TokenFile: *tokenFile,
-	})
+func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
+	client, err := resolveOperatorClient(opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

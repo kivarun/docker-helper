@@ -529,3 +529,63 @@ func minOfNonZero(a, b int) int {
 		return b
 	}
 }
+
+// --- reload operator flags tests ---
+
+func TestReloadHelpShowsOperatorFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"reload", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("reload --help exited %d", code)
+	}
+	out := stdout.String()
+	for _, flag := range []string{"--system", "--endpoint", "--token-file"} {
+		if !strings.Contains(out, flag) {
+			t.Errorf("reload --help should contain %q", flag)
+		}
+	}
+}
+
+func TestReloadSystemFlagAccepted(t *testing.T) {
+	// --system should be accepted by the flag parser.
+	// It will fail at connection time because there's no daemon,
+	// but the flag itself should not be "unknown".
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"reload", "--system"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit (no daemon running)")
+	}
+	if strings.Contains(stderr.String(), "unknown flag") {
+		t.Fatalf("--system should not be unknown: %s", stderr.String())
+	}
+}
+
+func TestReloadEndpointTokenFileAccepted(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"reload", "--endpoint", "http://127.0.0.1:52375", "--token-file", tokenPath}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit (no daemon running)")
+	}
+	if strings.Contains(stderr.String(), "unknown flag") {
+		t.Fatalf("flags should not be unknown: %s", stderr.String())
+	}
+}
+
+func TestReloadSystemEndpointMutuallyExclusive(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"reload", "--system", "--endpoint", "http://127.0.0.1:52375", "--token-file", tokenPath}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("expected mutual exclusion error: %s", stderr.String())
+	}
+}
