@@ -26,16 +26,8 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
-		Event:         "pull.start",
-		SessionID:     session.ID,
-		Image:         req.Image,
-		PrincipalName: session.PrincipalName,
-	})
-
-	started := time.Now()
-
-	// Ensure the session Docker config directory exists.
+	// Ensure the session Docker config directory exists before writing
+	// pull.start so that a failure here does not leave an orphan audit event.
 	cfg := a.getConfig()
 	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
 	if err != nil {
@@ -46,6 +38,15 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+
+	writeAuditWithRequestID(ctx, auditRecord{
+		Event:         "pull.start",
+		SessionID:     session.ID,
+		Image:         req.Image,
+		PrincipalName: session.PrincipalName,
+	})
+
+	started := time.Now()
 
 	args := []string{"--config", dockerDir, "pull", req.Image}
 
