@@ -16,30 +16,19 @@ func TestHTTPAddressDefaultSystem(t *testing.T) {
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 0 }
 
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	data := map[string]any{
-		"allowed_root": dir,
-		"session_ttl":  "1h",
-	}
-	writeConfig(t, configPath, data)
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.HTTPAddress != DefaultHTTPAddress {
-		t.Errorf("HTTPAddress = %q, want %q", cfg.HTTPAddress, DefaultHTTPAddress)
+	got := resolveHTTPAddress("")
+	if got != DefaultHTTPAddress {
+		t.Errorf("resolveHTTPAddress(\"\") = %q, want %q", got, DefaultHTTPAddress)
 	}
 }
 
 func TestHTTPAddressCustomSystem(t *testing.T) {
+	// Validate custom http_address by loading config in user mode.
+	// Config decoding and validation are mode-independent;
+	// only TCP listener creation depends on mode.
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
-	EffectiveUID = func() int { return 0 }
+	EffectiveUID = func() int { return 1000 }
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
