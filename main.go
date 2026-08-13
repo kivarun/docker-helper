@@ -321,6 +321,11 @@ func runServe(stdout, stderr io.Writer) error {
 		mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
 		mux.HandleFunc("GET /operations/{id}/logs", app.handleOperationLogs)
 		mux.HandleFunc("POST /operations/{id}/cancel", app.handleOperationCancel)
+		mux.HandleFunc("POST /principals", app.handleCreatePrincipal)
+		mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
+		mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
+		mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+		mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
 
 		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 

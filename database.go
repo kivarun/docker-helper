@@ -39,9 +39,26 @@ func initializeDatabase(db *sql.DB) error {
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS principals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			uid INTEGER NOT NULL,
+			gid INTEGER NOT NULL,
+			home TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1
+		);
+
+		CREATE TABLE IF NOT EXISTS principal_allowed_roots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			principal_username TEXT NOT NULL,
+			root_path TEXT NOT NULL,
+			FOREIGN KEY (principal_username) REFERENCES principals(username) ON DELETE CASCADE,
+			UNIQUE(principal_username, root_path)
+		);
 	`)
 	if err != nil {
-		return fmt.Errorf("cannot create sessions table: %w", err)
+		return fmt.Errorf("cannot create tables: %w", err)
 	}
 
 	return nil

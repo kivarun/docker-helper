@@ -516,6 +516,7 @@ func init() {
 		reloadCommand,
 		sessionCommand,
 		configCommand,
+		principalCommand,
 		versionCommand,
 		helpCommand,
 		pullCommand,
