@@ -259,6 +259,11 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasPrefix(req.Image, "-") {
+		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image must not start with '-'")
+		return
+	}
+
 	if req.Workdir != "" {
 		if !filepath.IsAbs(req.Workdir) {
 			writeError(ctx, w, http.StatusBadRequest, "invalid_workdir", "workdir must be an absolute path")
