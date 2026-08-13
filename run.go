@@ -410,24 +410,21 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		op.cidfile = filepath.Join(cfg.RuntimeDir, op.ID+".cid")
 	}
 
-	if a.OperationRegistry != nil {
-		if !a.OperationRegistry.tryCreate(op) {
-			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
-			return
-		}
-		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
-	}
-
 	// In system mode, pin each mount source to a helper-owned destination.
 	// In user mode, use the resolved host paths directly.
 	pinnedMounts := make([]*pinnedMount, 0, len(resolvedMounts))
-	if cfg.Mode == ModeSystem && cfg.RuntimeDir != "" {
+	if cfg.Mode == ModeSystem {
 		for i, m := range resolvedMounts {
 			pm, err := a.pinMount(session.Workspace, m.HostPath, cfg.RuntimeDir, op.ID, i)
 			if err != nil {
 				// Fail closed: do not use original pathname.
 				for j := len(pinnedMounts) - 1; j >= 0; j-- {
-					pinnedMounts[j].Cleanup()
+					if ce := pinnedMounts[j].Cleanup(); ce != nil {
+						opLog(ctx).Error("pin cleanup failed",
+							slog.String("operation", "run"),
+							slog.String("error", ce.Error()),
+						)
+					}
 				}
 				opLog(ctx).Error("cannot pin mount source",
 					slog.String("operation", "run"),
@@ -440,21 +437,25 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check shutdown gate after all pins are created.
+	// Store pins in operation before registering so the operation owns them.
+	op.pinnedMounts = pinnedMounts
+
+	// Register the operation. Single tryCreate after all pins are created.
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
-			// Clean up all pins if shutdown gate failed.
 			for j := len(pinnedMounts) - 1; j >= 0; j-- {
-				pinnedMounts[j].Cleanup()
+				if ce := pinnedMounts[j].Cleanup(); ce != nil {
+					opLog(ctx).Error("pin cleanup failed",
+						slog.String("operation", "run"),
+						slog.String("error", ce.Error()),
+					)
+				}
 			}
 			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
 			return
 		}
 		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
-
-	// Store pins in operation for cleanup during lifecycle.
-	op.pinnedMounts = pinnedMounts
 
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:             "run.start",
@@ -505,7 +506,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Add user mounts: pinned paths in system mode, resolved paths in user mode.
 	for i, m := range resolvedMounts {
 		hostPath := m.HostPath
-		if cfg.Mode == ModeSystem && len(pinnedMounts) > i {
+		if cfg.Mode == ModeSystem {
 			hostPath = pinnedMounts[i].HostPath
 		}
 		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", hostPath, m.Target)
@@ -531,7 +532,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if result.Terminated {
 		cancel()
 		cleanupCidfile(op)
-		cleanupPinnedMounts(op)
+		if ce := cleanupPinnedMounts(op); ce != nil {
+			opLog(ctx).Error("pin cleanup failed",
+				slog.String("operation", "run"),
+				slog.String("error", ce.Error()),
+			)
+		}
 		msg := "run cancelled: daemon is shutting down"
 		if op.reason == terminationCancelled {
 			msg = "run cancelled"
@@ -545,7 +551,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if result.Err != nil {
 		cancel()
 		cleanupCidfile(op)
-		cleanupPinnedMounts(op)
+		if ce := cleanupPinnedMounts(op); ce != nil {
+			opLog(ctx).Error("pin cleanup failed",
+				slog.String("operation", "run"),
+				slog.String("error", ce.Error()),
+			)
+		}
 		msg := fmt.Sprintf("cannot start run: %v", result.Err)
 		op.fail("docker_run_failed", msg, nil)
 		writeOperationCreated(ctx, w, op.ID, op.State)
