@@ -15,7 +15,9 @@ Never:
 - create, list, delete, or otherwise manage Docker Helper sessions;
 - look for or use the Docker Helper administrative token;
 - print, log, echo, or otherwise expose `DOCKER_HELPER_SESSION_TOKEN`;
-- fall back to direct Docker access if a Docker Helper operation fails.
+- fall back to direct Docker access if a Docker Helper operation fails;
+- use operator commands: `serve`, `init`, `reload`, `session`, `config`,
+  `principal`, `credential`.
 
 ## Client interfaces
 

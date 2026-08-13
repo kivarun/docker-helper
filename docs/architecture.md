@@ -21,23 +21,27 @@ The agent cannot escalate beyond the workspace boundary.
 ## High-level architecture
 
 ```
-Consumer / agent
-     │
-  +--+--+
-  │     │
-  ▼     ▼
+Operator / agent
+      │
+      ├─── admin token (full admin)
+      ├─── launcher credential (principal-scoped)
+      └─── session token (Docker operations)
+      │
+   +--+--+
+   │     │
+   ▼     ▼
 docker-helper CLI    direct HTTP client
 reference client     curl / native adapter
-  │     │
-  +--+--+
-     │
-  daemon HTTP API
-     │
+   │     │
+   +--+--+
+      │
+   daemon HTTP API
+      │
 docker-helper daemon
-     │
-   Docker CLI
-     │
- Docker Engine
+      │
+    Docker CLI
+      │
+   Docker Engine
 ```
 
 The daemon HTTP API is the single capability contract. The CLI is a
@@ -47,6 +51,42 @@ are direct clients of the same API.
 The presence of the `docker-helper` binary in the agent image is not a
 requirement. Choosing a client interface does not change daemon policy
 or security semantics.
+
+## Deployment modes
+
+docker-helper supports two deployment modes:
+
+### User mode
+
+- **Effective UID**: non-root
+- **Config**: `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json`
+- **State**: `${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper`
+- **Runtime**: `$XDG_RUNTIME_DIR/docker-helper`
+- **Transport**: Unix socket only (0600)
+- **Execution identity**: daemon UID:GID for legacy/user sessions
+
+### System mode
+
+- **Effective UID**: root
+- **Config**: `/etc/docker-helper/config.json`
+- **State**: `/var/lib/docker-helper`
+- **Runtime**: `/run/docker-helper`
+- **Transports**: Unix socket (0666) + loopback HTTP
+- **Default HTTP address**: `127.0.0.1:52375` (configurable via `http_address`)
+- **Execution identity**: principal UID:GID for principal-owned sessions
+
+The `http_address` field is configurable in system mode but requires a
+daemon restart to take effect.
+
+## Transports
+
+- **User mode**: Unix socket only
+- **System mode**: Unix socket + loopback HTTP (`127.0.0.1:<port>`)
+
+One handler/API/auth policy on both transports. Transport does not
+determine identity or authorization.
+
+Loopback HTTP in Release 2 is local-only, no TLS, no non-loopback bind.
 
 The launcher creates a session and passes the client token to the agent.
 It is not a mandatory daemon or control plane component.
@@ -80,6 +120,8 @@ malicious Dockerfiles, or attempt path traversal. docker-helper validates
 every agent input before passing it to Docker.
 
 ## Session lifecycle
+
+### Legacy/admin sessions
 
 ```
 docker-helper init
@@ -117,6 +159,47 @@ POST /build or POST /run  (session token)
     ├── captures stdout/stderr into bounded LogBuffer
     ├── completion goroutine owns cmd.Wait()
     ├── transitions operation to succeeded/failed
+    └── writes audit record (no principal_name for legacy sessions)
+```
+
+### Principal-owned sessions
+
+```
+POST /principals  (admin token)
+    │
+    ├── resolves OS user (uid, gid, home)
+    ├── creates principal record
+    └── sets default allowed root = home
+    │
+POST /principals/{username}/credentials  (admin token)
+    │
+    ├── generates credential ID (dhcr_<32 hex chars>)
+    ├── generates credential token (dhc_<64 hex chars>)
+    ├── stores SHA-256 hash in database
+    └── returns credential + token (one-time)
+    │
+POST /sessions  (launcher credential)
+    │
+    ├── validates credential
+    ├── resolves principal_id
+    ├── validates workspace inside principal.allowed_roots
+    ├── generates session ID + token
+    ├── stores session with principal_id
+    └── returns session + token
+    │
+POST /build or POST /run  (session token)
+    │
+    ├── resolves principal_id from session
+    ├── execution identity = principal.uid:principal.gid
+    └── audit record contains principal_name
+```
+
+Session token semantics:
+- revoking the launcher credential does not invalidate issued sessions;
+- disabling the principal does not invalidate issued sessions;
+- removing an allowed root does not invalidate issued sessions;
+- session expiry or deletion blocks future requests;
+- an already-started Docker operation continues its lifecycle.
     └── status/logs available via operation endpoints
     │
 POST /operations/{id}/cancel  (session token)
@@ -1236,14 +1319,19 @@ stored in the database — only its SHA-256 hash. Token comparison uses
 ### Direct docker.sock access
 
 docker-helper does not expose `docker.sock`. The agent communicates only
-through the HTTP API. The Unix socket has `0600` permissions.
+through the HTTP API.
+
+- **User mode**: Unix socket has `0600` permissions.
+- **System mode**: Unix socket has `0666` permissions, but security is
+  enforced through bearer authentication and authorization, not socket
+  permissions alone.
 
 ### Secret leakage through logs
 
 Command arguments, environment variable values, and Docker output are
-never logged. Admin and session tokens are never logged. The audit
-record for `POST /run` includes `command_arg_count` but never the
-arguments themselves.
+never logged. Admin tokens, launcher credentials, and session tokens are
+never logged. The audit record for `POST /run` includes `command_arg_count`
+but never the arguments themselves.
 
 ### Container security
 
@@ -1251,7 +1339,8 @@ docker-helper applies a fixed security policy when running containers:
 
 - `--rm` — remove the container on exit;
 - `--security-opt label=disable` — disable SELinux/MacAppLabel confinement;
-- `--user <uid>:<gid>` — run as the helper process's own UID and GID.
+- `--user <uid>:<gid>` — run as the principal's UID and GID for
+  principal-owned sessions, or daemon UID:GID for legacy sessions.
 
 ## Design principles
 

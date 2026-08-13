@@ -38,6 +38,61 @@ The review was completed before changing Release 2 behavior. Findings were
 classified as current correctness issues, Release 2 blockers, or maintenance
 preferences. No cleanup was performed merely for style.
 
+## Phase 1: principals — completed
+
+- Principal table with username, uid, gid, home, enabled;
+- OS user resolution server-side;
+- Principal CRUD via admin token;
+- Default allowed root = principal home.
+
+## Phase 2: launcher credentials — completed
+
+- Credential table with token hash, ID, name;
+- Credential token format `dhc_` + 32 bytes;
+- Credential CRUD via admin token;
+- Credential authentication for session creation.
+
+## Phase 3: principal-owned sessions/auth — completed
+
+- `sessions.principal_id` column;
+- Principal-owned sessions created via launcher credential;
+- Session ownership boundary (principal can list/delete own sessions);
+- Session token semantics (credential revoke / principal disable / allowed-root
+  removal do not invalidate issued sessions).
+
+## Phase 4: execution identity/audit — completed
+
+- `--user principal.uid:principal.gid` for principal-owned sessions;
+- `principal_name` in Docker operation audit events;
+- Legacy sessions: `principal_name` omitted.
+
+## Phase 5: deployment modes/paths — completed
+
+- User mode: XDG paths, Unix socket (0600);
+- System mode: system paths, Unix socket (0666) + loopback HTTP;
+- Default HTTP address `127.0.0.1:52375`;
+- `http_address` configurable (restart required).
+
+## Phase 6: dual local listeners — completed
+
+- `serveWithShutdownMulti` for Unix + TCP;
+- Atomic listener startup;
+- Graceful shutdown closes both listeners.
+
+## Phase 7: operator endpoint selection — completed
+
+- `--system`, `--endpoint`, `--token-file` flags;
+- No fallback semantics;
+- `reload` command uses operator client.
+
+## Phase 8: system service / packaging — next
+
+- systemd system service unit;
+- RPM/DEB packaging;
+- Distribution installation.
+
+### Completion criteria
+
 Accepted Release 2 decisions:
 
 ### Deployment

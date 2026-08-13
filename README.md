@@ -12,7 +12,7 @@ Docker and enforces policy:
 - host paths accepted as build contexts and bind-mount sources are
   restricted to the session workspace;
 - build, pull, and run require a session token; session management
-  requires an admin token;
+  requires an admin or launcher credential;
 - all supported Docker operations are mediated by the daemon;
 - the developer controls which workspace each session can access.
 
@@ -21,6 +21,50 @@ access `docker.sock`. It does not sandbox an otherwise unrestricted agent
 process running as the same host user.
 
 Full architecture and detailed API documentation: [docs/architecture.md](docs/architecture.md)
+
+## Deployment modes
+
+docker-helper supports two deployment modes determined by the effective
+UID of the process:
+
+| | User mode | System mode |
+|---|---|---|
+| **Effective UID** | non-root | root |
+| **Config** | `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/config.json` | `/etc/docker-helper/config.json` |
+| **State** | `${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper` | `/var/lib/docker-helper` |
+| **Runtime** | `$XDG_RUNTIME_DIR/docker-helper` | `/run/docker-helper` |
+| **Transport** | Unix socket (0600) | Unix socket (0666) + loopback HTTP |
+| **Default HTTP** | — | `127.0.0.1:52375` |
+
+In user mode, the daemon runs as the current user and listens on a
+private Unix socket.
+
+In system mode, the daemon runs as root, serves multiple principals, and
+exposes both a system Unix socket and a loopback HTTP listener. The
+loopback HTTP address is configurable (`http_address`); changing it
+requires a daemon restart.
+
+System daemon mode is implemented; system service/package installation is
+not yet shipped.
+
+## Authentication model
+
+Three credential classes provide different levels of access:
+
+1. **Admin token** — full administrative access: manage principals,
+   credentials, and all sessions.
+2. **Launcher credential** — bound to a principal: create sessions for
+   that principal, list and delete only that principal's sessions.
+   Cannot manage principals or credentials.
+3. **Session token** — narrow workspace capability for Docker operations
+   (pull, build, run, registry login).
+
+After a session token is issued:
+- revoking the launcher credential does not invalidate the session;
+- disabling the principal does not invalidate the session;
+- removing an allowed root does not invalidate the session;
+- session expiry or deletion blocks future requests;
+- an already-started Docker operation continues its lifecycle.
 
 ## Prerequisites
 
@@ -229,6 +273,7 @@ Configuration fields:
 | `operation_log_max_bytes` | int | Max bytes retained per operation log (bounded buffer, default: `4194304` = 4 MiB) |
 | `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`) |
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. Requires host `openssl` binary for hash computation. |
+| `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |
 
 `allowed_root` and `session_ttl` are required and cannot be unset.
 Other fields may be unset to restore their defaults, except that
@@ -237,8 +282,9 @@ Other fields may be unset to restore their defaults, except that
 
 Runtime reload: after `config set` or `config unset`, the change is written
 to disk immediately. If the daemon is running, the new configuration is
-applied automatically. If the daemon is not running, the change will apply
-on the next start.
+applied automatically, except for startup-only fields such as `http_address`
+which require a daemon restart. If the daemon is not running, the change
+will apply on the next start.
 
 You can also trigger a reload explicitly:
 
@@ -263,6 +309,9 @@ The following fields are applied at runtime:
 - `operation_log_max_bytes`
 - `trusted_ca_path`
 - `trusted_ca_injection`
+
+Startup-only fields (require daemon restart):
+- `http_address`
 
 Runtime paths (socket, database, state) are not changed by reload.
 
@@ -306,14 +355,19 @@ config.json. If present, configuration validation and daemon startup fail:
 | `database_path` | SQLite database path |
 | `admin_token_path` | Path to `admin.token` |
 | `admin_token` | Admin token (redacted in general show) |
+| `mode` | `"user"` or `"system"` |
 
 ### 3. Start the daemon
 
-Choose one of the startup modes below. The daemon listens on the Unix
-socket at `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`
-(permissions 0600). On SIGINT or SIGTERM, docker-helper stops accepting
-new connections and waits for in-flight HTTP requests to complete, up to
-the configured `shutdown_timeout` (default 30 seconds).
+Choose one of the startup modes below. In user mode the daemon listens on
+the Unix socket at `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`
+(permissions 0600). In system mode it listens on both
+`/run/docker-helper/docker-helper.sock` (0666) and the configured loopback
+HTTP address (default `127.0.0.1:52375`).
+
+On SIGINT or SIGTERM, docker-helper stops accepting new connections and
+waits for in-flight HTTP requests to complete, up to the configured
+`shutdown_timeout` (default 30 seconds).
 
 #### Manual foreground run
 
@@ -396,6 +450,27 @@ authentication and excluded from session lists by their `expires_at`
 value; this command is useful for explicitly reclaiming storage during
 long daemon uptimes. The daemon also removes expired sessions
 automatically at startup. No running daemon or admin token is required.
+
+## Operator CLI
+
+API-backed operator commands (principal, credential, session, reload)
+support explicit endpoint selection:
+
+```
+--system              connect to system daemon (Unix socket)
+--endpoint ENDPOINT   explicit endpoint (unix:///path or http://127.0.0.1:port)
+--token-file PATH     token file path
+```
+
+Default behavior depends on the effective UID:
+- non-root: user daemon (Unix socket)
+- root: system daemon (Unix socket)
+
+`--endpoint` requires `--token-file`. `--system` and `--endpoint` are
+mutually exclusive. There is no fallback: if the chosen endpoint is
+unavailable, the command fails.
+
+For the full command syntax, use `docker-helper help <command>`.
 
 ## Client interfaces
 
@@ -626,11 +701,14 @@ Note: `docker-helper config show` (without a field) displays
 
 - **Host path policy** — build contexts, Dockerfiles, and bind-mount
   sources are validated against the session workspace.
-- **Two-token model** — admin token manages sessions; session token
-  performs operations within a workspace. SHA-256 hashes,
+- **Bearer authentication** — admin token, launcher credentials, and
+  session tokens use Bearer authentication with SHA-256 hashing and
   constant-time comparison.
-- **Socket** — the daemon exposes a separate Unix socket with 0600
-  permissions. The coding tool must not be given access to docker.sock.
+- **Socket permissions** — user mode Unix socket has 0600 permissions;
+  system mode Unix socket has 0666 permissions. In system mode, the
+  socket is accessible to any local user, but security is enforced
+  through bearer authentication and authorization, not socket
+  permissions alone.
 - **Container policy** — containers run with `--rm`, host UID/GID,
   and `--security-opt label=disable`.
 - **AppArmor** — an optional AppArmor profile is included in the release

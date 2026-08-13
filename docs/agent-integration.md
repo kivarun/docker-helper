@@ -51,8 +51,8 @@ between them. The consumer chooses the interface appropriate for its
 environment.
 
 For the initial local integration, both interfaces talk to the Docker Helper
-Unix socket. Remote endpoint discovery, TCP/TLS transport, and remote client
-authentication are Release 2 concerns and are intentionally not designed here.
+Unix socket. In system mode, loopback HTTP on `127.0.0.1:52375` is also
+available.
 
 ## Skills
 
