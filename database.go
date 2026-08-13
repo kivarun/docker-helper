@@ -42,7 +42,7 @@ func initializeDatabase(db *sql.DB) error {
 
 		CREATE TABLE IF NOT EXISTS principals (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			username TEXT NOT NULL UNIQUE,
 			uid INTEGER NOT NULL,
 			gid INTEGER NOT NULL,
 			home TEXT NOT NULL,
@@ -51,10 +51,10 @@ func initializeDatabase(db *sql.DB) error {
 
 		CREATE TABLE IF NOT EXISTS principal_allowed_roots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			principal_username TEXT NOT NULL,
+			principal_id INTEGER NOT NULL,
 			root_path TEXT NOT NULL,
-			FOREIGN KEY (principal_username) REFERENCES principals(username) ON DELETE CASCADE,
-			UNIQUE(principal_username, root_path)
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE(principal_id, root_path)
 		);
 	`)
 	if err != nil {

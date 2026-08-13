@@ -21,6 +21,8 @@ type auditRecord struct {
 	Dockerfile        string       `json:"dockerfile,omitempty"`
 	Workspace         string       `json:"workspace,omitempty"`
 	PrincipalName     string       `json:"principal_name,omitempty"`
+	PrincipalEnabled  *bool        `json:"principal_enabled,omitempty"`
+	PrincipalPath     string       `json:"principal_path,omitempty"`
 	Result            string       `json:"result,omitempty"`
 	ExitCode          *int         `json:"exit_code,omitempty"`
 	Duration          string       `json:"duration,omitempty"`

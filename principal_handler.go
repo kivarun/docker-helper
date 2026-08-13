@@ -215,10 +215,11 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
-		Event:         "principal.enabled_change",
-		PrincipalName: username,
-		Result:        "success",
-		Duration:      duration,
+		Event:            "principal.enabled_change",
+		PrincipalName:    username,
+		PrincipalEnabled: req.Enabled,
+		Result:           "success",
+		Duration:         duration,
 	})
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
@@ -270,7 +271,7 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, err := addAllowedRoot(a.DB, username, req.Path)
+	changed, canonicalPath, err := addAllowedRoot(a.DB, username, req.Path)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -305,6 +306,7 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:         "principal.allowed_root_add",
 		PrincipalName: username,
+		PrincipalPath: canonicalPath,
 		Result:        "success",
 		Duration:      duration,
 	})
@@ -358,7 +360,7 @@ func (a *App) handleRemoveAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, err := removeAllowedRoot(a.DB, username, req.Path)
+	changed, canonicalPath, err := removeAllowedRoot(a.DB, username, req.Path)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -393,6 +395,7 @@ func (a *App) handleRemoveAllowedRoot(w http.ResponseWriter, r *http.Request) {
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:         "principal.allowed_root_remove",
 		PrincipalName: username,
+		PrincipalPath: canonicalPath,
 		Result:        "success",
 		Duration:      duration,
 	})

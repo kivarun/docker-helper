@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 var principalCommand = &Command{
@@ -184,7 +183,11 @@ func extractPrincipalField(p *principalResponse, field string) (string, bool) {
 	case "enabled":
 		return fmt.Sprintf("%t", p.Enabled), true
 	case "allowed_roots":
-		return strings.Join(p.AllowedRoots, ","), true
+		data, err := json.Marshal(p.AllowedRoots)
+		if err != nil {
+			return "", false
+		}
+		return string(data), true
 	}
 	return "", false
 }
@@ -210,12 +213,12 @@ var principalSetCommand = &Command{
 
 				var enabled bool
 				switch value {
-				case "true", "1", "yes":
+				case "true":
 					enabled = true
-				case "false", "0", "no":
+				case "false":
 					enabled = false
 				default:
-					fmt.Fprintf(stderr, "error: invalid value %q for enabled\n", value)
+					fmt.Fprintf(stderr, "error: invalid value %q for enabled; must be true or false\n", value)
 					return 1
 				}
 
