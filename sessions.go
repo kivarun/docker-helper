@@ -59,21 +59,21 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 	// Parse the Authorization header.
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		writeAuthFailure(ctx, r, "admin.parse_failed")
-		writeUnauthorizedAdmin(ctx, w)
+		writeAuthFailure(ctx, r, "parse_failed")
+		writeUnauthorizedSession(ctx, w)
 		return nil, nil
 	}
 
 	token, ok := parseBearerToken(r)
 	if !ok {
-		writeAuthFailure(ctx, r, "admin.parse_failed")
-		writeUnauthorizedAdmin(ctx, w)
+		writeAuthFailure(ctx, r, "parse_failed")
+		writeUnauthorizedSession(ctx, w)
 		return nil, nil
 	}
 
 	if token == "" {
-		writeAuthFailure(ctx, r, "admin.parse_failed")
-		writeUnauthorizedAdmin(ctx, w)
+		writeAuthFailure(ctx, r, "parse_failed")
+		writeUnauthorizedSession(ctx, w)
 		return nil, nil
 	}
 
@@ -82,9 +82,6 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) == 1 {
 		return &sessionAuthContext{isAdmin: true}, nil
 	}
-
-	// Not admin — log admin failure for audit compatibility.
-	writeAuthFailure(ctx, r, "admin.wrong_token")
 
 	// Try credential.
 	authResult, err := authenticateCredential(a.DB, token)
@@ -96,7 +93,6 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 	if !errors.Is(err, ErrCredentialNotFound) &&
 		!errors.Is(err, ErrCredentialRevoked) &&
 		!errors.Is(err, ErrCredentialDisabled) {
-		// Database error.
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:  "auth.session",
 			Result: "database_error",
@@ -109,17 +105,14 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 		return nil, err
 	}
 
-	// Invalid/revoked/disabled credential.
+	// Single auth failure for any credential reason.
 	resultCode := "credential.not_found"
 	if errors.Is(err, ErrCredentialRevoked) {
 		resultCode = "credential.revoked"
 	} else if errors.Is(err, ErrCredentialDisabled) {
 		resultCode = "credential.disabled"
 	}
-	writeAuditWithRequestID(ctx, auditRecord{
-		Event:  "auth.session",
-		Result: resultCode,
-	})
+	writeAuthFailure(ctx, r, resultCode)
 	writeUnauthorizedSession(ctx, w)
 	return nil, err
 }
@@ -198,6 +191,8 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !authCtx.isAdmin && authCtx.authResult != nil {
 		auditRec.PrincipalName = authCtx.authResult.PrincipalName
 		auditRec.CredentialID = authCtx.authResult.CredentialID
+		// Populate principal name in the session for the response.
+		result.Session.PrincipalName = authCtx.authResult.PrincipalName
 	}
 	writeAuditWithRequestID(ctx, auditRec)
 
@@ -209,6 +204,8 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+
 	authCtx, err := a.authenticateSessionRequest(w, r)
 	if err != nil || authCtx == nil {
 		return
@@ -225,7 +222,19 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions, err = a.listSessionsForPrincipal(auth.PrincipalID)
 	}
 
+	duration := time.Since(started).Round(time.Millisecond).String()
+
 	if err != nil {
+		auditRec := auditRecord{
+			Event:    "session.list",
+			Result:   "database_error",
+			Duration: duration,
+		}
+		if !authCtx.isAdmin && authCtx.authResult != nil {
+			auditRec.PrincipalName = authCtx.authResult.PrincipalName
+			auditRec.CredentialID = authCtx.authResult.CredentialID
+		}
+		writeAuditWithRequestID(ctx, auditRec)
 		opLog(ctx).Error("list sessions error",
 			slog.String("operation", "session_list"),
 			slog.String("error", err.Error()),
@@ -242,6 +251,17 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	for _, s := range sessions {
 		resp.Sessions = append(resp.Sessions, sessionToJSON(s))
 	}
+
+	auditRec := auditRecord{
+		Event:    "session.list",
+		Result:   "success",
+		Duration: duration,
+	}
+	if !authCtx.isAdmin && authCtx.authResult != nil {
+		auditRec.PrincipalName = authCtx.authResult.PrincipalName
+		auditRec.CredentialID = authCtx.authResult.CredentialID
+	}
+	writeAuditWithRequestID(ctx, auditRec)
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }

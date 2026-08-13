@@ -1147,3 +1147,264 @@ func TestDuplicateTokenHashRejected(t *testing.T) {
 		t.Errorf("expected UNIQUE constraint error, got: %v", err)
 	}
 }
+
+func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "noadminfail")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1060", "1060", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "noadminfail"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "noadminfail", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	// Verify no admin.wrong_token in auth failures.
+	lines := findAuthFailureRawLines(auditBuf)
+	for _, line := range lines {
+		if strings.Contains(line, "admin.wrong_token") {
+			t.Errorf("credential auth should not produce admin.wrong_token: %s", line)
+		}
+	}
+}
+
+func TestInvalidCredentialSingleAuthFailure(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer dhc_invalidtoken1234567890abcdef1234567890abcdef1234567890abcdef")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected %d, got %d", http.StatusUnauthorized, w.Code)
+	}
+
+	lines := findAuthFailureRawLines(auditBuf)
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 auth.failure, got %d", len(lines))
+	}
+	if !strings.Contains(lines[0], "credential.not_found") {
+		t.Errorf("expected credential.not_found in auth failure: %s", lines[0])
+	}
+}
+
+func TestSessionManagementGenericUnauthorizedMessage(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected %d, got %d", http.StatusUnauthorized, w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	msg, _ := resp["message"].(string)
+	if strings.Contains(msg, "Administrative") {
+		t.Errorf("session management should not mention 'Administrative': %s", msg)
+	}
+}
+
+func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "principalresp")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1061", "1061", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "principalresp"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "principalresp", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if resp.Session.PrincipalName == nil {
+		t.Fatal("expected principal name in response")
+	}
+	if *resp.Session.PrincipalName != "principalresp" {
+		t.Errorf("expected principal 'principalresp', got %q", *resp.Session.PrincipalName)
+	}
+}
+
+func TestPrincipalDeleteAuditContainsWorkspace(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "deleteaudit")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1062", "1062", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "deleteaudit"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "deleteaudit", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	// Delete the session.
+	req = httptest.NewRequest(http.MethodDelete, "/sessions/"+resp.Session.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete: expected %d, got %d", http.StatusNoContent, w.Code)
+	}
+
+	// Check audit for workspace in delete success.
+	raw := auditBuf.String()
+	if !strings.Contains(raw, "session.delete") || !strings.Contains(raw, "success") {
+		t.Error("expected session.delete success in audit")
+	}
+	if !strings.Contains(raw, home) {
+		t.Errorf("delete audit should contain workspace %q", home)
+	}
+}
+
+func TestCredentialSessionListAudit(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "listaudit")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1063", "1063", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "listaudit"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	cred, token, err := createCredential(app.DB, "listaudit", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /sessions", withRequestID(withLogging(app.handleListSessions)))
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
+	}
+
+	// Check audit for principal and credential ID.
+	raw := auditBuf.String()
+	if !strings.Contains(raw, "session.list") || !strings.Contains(raw, "success") {
+		t.Error("expected session.list success in audit")
+	}
+	if !strings.Contains(raw, "listaudit") {
+		t.Errorf("list audit should contain principal name: %s", raw)
+	}
+	if !strings.Contains(raw, cred.ID) {
+		t.Errorf("list audit should contain credential ID: %s", raw)
+	}
+}

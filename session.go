@@ -314,12 +314,32 @@ func (a *App) deleteSession(id string) (*Session, error) {
 
 // deleteSessionForPrincipal atomically deletes a session only if it belongs to the given principal.
 // Returns ErrSessionNotFound if the session doesn't exist or doesn't belong to the principal.
+// Returns the deleted session metadata for audit purposes.
 func (a *App) deleteSessionForPrincipal(id string, principalID int64) (*Session, error) {
-	// Atomic ownership check + delete.
-	result, err := a.DB.Exec(
-		`DELETE FROM sessions WHERE id = ? AND principal_id = ?`,
+	tx, err := a.DB.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Read session metadata first within the transaction.
+	row := tx.QueryRow(
+		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
+		 FROM sessions s
+		 LEFT JOIN principals p ON p.id = s.principal_id
+		 WHERE s.id = ? AND s.principal_id = ?`,
 		id, principalID,
 	)
+	s, err := scanSessionWithPrincipal(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
+		}
+		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
+	}
+
+	// Delete within the same transaction.
+	result, err := tx.Exec(`DELETE FROM sessions WHERE id = ? AND principal_id = ?`, id, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("cannot delete session: %w: %w", err, ErrDatabase)
 	}
@@ -328,14 +348,15 @@ func (a *App) deleteSessionForPrincipal(id string, principalID int64) (*Session,
 	if err != nil {
 		return nil, fmt.Errorf("cannot check deletion result: %w: %w", err, ErrDatabase)
 	}
-
 	if affected == 0 {
 		return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
 	}
 
-	// Fetch the deleted session info for audit (best-effort, already deleted).
-	// We don't need the full session data, just the workspace.
-	return nil, nil
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("cannot commit deletion: %w", err)
+	}
+
+	return &s, nil
 }
 
 func (a *App) findSessionByToken(token string) (*Session, error) {

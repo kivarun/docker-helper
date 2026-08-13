@@ -201,7 +201,7 @@ func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "", "", headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", "", headerMarker, bodyMarker)
 }
 
 func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
@@ -223,7 +223,7 @@ func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", authHeader, "", "")
 }
 
 func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
@@ -245,11 +245,11 @@ func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.parse_failed", "", "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", authHeader, "", "")
 }
 
 // ========================
-// admin.wrong_token
+// credential.not_found (token not admin, not valid credential)
 // ========================
 
 func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
@@ -275,7 +275,7 @@ func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "admin.wrong_token", token, "", authHeader, headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "credential.not_found", token, "", authHeader, headerMarker, bodyMarker)
 }
 
 func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
@@ -298,7 +298,7 @@ func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodGet, "/sessions", "admin.wrong_token", token, "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodGet, "/sessions", "credential.not_found", token, "", authHeader, "", "")
 }
 
 func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
@@ -321,7 +321,7 @@ func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodDelete, "/sessions/dhs_123", "admin.wrong_token", token, "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], http.MethodDelete, "/sessions/dhs_123", "credential.not_found", token, "", authHeader, "", "")
 }
 
 // ========================

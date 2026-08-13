@@ -109,7 +109,7 @@ func writeUnauthorizedSession(ctx context.Context, w http.ResponseWriter) {
 	writeJSON(ctx, w, http.StatusUnauthorized, response{
 		OK:      false,
 		Code:    "unauthorized",
-		Message: "Valid session authentication required.",
+		Message: "Authentication required for session management.",
 	})
 }
 
