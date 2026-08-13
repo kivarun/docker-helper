@@ -15,7 +15,7 @@ import (
 
 // mockSeam implements mountSeam for unit tests without root/CAP_SYS_ADMIN.
 type mockSeam struct {
-	openat2Fn   func(dirfd int, path string, flags uint, resolveFlags uint64) (int, error)
+	openat2Fn   func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error)
 	openTreeFn  func(sourceFD int) (int, error)
 	moveMountFn func(treeFD, destDirfd int, destPath string) error
 	fstatFn     func(fd int) (*unixStat, error)
@@ -23,47 +23,45 @@ type mockSeam struct {
 	umountFn    func(path string) error
 
 	// Track calls for verification
-	openat2Calls   []openat2Call
-	openTreeCalls  []int
-	moveMountCalls []moveMountCall
+	openat2Calls   []openat2Args
+	openTreeCalls  []openTreeArgs
+	moveMountCalls []moveMountArgs
 	closeCalls     []int
 	umountCalls    []string
+
+	// Next FD to assign (for distinct FDs)
+	nextFD int
 }
 
-type openat2Call struct {
-	dirfd        int
-	path         string
-	flags        uint
-	resolveFlags uint64
+func (m *mockSeam) nextFd() int {
+	fd := m.nextFD
+	m.nextFD++
+	return fd
 }
 
-type moveMountCall struct {
-	treeFD    int
-	destDirfd int
-	destPath  string
-}
-
-func (m *mockSeam) openat2(dirfd int, path string, flags uint, resolveFlags uint64) (int, error) {
+func (m *mockSeam) openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 	if m.openat2Fn != nil {
-		return m.openat2Fn(dirfd, path, flags, resolveFlags)
+		return m.openat2Fn(dirfd, path, flags, mode, resolveFlags)
 	}
-	m.openat2Calls = append(m.openat2Calls, openat2Call{dirfd, path, flags, resolveFlags})
-	return 3, nil
+	fd := m.nextFd()
+	m.openat2Calls = append(m.openat2Calls, openat2Args{dirfd, path, flags, mode, resolveFlags})
+	return fd, nil
 }
 
 func (m *mockSeam) openTreeClone(sourceFD int) (int, error) {
 	if m.openTreeFn != nil {
 		return m.openTreeFn(sourceFD)
 	}
-	m.openTreeCalls = append(m.openTreeCalls, sourceFD)
-	return 4, nil
+	fd := m.nextFd()
+	m.openTreeCalls = append(m.openTreeCalls, openTreeArgs{fd, "", uint(unix.AT_EMPTY_PATH | unix.OPEN_TREE_CLONE | unix.OPEN_TREE_CLOEXEC)})
+	return fd, nil
 }
 
 func (m *mockSeam) moveMount(treeFD, destDirfd int, destPath string) error {
 	if m.moveMountFn != nil {
 		return m.moveMountFn(treeFD, destDirfd, destPath)
 	}
-	m.moveMountCalls = append(m.moveMountCalls, moveMountCall{treeFD, destDirfd, destPath})
+	m.moveMountCalls = append(m.moveMountCalls, moveMountArgs{treeFD, "", destDirfd, destPath, uint(unix.MOVE_MOUNT_F_EMPTY_PATH)})
 	return nil
 }
 
@@ -90,6 +88,30 @@ func (m *mockSeam) umountDetach(path string) error {
 	return nil
 }
 
+func (m *mockSeam) lastOpenat2() *openat2Args {
+	if len(m.openat2Calls) == 0 {
+		return nil
+	}
+	last := m.openat2Calls[len(m.openat2Calls)-1]
+	return &last
+}
+
+func (m *mockSeam) lastOpenTree() *openTreeArgs {
+	if len(m.openTreeCalls) == 0 {
+		return nil
+	}
+	last := m.openTreeCalls[len(m.openTreeCalls)-1]
+	return &last
+}
+
+func (m *mockSeam) lastMoveMount() *moveMountArgs {
+	if len(m.moveMountCalls) == 0 {
+		return nil
+	}
+	last := m.moveMountCalls[len(m.moveMountCalls)-1]
+	return &last
+}
+
 func TestPinMountDirectory(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
@@ -101,6 +123,7 @@ func TestPinMountDirectory(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -123,13 +146,9 @@ func TestPinMountDirectory(t *testing.T) {
 	if seam.openat2Calls[0].path != "/" {
 		t.Errorf("openat2[0].path = %q, want %q", seam.openat2Calls[0].path, "/")
 	}
-	// Second call: open source with root FD
+	// Second call: open source with root FD (mock returns 3 for root)
 	if seam.openat2Calls[1].dirfd != 3 {
-		t.Errorf("openat2[1].dirfd = %d, want 3 (root FD)", seam.openat2Calls[1].dirfd)
-	}
-	// Path is sourcePath without leading "/"
-	if !strings.HasSuffix(seam.openat2Calls[1].path, "workspace/src") {
-		t.Errorf("openat2[1].path = %q, want suffix %q", seam.openat2Calls[1].path, "workspace/src")
+		t.Errorf("openat2[1].dirfd = %d, want 3 (root FD from mock)", seam.openat2Calls[1].dirfd)
 	}
 	expectedResolve := uint64(unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS)
 	if seam.openat2Calls[1].resolveFlags != expectedResolve {
@@ -137,20 +156,37 @@ func TestPinMountDirectory(t *testing.T) {
 			seam.openat2Calls[1].resolveFlags, expectedResolve)
 	}
 
-	// Verify open_tree was called.
+	// Verify open_tree was called with correct flags.
 	if len(seam.openTreeCalls) != 1 {
 		t.Errorf("openTreeCalls = %d, want 1", len(seam.openTreeCalls))
 	}
+	if seam.openTreeCalls[0].path != "" {
+		t.Errorf("open_tree path = %q, want %q", seam.openTreeCalls[0].path, "")
+	}
+	expectedTreeFlags := uint(unix.AT_EMPTY_PATH | unix.OPEN_TREE_CLONE | unix.OPEN_TREE_CLOEXEC)
+	if seam.openTreeCalls[0].flags != expectedTreeFlags {
+		t.Errorf("open_tree flags = 0x%x, want 0x%x", seam.openTreeCalls[0].flags, expectedTreeFlags)
+	}
 
-	// Verify move_mount was called.
+	// Verify move_mount was called with correct flags.
 	if len(seam.moveMountCalls) != 1 {
 		t.Fatal("moveMount not called")
 	}
+	if seam.moveMountCalls[0].fromPath != "" {
+		t.Errorf("move_mount fromPath = %q, want %q", seam.moveMountCalls[0].fromPath, "")
+	}
+	if seam.moveMountCalls[0].toPath != "0" {
+		t.Errorf("move_mount toPath = %q, want %q", seam.moveMountCalls[0].toPath, "0")
+	}
+	if seam.moveMountCalls[0].flags != uint(unix.MOVE_MOUNT_F_EMPTY_PATH) {
+		t.Errorf("move_mount flags = 0x%x, want 0x%x",
+			seam.moveMountCalls[0].flags, unix.MOVE_MOUNT_F_EMPTY_PATH)
+	}
 
 	// Verify FDs were closed exactly once.
-	expectedCloses := []int{3, 5, 6, 4} // root, source, destDir, tree
-	if len(seam.closeCalls) != len(expectedCloses) {
-		t.Errorf("closeCalls = %v, want %v", seam.closeCalls, expectedCloses)
+	// root(3), source(4), destDir(5), tree(6) = 4 closes
+	if len(seam.closeCalls) != 4 {
+		t.Errorf("closeCalls = %v, want 4 closes", seam.closeCalls)
 	}
 
 	// Cleanup should not error.
@@ -175,6 +211,7 @@ func TestPinMountRegularFile(t *testing.T) {
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFREG}, nil
 		},
@@ -188,6 +225,19 @@ func TestPinMountRegularFile(t *testing.T) {
 	// Verify move_mount was called.
 	if len(seam.moveMountCalls) != 1 {
 		t.Fatal("moveMount not called")
+	}
+
+	// Verify file destination was created with correct mode.
+	// The openat2 call for file destination should have mode 0600.
+	foundFileCreate := false
+	for _, call := range seam.openat2Calls {
+		if call.mode == 0600 && (call.flags&unix.O_CREAT) != 0 {
+			foundFileCreate = true
+			break
+		}
+	}
+	if !foundFileCreate {
+		t.Error("file destination should be created with mode 0600 and O_CREAT")
 	}
 
 	if err := pm.Cleanup(); err != nil {
@@ -297,6 +347,198 @@ func TestPinMountUnsupportedInode(t *testing.T) {
 	}
 }
 
+func TestPinMountRelativePathsRejected(t *testing.T) {
+	work := t.TempDir()
+	sourceFile := filepath.Join(work, "src.txt")
+	os.WriteFile(sourceFile, []byte("data"), 0644)
+
+	seam := &mockSeam{}
+
+	// Relative workspace.
+	_, err := pinMount(seam, "relative/workspace", sourceFile, work, "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject relative workspace")
+	}
+	if !strings.Contains(err.Error(), "workspace must be absolute") {
+		t.Errorf("error = %v, want 'workspace must be absolute'", err)
+	}
+
+	// Relative sourcePath.
+	_, err = pinMount(seam, work, "relative/src.txt", work, "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject relative sourcePath")
+	}
+	if !strings.Contains(err.Error(), "sourcePath must be absolute") {
+		t.Errorf("error = %v, want 'sourcePath must be absolute'", err)
+	}
+
+	// Relative runtimeDir.
+	_, err = pinMount(seam, work, sourceFile, "relative/runtime", "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject relative runtimeDir")
+	}
+	if !strings.Contains(err.Error(), "runtimeDir must be absolute") {
+		t.Errorf("error = %v, want 'runtimeDir must be absolute'", err)
+	}
+}
+
+func TestPinMountEmptyPaths(t *testing.T) {
+	seam := &mockSeam{}
+
+	_, err := pinMount(seam, "", "/tmp/src", "/tmp/runtime", "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject empty workspace")
+	}
+
+	_, err = pinMount(seam, "/tmp/ws", "", "/tmp/runtime", "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject empty sourcePath")
+	}
+
+	_, err = pinMount(seam, "/tmp/ws", "/tmp/src", "", "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject empty runtimeDir")
+	}
+}
+
+func TestPinMountExistingFilePreserved(t *testing.T) {
+	work := t.TempDir()
+	workspace := filepath.Join(work, "workspace")
+	runtimeDir := filepath.Join(work, "runtime")
+	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(runtimeDir, 0755)
+
+	sourceFile := filepath.Join(workspace, "src.txt")
+	os.WriteFile(sourceFile, []byte("data"), 0644)
+
+	// Pre-create destination file with content.
+	mountsDir := filepath.Join(runtimeDir, "mounts", "op_abc")
+	os.MkdirAll(mountsDir, 0700)
+	destPath := filepath.Join(mountsDir, "0")
+	os.WriteFile(destPath, []byte("EXISTING"), 0644)
+
+	callCount := 0
+	seam := &mockSeam{
+		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
+			callCount++
+			if callCount == 1 {
+				// First call: open /
+				return 3, nil
+			}
+			if callCount == 2 {
+				// Second call: open source
+				return 4, nil
+			}
+			if callCount == 3 {
+				// Third call: create file destination - fails with EEXIST
+				return -1, unix.EEXIST
+			}
+			// Fourth call: open dest dir
+			return 5, nil
+		},
+		fstatFn: func(fd int) (*unixStat, error) {
+			return &unixStat{mode: unix.S_IFREG}, nil
+		},
+	}
+
+	_, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject existing destination")
+	}
+	if !strings.Contains(err.Error(), "destination already exists") {
+		t.Errorf("error = %v, want 'destination already exists'", err)
+	}
+
+	// Verify existing file was not modified.
+	content, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("read existing file: %v", err)
+	}
+	if string(content) != "EXISTING" {
+		t.Errorf("existing file content = %q, want %q", string(content), "EXISTING")
+	}
+}
+
+func TestPinMountExistingDirectoryPreserved(t *testing.T) {
+	work := t.TempDir()
+	workspace := filepath.Join(work, "workspace")
+	runtimeDir := filepath.Join(work, "runtime")
+	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(runtimeDir, 0755)
+
+	sourceDir := filepath.Join(workspace, "src")
+	os.MkdirAll(sourceDir, 0755)
+
+	// Pre-create destination directory.
+	mountsDir := filepath.Join(runtimeDir, "mounts", "op_abc")
+	os.MkdirAll(mountsDir, 0700)
+	destPath := filepath.Join(mountsDir, "0")
+	os.MkdirAll(destPath, 0700)
+
+	seam := &mockSeam{
+		nextFD: 3,
+		fstatFn: func(fd int) (*unixStat, error) {
+			return &unixStat{mode: unix.S_IFDIR}, nil
+		},
+	}
+
+	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject existing destination")
+	}
+	if !strings.Contains(err.Error(), "destination already exists") {
+		t.Errorf("error = %v, want 'destination already exists'", err)
+	}
+
+	// Verify existing directory was not removed.
+	info, err := os.Stat(destPath)
+	if err != nil {
+		t.Fatalf("stat existing dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("existing directory was removed or modified")
+	}
+}
+
+func TestPinMountExistingSymlinkPreserved(t *testing.T) {
+	work := t.TempDir()
+	workspace := filepath.Join(work, "workspace")
+	runtimeDir := filepath.Join(work, "runtime")
+	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(runtimeDir, 0755)
+
+	sourceDir := filepath.Join(workspace, "src")
+	os.MkdirAll(sourceDir, 0755)
+
+	// Pre-create destination symlink.
+	mountsDir := filepath.Join(runtimeDir, "mounts", "op_abc")
+	os.MkdirAll(mountsDir, 0700)
+	destPath := filepath.Join(mountsDir, "0")
+	target := filepath.Join(work, "target")
+	os.Symlink(target, destPath)
+
+	seam := &mockSeam{
+		nextFD: 3,
+		fstatFn: func(fd int) (*unixStat, error) {
+			return &unixStat{mode: unix.S_IFDIR}, nil
+		},
+	}
+
+	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	if err == nil {
+		t.Fatal("should reject existing destination (symlink)")
+	}
+
+	// Verify symlink was not modified.
+	linkTarget, err := os.Readlink(destPath)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if linkTarget != target {
+		t.Errorf("symlink target = %q, want %q", linkTarget, target)
+	}
+}
+
 func TestPinMountOpenat2FailureCleansUp(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
@@ -309,7 +551,7 @@ func TestPinMountOpenat2FailureCleansUp(t *testing.T) {
 
 	callCount := 0
 	seam := &mockSeam{
-		openat2Fn: func(dirfd int, path string, flags uint, resolveFlags uint64) (int, error) {
+		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 			callCount++
 			if callCount == 1 {
 				// First call: open /
@@ -337,6 +579,7 @@ func TestPinMountOpenTreeFailureCleansUp(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -365,6 +608,7 @@ func TestPinMountMoveMountFailureCleansUp(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -391,6 +635,7 @@ func TestPinMountCleanupIdempotent(t *testing.T) {
 
 	umountCount := 0
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -438,6 +683,7 @@ func TestPinMountCleanupConcurrent(t *testing.T) {
 
 	umountCount := 0
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -487,6 +733,7 @@ func TestPinMountCleanupReturnsError(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -524,6 +771,7 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 
 	// First mount succeeds.
 	seam1 := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -535,6 +783,7 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 
 	// Second mount fails on move_mount.
 	seam2 := &mockSeam{
+		nextFD: 100,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -547,9 +796,9 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 		t.Fatal("second pinMount should fail")
 	}
 
-	// First mount should still be usable.
-	if pm1.HostPath == "" {
-		t.Error("first mount HostPath should not be empty")
+	// First mount should still exist on filesystem.
+	if _, err := os.Stat(pm1.HostPath); err != nil {
+		t.Errorf("first mount mountpoint should still exist: %v", err)
 	}
 }
 
@@ -564,6 +813,7 @@ func TestPinMountCloseCount(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	seam := &mockSeam{
+		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
@@ -574,9 +824,20 @@ func TestPinMountCloseCount(t *testing.T) {
 		t.Fatalf("pinMount: %v", err)
 	}
 
-	// Expected closes: root(3), source(5), destDir(6), tree(4) = 4 closes
+	// Expected closes: root(3), source(4), destDir(5), tree(6) = 4 closes
 	if len(seam.closeCalls) != 4 {
 		t.Errorf("closeCalls = %d, want 4", len(seam.closeCalls))
+	}
+
+	// Verify each FD was closed exactly once.
+	closeSet := make(map[int]int)
+	for _, fd := range seam.closeCalls {
+		closeSet[fd]++
+	}
+	for fd, count := range closeSet {
+		if count != 1 {
+			t.Errorf("FD %d closed %d times, want 1", fd, count)
+		}
 	}
 
 	// Cleanup should not close any FDs (they're already closed).
@@ -586,6 +847,49 @@ func TestPinMountCloseCount(t *testing.T) {
 	closeAfterCleanup := len(seam.closeCalls)
 	if closeAfterCleanup != 4 {
 		t.Errorf("closeCalls after cleanup = %d, want 4", closeAfterCleanup)
+	}
+}
+
+func TestPinMountFileCloseCount(t *testing.T) {
+	work := t.TempDir()
+	workspace := filepath.Join(work, "workspace")
+	runtimeDir := filepath.Join(work, "runtime")
+	os.MkdirAll(workspace, 0755)
+	os.MkdirAll(runtimeDir, 0755)
+
+	sourceFile := filepath.Join(workspace, "src.txt")
+	os.WriteFile(sourceFile, []byte("data"), 0644)
+
+	seam := &mockSeam{
+		nextFD: 3,
+		fstatFn: func(fd int) (*unixStat, error) {
+			return &unixStat{mode: unix.S_IFREG}, nil
+		},
+	}
+
+	pm, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
+	if err != nil {
+		t.Fatalf("pinMount: %v", err)
+	}
+
+	// For file: root(3), source(4), fileDest(5), destDir(6), tree(7) = 5 closes
+	if len(seam.closeCalls) != 5 {
+		t.Errorf("closeCalls = %d, want 5", len(seam.closeCalls))
+	}
+
+	// Verify each FD was closed exactly once.
+	closeSet := make(map[int]int)
+	for _, fd := range seam.closeCalls {
+		closeSet[fd]++
+	}
+	for fd, count := range closeSet {
+		if count != 1 {
+			t.Errorf("FD %d closed %d times, want 1", fd, count)
+		}
+	}
+
+	if err := pm.Cleanup(); err != nil {
+		t.Errorf("Cleanup: %v", err)
 	}
 }
 
@@ -599,7 +903,8 @@ func TestIsOperationIDSafe(t *testing.T) {
 		{"", false},
 		{"../etc", false},
 		{"op/abc", false},
-		{"op\\abc", true}, // backslash is OK (not path separator on Linux)
+		{".hidden", false},
+		{"op\\abc", false},
 	}
 
 	for _, tc := range tests {
