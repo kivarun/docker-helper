@@ -483,3 +483,26 @@ func cleanupStaleSessionRuntimeDirs(db *sql.DB, runtimeDir string) error {
 	}
 	return nil
 }
+
+// resolveSessionExecutionIdentity returns the UID:GID for Docker --user.
+// Legacy/admin sessions (principal_id == NULL) use the daemon process UID/GID.
+// Principal-owned sessions use the stored principal UID/GID from the database.
+func resolveSessionExecutionIdentity(db *sql.DB, session *Session) (uid, gid int, err error) {
+	if session.PrincipalID == nil {
+		return os.Getuid(), os.Getgid(), nil
+	}
+
+	var pUID, pGID int
+	row := db.QueryRow(
+		`SELECT uid, gid FROM principals WHERE id = ?`,
+		*session.PrincipalID,
+	)
+	if err := row.Scan(&pUID, &pGID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, fmt.Errorf("principal %d not found: %w", *session.PrincipalID, ErrDatabase)
+		}
+		return 0, 0, fmt.Errorf("cannot lookup principal identity: %w", err)
+	}
+
+	return pUID, pGID, nil
+}

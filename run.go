@@ -358,6 +358,18 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Audit env keys are only the user-provided ones (already sorted above).
 
+	// Resolve execution identity before registering the operation.
+	// Failure here means no operation is created and docker is not called.
+	execUID, execGID, err := resolveSessionExecutionIdentity(a.DB, session)
+	if err != nil {
+		opLog(ctx).Error("cannot resolve session execution identity",
+			slog.String("operation", "run"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
 	// Ensure the session Docker config directory exists before registering
 	// the operation so that a failure here does not leave a zombie operation.
 	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
@@ -406,6 +418,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		EnvKeys:           envNames,
 		ShmSize:           op.auditShmSize,
 		TrustedCAInjected: trustedCAInjected,
+		PrincipalName:     session.PrincipalName,
 	})
 
 	// Build docker run command.
@@ -414,7 +427,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		"run",
 		"--rm",
 		"--security-opt", "label=disable",
-		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		"--user", fmt.Sprintf("%d:%d", execUID, execGID),
 	}
 
 	if op.cidfile != "" {
