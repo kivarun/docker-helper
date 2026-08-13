@@ -194,13 +194,27 @@ POST /build or POST /run  (session token)
     └── audit record contains principal_name
 ```
 
-Session token semantics:
-- revoking the launcher credential does not invalidate issued sessions;
-- disabling the principal does not invalidate issued sessions;
-- removing an allowed root does not invalidate issued sessions;
-- session expiry or deletion blocks future requests;
-- an already-started Docker operation continues its lifecycle.
-    └── status/logs available via operation endpoints
+### Shared session capability lifecycle
+
+```
+POST /build or POST /run  (session token)
+    │
+    ├── resolves session (legacy or principal-owned)
+    ├── execution identity = principal UID:GID or daemon UID:GID
+    ├── registers operation (tryCreate — atomic with shutdown gate)
+    ├── starts async process (cmd.Start under op.mu)
+    ├── captures stdout/stderr into bounded LogBuffer
+    ├── completion goroutine owns cmd.Wait()
+    ├── transitions operation to succeeded/failed
+    └── writes audit record
+    │
+GET /operations/{id}  (session token)
+    │
+    └── status, timestamps, exit code, result code
+    │
+GET /operations/{id}/logs?offset=N  (session token)
+    │
+    └── incremental operation output
     │
 POST /operations/{id}/cancel  (session token)
     │
@@ -208,7 +222,7 @@ POST /operations/{id}/cancel  (session token)
     ├── bounded force-cleanup fallback if process does not exit
     └── operation becomes terminal (status=failed, result_code=cancelled)
     │
-DELETE /sessions/{id}  (admin token)
+DELETE /sessions/{id}  (admin token or launcher credential)
     │
     └── physically deletes session row
     │
@@ -217,11 +231,18 @@ subsequent requests with deleted session token
     └── 401 Unauthorized
 ```
 
-The administrative token stays with the launcher and the developer. The
-coding agent never receives it. The agent only gets a session token, which
-grants access to a single workspace and expires after the configured TTL.
-This separation ensures the agent cannot create sessions for other
-workspaces or manage sessions it does not own.
+Session token semantics:
+- revoking the launcher credential does not invalidate issued sessions;
+- disabling the principal does not invalidate issued sessions;
+- removing an allowed root does not invalidate issued sessions;
+- session expiry or deletion blocks future requests;
+- an already-started Docker operation continues its lifecycle.
+
+A launcher credential stays with the launcher. The coding agent never
+receives it. The agent only gets a session token, which grants access to
+a single workspace and expires after the configured TTL. This separation
+ensures the agent cannot create sessions for other workspaces or manage
+sessions it does not own.
 
 Expired sessions are rejected immediately by the `expires_at` check in
 `findSessionByToken`. Their database rows are physically removed the next
@@ -233,7 +254,7 @@ docker-helper provides a CLI for session management.
 
 ### docker-helper session create
 
-Create a new session. Requires the admin token.
+Create a new session. Requires admin token or launcher credential.
 
 ```
 docker-helper session create --workspace PATH [--json]
@@ -249,9 +270,13 @@ Flags:
 Returns the session ID, token, workspace, creation time, and expiration
 time. The token is shown only once and cannot be retrieved later.
 
+With admin token: creates a session with global scope.
+With launcher credential: creates a session for the credential's principal;
+workspace must be inside the principal's allowed roots.
+
 ### docker-helper session list
 
-List active sessions. Requires the admin token.
+List active sessions. Requires admin token or launcher credential.
 
 ```
 docker-helper session list [--json]
@@ -266,9 +291,12 @@ Flags:
 Returns a table of active sessions with ID, workspace, creation time,
 and expiration time.
 
+With admin token: lists all sessions.
+With launcher credential: lists only sessions for the credential's principal.
+
 ### docker-helper session delete
 
-Delete a session. Requires the admin token.
+Delete a session. Requires admin token or launcher credential.
 
 ```
 docker-helper session delete --id SESSION_ID [--json]
@@ -284,6 +312,9 @@ Flags:
 Permanently removes the session. Subsequent requests with the session's
 token will receive 401 Unauthorized.
 
+With admin token: can delete any session.
+With launcher credential: can only delete sessions for its principal.
+
 ### docker-helper session cleanup
 
 Remove expired sessions from the local state database. Does not require
@@ -295,6 +326,18 @@ docker-helper session cleanup
 
 Deletes rows whose `expires_at` has passed. Active sessions are
 untouched. Reports the number of removed rows.
+
+### Operator flags
+
+API-backed operator commands (principal, credential, session, reload)
+support explicit endpoint selection. See `docker-helper <command> --help`
+for full syntax:
+
+```
+--system              connect to system daemon (Unix socket)
+--endpoint ENDPOINT   explicit endpoint (unix:///path or http://127.0.0.1:port)
+--token-file PATH     token file path
+```
 
 ## CLI reference
 
@@ -318,6 +361,10 @@ untouched. Reports the number of removed rows.
   `cleanup`.
 - `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
   `unset`.
+- `principal` — Manage principals. Subcommands: `create`, `list`, `delete`,
+  `disable`, `allowed-root`.
+- `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
+  `revoke`.
 
 ### General commands
 
@@ -343,25 +390,28 @@ Subcommands: `show`, `set`, `unset`.
 effective configuration as JSON (admin_token redacted). With FIELD, prints
 only that field's scalar value.
 
-`docker-helper config set FIELD VALUE` — sets a writable field
-(`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`,
-`shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
-`operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`).
+`docker-helper config set FIELD VALUE` — sets a writable field.
 Reports `updated` or `unchanged`. If the daemon is running, the change is
-applied immediately.
+applied automatically for reloadable fields. `http_address` is startup-only
+and requires a daemon restart.
 
 `docker-helper config unset FIELD` — removes an optional field to restore
 its default. `allowed_root` and `session_ttl` are required and cannot be
-unset. Reports `unset` or `unchanged`. If the daemon is running, the change
-is applied immediately.
+unset. Reports `unset` or `unchanged`.
+
+`http_address` is configurable in system mode only and requires a daemon
+restart to take effect. It is not included in the reloadable field list.
 
 ### `docker-helper reload`
 
 Ask the running daemon to re-read `config.json` and apply changes without
-restarting. All configurable fields are applied at runtime:
+restarting. Reloadable fields:
 `allowed_root`, `session_ttl`, `log_level`, `audit_enabled`,
 `shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
 `operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`.
+
+Startup-only fields (require daemon restart): `http_address`.
+
 Computed paths (socket, database, state) are not changed. If the daemon is
 not running, the command fails with a non-zero exit code. If the new
 configuration is invalid, the daemon keeps its current configuration and
@@ -481,30 +531,44 @@ Docker socket means the unit does not create a full security boundary.
 
 ## Authentication
 
-Two token types exist.
+Three credential classes provide different levels of access:
 
-### Administrative token
+### Admin token
 
 - generated once by `docker-helper init`;
-- stored at `$XDG_CONFIG_HOME/docker-helper/admin.token`;
+- stored at `admin.token` (user mode: user config directory; system mode:
+  `/etc/docker-helper/admin.token`);
 - SHA-256 hash loaded into memory at server start;
-- required for `POST /sessions`, `GET /sessions`, `DELETE /sessions/{id}`;
+- grants full administrative access: manage principals, credentials, and
+  all sessions;
 - sent as `Authorization: Bearer <admin-token>`;
 - compared via `crypto/subtle.ConstantTimeCompare`.
+
+### Launcher credential
+
+- created per principal by `POST /principals/{username}/credentials`
+  (admin token required);
+- credential token prefixed `dhc_`, credential ID prefixed `dhcr_`;
+- SHA-256 hash stored in SQLite;
+- grants access scoped to the principal: create sessions for that principal,
+  list and delete only that principal's sessions;
+- cannot manage principals or credentials;
+- sent as `Authorization: Bearer <credential-token>`.
 
 ### Session token
 
 - generated per session by `POST /sessions`;
 - returned once in the creation response;
 - SHA-256 hash stored in SQLite;
-- required for `POST /build`, `POST /run`, `POST /pull`;
+- required for Docker operations: `POST /build`, `POST /run`, `POST /pull`,
+  `POST /registry/login`;
 - sent as `Authorization: Bearer <session-token>`;
 - looked up by hash, checked for expiration and revocation.
 
-The two tokens serve different purposes. The admin token manages sessions.
-The session token performs operations within a session's workspace boundary.
-An admin token cannot be used for build or run. A session token cannot
-create or delete sessions.
+Session management is dual-authenticated:
+- admin token -> global session management (create, list all, delete any);
+- launcher credential -> principal-scoped session management (create for its
+  principal, list and delete only its principal's sessions).
 
 ## Workspace isolation
 
@@ -704,8 +768,8 @@ returned to the client.
 
 | Event | Fields |
 |-------|--------|
-| `registry.login.start` | `session_id`, `registry` |
-| `registry.login.finish` | `session_id`, `registry`, `result`, `duration` |
+| `registry.login.start` | `session_id`, `registry`, `principal_name` (present for principal-owned sessions) |
+| `registry.login.finish` | `session_id`, `registry`, `result`, `duration`, `principal_name` (present for principal-owned sessions) |
 
 `result` is `success` or `login_failed`. The password and username are
 never included in audit records.
@@ -1083,6 +1147,7 @@ Emitted before a Docker build begins.
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
 | `build_arg_keys` | string[] | build-arg names, sorted (present when set; values are never logged) |
+| `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
 
 No `result` or `duration` field.
 
@@ -1099,6 +1164,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `context` | string | build context path from the request |
 | `dockerfile` | string | Dockerfile path from the request |
 | `build_arg_keys` | string[] | build-arg names, sorted (present when set; values are never logged) |
+| `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
 | `result` | string | `succeeded`, `docker_build_failed`, or `cancelled` |
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | build wall-clock time |
@@ -1161,6 +1227,7 @@ Emitted before a container starts.
 | `env_keys` | string[] | environment variable names, sorted (present when set; values are never logged) |
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection is active for this run |
+| `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
 
 No `result` or `duration` field.
 
@@ -1187,6 +1254,7 @@ Does not include `request_id` because completion is not request-scoped.
 | `env_keys` | string[] | environment variable names, sorted (present when set) |
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection was active for this run |
+| `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
 | `result` | string | outcome code |
 | `exit_code` | number | container exit code (present when available) |
 | `duration` | string | container run attempt wall-clock time |
@@ -1229,6 +1297,7 @@ Emitted before a Docker pull begins.
 |-------|------|-------------|
 | `session_id` | string | session identifier |
 | `image` | string | image reference |
+| `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
 
 No `result` or `duration` field.
 
@@ -1240,6 +1309,7 @@ Emitted after a Docker pull completes (success or failure).
 |-------|------|-------------|
 | `session_id` | string | session identifier |
 | `image` | string | image reference |
+| `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
 | `result` | string | `success` or `pull_error` |
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | pull wall-clock time |

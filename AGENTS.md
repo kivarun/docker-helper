@@ -131,6 +131,7 @@ Security-sensitive behavior must have focused tests.
 Never expose:
 - admin tokens;
 - session bearer tokens;
+- launcher credential tokens;
 - Authorization headers;
 - secret environment values
 
@@ -344,24 +345,7 @@ Do not require cleanup after every small commit.
 
 Focus on deletion and simplification over new abstractions.
 
-22. Secrets must not leak.
-
-Never expose:
-- admin tokens;
-- session bearer tokens;
-- launcher credential tokens;
-- Authorization headers;
-- secret environment values
-
-through:
-- operational logs;
-- audit logs;
-- CLI stderr;
-- API error messages.
-
-Preserve existing masking/redaction behavior.
-
-23. shm_size 2 GiB limit.
+22. shm_size 2 GiB limit.
 
 The POST /run `shm_size` maximum of 2 GiB is a deliberate Release 1
 limit. Whether it becomes configurable in a later release is not committed.

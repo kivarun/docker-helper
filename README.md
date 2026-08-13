@@ -709,8 +709,9 @@ Note: `docker-helper config show` (without a field) displays
   socket is accessible to any local user, but security is enforced
   through bearer authentication and authorization, not socket
   permissions alone.
-- **Container policy** — containers run with `--rm`, host UID/GID,
-  and `--security-opt label=disable`.
+- **Container policy** — containers run with `--rm`, `--security-opt label=disable`,
+  and `--user <uid>:<gid>` (principal UID:GID for principal-owned sessions,
+  daemon UID:GID for legacy/admin sessions).
 - **AppArmor** — an optional AppArmor profile is included in the release
   tarball and can be installed during `./install.sh` to further restrict
   daemon access.
