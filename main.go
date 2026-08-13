@@ -326,6 +326,9 @@ func runServe(stdout, stderr io.Writer) error {
 		mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
 		mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
 		mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
+		mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
+		mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
+		mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
 
 		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 

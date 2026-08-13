@@ -23,6 +23,9 @@ type auditRecord struct {
 	PrincipalName     string       `json:"principal_name,omitempty"`
 	PrincipalEnabled  *bool        `json:"principal_enabled,omitempty"`
 	PrincipalPath     string       `json:"principal_path,omitempty"`
+	CredentialID      string       `json:"credential_id,omitempty"`
+	CredentialName    string       `json:"credential_name,omitempty"`
+	CredentialChanged *bool        `json:"credential_changed,omitempty"`
 	Result            string       `json:"result,omitempty"`
 	ExitCode          *int         `json:"exit_code,omitempty"`
 	Duration          string       `json:"duration,omitempty"`

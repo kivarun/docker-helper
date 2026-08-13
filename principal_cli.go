@@ -20,6 +20,16 @@ var principalCommand = &Command{
 	},
 }
 
+var credentialCommand = &Command{
+	Name:    "credential",
+	Summary: "Manage principal credentials",
+	Subcommands: []*Command{
+		credentialCreateCommand,
+		credentialListCommand,
+		credentialRevokeCommand,
+	},
+}
+
 var principalCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new principal",
@@ -415,6 +425,213 @@ var principalAllowedRootRemoveCommand = &Command{
 				fmt.Fprintf(stdout, "removed %q from %s\n", path, username)
 				if result.Message == "unchanged" {
 					fmt.Fprintln(stdout, "(was not present)")
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var credentialCreateCommand = &Command{
+	Name:       "create",
+	Summary:    "Create a new credential for a principal",
+	Usage:      "docker-helper credential create USER --name NAME",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		name := fs.String("name", "", "Credential name")
+
+		return Invocation{
+			Validate: func() error {
+				if *name == "" {
+					return fmt.Errorf("--name is required")
+				}
+				return nil
+			},
+			Run: func(stdout, stderr io.Writer) int {
+				args := fs.Args()
+				username := args[0]
+
+				socketPath, adminTokenPath, err := adminAPIPaths()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				tokenSource, err := adminAPITokenSource(adminTokenPath)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				client := newUnixAPIClient(socketPath, tokenSource, nil)
+
+				body, err := json.Marshal(createCredentialRequest{Name: *name})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: cannot encode request: %v\n", err)
+					return 1
+				}
+
+				resp, err := client.doAuthenticatedRequest("POST", "/principals/"+username+"/credentials", bytes.NewReader(body))
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				defer resp.Body.Close()
+
+				respBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
+					return 1
+				}
+
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					apiErr := parseApiError(resp.StatusCode, respBody)
+					fmt.Fprintf(stderr, "error: %v\n", apiErr)
+					return 1
+				}
+
+				var result createCredentialResponse
+				if err := json.Unmarshal(respBody, &result); err != nil {
+					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
+					return 1
+				}
+
+				fmt.Fprintf(stdout, "Credential created for %s\n", username)
+				fmt.Fprintf(stdout, "  ID:    %s\n", result.Credential.ID)
+				fmt.Fprintf(stdout, "  Name:  %s\n", result.Credential.Name)
+				fmt.Fprintf(stdout, "  Token: %s\n", result.Token)
+				fmt.Fprintln(stdout, "")
+				fmt.Fprintln(stdout, "IMPORTANT: Save the token now. It will not be shown again.")
+				return 0
+			},
+		}
+	},
+}
+
+var credentialListCommand = &Command{
+	Name:       "list",
+	Summary:    "List credentials for a principal",
+	Usage:      "docker-helper credential list USER",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				args := fs.Args()
+				username := args[0]
+
+				socketPath, adminTokenPath, err := adminAPIPaths()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				tokenSource, err := adminAPITokenSource(adminTokenPath)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				client := newUnixAPIClient(socketPath, tokenSource, nil)
+
+				resp, err := client.doAuthenticatedRequest("GET", "/principals/"+username+"/credentials", nil)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				defer resp.Body.Close()
+
+				respBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
+					return 1
+				}
+
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					apiErr := parseApiError(resp.StatusCode, respBody)
+					fmt.Fprintf(stderr, "error: %v\n", apiErr)
+					return 1
+				}
+
+				var result listCredentialsResponse
+				if err := json.Unmarshal(respBody, &result); err != nil {
+					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
+					return 1
+				}
+
+				if len(result.Credentials) == 0 {
+					fmt.Fprintln(stdout, "No credentials for", username)
+					return 0
+				}
+
+				for _, c := range result.Credentials {
+					revoked := "no"
+					if c.RevokedAt != nil {
+						revoked = *c.RevokedAt
+					}
+					fmt.Fprintf(stdout, "  %-16s %-12s created=%s revoked=%s\n", c.ID, c.Name, c.CreatedAt, revoked)
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var credentialRevokeCommand = &Command{
+	Name:       "revoke",
+	Summary:    "Revoke a credential",
+	Usage:      "docker-helper credential revoke CREDENTIAL_ID",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				args := fs.Args()
+				id := args[0]
+
+				socketPath, adminTokenPath, err := adminAPIPaths()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				tokenSource, err := adminAPITokenSource(adminTokenPath)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				client := newUnixAPIClient(socketPath, tokenSource, nil)
+
+				resp, err := client.doAuthenticatedRequest("POST", "/credentials/"+id+"/revoke", nil)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				defer resp.Body.Close()
+
+				respBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
+					return 1
+				}
+
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					apiErr := parseApiError(resp.StatusCode, respBody)
+					fmt.Fprintf(stderr, "error: %v\n", apiErr)
+					return 1
+				}
+
+				var result revokeCredentialResponse
+				if err := json.Unmarshal(respBody, &result); err != nil {
+					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
+					return 1
+				}
+
+				fmt.Fprintf(stdout, "revoked %s\n", id)
+				if result.Message == "unchanged" {
+					fmt.Fprintln(stdout, "(was already revoked)")
 				}
 				return 0
 			},

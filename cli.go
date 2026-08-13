@@ -517,6 +517,7 @@ func init() {
 		sessionCommand,
 		configCommand,
 		principalCommand,
+		credentialCommand,
 		versionCommand,
 		helpCommand,
 		pullCommand,

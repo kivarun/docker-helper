@@ -56,6 +56,17 @@ func initializeDatabase(db *sql.DB) error {
 			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
 			UNIQUE(principal_id, root_path)
 		);
+
+		CREATE TABLE IF NOT EXISTS credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE(principal_id, name)
+		);
 	`)
 	if err != nil {
 		return fmt.Errorf("cannot create tables: %w", err)
