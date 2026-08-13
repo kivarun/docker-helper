@@ -546,7 +546,6 @@ func TestParallelStartupRace(t *testing.T) {
 	go func() {
 		defer close(holderDone)
 		holderResult <- runWithLock(lockPath, func() error {
-			close(holderStarted)
 			// Create a listener so the socket exists.
 			listener, err := net.Listen("unix", socketPath)
 			if err != nil {
@@ -554,6 +553,8 @@ func TestParallelStartupRace(t *testing.T) {
 			}
 			defer listener.Close()
 			defer os.Remove(socketPath)
+			// Signal only after lock acquired + listener created.
+			close(holderStarted)
 			<-holderProceed
 			return nil
 		})
@@ -1120,5 +1121,260 @@ func TestServerErrorLogGoesToOperational(t *testing.T) {
 		if m["level"] != "ERROR" {
 			t.Errorf("expected level=ERROR, got %v", m["level"])
 		}
+	}
+}
+
+// --- serveWithShutdownMulti deadlock regression tests ---
+
+// User mode / single listener: unexpected Serve error -> function completes drain, no hang.
+func TestServeWithShutdownMultiUserModeServeError(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	defer signalCancel()
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	done := make(chan error, 1)
+	go func() {
+		_, shutdownCancel, drainDone, serveErr := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
+		if shutdownCancel != nil {
+			<-drainDone
+			shutdownCancel()
+		}
+		done <- serveErr
+	}()
+
+	listener.Close()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error from serveWithShutdownMulti")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveWithShutdownMulti did not return (possible deadlock)")
+	}
+}
+
+// System mode: Unix Serve error -> TCP also closed, drain completes.
+func TestServeWithShutdownMultiUnixServeError(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	defer signalCancel()
+
+	unixListener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, shutdownCancel, drainDone, serveErr := serveWithShutdownMulti(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
+		if shutdownCancel != nil {
+			<-drainDone
+			shutdownCancel()
+		}
+		done <- serveErr
+	}()
+
+	unixListener.Close()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error from serveWithShutdownMulti")
+		}
+		if _, dialErr := net.Dial("tcp", tcpListener.Addr().String()); dialErr == nil {
+			t.Error("TCP listener should be closed after Unix serve error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveWithShutdownMulti did not return (possible deadlock)")
+	}
+}
+
+// System mode: TCP Serve error -> Unix also closed, drain completes.
+func TestServeWithShutdownMultiTCPServeError(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	mux := http.NewServeMux()
+	server := &http.Server{Handler: mux}
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	defer signalCancel()
+
+	unixListener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer os.Remove(socketPath)
+
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, shutdownCancel, drainDone, serveErr := serveWithShutdownMulti(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
+		if shutdownCancel != nil {
+			<-drainDone
+			shutdownCancel()
+		}
+		done <- serveErr
+	}()
+
+	tcpListener.Close()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error from serveWithShutdownMulti")
+		}
+		if _, dialErr := net.Dial("unix", socketPath); dialErr == nil {
+			t.Error("Unix listener should be closed after TCP serve error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveWithShutdownMulti did not return (possible deadlock)")
+	}
+}
+
+// --- safe Unix socket preparation tests (factory) ---
+
+// Regular file at socket path -> error, file not deleted.
+func TestCreateUnixListenerRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	const stub = "stub"
+	if err := os.WriteFile(socketPath, []byte(stub), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := ListenerFactory.createUnixListener(socketPath, ModeUser)
+	if err == nil {
+		t.Fatal("expected error when socket path is a regular file")
+	}
+
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatal("regular file should not be deleted")
+	}
+	if info.Mode()&os.ModeType != 0 {
+		t.Error("regular file should not be modified")
+	}
+	data, err := os.ReadFile(socketPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != stub {
+		t.Errorf("file content = %q, want %q", string(data), stub)
+	}
+}
+
+// Live socket at path -> error, socket not deleted.
+func TestCreateUnixListenerLiveSocket(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer listener.Close()
+
+	_, err = ListenerFactory.createUnixListener(socketPath, ModeUser)
+	if err == nil {
+		t.Fatal("expected error when socket has a live listener")
+	}
+
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Error("live socket should not be deleted")
+	}
+}
+
+// Stale socket -> replaced.
+func TestCreateUnixListenerStaleSocket(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("Socket: %v", err)
+	}
+	sa := &syscall.SockaddrUnix{Name: socketPath}
+	if err := syscall.Bind(fd, sa); err != nil {
+		syscall.Close(fd)
+		t.Fatalf("Bind: %v", err)
+	}
+	syscall.Close(fd)
+
+	listener, err := ListenerFactory.createUnixListener(socketPath, ModeUser)
+	if err != nil {
+		t.Fatalf("createUnixListener: %v", err)
+	}
+	defer listener.Close()
+
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		t.Fatal("new socket should exist")
+	}
+}
+
+// User mode -> 0600 permissions.
+func TestCreateUnixListenerPermissionsUser(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	listener, err := ListenerFactory.createUnixListener(socketPath, ModeUser)
+	if err != nil {
+		t.Fatalf("createUnixListener: %v", err)
+	}
+	defer listener.Close()
+
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	perm := info.Mode().Perm()
+	if perm != 0600 {
+		t.Errorf("permissions = %o, want 0600", perm)
+	}
+}
+
+// System mode -> 0666 permissions.
+func TestCreateUnixListenerPermissionsSystem(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	listener, err := ListenerFactory.createUnixListener(socketPath, ModeSystem)
+	if err != nil {
+		t.Fatalf("createUnixListener: %v", err)
+	}
+	defer listener.Close()
+
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	perm := info.Mode().Perm()
+	if perm != 0666 {
+		t.Errorf("permissions = %o, want 0666", perm)
 	}
 }

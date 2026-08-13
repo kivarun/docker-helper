@@ -23,34 +23,70 @@ type listenerFactory interface {
 
 type defaultListenerFactory struct{}
 
+// safePrepareUnixListener creates a Unix listener with safe preparation.
+// It checks for existing files, live sockets, and stale sockets before creating.
+// perm is the file mode to set on the socket (e.g., 0600 for user mode, 0666 for system mode).
+// Returns the listener, a flag indicating whether a new socket was created, and an error if any.
+func safePrepareUnixListener(socketPath string, perm os.FileMode) (net.Listener, bool, error) {
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return createUnixListenerWithPerm(socketPath, perm)
+		}
+		return nil, false, fmt.Errorf("cannot stat socket %s: %w", socketPath, err)
+	}
+
+	if info.Mode()&os.ModeSocket == 0 {
+		if info.IsDir() {
+			return nil, false, fmt.Errorf("socket path %s is a directory", socketPath)
+		}
+		return nil, false, fmt.Errorf("socket path %s exists and is not a socket", socketPath)
+	}
+
+	// It's a socket — check if it's live or stale.
+	live, err := checkSocket(socketPath)
+	if err != nil {
+		// Path may have disappeared during check — re-stat.
+		if _, statErr := os.Stat(socketPath); os.IsNotExist(statErr) {
+			return createUnixListenerWithPerm(socketPath, perm)
+		}
+		return nil, false, fmt.Errorf("cannot check socket %s: %w", socketPath, err)
+	}
+	if live {
+		return nil, false, fmt.Errorf("another docker-helper is already listening on %s", socketPath)
+	}
+
+	// Stale socket — remove and create new listener.
+	if err := os.Remove(socketPath); err != nil {
+		if os.IsNotExist(err) {
+			return createUnixListenerWithPerm(socketPath, perm)
+		}
+		return nil, false, fmt.Errorf("cannot remove stale socket %s: %w", socketPath, err)
+	}
+
+	return createUnixListenerWithPerm(socketPath, perm)
+}
+
+func createUnixListenerWithPerm(socketPath string, perm os.FileMode) (net.Listener, bool, error) {
+	l, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, false, fmt.Errorf("cannot listen on %s: %w", socketPath, err)
+	}
+	if err := os.Chmod(socketPath, perm); err != nil {
+		l.Close()
+		os.Remove(socketPath)
+		return nil, false, fmt.Errorf("cannot set socket permissions: %w", err)
+	}
+	return l, true, nil
+}
+
 func (f *defaultListenerFactory) createUnixListener(socketPath string, mode DeploymentMode) (net.Listener, error) {
-	// Remove stale socket if present.
-	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("cannot remove stale socket %s: %w", socketPath, err)
-	}
-
-	addr, err := net.ResolveUnixAddr("unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve Unix address %s: %w", socketPath, err)
-	}
-
-	listener, err := net.ListenUnix("unix", addr)
-	if err != nil {
-		return nil, fmt.Errorf("cannot listen on Unix socket %s: %w", socketPath, err)
-	}
-
-	// Set socket permissions based on deployment mode.
 	perm := os.FileMode(0600)
 	if mode == ModeSystem {
 		perm = 0666
 	}
-	if err := os.Chmod(socketPath, perm); err != nil {
-		listener.Close()
-		os.Remove(socketPath)
-		return nil, fmt.Errorf("cannot set socket permissions: %w", err)
-	}
-
-	return listener, nil
+	l, _, err := safePrepareUnixListener(socketPath, perm)
+	return l, err
 }
 
 func (f *defaultListenerFactory) createTCPListener(address string) (net.Listener, error) {

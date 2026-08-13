@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -61,63 +62,7 @@ func acquireLock(path string) (*os.File, error) {
 // by this call (true means the caller should clean it up on shutdown),
 // and an error if any.
 func prepareListener(socketPath string) (net.Listener, bool, error) {
-	info, err := os.Stat(socketPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			l, err := createListener(socketPath)
-			return l, err == nil, err
-		}
-		return nil, false, fmt.Errorf("cannot stat socket %s: %w", socketPath, err)
-	}
-
-	if info.Mode()&os.ModeSocket == 0 {
-		if info.IsDir() {
-			return nil, false, fmt.Errorf("socket path %s is a directory", socketPath)
-		}
-		return nil, false, fmt.Errorf("socket path %s exists and is not a socket", socketPath)
-	}
-
-	// It's a socket — check if it's live or stale.
-	live, err := checkSocket(socketPath)
-	if err != nil {
-		// Path may have disappeared during check — re-stat.
-		if _, statErr := os.Stat(socketPath); os.IsNotExist(statErr) {
-			l, err := createListener(socketPath)
-			return l, err == nil, err
-		}
-		return nil, false, fmt.Errorf("cannot check socket %s: %w", socketPath, err)
-	}
-	if live {
-		return nil, false, fmt.Errorf("another docker-helper is already listening on %s", socketPath)
-	}
-
-	// Stale socket — remove and create new listener.
-	if err := os.Remove(socketPath); err != nil {
-		if os.IsNotExist(err) {
-			// Disappeared during remove — try creating.
-			l, err := createListener(socketPath)
-			return l, err == nil, err
-		}
-		return nil, false, fmt.Errorf("cannot remove stale socket %s: %w", socketPath, err)
-	}
-
-	l, err := createListener(socketPath)
-	return l, err == nil, err
-}
-
-func createListener(socketPath string) (net.Listener, error) {
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot listen on %s: %w", socketPath, err)
-	}
-
-	if err := os.Chmod(socketPath, 0600); err != nil {
-		listener.Close()
-		os.Remove(socketPath)
-		return nil, fmt.Errorf("cannot set socket permissions: %w", err)
-	}
-
-	return listener, nil
+	return safePrepareUnixListener(socketPath, 0600)
 }
 
 // dialUnixFunc is the dial function used to probe a Unix socket.
@@ -247,17 +192,31 @@ func serveWithShutdownMulti(
 	timeout time.Duration,
 	onShutdown func(),
 ) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error, err error) {
-	serveDone := make(chan error, 1)
+	var wg sync.WaitGroup
 
+	firstErr := make(chan error, 1)
+
+	wg.Add(1)
 	go func() {
-		serveDone <- server.Serve(unixListener)
+		defer wg.Done()
+		if serveErr := server.Serve(unixListener); serveErr != nil {
+			select {
+			case firstErr <- serveErr:
+			default:
+			}
+		}
 	}()
 
-	var tcpDone chan error
 	if tcpListener != nil {
-		tcpDone = make(chan error, 1)
+		wg.Add(1)
 		go func() {
-			tcpDone <- server.Serve(tcpListener)
+			defer wg.Done()
+			if serveErr := server.Serve(tcpListener); serveErr != nil {
+				select {
+				case firstErr <- serveErr:
+				default:
+				}
+			}
 		}()
 	}
 
@@ -278,11 +237,8 @@ func serveWithShutdownMulti(
 			} else if shutdownErr != nil {
 				drainErr = shutdownErr
 			}
-			// Drain serve goroutines.
-			<-serveDone
-			if tcpDone != nil {
-				<-tcpDone
-			}
+			// Wait for all Serve goroutines to finish.
+			wg.Wait()
 			drainDoneCh <- drainErr
 		}()
 	}
@@ -294,15 +250,10 @@ func serveWithShutdownMulti(
 			startShutdown(nil)
 			drainDone = drainDoneCh
 			return
-		case serveErr := <-serveDone:
+		case serveErr := <-firstErr:
 			startShutdown(serveErr)
 			drainDone = drainDoneCh
 			err = serveErr
-			return
-		case tcpErr := <-tcpDone:
-			startShutdown(tcpErr)
-			drainDone = drainDoneCh
-			err = tcpErr
 			return
 		}
 	} else {
@@ -312,7 +263,7 @@ func serveWithShutdownMulti(
 			startShutdown(nil)
 			drainDone = drainDoneCh
 			return
-		case serveErr := <-serveDone:
+		case serveErr := <-firstErr:
 			startShutdown(serveErr)
 			drainDone = drainDoneCh
 			err = serveErr
