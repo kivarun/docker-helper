@@ -468,7 +468,7 @@ func TestSessionTableWithHistoricalRevokedAtColumn(t *testing.T) {
 	}
 
 	// Verify the current scanSession works against this table.
-	row := db.QueryRow("SELECT id, workspace, created_at, expires_at FROM sessions WHERE id = ?", "dhs_old")
+	row := db.QueryRow("SELECT id, workspace, created_at, expires_at, NULL FROM sessions WHERE id = ?", "dhs_old")
 	s, err := scanSession(row)
 	if err != nil {
 		t.Fatalf("scanSession() error: %v", err)

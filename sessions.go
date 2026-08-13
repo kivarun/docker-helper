@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,10 +14,11 @@ type sessionRequest struct {
 }
 
 type sessionJSON struct {
-	ID        string `json:"id"`
-	Workspace string `json:"workspace"`
-	CreatedAt string `json:"created_at"`
-	ExpiresAt string `json:"expires_at"`
+	ID            string  `json:"id"`
+	Workspace     string  `json:"workspace"`
+	CreatedAt     string  `json:"created_at"`
+	ExpiresAt     string  `json:"expires_at"`
+	PrincipalName *string `json:"principal,omitempty"`
 }
 
 type createSessionResponse struct {
@@ -30,18 +33,102 @@ type listSessionsResponse struct {
 }
 
 func sessionToJSON(s Session) sessionJSON {
-	return sessionJSON{
-		ID:        s.ID,
-		Workspace: s.Workspace,
-		CreatedAt: s.CreatedAt.Format(time.RFC3339),
-		ExpiresAt: s.ExpiresAt.Format(time.RFC3339),
+	principalName := (*string)(nil)
+	if s.PrincipalName != "" {
+		principalName = &s.PrincipalName
 	}
+	return sessionJSON{
+		ID:            s.ID,
+		Workspace:     s.Workspace,
+		CreatedAt:     s.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:     s.ExpiresAt.Format(time.RFC3339),
+		PrincipalName: principalName,
+	}
+}
+
+// sessionAuthContext represents the authenticated context for session operations.
+type sessionAuthContext struct {
+	isAdmin    bool
+	authResult *CredentialAuthResult
+}
+
+// authenticateSessionRequest tries admin token first, then credential token.
+func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request) (*sessionAuthContext, error) {
+	ctx := r.Context()
+
+	// Parse the Authorization header.
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		writeAuthFailure(ctx, r, "admin.parse_failed")
+		writeUnauthorizedAdmin(ctx, w)
+		return nil, nil
+	}
+
+	token, ok := parseBearerToken(r)
+	if !ok {
+		writeAuthFailure(ctx, r, "admin.parse_failed")
+		writeUnauthorizedAdmin(ctx, w)
+		return nil, nil
+	}
+
+	if token == "" {
+		writeAuthFailure(ctx, r, "admin.parse_failed")
+		writeUnauthorizedAdmin(ctx, w)
+		return nil, nil
+	}
+
+	// Check admin token.
+	tokenHash := sha256.Sum256([]byte(token))
+	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) == 1 {
+		return &sessionAuthContext{isAdmin: true}, nil
+	}
+
+	// Not admin — log admin failure for audit compatibility.
+	writeAuthFailure(ctx, r, "admin.wrong_token")
+
+	// Try credential.
+	authResult, err := authenticateCredential(a.DB, token)
+	if err == nil {
+		return &sessionAuthContext{authResult: authResult}, nil
+	}
+
+	// Credential auth failed. Check if it's a database error.
+	if !errors.Is(err, ErrCredentialNotFound) &&
+		!errors.Is(err, ErrCredentialRevoked) &&
+		!errors.Is(err, ErrCredentialDisabled) {
+		// Database error.
+		writeAuditWithRequestID(ctx, auditRecord{
+			Event:  "auth.session",
+			Result: "database_error",
+		})
+		opLog(ctx).Error("session auth database error",
+			slog.String("operation", "session_auth"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return nil, err
+	}
+
+	// Invalid/revoked/disabled credential.
+	resultCode := "credential.not_found"
+	if errors.Is(err, ErrCredentialRevoked) {
+		resultCode = "credential.revoked"
+	} else if errors.Is(err, ErrCredentialDisabled) {
+		resultCode = "credential.disabled"
+	}
+	writeAuditWithRequestID(ctx, auditRecord{
+		Event:  "auth.session",
+		Result: resultCode,
+	})
+	writeUnauthorizedSession(ctx, w)
+	return nil, err
 }
 
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
-	if !a.requireAdmin(w, r) {
+	authCtx, err := a.authenticateSessionRequest(w, r)
+	if err != nil || authCtx == nil {
 		return
 	}
 
@@ -60,17 +147,34 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := a.createSession(req.Workspace)
+	var result *CreatedSession
+
+	if authCtx.isAdmin {
+		result, err = a.createSession(req.Workspace)
+	} else {
+		auth := authCtx.authResult
+		result, err = a.createSessionWithPolicy(&sessionCreatePolicy{
+			Workspace:    req.Workspace,
+			AllowedRoots: auth.AllowedRoots,
+			PrincipalID:  &auth.PrincipalID,
+		})
+	}
+
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
 		resultCode := classifyCreateSessionError(err)
-		writeAuditWithRequestID(ctx, auditRecord{
+		auditRec := auditRecord{
 			Event:     "session.create",
 			Workspace: req.Workspace,
 			Result:    resultCode,
 			Duration:  duration,
-		})
+		}
+		if !authCtx.isAdmin && authCtx.authResult != nil {
+			auditRec.PrincipalName = authCtx.authResult.PrincipalName
+			auditRec.CredentialID = authCtx.authResult.CredentialID
+		}
+		writeAuditWithRequestID(ctx, auditRec)
 
 		if errors.Is(err, ErrInvalidWorkspace) {
 			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", "invalid workspace")
@@ -84,13 +188,18 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	auditRec := auditRecord{
 		Event:     "session.create",
 		SessionID: result.Session.ID,
 		Workspace: result.Session.Workspace,
 		Result:    "success",
 		Duration:  duration,
-	})
+	}
+	if !authCtx.isAdmin && authCtx.authResult != nil {
+		auditRec.PrincipalName = authCtx.authResult.PrincipalName
+		auditRec.CredentialID = authCtx.authResult.CredentialID
+	}
+	writeAuditWithRequestID(ctx, auditRec)
 
 	writeJSONRaw(ctx, w, http.StatusCreated, createSessionResponse{
 		OK:      true,
@@ -100,13 +209,22 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	if !a.requireAdmin(w, r) {
+	authCtx, err := a.authenticateSessionRequest(w, r)
+	if err != nil || authCtx == nil {
 		return
 	}
 
 	ctx := r.Context()
 
-	sessions, err := a.listSessions()
+	var sessions []Session
+
+	if authCtx.isAdmin {
+		sessions, err = a.listSessions()
+	} else {
+		auth := authCtx.authResult
+		sessions, err = a.listSessionsForPrincipal(auth.PrincipalID)
+	}
+
 	if err != nil {
 		opLog(ctx).Error("list sessions error",
 			slog.String("operation", "session_list"),
@@ -131,7 +249,8 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
-	if !a.requireAdmin(w, r) {
+	authCtx, err := a.authenticateSessionRequest(w, r)
+	if err != nil || authCtx == nil {
 		return
 	}
 
@@ -149,7 +268,15 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := a.deleteSession(id)
+	var session *Session
+
+	if authCtx.isAdmin {
+		session, err = a.deleteSession(id)
+	} else {
+		auth := authCtx.authResult
+		session, err = a.deleteSessionForPrincipal(id, auth.PrincipalID)
+	}
+
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -177,6 +304,10 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		if workspace != "" {
 			auditRec.Workspace = workspace
 		}
+		if !authCtx.isAdmin && authCtx.authResult != nil {
+			auditRec.PrincipalName = authCtx.authResult.PrincipalName
+			auditRec.CredentialID = authCtx.authResult.CredentialID
+		}
 		writeAuditWithRequestID(ctx, auditRec)
 
 		if errors.Is(err, ErrSessionNotFound) {
@@ -191,18 +322,25 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	auditRec := auditRecord{
 		Event:     "session.delete",
-		SessionID: session.ID,
-		Workspace: session.Workspace,
+		SessionID: id,
 		Result:    "success",
 		Duration:  duration,
-	})
+	}
+	if session != nil {
+		auditRec.Workspace = session.Workspace
+	}
+	if !authCtx.isAdmin && authCtx.authResult != nil {
+		auditRec.PrincipalName = authCtx.authResult.PrincipalName
+		auditRec.CredentialID = authCtx.authResult.CredentialID
+	}
+	writeAuditWithRequestID(ctx, auditRec)
 
 	// Clean up session runtime directory (Docker config, etc.) best-effort.
 	// Cleanup failure must not fail the already-deleted session.
 	cfg := a.getConfig()
-	if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, session.ID); err != nil {
+	if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, id); err != nil {
 		opLog(ctx).Warn("cannot remove session runtime directory",
 			slog.String("operation", "session_delete"),
 			slog.String("error", err.Error()),

@@ -431,6 +431,14 @@ func isErrInvalidCredentialName(err error) bool {
 	return errors.Is(err, ErrInvalidCredentialName)
 }
 
+func isErrCredentialRevoked(err error) bool {
+	return errors.Is(err, ErrCredentialRevoked)
+}
+
+func isErrCredentialDisabled(err error) bool {
+	return errors.Is(err, ErrCredentialDisabled)
+}
+
 type createCredentialRequest struct {
 	Name string `json:"name"`
 }

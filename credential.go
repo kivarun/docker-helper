@@ -210,3 +210,84 @@ func revokeCredential(db *sql.DB, id string) (bool, error) {
 
 	return true, nil
 }
+
+// ErrCredentialDisabled is returned when the credential's principal is disabled.
+var ErrCredentialDisabled = errors.New("credential disabled")
+
+// ErrCredentialRevoked is returned when the credential has been revoked.
+var ErrCredentialRevoked = errors.New("credential revoked")
+
+// CredentialAuthResult contains the information needed to authorize a principal request.
+type CredentialAuthResult struct {
+	PrincipalID   int64
+	PrincipalName string
+	CredentialID  string
+	AllowedRoots  []string
+}
+
+// authenticateCredential looks up a bearer token as a launcher credential.
+// Returns the authenticated principal and allowed roots on success.
+// Returns ErrCredentialNotFound for unknown token.
+// Returns ErrCredentialRevoked for revoked credentials.
+// Returns ErrCredentialDisabled for disabled principals.
+func authenticateCredential(db *sql.DB, token string) (*CredentialAuthResult, error) {
+	tokenHash := hashCredentialToken(token)
+
+	var credID, principalName string
+	var principalID int64
+	var revokedAt sql.NullInt64
+	var enabled int
+	row := db.QueryRow(
+		`SELECT c.id, p.id, p.username, c.revoked_at, p.enabled
+		 FROM credentials c
+		 JOIN principals p ON p.id = c.principal_id
+		 WHERE c.token_hash = ?`,
+		tokenHash,
+	)
+	err := row.Scan(&credID, &principalID, &principalName, &revokedAt, &enabled)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("credential not found: %w", ErrCredentialNotFound)
+		}
+		return nil, fmt.Errorf("cannot authenticate credential: %w", err)
+	}
+
+	if revokedAt.Valid {
+		return nil, fmt.Errorf("credential revoked: %w", ErrCredentialRevoked)
+	}
+
+	if enabled == 0 {
+		return nil, fmt.Errorf("principal disabled: %w", ErrCredentialDisabled)
+	}
+
+	// Fetch allowed roots for the principal.
+	rows, err := db.Query(
+		`SELECT root_path FROM principal_allowed_roots
+		 WHERE principal_id = ?
+		 ORDER BY root_path`,
+		principalID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot query allowed roots: %w", err)
+	}
+	defer rows.Close()
+
+	roots := []string{}
+	for rows.Next() {
+		var rootPath string
+		if err := rows.Scan(&rootPath); err != nil {
+			return nil, fmt.Errorf("cannot scan allowed root: %w", err)
+		}
+		roots = append(roots, rootPath)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate allowed roots: %w", err)
+	}
+
+	return &CredentialAuthResult{
+		PrincipalID:   principalID,
+		PrincipalName: principalName,
+		CredentialID:  credID,
+		AllowedRoots:  roots,
+	}, nil
+}

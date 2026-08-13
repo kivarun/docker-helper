@@ -36,10 +36,12 @@ type sqlScanner interface {
 }
 
 type Session struct {
-	ID        string
-	Workspace string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID            string
+	Workspace     string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	PrincipalID   *int64
+	PrincipalName string
 }
 
 type CreatedSession struct {
@@ -49,28 +51,65 @@ type CreatedSession struct {
 
 // scanSession scans the canonical session column order and converts
 // Unix-integer timestamps to time.Time.  The caller must query exactly
-// the columns: id, workspace, created_at, expires_at.
+// the columns: id, workspace, created_at, expires_at, principal_id.
+// If principal_id is not present (R1 DB), it will be NULL.
 func scanSession(s sqlScanner) (Session, error) {
 	var sess Session
 	var createdAt int64
 	var expiresAt int64
+	var principalID sql.NullInt64
 
-	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt); err != nil {
+	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt, &principalID); err != nil {
 		return sess, err
 	}
 
 	sess.CreatedAt = time.Unix(createdAt, 0)
 	sess.ExpiresAt = time.Unix(expiresAt, 0)
+	if principalID.Valid {
+		sess.PrincipalID = &principalID.Int64
+	}
 
 	return sess, nil
 }
 
-func (a *App) createSession(workspace string) (*CreatedSession, error) {
-	if workspace == "" {
+// scanSessionWithPrincipal scans session columns joined with principal username.
+// Columns: id, workspace, created_at, expires_at, principal_id, principal_username.
+func scanSessionWithPrincipal(s sqlScanner) (Session, error) {
+	var sess Session
+	var createdAt int64
+	var expiresAt int64
+	var principalID sql.NullInt64
+	var principalName sql.NullString
+
+	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt, &principalID, &principalName); err != nil {
+		return sess, err
+	}
+
+	sess.CreatedAt = time.Unix(createdAt, 0)
+	sess.ExpiresAt = time.Unix(expiresAt, 0)
+	if principalID.Valid {
+		sess.PrincipalID = &principalID.Int64
+	}
+	if principalName.Valid {
+		sess.PrincipalName = principalName.String
+	}
+
+	return sess, nil
+}
+
+// sessionCreatePolicy contains the context needed to create a session.
+type sessionCreatePolicy struct {
+	Workspace    string
+	AllowedRoots []string
+	PrincipalID  *int64
+}
+
+func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, error) {
+	if p.Workspace == "" {
 		return nil, fmt.Errorf("workspace is required: %w", ErrInvalidWorkspace)
 	}
 
-	absWorkspace, err := filepath.Abs(workspace)
+	absWorkspace, err := filepath.Abs(p.Workspace)
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve workspace path: %w: %w", err, ErrInvalidWorkspace)
 	}
@@ -88,14 +127,20 @@ func (a *App) createSession(workspace string) (*CreatedSession, error) {
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
 	}
 
-	cfg := a.getConfig()
-	allowedRoot, err := filepath.EvalSymlinks(cfg.AllowedRoot)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
+	if len(p.AllowedRoots) == 0 {
+		return nil, fmt.Errorf("no allowed roots configured: %w", ErrInvalidWorkspace)
 	}
 
-	if !isInside(allowedRoot, absWorkspace) {
-		return nil, fmt.Errorf("workspace must be inside %s: %w", allowedRoot, ErrInvalidWorkspace)
+	// Check workspace is inside at least one allowed root.
+	inside := false
+	for _, root := range p.AllowedRoots {
+		if isInside(root, absWorkspace) {
+			inside = true
+			break
+		}
+	}
+	if !inside {
+		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
 	}
 
 	idBytes := make([]byte, 16)
@@ -114,16 +159,24 @@ func (a *App) createSession(workspace string) (*CreatedSession, error) {
 	tokenHashHex := hex.EncodeToString(tokenHash[:])
 
 	now := time.Now()
-	expiresAt := now.Add(cfg.SessionTTL)
+	expiresAt := now.Add(a.getConfig().SessionTTL)
+
+	var principalID interface{}
+	if p.PrincipalID != nil {
+		principalID = *p.PrincipalID
+	} else {
+		principalID = nil
+	}
 
 	_, err = a.DB.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		sessionID,
 		tokenHashHex,
 		absWorkspace,
 		now.Unix(),
 		expiresAt.Unix(),
+		principalID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
@@ -131,23 +184,41 @@ func (a *App) createSession(workspace string) (*CreatedSession, error) {
 
 	return &CreatedSession{
 		Session: Session{
-			ID:        sessionID,
-			Workspace: absWorkspace,
-			CreatedAt: now,
-			ExpiresAt: expiresAt,
+			ID:          sessionID,
+			Workspace:   absWorkspace,
+			CreatedAt:   now,
+			ExpiresAt:   expiresAt,
+			PrincipalID: p.PrincipalID,
 		},
 		Token: token,
 	}, nil
+}
+
+// createSession is the admin-only session creation using global allowed root.
+// Kept for backward compatibility.
+func (a *App) createSession(workspace string) (*CreatedSession, error) {
+	cfg := a.getConfig()
+	allowedRoot, err := filepath.EvalSymlinks(cfg.AllowedRoot)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
+	}
+
+	return a.createSessionWithPolicy(&sessionCreatePolicy{
+		Workspace:    workspace,
+		AllowedRoots: []string{allowedRoot},
+		PrincipalID:  nil,
+	})
 }
 
 func (a *App) listSessions() ([]Session, error) {
 	now := time.Now().Unix()
 
 	rows, err := a.DB.Query(
-		`SELECT id, workspace, created_at, expires_at
-		 FROM sessions
-		 WHERE expires_at > ?
-		 ORDER BY created_at ASC`,
+		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
+		 FROM sessions s
+		 LEFT JOIN principals p ON p.id = s.principal_id
+		 WHERE s.expires_at > ?
+		 ORDER BY s.created_at ASC`,
 		now,
 	)
 	if err != nil {
@@ -157,7 +228,40 @@ func (a *App) listSessions() ([]Session, error) {
 
 	var sessions []Session
 	for rows.Next() {
-		s, err := scanSession(rows)
+		s, err := scanSessionWithPrincipal(rows)
+		if err != nil {
+			return nil, fmt.Errorf("cannot scan session: %w", err)
+		}
+		sessions = append(sessions, s)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions: %w", err)
+	}
+
+	return sessions, nil
+}
+
+// listSessionsForPrincipal returns only sessions owned by the given principal.
+func (a *App) listSessionsForPrincipal(principalID int64) ([]Session, error) {
+	now := time.Now().Unix()
+
+	rows, err := a.DB.Query(
+		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
+		 FROM sessions s
+		 LEFT JOIN principals p ON p.id = s.principal_id
+		 WHERE s.expires_at > ? AND s.principal_id = ?
+		 ORDER BY s.created_at ASC`,
+		now, principalID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot list sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []Session
+	for rows.Next() {
+		s, err := scanSessionWithPrincipal(rows)
 		if err != nil {
 			return nil, fmt.Errorf("cannot scan session: %w", err)
 		}
@@ -173,12 +277,14 @@ func (a *App) listSessions() ([]Session, error) {
 
 func (a *App) deleteSession(id string) (*Session, error) {
 	row := a.DB.QueryRow(
-		`SELECT id, workspace, created_at, expires_at
-		 FROM sessions WHERE id = ?`,
+		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
+		 FROM sessions s
+		 LEFT JOIN principals p ON p.id = s.principal_id
+		 WHERE s.id = ?`,
 		id,
 	)
 
-	s, err := scanSession(row)
+	s, err := scanSessionWithPrincipal(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
@@ -206,6 +312,32 @@ func (a *App) deleteSession(id string) (*Session, error) {
 	return &s, nil
 }
 
+// deleteSessionForPrincipal atomically deletes a session only if it belongs to the given principal.
+// Returns ErrSessionNotFound if the session doesn't exist or doesn't belong to the principal.
+func (a *App) deleteSessionForPrincipal(id string, principalID int64) (*Session, error) {
+	// Atomic ownership check + delete.
+	result, err := a.DB.Exec(
+		`DELETE FROM sessions WHERE id = ? AND principal_id = ?`,
+		id, principalID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot delete session: %w: %w", err, ErrDatabase)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("cannot check deletion result: %w: %w", err, ErrDatabase)
+	}
+
+	if affected == 0 {
+		return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
+	}
+
+	// Fetch the deleted session info for audit (best-effort, already deleted).
+	// We don't need the full session data, just the workspace.
+	return nil, nil
+}
+
 func (a *App) findSessionByToken(token string) (*Session, error) {
 	tokenHash := sha256.Sum256([]byte(token))
 	tokenHashHex := hex.EncodeToString(tokenHash[:])
@@ -213,15 +345,16 @@ func (a *App) findSessionByToken(token string) (*Session, error) {
 	now := time.Now().Unix()
 
 	row := a.DB.QueryRow(
-		`SELECT id, workspace, created_at, expires_at
-		 FROM sessions
-		 WHERE token_hash = ? AND expires_at > ?
+		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
+		 FROM sessions s
+		 LEFT JOIN principals p ON p.id = s.principal_id
+		 WHERE s.token_hash = ? AND s.expires_at > ?
 		 LIMIT 1`,
 		tokenHashHex,
 		now,
 	)
 
-	s, err := scanSession(row)
+	s, err := scanSessionWithPrincipal(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrSessionNotFound

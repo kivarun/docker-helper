@@ -72,6 +72,20 @@ func initializeDatabase(db *sql.DB) error {
 		return fmt.Errorf("cannot create tables: %w", err)
 	}
 
+	// Additive migration: add principal_id to sessions if it doesn't exist.
+	// This allows upgrading from an R1 database that only has sessions without principal_id.
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='principal_id';`).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("cannot check sessions schema: %w", err)
+	}
+	if count == 0 {
+		_, err = db.Exec(`ALTER TABLE sessions ADD COLUMN principal_id INTEGER REFERENCES principals(id)`)
+		if err != nil {
+			return fmt.Errorf("cannot add principal_id to sessions: %w", err)
+		}
+	}
+
 	return nil
 }
 

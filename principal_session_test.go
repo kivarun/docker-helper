@@ -1,0 +1,1149 @@
+package main
+
+import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestCredentialAuthValid(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "authuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1030", "1030", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "authuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	cred, token, err := createCredential(app.DB, "authuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	auth, err := authenticateCredential(app.DB, token)
+	if err != nil {
+		t.Fatalf("authenticateCredential() error: %v", err)
+	}
+
+	if auth.PrincipalName != "authuser" {
+		t.Errorf("principal = %q, want %q", auth.PrincipalName, "authuser")
+	}
+	if auth.CredentialID != cred.ID {
+		t.Errorf("credential ID = %q, want %q", auth.CredentialID, cred.ID)
+	}
+	if len(auth.AllowedRoots) == 0 {
+		t.Error("expected at least one allowed root")
+	}
+}
+
+func TestCredentialAuthRandomToken(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	_, err := authenticateCredential(app.DB, "dhc_randomtoken1234567890abcdef1234567890abcdef1234567890abcdef")
+	if err == nil {
+		t.Fatal("expected error for random token")
+	}
+	if !isErrCredentialNotFound(err) {
+		t.Errorf("expected ErrCredentialNotFound, got: %v", err)
+	}
+}
+
+func TestCredentialAuthRevoked(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "revokeduser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1031", "1031", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "revokeduser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "revokeduser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	// Revoke the credential.
+	creds, err := listCredentials(app.DB, "revokeduser")
+	if err != nil {
+		t.Fatalf("listCredentials() error: %v", err)
+	}
+	if _, err := revokeCredential(app.DB, creds[0].ID); err != nil {
+		t.Fatalf("revokeCredential() error: %v", err)
+	}
+
+	_, err = authenticateCredential(app.DB, token)
+	if err == nil {
+		t.Fatal("expected error for revoked credential")
+	}
+	if !isErrCredentialRevoked(err) {
+		t.Errorf("expected ErrCredentialRevoked, got: %v", err)
+	}
+}
+
+func TestCredentialAuthDisabledPrincipal(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "disableduser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1032", "1032", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "disableduser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "disableduser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	// Disable the principal.
+	if _, err := updatePrincipalEnabled(app.DB, "disableduser", false); err != nil {
+		t.Fatalf("updatePrincipalEnabled() error: %v", err)
+	}
+
+	_, err = authenticateCredential(app.DB, token)
+	if err == nil {
+		t.Fatal("expected error for disabled principal")
+	}
+	if !isErrCredentialDisabled(err) {
+		t.Errorf("expected ErrCredentialDisabled, got: %v", err)
+	}
+}
+
+func TestCredentialAuthDBError(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	// Close the DB to simulate a DB error.
+	app.DB.Close()
+
+	_, err := authenticateCredential(app.DB, "dhc_testtoken")
+	if err == nil {
+		t.Fatal("expected error for DB failure")
+	}
+	// Should be a generic error, not credential-specific.
+	if isErrCredentialNotFound(err) || isErrCredentialRevoked(err) || isErrCredentialDisabled(err) {
+		t.Errorf("expected generic DB error, got: %v", err)
+	}
+}
+
+func TestAdminTokenStillWorks(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAuth(req)
+	w := httptest.NewRecorder()
+
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+}
+
+func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "sessuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1033", "1033", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "sessuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "sessuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	// Check that the session has principal_id set.
+	var principalID sql.NullInt64
+	err = app.DB.QueryRow(
+		`SELECT principal_id FROM sessions WHERE id = ?`,
+		resp.Session.ID,
+	).Scan(&principalID)
+	if err != nil {
+		t.Fatalf("cannot query principal_id: %v", err)
+	}
+	if !principalID.Valid {
+		t.Error("expected principal_id to be set")
+	}
+}
+
+func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	withAuth(req)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	// Check that the session has principal_id = NULL.
+	var principalID sql.NullInt64
+	err := app.DB.QueryRow(
+		`SELECT principal_id FROM sessions WHERE id = ?`,
+		resp.Session.ID,
+	).Scan(&principalID)
+	if err != nil {
+		t.Fatalf("cannot query principal_id: %v", err)
+	}
+	if principalID.Valid {
+		t.Error("expected principal_id to be NULL for admin session")
+	}
+}
+
+func TestPrincipalWorkspaceInsideFirstRoot(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "wsuser1")
+	subdir := filepath.Join(home, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1034", "1034", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "wsuser1"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "wsuser1", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": subdir}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+}
+
+func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "wsuser2")
+	secondRoot := filepath.Join(app.Config.AllowedRoot, "second")
+	subdir := filepath.Join(secondRoot, "subdir")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1035", "1035", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "wsuser2"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Add second allowed root.
+	if _, _, err := addAllowedRoot(app.DB, "wsuser2", secondRoot); err != nil {
+		t.Fatalf("addAllowedRoot() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "wsuser2", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": subdir}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+}
+
+func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "wsuser3")
+	outsideRoot := filepath.Join(app.Config.AllowedRoot, "outside")
+	subdir := filepath.Join(outsideRoot, "subdir")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1036", "1036", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "wsuser3"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Do NOT add outsideRoot as allowed root.
+	_, token, err := createCredential(app.DB, "wsuser3", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": subdir}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home1 := filepath.Join(app.Config.AllowedRoot, "home", "owner1")
+	home2 := filepath.Join(app.Config.AllowedRoot, "home", "owner2")
+	if err := os.MkdirAll(home1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home2, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		switch username {
+		case "owner1":
+			return "1037", "1037", home1, nil
+		case "owner2":
+			return "1038", "1038", home2, nil
+		}
+		return "", "", "", fmt.Errorf("not found")
+	}
+
+	if _, err := createPrincipal(app.DB, "owner1"); err != nil {
+		t.Fatalf("createPrincipal(owner1) error: %v", err)
+	}
+	if _, err := createPrincipal(app.DB, "owner2"); err != nil {
+		t.Fatalf("createPrincipal(owner2) error: %v", err)
+	}
+
+	_, token1, err := createCredential(app.DB, "owner1", "oc")
+	if err != nil {
+		t.Fatalf("createCredential(owner1) error: %v", err)
+	}
+	_, token2, err := createCredential(app.DB, "owner2", "oc")
+	if err != nil {
+		t.Fatalf("createCredential(owner2) error: %v", err)
+	}
+
+	// owner1 creates a session.
+	reqBody := map[string]string{"workspace": home1}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("GET /sessions", app.handleListSessions)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token1)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("owner1 create: expected %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	// owner2 creates a session.
+	reqBody2 := map[string]string{"workspace": home2}
+	body2, _ := json.Marshal(reqBody2)
+	req = httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body2))
+	req.Header.Set("Authorization", "Bearer "+token2)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("owner2 create: expected %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	// owner1 lists sessions — should see only own.
+	req = httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+token1)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("owner1 list: expected %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var resp listSessionsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if len(resp.Sessions) != 1 {
+		t.Errorf("owner1 should see 1 session, got %d", len(resp.Sessions))
+	}
+}
+
+func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "legacyuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1039", "1039", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "legacyuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Create a legacy session (principal_id = NULL) via admin.
+	adminResult, err := app.createSession(home)
+	if err != nil {
+		t.Fatalf("admin createSession() error: %v", err)
+	}
+	_ = adminResult
+
+	_, token, err := createCredential(app.DB, "legacyuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /sessions", app.handleListSessions)
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var resp listSessionsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if len(resp.Sessions) != 0 {
+		t.Errorf("principal should see 0 sessions, got %d", len(resp.Sessions))
+	}
+}
+
+func TestAdminSeesAllSessions(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "adminseesuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1040", "1040", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "adminseesuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Create admin session.
+	adminResult, err := app.createSession(home)
+	if err != nil {
+		t.Fatalf("admin createSession() error: %v", err)
+	}
+	_ = adminResult
+
+	// Create principal session.
+	_, token, err := createCredential(app.DB, "adminseesuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("GET /sessions", app.handleListSessions)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("principal create: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	// Admin lists sessions — should see all.
+	req = httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	withAuth(req)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin list: expected %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var resp listSessionsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if len(resp.Sessions) != 2 {
+		t.Errorf("admin should see 2 sessions, got %d", len(resp.Sessions))
+	}
+}
+
+func TestPrincipalDeletesOwnSession(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "delownuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1041", "1041", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "delownuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "delownuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	// Delete own session.
+	req = httptest.NewRequest(http.MethodDelete, "/sessions/"+resp.Session.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusNoContent, w.Code, w.Body.String())
+	}
+}
+
+func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home1 := filepath.Join(app.Config.AllowedRoot, "home", "delother1")
+	home2 := filepath.Join(app.Config.AllowedRoot, "home", "delother2")
+	if err := os.MkdirAll(home1, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(home2, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		switch username {
+		case "delother1":
+			return "1042", "1042", home1, nil
+		case "delother2":
+			return "1043", "1043", home2, nil
+		}
+		return "", "", "", fmt.Errorf("not found")
+	}
+
+	if _, err := createPrincipal(app.DB, "delother1"); err != nil {
+		t.Fatalf("createPrincipal(delother1) error: %v", err)
+	}
+	if _, err := createPrincipal(app.DB, "delother2"); err != nil {
+		t.Fatalf("createPrincipal(delother2) error: %v", err)
+	}
+
+	_, token1, err := createCredential(app.DB, "delother1", "oc")
+	if err != nil {
+		t.Fatalf("createCredential(delother1) error: %v", err)
+	}
+	_, token2, err := createCredential(app.DB, "delother2", "oc")
+	if err != nil {
+		t.Fatalf("createCredential(delother2) error: %v", err)
+	}
+
+	// delother2 creates a session.
+	reqBody := map[string]string{"workspace": home2}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token2)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("delother2 create: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	// delother1 tries to delete delother2's session.
+	req = httptest.NewRequest(http.MethodDelete, "/sessions/"+resp.Session.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token1)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+}
+
+func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "dellegacyuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1044", "1044", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "dellegacyuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Create a legacy session (principal_id = NULL) via admin.
+	adminResult, err := app.createSession(home)
+	if err != nil {
+		t.Fatalf("admin createSession() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "dellegacyuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
+	// Principal tries to delete legacy session.
+	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+adminResult.Session.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+}
+
+func TestAdminDeletesAnySession(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "admindeluser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1045", "1045", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "admindeluser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "admindeluser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
+
+	// Principal creates a session.
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("principal create: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	// Admin deletes principal's session.
+	req = httptest.NewRequest(http.MethodDelete, "/sessions/"+resp.Session.ID, nil)
+	withAuth(req)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusNoContent, w.Code, w.Body.String())
+	}
+}
+
+func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "surviveuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1046", "1046", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "surviveuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	cred, token, err := createCredential(app.DB, "surviveuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	sessionToken := resp.Token
+
+	// Revoke the credential.
+	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
+		t.Fatalf("revokeCredential() error: %v", err)
+	}
+
+	// Session token should still work.
+	session, err := app.findSessionByToken(sessionToken)
+	if err != nil {
+		t.Fatalf("findSessionByToken() error after credential revoke: %v", err)
+	}
+	if session.ID != resp.Session.ID {
+		t.Errorf("session ID mismatch: got %q, want %q", session.ID, resp.Session.ID)
+	}
+}
+
+func TestSessionTokenSurvivesPrincipalDisable(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "survivedisuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1047", "1047", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "survivedisuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "survivedisuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": home}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp createSessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	sessionToken := resp.Token
+
+	// Disable the principal.
+	if _, err := updatePrincipalEnabled(app.DB, "survivedisuser", false); err != nil {
+		t.Fatalf("updatePrincipalEnabled() error: %v", err)
+	}
+
+	// Session token should still work.
+	session, err := app.findSessionByToken(sessionToken)
+	if err != nil {
+		t.Fatalf("findSessionByToken() error after principal disable: %v", err)
+	}
+	if session.ID != resp.Session.ID {
+		t.Errorf("session ID mismatch: got %q, want %q", session.ID, resp.Session.ID)
+	}
+}
+
+func TestR1SessionsTableUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Create DB with only the old R1 sessions schema (no principal_id).
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL UNIQUE,
+			workspace TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create sessions table: %v", err)
+	}
+
+	_, err = db.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		"dhs_r1", "abc123", dir, 1000000000, 9999999999,
+	)
+	if err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+	db.Close()
+
+	// Reopen and run current initializeDatabase.
+	db, err = openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("reopenDatabase() error: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+
+	// Verify principal_id column exists.
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='principal_id';`).Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot check principal_id column: %v", err)
+	}
+	if count == 0 {
+		t.Fatal("principal_id column not found after upgrade")
+	}
+
+	// Verify old session row preserved with NULL principal_id.
+	var id, workspace string
+	var principalID sql.NullInt64
+	err = db.QueryRow(
+		`SELECT id, workspace, principal_id FROM sessions WHERE id = ?`,
+		"dhs_r1",
+	).Scan(&id, &workspace, &principalID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			t.Fatal("R1 session row was lost after upgrade")
+		}
+		t.Fatalf("query session: %v", err)
+	}
+	if principalID.Valid {
+		t.Error("R1 session should have NULL principal_id")
+	}
+}
+
+func TestSessionAuditNoTokens(t *testing.T) {
+	rec := auditRecord{
+		Event:         "session.create",
+		PrincipalName: "testuser",
+		CredentialID:  "dhcr_test",
+		SessionID:     "dhs_test",
+		Workspace:     "/workspace",
+		Result:        "success",
+	}
+
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("cannot marshal auditRecord: %v", err)
+	}
+
+	body := string(data)
+	// Verify no token fields in audit.
+	if strings.Contains(body, "token") && !strings.Contains(body, "session_token") {
+		// Check specifically for credential token or session token.
+		if strings.Contains(body, "dhc_") || strings.Contains(body, "dht_") {
+			t.Error("audit record should not contain plaintext tokens")
+		}
+	}
+}
+
+func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
+	app := newTestApp(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "concurrentuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1048", "1048", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "concurrentuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	cred, _, err := createCredential(app.DB, "concurrentuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	// Concurrent revokes.
+	const goroutines = 10
+	var changedCount int32
+	var mu sync.Mutex
+	var errs []error
+	done := make(chan bool, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			changed, err := revokeCredential(app.DB, cred.ID)
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+				done <- false
+				return
+			}
+			if changed {
+				// Simple atomic increment using mutex.
+				mu.Lock()
+				changedCount++
+				mu.Unlock()
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+
+	if len(errs) > 0 {
+		t.Errorf("unexpected errors: %v", errs)
+	}
+	if changedCount != 1 {
+		t.Errorf("expected exactly 1 changed, got %d", changedCount)
+	}
+}
+
+func TestDuplicateTokenHashRejected(t *testing.T) {
+	app := newTestApp(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "duphashuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1049", "1049", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "duphashuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Create a credential.
+	_, token, err := createCredential(app.DB, "duphashuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	// Try to manually insert a duplicate token_hash.
+	tokenHash := hashCredentialToken(token)
+	_, err = app.DB.Exec(
+		`INSERT INTO credentials (id, principal_id, name, token_hash, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhcr_duplicate", 1, "duplicate", tokenHash, time.Now().Unix(),
+	)
+	if err == nil {
+		t.Fatal("expected error for duplicate token_hash")
+	}
+	if !isSQLiteUniqueError(err) {
+		t.Errorf("expected UNIQUE constraint error, got: %v", err)
+	}
+}
