@@ -355,7 +355,7 @@ func runServe(stdout, stderr io.Writer) error {
 		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 
 		// Prepare listeners based on deployment mode.
-		unixListener, tcpListener, err := prepareListeners(cfg.Mode, cfg.SocketPath)
+		unixListener, tcpListener, err := prepareListeners(cfg.Mode, cfg.SocketPath, cfg.HTTPAddress)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
@@ -368,7 +368,7 @@ func runServe(stdout, stderr io.Writer) error {
 			if cfg.Mode == ModeSystem {
 				logger.Info("daemon listening",
 					slog.String("socket", cfg.SocketPath),
-					slog.String("http", DefaultHTTPAddress),
+					slog.String("http", cfg.HTTPAddress),
 				)
 			} else {
 				logger.Info("daemon listening",

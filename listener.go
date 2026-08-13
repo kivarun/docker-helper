@@ -106,15 +106,16 @@ func (f *defaultListenerFactory) createTCPListener(address string) (net.Listener
 // prepareListeners creates listeners for the given deployment mode.
 // In user mode, only Unix listener is created.
 // In system mode, both Unix and TCP listeners are created atomically.
+// httpAddress is the TCP listen address for system mode.
 // If any listener fails, all created listeners are cleaned up.
-func prepareListeners(mode DeploymentMode, socketPath string) (unixListener, tcpListener net.Listener, err error) {
+func prepareListeners(mode DeploymentMode, socketPath, httpAddress string) (unixListener, tcpListener net.Listener, err error) {
 	unixListener, err = ListenerFactory.createUnixListener(socketPath, mode)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	if mode == ModeSystem {
-		tcpListener, err = ListenerFactory.createTCPListener(DefaultHTTPAddress)
+		tcpListener, err = ListenerFactory.createTCPListener(httpAddress)
 		if err != nil {
 			unixListener.Close()
 			os.Remove(socketPath)

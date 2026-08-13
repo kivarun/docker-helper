@@ -89,10 +89,10 @@ func isRuntimeDependent(name string) bool {
 }
 
 // isPureComputed returns true for fields that can be resolved without
-// reading config.json (config_path, config_dir, admin_token_path, mode, http_address).
+// reading config.json (config_path, config_dir, admin_token_path, mode).
 func isPureComputed(name string) bool {
 	switch name {
-	case "config_path", "config_dir", "admin_token_path", "mode", "http_address":
+	case "config_path", "config_dir", "admin_token_path", "mode":
 		return true
 	default:
 		return false
@@ -397,6 +397,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"trusted_ca_path":         fc.TrustedCAPath,
 		"trusted_ca_injection":    resolveTrustedCAInjection(fc.TrustedCAInjection),
 		"mode":                    resolveDeploymentMode(),
+		"http_address":            resolveHTTPAddress(fc.HTTPAddress),
 	}
 
 	enc := json.NewEncoder(stdout)
@@ -407,6 +408,18 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveHTTPAddress returns the effective HTTP address.
+// If the configured value is empty, returns the default for system mode or empty for user mode.
+func resolveHTTPAddress(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if resolveDeploymentMode() == ModeSystem {
+		return DefaultHTTPAddress
+	}
+	return ""
 }
 
 func configShowField(field string, stdout, stderr io.Writer) int {
@@ -452,11 +465,6 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, filepath.Join(configDir, "admin.token"))
 		case "mode":
 			fmt.Fprintln(stdout, resolveDeploymentMode())
-		case "http_address":
-			if resolveDeploymentMode() == ModeSystem {
-				fmt.Fprintln(stdout, DefaultHTTPAddress)
-			}
-			// user mode: empty
 		}
 		return 0
 	}
@@ -470,6 +478,17 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	if err := validateRawConfig(raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
+	}
+
+	// http_address: resolve from config, with default.
+	if field == "http_address" {
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, resolveHTTPAddress(fc.HTTPAddress))
+		return 0
 	}
 
 	// Runtime-dependent fields: validate config first, then check XDG_RUNTIME_DIR.
@@ -635,6 +654,15 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: trusted_ca_injection must be \"disabled\" or \"auto\"\n")
 			return 2
 		}
+	case "http_address":
+		if resolveDeploymentMode() != ModeSystem {
+			fmt.Fprintln(stderr, "error: http_address is only used in system mode")
+			return 2
+		}
+		if err := validateHTTPAddress(value); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 2
+		}
 	}
 
 	raw, configPath, err := loadRawConfig()
@@ -669,6 +697,8 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 	case "trusted_ca_path":
 		newValue, _ = json.Marshal(value)
 	case "trusted_ca_injection":
+		newValue, _ = json.Marshal(value)
+	case "http_address":
 		newValue, _ = json.Marshal(value)
 	}
 

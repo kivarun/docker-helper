@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -52,6 +54,8 @@ type Config struct {
 	OperationLogMaxBytes  int64
 	// Deployment mode (computed from effective UID).
 	Mode DeploymentMode
+	// HTTPAddress is the loopback TCP listen address for system mode.
+	HTTPAddress string
 	// Trusted CA injection (runtime-only, computed from file config).
 	TrustedCAInjection   string // "disabled" or "auto"
 	TrustedCAPath        string // absolute path to CA file (only when auto)
@@ -69,6 +73,7 @@ type fileConfig struct {
 	OperationLogMaxBytes  *int64 `json:"operation_log_max_bytes,omitempty"`
 	TrustedCAPath         string `json:"trusted_ca_path,omitempty"`
 	TrustedCAInjection    string `json:"trusted_ca_injection,omitempty"`
+	HTTPAddress           string `json:"http_address,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -103,7 +108,6 @@ var reservedConfigFields = map[string]bool{
 	"admin_token_path":     true,
 	"admin_token":          true,
 	"mode":                 true,
-	"http_address":         true,
 }
 
 // deprecatedConfigFields were renamed and must not appear in config.json.
@@ -257,6 +261,14 @@ func loadConfig() (*Config, error) {
 
 	trustedCAInjection := resolveTrustedCAInjection(fc.TrustedCAInjection)
 
+	httpAddress := DefaultHTTPAddress
+	if fc.HTTPAddress != "" {
+		if err := validateHTTPAddress(fc.HTTPAddress); err != nil {
+			return nil, err
+		}
+		httpAddress = fc.HTTPAddress
+	}
+
 	mode := resolveDeploymentMode()
 	runtimeDir, err := getRuntimeDir()
 	if err != nil {
@@ -299,6 +311,7 @@ func loadConfig() (*Config, error) {
 		OperationMaxCompleted: opMaxCompleted,
 		OperationLogMaxBytes:  operationLogMaxBytes,
 		Mode:                  mode,
+		HTTPAddress:           httpAddress,
 		TrustedCAInjection:    trustedCAInjection,
 		TrustedCAPath:         fc.TrustedCAPath,
 	}
@@ -355,6 +368,26 @@ func validateAllowedRootValue(s string) error {
 	}
 	if !filepath.IsAbs(s) {
 		return fmt.Errorf("allowed_root must be a non-empty absolute path")
+	}
+	return nil
+}
+
+// validateHTTPAddress validates that the http_address value is a loopback
+// IPv4 address with a valid port (1..65535).
+func validateHTTPAddress(s string) error {
+	if s == "" {
+		return fmt.Errorf("http_address must not be empty")
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return fmt.Errorf("http_address must be in the form 127.0.0.1:PORT: %v", err)
+	}
+	if host != "127.0.0.1" {
+		return fmt.Errorf("http_address: host must be 127.0.0.1 (got %s)", host)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("http_address: port must be 1..65535 (got %s)", port)
 	}
 	return nil
 }
