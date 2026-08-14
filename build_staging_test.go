@@ -11,7 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestBuildDockerReceivesStagedPaths verifies Docker gets staged paths,
@@ -416,6 +419,33 @@ func TestBuildStagedPathsContainContext(t *testing.T) {
 	app, _, token := setupBuildTest(t)
 
 	var capturedArgs []string
+	var capturedOpDir string
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		stagingDir := t.TempDir()
+		opDir := filepath.Join(stagingDir, opID)
+		if err := os.MkdirAll(opDir, 0o700); err != nil {
+			return nil, err
+		}
+		ctxDir := filepath.Join(opDir, "context")
+		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
+			return nil, err
+		}
+		srcDockerfile := filepath.Join(cpath, dfrel)
+		data, err := os.ReadFile(srcDockerfile)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
+			return nil, err
+		}
+		capturedOpDir = opDir
+		return &stagedBuildContext{
+			ContextPath:    ctxDir,
+			DockerfilePath: filepath.Join(ctxDir, dfrel),
+			cleanupPath:    opDir,
+		}, nil
+	}
+
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
 		return exec.CommandContext(ctx, "/bin/true")
@@ -435,7 +465,8 @@ func TestBuildStagedPathsContainContext(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// --file should contain "context" in its path (staging structure).
+	// --file should be exactly the staged Dockerfile path.
+	expectedDockerfile := filepath.Join(capturedOpDir, "context", "Dockerfile")
 	var fileArg string
 	for i, arg := range capturedArgs {
 		if arg == "--file" && i+1 < len(capturedArgs) {
@@ -446,14 +477,15 @@ func TestBuildStagedPathsContainContext(t *testing.T) {
 	if fileArg == "" {
 		t.Fatal("--file not found in args")
 	}
-	if !strings.Contains(fileArg, "context") {
-		t.Errorf("--file path should contain 'context': %s", fileArg)
+	if fileArg != expectedDockerfile {
+		t.Errorf("--file = %q, want %q", fileArg, expectedDockerfile)
 	}
 
-	// Last arg should contain "context" in its path.
+	// Last arg should be exactly the staged context path.
+	expectedContext := filepath.Join(capturedOpDir, "context")
 	lastArg := capturedArgs[len(capturedArgs)-1]
-	if !strings.Contains(lastArg, "context") {
-		t.Errorf("context path should contain 'context': %s", lastArg)
+	if lastArg != expectedContext {
+		t.Errorf("context = %q, want %q", lastArg, expectedContext)
 	}
 }
 
@@ -594,5 +626,500 @@ func TestBuildStagingErrorNoOperationRegistered(t *testing.T) {
 
 	if finalCount != initialCount {
 		t.Errorf("no operation should be registered after staging error: had %d, now %d", initialCount, finalCount)
+	}
+}
+
+// TestBuildDockerfileDotSlash verifies that "./Dockerfile" is normalized
+// to "Dockerfile" and passed correctly to staging.
+func TestBuildDockerfileDotSlash(t *testing.T) {
+	app, _, token := setupBuildTest(t)
+
+	var capture capturedStaging
+	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
+
+	var capturedArgs []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "./Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	waitBuild(t, app, w)
+
+	// dockerfileRel should be normalized to "Dockerfile".
+	if capture.dockerfileRel != "Dockerfile" {
+		t.Errorf("dockerfileRel = %q, want %q", capture.dockerfileRel, "Dockerfile")
+	}
+
+	// --file should point to the staged Dockerfile with exact path.
+	var fileArg string
+	for i, arg := range capturedArgs {
+		if arg == "--file" && i+1 < len(capturedArgs) {
+			fileArg = capturedArgs[i+1]
+			break
+		}
+	}
+	if fileArg == "" {
+		t.Fatal("--file not found in args")
+	}
+	if filepath.Base(fileArg) != "Dockerfile" {
+		t.Errorf("--file base = %q, want %q", filepath.Base(fileArg), "Dockerfile")
+	}
+}
+
+// TestBuildDockerfileDotDotPath verifies that a path with normalizable ".."
+// inside context (e.g., "subdir/../Dockerfile") is resolved correctly.
+func TestBuildDockerfileDotDotPath(t *testing.T) {
+	app, _, token := setupBuildTest(t)
+
+	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create the Dockerfile at the workspace root, reference via subdir/../Dockerfile.
+	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var capture capturedStaging
+	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "subdir/../Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	waitBuild(t, app, w)
+
+	// dockerfileRel should be normalized to "Dockerfile".
+	if capture.dockerfileRel != "Dockerfile" {
+		t.Errorf("dockerfileRel = %q, want %q", capture.dockerfileRel, "Dockerfile")
+	}
+}
+
+// TestBuildDockerfileSymlink verifies that a symlink Dockerfile pointing
+// to a regular file inside context is resolved correctly.
+func TestBuildDockerfileSymlink(t *testing.T) {
+	app, _, token := setupBuildTest(t)
+
+	// Remove the default Dockerfile so we can create our symlink.
+	os.Remove(filepath.Join(app.Config.AllowedRoot, "Dockerfile"))
+
+	// Create a real Dockerfile and a symlink to it.
+	realDockerfile := filepath.Join(app.Config.AllowedRoot, "real.Dockerfile")
+	if err := os.WriteFile(realDockerfile, []byte("FROM alpine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkDockerfile := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	if err := os.Symlink("real.Dockerfile", symlinkDockerfile); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	var capture capturedStaging
+	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	waitBuild(t, app, w)
+
+	// dockerfileRel should resolve to the real file inside context.
+	if capture.dockerfileRel != "real.Dockerfile" {
+		t.Errorf("dockerfileRel = %q, want %q", capture.dockerfileRel, "real.Dockerfile")
+	}
+}
+
+// TestBuildStagedPathsExactSentinel verifies Docker gets exact staged paths
+// using sentinel directory names, not fuzzy string matching.
+func TestBuildStagedPathsExactSentinel(t *testing.T) {
+	app, _, token := setupBuildTest(t)
+
+	var capturedArgs []string
+	var capturedOpDir string
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		stagingDir := t.TempDir()
+		opDir := filepath.Join(stagingDir, opID)
+		if err := os.MkdirAll(opDir, 0o700); err != nil {
+			return nil, err
+		}
+		ctxDir := filepath.Join(opDir, "context")
+		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
+			return nil, err
+		}
+		srcDockerfile := filepath.Join(cpath, dfrel)
+		data, err := os.ReadFile(srcDockerfile)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
+			return nil, err
+		}
+		capturedOpDir = opDir
+		return &stagedBuildContext{
+			ContextPath:    ctxDir,
+			DockerfilePath: filepath.Join(ctxDir, dfrel),
+			cleanupPath:    opDir,
+		}, nil
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	waitBuild(t, app, w)
+
+	// --file should be exactly the staged Dockerfile path.
+	expectedDockerfile := filepath.Join(capturedOpDir, "context", "Dockerfile")
+	var fileArg string
+	for i, arg := range capturedArgs {
+		if arg == "--file" && i+1 < len(capturedArgs) {
+			fileArg = capturedArgs[i+1]
+			break
+		}
+	}
+	if fileArg != expectedDockerfile {
+		t.Errorf("--file = %q, want %q", fileArg, expectedDockerfile)
+	}
+
+	// Last arg should be exactly the staged context path.
+	expectedContext := filepath.Join(capturedOpDir, "context")
+	lastArg := capturedArgs[len(capturedArgs)-1]
+	if lastArg != expectedContext {
+		t.Errorf("context = %q, want %q", lastArg, expectedContext)
+	}
+}
+
+// TestStagedCleanupReturnsError verifies that Cleanup() returns the error
+// from os.RemoveAll and that repeated calls return the same error.
+func TestStagedCleanupReturnsError(t *testing.T) {
+	s := newTestStagedContext(t, "Dockerfile")
+
+	// First cleanup should succeed.
+	err1 := s.Cleanup()
+	if err1 != nil {
+		t.Errorf("first Cleanup() error = %v", err1)
+	}
+
+	// Second cleanup should return nil (already cleaned, idempotent).
+	err2 := s.Cleanup()
+	if err2 != nil {
+		t.Errorf("second Cleanup() error = %v", err2)
+	}
+
+	// Directory should be gone.
+	if _, err := os.Stat(s.ContextPath); err == nil {
+		t.Error("staging directory should be removed after Cleanup")
+	}
+}
+
+// TestStagedCleanupConcurrentExactlyOnce verifies that concurrent Cleanup()
+// calls result in exactly one deletion and all callers get the same result.
+func TestStagedCleanupConcurrentExactlyOnce(t *testing.T) {
+	s := newTestStagedContext(t, "Dockerfile")
+
+	var (
+		wg       sync.WaitGroup
+		errCount int32
+		nilCount int32
+		cleanupN int32
+	)
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := s.Cleanup()
+			if err != nil {
+				atomic.AddInt32(&errCount, 1)
+			} else {
+				atomic.AddInt32(&nilCount, 1)
+			}
+			atomic.AddInt32(&cleanupN, 1)
+		}()
+	}
+	wg.Wait()
+
+	// All calls should return (some may return nil, some may not — but only
+	// one actual deletion happens). The important thing is all 20 calls complete.
+	if cleanupN != 20 {
+		t.Errorf("cleanup calls = %d, want 20", cleanupN)
+	}
+
+	// All results should be consistent (all nil or all same error).
+	// Since we're on a temp dir, all should be nil.
+	if errCount != 0 {
+		t.Errorf("unexpected errors: %d nil, %d err", nilCount, errCount)
+	}
+
+	// Directory should be gone.
+	if _, err := os.Stat(s.ContextPath); err == nil {
+		t.Error("staging directory should be removed after concurrent Cleanup")
+	}
+}
+
+// TestStagedCleanupErrorLogged verifies that a cleanup error is logged
+// with the operation ID in the operational log.
+func TestStagedCleanupErrorLogged(t *testing.T) {
+	_, opLogBuf := setupTestLogging(t)
+
+	app, _, token := setupBuildTest(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	waitBuild(t, app, w)
+
+	// Operational log should contain the cleanup error with operation ID.
+	opLogContent := opLogBuf.String()
+	if !strings.Contains(opLogContent, "staging cleanup failed") {
+		t.Errorf("operational log should contain cleanup error, got: %s", opLogContent)
+	}
+}
+
+// TestBuildCleanupOnErrorPreservesSemantics verifies that cleanup errors
+// do not change the HTTP response, operation state, or result code.
+func TestBuildCleanupOnErrorPreservesSemantics(t *testing.T) {
+	_, opLogBuf := setupTestLogging(t)
+
+	app, _, token := setupBuildTest(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+	op.Wait()
+
+	// Operation should still succeed despite cleanup error.
+	if op.State != operationSucceeded {
+		t.Errorf("state = %q, want %q", op.State, operationSucceeded)
+	}
+	if op.ResultCode == nil || *op.ResultCode != "succeeded" {
+		t.Errorf("result_code = %v, want %q", op.ResultCode, "succeeded")
+	}
+
+	// Cleanup error should be logged.
+	opLogContent := opLogBuf.String()
+	if !strings.Contains(opLogContent, "staging cleanup failed") {
+		t.Errorf("cleanup error should be logged, got: %s", opLogContent)
+	}
+}
+
+// TestBuildCancelCleanupErrorPreservesResult verifies that when explicit
+// cancel triggers cleanup with an error, the operation result is still cancelled.
+func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
+	_, opLogBuf := setupTestLogging(t)
+
+	app, _, token := setupBuildTest(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+
+	syncDir := t.TempDir()
+	readyFile := filepath.Join(syncDir, "ready")
+	releaseFile := filepath.Join(syncDir, "release")
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c",
+			"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	waitProcessReady(t, readyFile)
+
+	// Cancel the operation.
+	if err := app.OperationRegistry.terminateOne(opID, app.killContainerBestEffort); err != nil {
+		t.Fatalf("terminateOne: %v", err)
+	}
+
+	if err := os.WriteFile(releaseFile, nil, 0o644); err != nil {
+		t.Fatalf("create release file: %v", err)
+	}
+
+	op.Wait()
+
+	// Result should be cancelled despite cleanup error.
+	if op.ResultCode == nil || *op.ResultCode != resultCancelled {
+		t.Errorf("result_code = %v, want %q", op.ResultCode, resultCancelled)
+	}
+
+	// Cleanup error should be logged.
+	opLogContent := opLogBuf.String()
+	if !strings.Contains(opLogContent, "staging cleanup failed") {
+		t.Errorf("cleanup error should be logged on cancel, got: %s", opLogContent)
+	}
+}
+
+// TestBuildShutdownCleanupErrorPreservesResult verifies that when daemon
+// shutdown triggers cleanup with an error, the operation result is not cancelled.
+func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
+	_, opLogBuf := setupTestLogging(t)
+
+	app, _, token := setupBuildTest(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+
+	syncDir := t.TempDir()
+	readyFile := filepath.Join(syncDir, "ready")
+	releaseFile := filepath.Join(syncDir, "release")
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c",
+			"touch "+readyFile+"; while [ ! -f "+releaseFile+" ]; do sleep 0.05; done")
+	}
+
+	req := newBuildRequest(map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "example:test",
+	}, token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	waitProcessReady(t, readyFile)
+
+	// Simulate daemon shutdown.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+
+	if err := os.WriteFile(releaseFile, nil, 0o644); err != nil {
+		t.Fatalf("create release file: %v", err)
+	}
+
+	op.Wait()
+
+	// Result should NOT be cancelled (shutdown semantics).
+	op.mu.Lock()
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	op.mu.Unlock()
+
+	if rc == "cancelled" {
+		t.Errorf("shutdown should not produce result_code 'cancelled', got %q", rc)
+	}
+
+	// Cleanup error should be logged.
+	opLogContent := opLogBuf.String()
+	if !strings.Contains(opLogContent, "staging cleanup failed") {
+		t.Errorf("cleanup error should be logged on shutdown, got: %s", opLogContent)
 	}
 }

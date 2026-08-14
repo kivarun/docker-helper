@@ -31,7 +31,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contextPath, _, err := validateBuildRequest(session.Workspace, req)
+	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
 	if err != nil {
 		if errors.Is(err, ErrInternal) {
 			opLog(ctx).Error("build validation error",
@@ -41,6 +41,13 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
+		writeError(ctx, w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
+		return
+	}
+
+	// Compute canonical relative Dockerfile path from the resolved absolute path.
+	dockerfileRel, err := filepath.Rel(contextPath, dockerfilePath)
+	if err != nil || !filepath.IsLocal(dockerfileRel) || dockerfileRel == "." {
 		writeError(ctx, w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
 		return
 	}
@@ -72,7 +79,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	op.auditBuildArgKeys = buildArgKeys
 
 	// Stage the build context into an isolated directory.
-	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, req.Dockerfile, cfg.RuntimeDir, op.ID)
+	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, dockerfileRel, cfg.RuntimeDir, op.ID)
 	if err != nil {
 		opLog(ctx).Error("build context staging failed",
 			slog.String("operation", "build"),
@@ -84,7 +91,12 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
-			staged.Cleanup()
+			if err := staged.Cleanup(); err != nil {
+				opLog(ctx).Error("staging cleanup failed after tryCreate rejection",
+					slog.String("operation", op.ID),
+					slog.String("error", err.Error()),
+				)
+			}
 			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
 			return
 		}
@@ -127,7 +139,12 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	if result.Terminated {
 		cancel()
-		staged.Cleanup()
+		if err := staged.Cleanup(); err != nil {
+			opLog(ctx).Error("staging cleanup failed after pre-start termination",
+				slog.String("operation", op.ID),
+				slog.String("error", err.Error()),
+			)
+		}
 		msg := "build cancelled: daemon is shutting down"
 		if op.reason == terminationCancelled {
 			msg = "build cancelled"
@@ -140,7 +157,12 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Err != nil {
 		cancel()
-		staged.Cleanup()
+		if err := staged.Cleanup(); err != nil {
+			opLog(ctx).Error("staging cleanup failed after start error",
+				slog.String("operation", op.ID),
+				slog.String("error", err.Error()),
+			)
+		}
 		msg := fmt.Sprintf("cannot start build: %v", result.Err)
 		op.fail("docker_build_failed", msg, nil)
 		writeOperationCreated(ctx, w, op.ID, op.State)
@@ -166,7 +188,15 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 
 	// Cleanup staging directory regardless of outcome.
 	if op.stagedCtx != nil {
-		op.stagedCtx.Cleanup()
+		if cerr := op.stagedCtx.Cleanup(); cerr != nil {
+			l := logging.snapshotLogger()
+			if l != nil {
+				l.Error("staging cleanup failed",
+					slog.String("operation", op.ID),
+					slog.String("error", cerr.Error()),
+				)
+			}
+		}
 	}
 
 	duration := time.Since(started).Round(time.Millisecond).String()

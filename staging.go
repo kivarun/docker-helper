@@ -11,11 +11,15 @@ type stagedBuildContext struct {
 	DockerfilePath string
 	cleanupPath    string
 	cleanupOnce    sync.Once
+	cleanupErr     error
 }
 
 // Cleanup removes the staging directory. It is idempotent and concurrency-safe.
-func (s *stagedBuildContext) Cleanup() {
+// The first invocation performs the deletion; subsequent invocations return
+// the same result (nil or the error from the first attempt).
+func (s *stagedBuildContext) Cleanup() error {
 	s.cleanupOnce.Do(func() {
-		os.RemoveAll(s.cleanupPath)
+		s.cleanupErr = os.RemoveAll(s.cleanupPath)
 	})
+	return s.cleanupErr
 }
