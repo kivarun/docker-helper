@@ -80,6 +80,59 @@ func TestRegistryLoginAuditStartFinish(t *testing.T) {
 	}
 }
 
+func TestRegistryLoginRegistryHyphenRejected(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	execCalled := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		execCalled = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	reqBody := map[string]string{
+		"registry": "-v",
+		"username": "user",
+		"password": "secret",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/registry/login", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRegistryLogin(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if resp["code"] != "invalid_registry_login" {
+		t.Errorf("expected code 'invalid_registry_login', got %v", resp["code"])
+	}
+
+	if execCalled {
+		t.Error("ExecCommandContext must not be called when registry starts with '-'")
+	}
+
+	records := parseAuditRecords(auditBuf)
+	for _, rec := range records {
+		if rec.Event == "registry.login.start" || rec.Event == "registry.login.finish" {
+			t.Errorf("registry login audit event must not appear: %s", rec.Event)
+		}
+	}
+}
+
 func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
 

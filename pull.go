@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,11 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	if req.Image == "" {
 		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image is required")
+		return
+	}
+
+	if strings.HasPrefix(req.Image, "-") {
+		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image must not start with '-'")
 		return
 	}
 

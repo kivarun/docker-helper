@@ -256,6 +256,52 @@ func TestPullDockerArgsUnchanged(t *testing.T) {
 	}
 }
 
+func TestPullImageHyphenRejected(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	execCalled := false
+	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+		execCalled = true
+		return []byte("ok"), nil
+	}
+
+	req := newPullRequest(map[string]any{
+		"image": "-v",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if resp["code"] != "invalid_image" {
+		t.Errorf("expected code 'invalid_image', got %v", resp["code"])
+	}
+
+	if execCalled {
+		t.Error("ExecCommand must not be called when image starts with '-'")
+	}
+
+	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
+	for _, rec := range records {
+		if rec.Event == "pull.start" || rec.Event == "pull.finish" {
+			t.Errorf("pull audit event must not appear: %s", rec.Event)
+		}
+	}
+}
+
 func newPullRequest(body map[string]any, token string) *http.Request {
 	data, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(data))

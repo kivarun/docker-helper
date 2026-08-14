@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -31,6 +32,11 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 
 	if req.Registry == "" || req.Username == "" || req.Password == "" {
 		writeError(ctx, w, http.StatusBadRequest, "invalid_registry_login", "invalid registry login request")
+		return
+	}
+
+	if strings.HasPrefix(req.Registry, "-") {
+		writeError(ctx, w, http.StatusBadRequest, "invalid_registry_login", "registry must not start with '-'")
 		return
 	}
 
