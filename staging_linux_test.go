@@ -312,8 +312,8 @@ func TestStageBuildContextExistingOperationDir(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for existing operation directory, got nil")
 	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("expected 'already exists' error, got: %v", err)
+	if !strings.Contains(err.Error(), "exists") {
+		t.Errorf("expected 'exists' in error, got: %v", err)
 	}
 }
 

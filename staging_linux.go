@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +30,7 @@ func (s *stagedBuildContext) Cleanup() {
 
 // stagingHooks allows tests to inject behavior between critical operations.
 type stagingHooks struct {
+	afterWorkspacePin     func() error
 	betweenStatAndOpen    func(name string) error
 	betweenOPATHAndReopen func(name string) error
 	afterCreateDest       func(name string) error
@@ -44,6 +44,22 @@ type stagingSyscall struct {
 
 func defaultStagingSyscall() stagingSyscall {
 	return stagingSyscall{Openat2: unix.Openat2}
+}
+
+func isValidDockerfileRel(path string) bool {
+	if path == "" || path == "." {
+		return false
+	}
+	if filepath.IsAbs(path) {
+		return false
+	}
+	if !filepath.IsLocal(path) {
+		return false
+	}
+	if filepath.Clean(path) != path {
+		return false
+	}
+	return true
 }
 
 // StageBuildContext creates an isolated copy of the build context in a staging directory.
@@ -86,18 +102,14 @@ func stageBuildContextInternal(
 		return nil, fmt.Errorf("invalid operation ID: %q", operationID)
 	}
 
-	if dockerfileRel == "" {
-		return nil, fmt.Errorf("dockerfile relative path is required")
+	if !isValidDockerfileRel(dockerfileRel) {
+		return nil, fmt.Errorf("invalid dockerfile relative path: %s", dockerfileRel)
 	}
-	if filepath.IsAbs(dockerfileRel) {
-		return nil, fmt.Errorf("dockerfile relative path must not be absolute: %s", dockerfileRel)
+
+	// Validate contextPath is inside workspace.
+	if !isInside(workspace, contextPath) {
+		return nil, fmt.Errorf("context path escapes workspace: %s", contextPath)
 	}
-	for _, part := range filepath.SplitList(dockerfileRel) {
-		if part == ".." {
-			return nil, fmt.Errorf("dockerfile relative path contains traversal: %s", dockerfileRel)
-		}
-	}
-	dockerfileRel = filepath.Clean(dockerfileRel)
 
 	// Open / with O_PATH | O_DIRECTORY | O_CLOEXEC.
 	rootFD, err := sy.Openat2(unix.AT_FDCWD, "/", &unix.OpenHow{
@@ -133,6 +145,13 @@ func stageBuildContextInternal(
 		return nil, fmt.Errorf("workspace is not a directory")
 	}
 
+	// Hook: after workspace pin, before context open.
+	if hooks != nil && hooks.afterWorkspacePin != nil {
+		if err := hooks.afterWorkspacePin(); err != nil {
+			return nil, err
+		}
+	}
+
 	// Compute context path relative to workspace.
 	relContext, err := filepath.Rel(workspace, contextPath)
 	if err != nil {
@@ -140,11 +159,6 @@ func stageBuildContextInternal(
 	}
 	if relContext == ".." || filepath.IsAbs(relContext) {
 		return nil, fmt.Errorf("context path escapes workspace: %s", contextPath)
-	}
-	for _, part := range filepath.SplitList(relContext) {
-		if part == ".." {
-			return nil, fmt.Errorf("context path escapes workspace: %s", contextPath)
-		}
 	}
 
 	// Open source context via workspace FD with openat2.
@@ -160,37 +174,97 @@ func stageBuildContextInternal(
 	}
 	defer unix.Close(sourceFD)
 
-	// Create operation directory exclusively.
-	opDir := filepath.Join(runtimeDir, "builds", operationID)
-	if err := os.MkdirAll(filepath.Dir(opDir), 0o700); err != nil {
-		return nil, fmt.Errorf("cannot create parent directories: %w", err)
+	// Pin runtimeDir via rootFD with openat2.
+	relRuntimeDir, err := filepath.Rel("/", runtimeDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot compute runtimeDir relative to /: %w", err)
 	}
-
-	// Reject if opDir path already exists (including symlinks).
-	if info, err := os.Lstat(opDir); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("operation directory is a symlink: %s", opDir)
+	runtimeDirFD, err := sy.Openat2(rootFD, relRuntimeDir, &unix.OpenHow{
+		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	})
+	if err != nil {
+		if err == unix.ENOSYS || err == unix.EPERM {
+			return nil, fmt.Errorf("openat2 not supported: %w (fail closed, no fallback)", err)
 		}
-		return nil, fmt.Errorf("operation directory already exists: %s", opDir)
+		return nil, fmt.Errorf("cannot pin runtimeDir: %w", err)
 	}
+	defer unix.Close(runtimeDirFD)
 
-	if err := os.Mkdir(opDir, 0o700); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("operation directory already exists: %s", opDir)
+	// Create builds directory via mkdirat.
+	var buildsFD int
+	{
+		buildsFD, err = sy.Openat2(runtimeDirFD, "builds", &unix.OpenHow{
+			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+		})
+		if err != nil {
+			if err == unix.ENOENT {
+				if err := unix.Mkdirat(runtimeDirFD, "builds", 0o700); err != nil && err != unix.EEXIST {
+					return nil, fmt.Errorf("cannot create builds directory: %w", err)
+				}
+				buildsFD, err = sy.Openat2(runtimeDirFD, "builds", &unix.OpenHow{
+					Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+					Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+				})
+				if err != nil {
+					return nil, fmt.Errorf("cannot open builds directory: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("cannot open builds directory: %w", err)
+			}
 		}
-		return nil, fmt.Errorf("cannot create operation directory: %w", err)
+		// Verify builds is a real directory (not symlink).
+		var buildsSt unix.Stat_t
+		if err := unix.Fstat(buildsFD, &buildsSt); err != nil {
+			unix.Close(buildsFD)
+			return nil, fmt.Errorf("cannot stat builds directory: %w", err)
+		}
+		if buildsSt.Mode&unix.S_IFMT != unix.S_IFDIR {
+			unix.Close(buildsFD)
+			return nil, fmt.Errorf("builds is not a directory")
+		}
 	}
+	defer unix.Close(buildsFD)
 
-	// Create staging directory.
-	stagingDir := filepath.Join(opDir, "context")
-	if err := os.Mkdir(stagingDir, 0o700); err != nil {
-		os.RemoveAll(opDir)
+	// Create operation directory exclusively via mkdirat.
+	opFD, err := sy.Openat2(buildsFD, operationID, &unix.OpenHow{
+		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	})
+	if err != nil {
+		if err == unix.ENOENT {
+			if err := unix.Mkdirat(buildsFD, operationID, 0o700); err != nil {
+				return nil, fmt.Errorf("cannot create operation directory: %w", err)
+			}
+			opFD, err = sy.Openat2(buildsFD, operationID, &unix.OpenHow{
+				Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+				Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+			})
+			if err != nil {
+				removeAllAtRecursive(buildsFD, operationID)
+				return nil, fmt.Errorf("cannot open operation directory: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("operation directory already exists: %s", operationID)
+		}
+	}
+	defer unix.Close(opFD)
+
+	// Track operation directory for cleanup via buildsFD.
+
+	// Create staging directory via mkdirat.
+	if err := unix.Mkdirat(opFD, "context", 0o700); err != nil {
+		removeAllAtRecursive(buildsFD, operationID)
 		return nil, fmt.Errorf("cannot create staging directory: %w", err)
 	}
 
-	stagingFD, err := unix.Openat(unix.AT_FDCWD, stagingDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	stagingFD, err := sy.Openat2(opFD, "context", &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	})
 	if err != nil {
-		os.RemoveAll(opDir)
+		removeAllAtRecursive(buildsFD, operationID)
 		return nil, fmt.Errorf("cannot open staging directory: %w", err)
 	}
 
@@ -199,14 +273,17 @@ func stageBuildContextInternal(
 	err = walkAndCopy(ctx, sourceFD, stagingFD, stagingFD, "", hardlinkMap, hooks)
 	unix.Close(stagingFD)
 	if err != nil {
-		os.RemoveAll(opDir)
+		removeAllAtRecursive(buildsFD, operationID)
 		return nil, err
 	}
 
 	// Verify Dockerfile via openat2 with BENEATH|NO_SYMLINKS|NO_MAGICLINKS.
-	stagingVerifyFD, err := unix.Openat(unix.AT_FDCWD, stagingDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	stagingVerifyFD, err := sy.Openat2(opFD, "context", &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	})
 	if err != nil {
-		os.RemoveAll(opDir)
+		removeAllAtRecursive(buildsFD, operationID)
 		return nil, fmt.Errorf("cannot open staging for verification: %w", err)
 	}
 
@@ -216,29 +293,35 @@ func stageBuildContextInternal(
 	})
 	unix.Close(stagingVerifyFD)
 	if err != nil {
-		os.RemoveAll(opDir)
+		removeAllAtRecursive(buildsFD, operationID)
 		return nil, fmt.Errorf("Dockerfile not found in staging: %w", err)
 	}
 
 	var dfSt unix.Stat_t
 	if err := unix.Fstat(dockerfileFD, &dfSt); err != nil {
 		unix.Close(dockerfileFD)
-		os.RemoveAll(opDir)
+		removeAllAtRecursive(buildsFD, operationID)
 		return nil, fmt.Errorf("cannot stat Dockerfile: %w", err)
 	}
 	if dfSt.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(dockerfileFD)
-		os.RemoveAll(opDir)
+		removeAllAtRecursive(buildsFD, operationID)
 		return nil, fmt.Errorf("Dockerfile is not a regular file")
 	}
 	unix.Close(dockerfileFD)
 
-	dockerfileStagingPath := filepath.Join(stagingDir, dockerfileRel)
+	// Compute cleanup path from rootFD chain.
+	cleanupPath := filepath.Join(runtimeDir, "builds", operationID)
+
+	// Compute staging path.
+	stagingPath := filepath.Join(cleanupPath, "context")
+
+	dockerfileStagingPath := filepath.Join(stagingPath, dockerfileRel)
 
 	return &stagedBuildContext{
-		ContextPath:    stagingDir,
+		ContextPath:    stagingPath,
 		DockerfilePath: dockerfileStagingPath,
-		cleanupPath:    opDir,
+		cleanupPath:    cleanupPath,
 	}, nil
 }
 
@@ -428,9 +511,14 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 			return fmt.Errorf("cannot copy %s: %w", name, err)
 		}
 		unix.Close(readFD)
-		unix.Close(createFD)
 
-		unix.Fchmodat(stagingDirFD, name, uint32(st.Mode&0o7777), 0)
+		// Preserve permissions via Fchmod on open FD.
+		if err := unix.Fchmod(createFD, uint32(st.Mode&0o7777)); err != nil {
+			unix.Unlinkat(stagingDirFD, name, 0)
+			unix.Close(createFD)
+			return fmt.Errorf("cannot chmod %s: %w", name, err)
+		}
+		unix.Close(createFD)
 
 		if err := setTimesFromStat(stagingDirFD, name, &st); err != nil {
 			unix.Unlinkat(stagingDirFD, name, 0)
@@ -492,19 +580,26 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD 
 
 		err = walkAndCopy(ctx, sourceReadFD, stagingRootFD, destFD, filepath.Join(relPrefix, name), hardlinkMap, hooks)
 		unix.Close(sourceReadFD)
-		unix.Close(destFD)
 
 		if err != nil {
+			unix.Close(destFD)
 			unix.Unlinkat(stagingDirFD, name, unix.AT_REMOVEDIR)
 			return fmt.Errorf("cannot copy directory %s: %w", name, err)
 		}
 
-		unix.Fchmodat(stagingDirFD, name, uint32(st.Mode&0o7777), 0)
+		// Preserve directory permissions via Fchmod on open FD.
+		if err := unix.Fchmod(destFD, uint32(st.Mode&0o7777)); err != nil {
+			unix.Close(destFD)
+			unix.Unlinkat(stagingDirFD, name, unix.AT_REMOVEDIR)
+			return fmt.Errorf("cannot chmod directory %s: %w", name, err)
+		}
 
 		if err := setTimesFromStat(stagingDirFD, name, &st); err != nil {
+			unix.Close(destFD)
 			unix.Unlinkat(stagingDirFD, name, unix.AT_REMOVEDIR)
 			return fmt.Errorf("cannot set directory times %s: %w", name, err)
 		}
+		unix.Close(destFD)
 		return nil
 	}
 
@@ -545,6 +640,9 @@ func copyFileContents(ctx context.Context, srcFD int, dstFD int, size int64, nam
 			return fmt.Errorf("cannot read: %w", err)
 		}
 		if n == 0 {
+			if off < size {
+				return fmt.Errorf("unexpected EOF at offset %d (expected %d)", off, size)
+			}
 			break
 		}
 
@@ -576,4 +674,33 @@ func setTimesFromStat(dirFD int, name string, st *unix.Stat_t) error {
 		{Sec: st.Mtim.Sec, Nsec: st.Mtim.Nsec},
 	}
 	return unix.UtimesNanoAt(dirFD, name, ts, unix.AT_SYMLINK_NOFOLLOW)
+}
+
+// removeAllAtRecursive recursively removes a directory tree referenced by parentFD/name.
+func removeAllAtRecursive(parentFD int, name string) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return
+	}
+	defer unix.Close(fd)
+
+	entries, err := readDirectoryEntries(fd)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		var st unix.Stat_t
+		if err := unix.Fstatat(fd, entry.name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			continue
+		}
+		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
+			removeAllAtRecursive(fd, entry.name)
+			unix.Unlinkat(fd, entry.name, unix.AT_REMOVEDIR)
+		} else {
+			unix.Unlinkat(fd, entry.name, 0)
+		}
+	}
+
+	unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
 }

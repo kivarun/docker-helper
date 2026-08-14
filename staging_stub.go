@@ -5,13 +5,21 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 // stagedBuildContext is a stub type for non-Linux platforms.
-type stagedBuildContext struct{}
+type stagedBuildContext struct {
+	ContextPath    string
+	DockerfilePath string
+	cleanupPath    string
+	cleanupOnce    sync.Once
+}
 
 // Cleanup is a stub for non-Linux platforms.
-func (s *stagedBuildContext) Cleanup() {}
+func (s *stagedBuildContext) Cleanup() {
+	s.cleanupOnce.Do(func() {})
+}
 
 // StageBuildContext is not supported on non-Linux platforms.
 func StageBuildContext(
