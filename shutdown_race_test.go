@@ -91,10 +91,6 @@ func TestShutdownGateConcurrentRegistration(t *testing.T) {
 		t.Fatal("no results collected")
 	}
 
-	if !reg.isShuttingDown() {
-		t.Fatal("registry should be shutting down")
-	}
-
 	op := &operation{
 		ID:        "after_gate_op",
 		SessionID: "test_session",

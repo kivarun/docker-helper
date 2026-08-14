@@ -89,7 +89,7 @@ func TestListSessionsSuccess(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	result, err := client.listSessions()
@@ -127,7 +127,7 @@ func TestListSessionsAuthHeader(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	if _, err := client.listSessions(); err != nil {
@@ -154,7 +154,7 @@ func TestListSessionsAuthError(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	_, err := client.listSessions()
@@ -174,23 +174,6 @@ func TestListSessionsConnectionError(t *testing.T) {
 	_, err := client.listSessions()
 	if err == nil {
 		t.Fatal("expected connection error for nonexistent socket")
-	}
-}
-
-func TestReadAdminTokenPlainWhitespaceOnly(t *testing.T) {
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "admin.token")
-
-	if err := os.WriteFile(tokenPath, []byte("   \n\t  \n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	_, err := readAdminTokenPlain(tokenPath)
-	if err == nil {
-		t.Fatal("expected error for whitespace-only token file")
-	}
-	if !strings.Contains(err.Error(), "admin token file is empty") {
-		t.Errorf("expected 'admin token file is empty', got: %v", err)
 	}
 }
 
@@ -414,7 +397,7 @@ func TestCreateSessionRequest(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	result, err := client.createSession("/home/user/proj")
@@ -716,7 +699,7 @@ func TestDeleteSessionRequest(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	if err := client.deleteSession("dhs_001"); err != nil {
@@ -758,7 +741,7 @@ func TestDeleteSessionEscapedID(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	if err := client.deleteSession(testID); err != nil {
@@ -966,7 +949,7 @@ func TestApiErrorStructured(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	_, err := client.listSessions()
@@ -1008,7 +991,7 @@ func TestApiErrorMalformedBody(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	_, err := client.listSessions()
@@ -1049,7 +1032,7 @@ func TestApiErrorEmptyBody(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	_, err := client.listSessions()
@@ -1085,7 +1068,7 @@ func TestDeleteSession204Success(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	if err := client.deleteSession("dhs_001"); err != nil {
@@ -1115,7 +1098,7 @@ func TestReloadErrorStructured(t *testing.T) {
 	})
 
 	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readAdminTokenPlain(tokenPath)
+		return readTokenFile(tokenPath)
 	}, nil)
 
 	resp, err := client.doAuthenticatedRequest("POST", "/reload", nil)

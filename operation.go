@@ -226,12 +226,6 @@ func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int
 	}
 }
 
-func (r *operationRegistry) isShuttingDown() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.shutting
-}
-
 func (r *operationRegistry) setShuttingDown() {
 	r.mu.Lock()
 	r.shutting = true

@@ -880,43 +880,6 @@ func TestFullUnixCycle(t *testing.T) {
 	}
 }
 
-// --- adminAPITokenSource still works (backward compat) ---
-
-func TestAdminAPITokenSourceBackwardCompat(t *testing.T) {
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("admin-token"), 0600)
-
-	source, err := adminAPITokenSource(tokenPath)
-	if err != nil {
-		t.Fatalf("adminAPITokenSource: %v", err)
-	}
-
-	token, err := source()
-	if err != nil {
-		t.Fatalf("token source: %v", err)
-	}
-	if token != "admin-token" {
-		t.Errorf("token = %q, want %q", token, "admin-token")
-	}
-}
-
-// --- readAdminTokenPlain still works (backward compat) ---
-
-func TestReadAdminTokenPlainBackwardCompat(t *testing.T) {
-	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("admin-token"), 0600)
-
-	token, err := readAdminTokenPlain(tokenPath)
-	if err != nil {
-		t.Fatalf("readAdminTokenPlain: %v", err)
-	}
-	if token != "admin-token" {
-		t.Errorf("token = %q, want %q", token, "admin-token")
-	}
-}
-
 // --- agentClient unchanged ---
 
 func TestAgentClientUnchanged(t *testing.T) {

@@ -42,16 +42,7 @@ func agentClient() (*apiClient, error) {
 	}, nil), nil
 }
 
-// waitForOperation polls an operation until it reaches a terminal state.
-// It streams logs to stdout as they become available.
-// If the daemon reports truncated logs, a single warning is printed to stderr
-// immediately on first occurrence.
-// Returns the final operation status response.
-func waitForOperation(c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
-	return waitForOperationContext(context.Background(), c, opID, stdout, stderr)
-}
-
-// waitForOperationContext is the context-aware variant of waitForOperation.
+// waitForOperationContext polls an operation until it reaches a terminal state.
 // If ctx is cancelled, it returns immediately with ctx.Err().
 func waitForOperationContext(ctx context.Context, c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
 	var offset int64

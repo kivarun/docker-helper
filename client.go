@@ -9,9 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -90,18 +88,6 @@ func parseApiError(status int, body []byte) *apiError {
 	return &apiError{
 		Status: status,
 	}
-}
-
-func readAdminTokenPlain(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("cannot read admin token: %w", err)
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("admin token file is empty")
-	}
-	return token, nil
 }
 
 func (c *apiClient) doAuthenticatedRequest(method, path string, body io.Reader) (*http.Response, error) {
@@ -304,11 +290,6 @@ func (c *apiClient) startRun(req runRequest) (*operationCreatedResponse, error) 
 	return &result, nil
 }
 
-// operationStatus returns the status of an operation.
-func (c *apiClient) operationStatus(opID string) (*operationStatusResponse, error) {
-	return c.operationStatusCtx(context.Background(), opID)
-}
-
 // operationStatusCtx is the context-aware variant of operationStatus.
 func (c *apiClient) operationStatusCtx(ctx context.Context, opID string) (*operationStatusResponse, error) {
 	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "GET", "/operations/"+opID, nil)
@@ -367,11 +348,6 @@ func (c *apiClient) cancelOperation(opID string) error {
 
 	_, err = c.readResponseBody(resp)
 	return err
-}
-
-// operationLogs returns logs for an operation starting at the given offset.
-func (c *apiClient) operationLogs(opID string, offset int64) (*operationLogsResponse, error) {
-	return c.operationLogsCtx(context.Background(), opID, offset)
 }
 
 // operationLogsCtx is the context-aware variant of operationLogs.

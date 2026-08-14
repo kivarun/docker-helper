@@ -1248,3 +1248,13 @@ func TestDeleteSessionAuditContainsRequestID(t *testing.T) {
 
 	t.Fatal("no session.delete audit record found")
 }
+
+// reset clears all logging state.  Intended for test cleanup.
+func (ls *loggingState) reset() {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.opLogger = nil
+	ls.opWriter = nil
+	ls.auditWriter = nil
+	ls.auditEnabled = false
+}

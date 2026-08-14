@@ -540,7 +540,7 @@ func TestWaitForOperationFinalLogsRace(t *testing.T) {
 		tokenSource: func() (string, error) { return "test-token", nil },
 	}
 
-	status, err := waitForOperation(c, opID, &out, &bytes.Buffer{})
+	status, err := waitForOperationContext(context.Background(), c, opID, &out, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("waitForOperation failed: %v", err)
 	}
@@ -835,78 +835,6 @@ func TestRunContract(t *testing.T) {
 	}
 }
 
-// TestWaitForOperationUsesConstants verifies that waitForOperation uses
-// operationState constants, not string literals.
-func TestWaitForOperationUsesConstants(t *testing.T) {
-	opID := "op_test"
-
-	tempDir := t.TempDir()
-	socketPath := tempDir + "/docker-helper.sock"
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       string(operationSucceeded),
-		})
-	})
-	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"offset":       int64(0),
-			"next_offset":  int64(0),
-			"truncated":    false,
-			"logs":         "",
-		})
-	})
-
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
-
-	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
-	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
-	defer func() {
-		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
-		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
-	}()
-
-	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
-	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
-
-	var out, stderr bytes.Buffer
-	c := &apiClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
-		baseURL:     "http://localhost",
-		tokenSource: func() (string, error) { return "test-token", nil },
-	}
-
-	status, err := waitForOperation(c, opID, &out, &stderr)
-	if err != nil {
-		t.Fatalf("waitForOperation failed: %v", err)
-	}
-	if status.Status != operationSucceeded {
-		t.Errorf("expected operationSucceeded, got %s", status.Status)
-	}
-}
-
 // TestTruncatedLogWarning verifies that truncated logs produce a warning.
 func TestTruncatedLogWarning(t *testing.T) {
 	opID := "op_test"
@@ -975,7 +903,7 @@ func TestTruncatedLogWarning(t *testing.T) {
 		tokenSource: func() (string, error) { return "test-token", nil },
 	}
 
-	_, err = waitForOperation(c, opID, &out, &stderr)
+	_, err = waitForOperationContext(context.Background(), c, opID, &out, &stderr)
 	if err != nil {
 		t.Fatalf("waitForOperation failed: %v", err)
 	}
@@ -1059,7 +987,7 @@ func TestTruncatedOnlyInFinalLogs(t *testing.T) {
 		tokenSource: func() (string, error) { return "test-token", nil },
 	}
 
-	_, err = waitForOperation(c, opID, &out, &stderr)
+	_, err = waitForOperationContext(context.Background(), c, opID, &out, &stderr)
 	if err != nil {
 		t.Fatalf("waitForOperation failed: %v", err)
 	}
@@ -1144,7 +1072,7 @@ func TestTruncatedMultiplePollsSingleWarning(t *testing.T) {
 		tokenSource: func() (string, error) { return "test-token", nil },
 	}
 
-	_, err = waitForOperation(c, opID, &out, &stderr)
+	_, err = waitForOperationContext(context.Background(), c, opID, &out, &stderr)
 	if err != nil {
 		t.Fatalf("waitForOperation failed: %v", err)
 	}

@@ -119,16 +119,6 @@ func (ls *loggingState) snapshotWriters() (opW, audW io.Writer) {
 	return ls.opWriter, ls.auditWriter
 }
 
-// reset clears all logging state.  Intended for test cleanup.
-func (ls *loggingState) reset() {
-	ls.mu.Lock()
-	defer ls.mu.Unlock()
-	ls.opLogger = nil
-	ls.opWriter = nil
-	ls.auditWriter = nil
-	ls.auditEnabled = false
-}
-
 // snapshotAudit returns (auditEnabled, auditWriter, opLogger) under a single
 // read lock so the caller sees a consistent configuration.
 func (ls *loggingState) snapshotAudit() (bool, io.Writer, *slog.Logger) {

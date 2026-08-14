@@ -273,16 +273,6 @@ func getRuntimeDirSafe() string {
 	return filepath.Join(dir, "docker-helper")
 }
 
-// adminAPITokenSource returns a token source function that reads the admin
-// token from the given path.
-func adminAPITokenSource(tokenPath string) (func() (string, error), error) {
-	token, err := readAdminTokenPlain(tokenPath)
-	if err != nil {
-		return nil, err
-	}
-	return func() (string, error) { return token, nil }, nil
-}
-
 func configShowAll(stdout, stderr io.Writer) int {
 	raw, configPath, err := loadRawConfig()
 	if err != nil {
