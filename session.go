@@ -49,29 +49,6 @@ type CreatedSession struct {
 	Token   string
 }
 
-// scanSession scans the canonical session column order and converts
-// Unix-integer timestamps to time.Time.  The caller must query exactly
-// the columns: id, workspace, created_at, expires_at, principal_id.
-// If principal_id is not present (R1 DB), it will be NULL.
-func scanSession(s sqlScanner) (Session, error) {
-	var sess Session
-	var createdAt int64
-	var expiresAt int64
-	var principalID sql.NullInt64
-
-	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt, &principalID); err != nil {
-		return sess, err
-	}
-
-	sess.CreatedAt = time.Unix(createdAt, 0)
-	sess.ExpiresAt = time.Unix(expiresAt, 0)
-	if principalID.Valid {
-		sess.PrincipalID = &principalID.Int64
-	}
-
-	return sess, nil
-}
-
 // scanSessionWithPrincipal scans session columns joined with principal username.
 // Columns: id, workspace, created_at, expires_at, principal_id, principal_username.
 func scanSessionWithPrincipal(s sqlScanner) (Session, error) {

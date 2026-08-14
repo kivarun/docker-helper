@@ -162,12 +162,6 @@ func (r *operationRegistry) get(id string) *operation {
 	return r.ops[id]
 }
 
-func (r *operationRegistry) remove(id string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.ops, id)
-}
-
 func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

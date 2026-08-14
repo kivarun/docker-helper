@@ -127,16 +127,6 @@ func validateNoDeprecatedRawFields(raw map[string]json.RawMessage) error {
 	return nil
 }
 
-// validateNoDeprecatedFields checks that no deprecated field appears in the config JSON.
-// It returns an error with a clear rename diagnostic.
-func validateNoDeprecatedFields(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("cannot parse config: %w", err)
-	}
-	return validateNoDeprecatedRawFields(raw)
-}
-
 func getConfigPath() string {
 	if p := os.Getenv("DOCKER_HELPER_CONFIG"); p != "" {
 		return p

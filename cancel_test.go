@@ -89,7 +89,8 @@ func TestCancelRunningBuild(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	if cancelW.Code != http.StatusOK {
 		t.Logf("cancel response: %d %s", cancelW.Code, cancelW.Body.String())
@@ -147,7 +148,8 @@ func TestCancelRunningRun(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	if cancelW.Code != http.StatusOK {
 		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
@@ -176,7 +178,7 @@ func TestCancelUnknownOperation(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/op_unknown123/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
-	app.handleOperationCancel(w, cancelReq)
+	newOperationMux(app).ServeHTTP(w, cancelReq)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected %d, got %d", http.StatusNotFound, w.Code)
@@ -216,7 +218,8 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+session2.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	if cancelW.Code != http.StatusNotFound {
 		t.Errorf("expected %d, got %d", http.StatusNotFound, cancelW.Code)
@@ -226,7 +229,7 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 	cancelReq2 := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq2.Header.Set("Authorization", "Bearer "+session1.Token)
 	cancelW2 := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW2, cancelReq2)
+	newOperationMux(app).ServeHTTP(cancelW2, cancelReq2)
 }
 
 // TestCancelAlreadyCompletedOperation returns current terminal state.
@@ -267,7 +270,8 @@ func TestCancelAlreadyCompletedOperation(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	if cancelW.Code != http.StatusOK {
 		t.Errorf("expected %d, got %d", http.StatusOK, cancelW.Code)
@@ -320,7 +324,8 @@ func TestCancelVsNaturalCompletion(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	if cancelW.Code != http.StatusOK {
 		t.Errorf("expected %d, got %d", http.StatusOK, cancelW.Code)
@@ -392,7 +397,8 @@ func TestCancelPreservesLogs(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	if cancelW.Code != http.StatusOK {
 		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
@@ -402,7 +408,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 	logsReq := httptest.NewRequest("GET", "/operations/"+opID+"/logs?offset=0", nil)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Errorf("expected %d, got %d", http.StatusOK, logsW.Code)
@@ -444,7 +450,8 @@ func TestCancelAuditEvent(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	// Verify the operation has result_code=cancelled.
 	op := app.OperationRegistry.get(opID)
@@ -466,7 +473,7 @@ func TestCancelNoRegistry(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/op_test/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
-	app.handleOperationCancel(w, cancelReq)
+	newOperationMux(app).ServeHTTP(w, cancelReq)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected %d, got %d", http.StatusNotFound, w.Code)
@@ -509,13 +516,14 @@ func TestCancelIdempotent(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	// Second cancel (idempotent).
 	cancelReq2 := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq2.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW2 := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW2, cancelReq2)
+	mux.ServeHTTP(cancelW2, cancelReq2)
 
 	if cancelW2.Code != http.StatusOK {
 		t.Errorf("expected %d, got %d", http.StatusOK, cancelW2.Code)
@@ -562,7 +570,8 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	// Verify cidfile is cleaned up.
 	if cidfile != "" {
@@ -607,7 +616,8 @@ func TestCancelPreservesExitCode(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	var cancelResp map[string]any
 	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
@@ -1077,7 +1087,8 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	mux := newOperationMux(app)
+	mux.ServeHTTP(cancelW, cancelReq)
 
 	// Verify: result must be succeeded, not cancelled.
 	op.mu.Lock()
@@ -1174,13 +1185,13 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		app.handleOperationCancel(cancelW1, cancelReq1)
+		newOperationMux(app).ServeHTTP(cancelW1, cancelReq1)
 	}()
 
 	go func() {
 		defer wg.Done()
 		<-start
-		app.handleOperationCancel(cancelW2, cancelReq2)
+		newOperationMux(app).ServeHTTP(cancelW2, cancelReq2)
 	}()
 
 	close(start)
@@ -1487,7 +1498,7 @@ func TestCancelResponseNoTimestampFields(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	w = httptest.NewRecorder()
-	app.handleOperationCancel(w, cancelReq)
+	newOperationMux(app).ServeHTTP(w, cancelReq)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, w.Code)

@@ -699,10 +699,9 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 	for _, offset := range cases {
 		t.Run(offset, func(t *testing.T) {
 			logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs?offset="+offset, nil)
-			logsReq.SetPathValue("id", opID)
 			logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 			logsW := httptest.NewRecorder()
-			app.handleOperationLogs(logsW, logsReq)
+			newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 			if logsW.Code != http.StatusBadRequest {
 				t.Errorf("expected status %d, got %d", http.StatusBadRequest, logsW.Code)
@@ -767,75 +766,5 @@ func TestOperationForSessionOwner(t *testing.T) {
 	}
 	if result.ID != op.ID {
 		t.Errorf("expected operation ID %s, got %s", op.ID, result.ID)
-	}
-}
-
-// TestOperationIDFromRequest verifies operationIDFromRequest extraction.
-func TestOperationIDFromRequest(t *testing.T) {
-	tests := []struct {
-		name      string
-		path      string
-		pathValue string
-		want      string
-	}{
-		{
-			name:      "PathValue takes priority",
-			path:      "/anything",
-			pathValue: "op_from_pathvalue",
-			want:      "op_from_pathvalue",
-		},
-		{
-			name: "status path fallback",
-			path: "/operations/op_123",
-			want: "op_123",
-		},
-		{
-			name: "logs path fallback",
-			path: "/operations/op_456/logs",
-			want: "op_456",
-		},
-		{
-			name: "cancel path fallback",
-			path: "/operations/op_789/cancel",
-			want: "op_789",
-		},
-		{
-			name: "unknown path returns empty",
-			path: "/other/op_123",
-			want: "",
-		},
-		{
-			name: "operations prefix only returns empty",
-			path: "/operations",
-			want: "",
-		},
-		{
-			name: "garbage suffix returns empty",
-			path: "/operations/op_123/garbage",
-			want: "",
-		},
-		{
-			name: "logs with extra segment returns empty",
-			path: "/operations/op_123/logs/extra",
-			want: "",
-		},
-		{
-			name: "empty id returns empty",
-			path: "/operations//logs",
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
-			if tt.pathValue != "" {
-				req.SetPathValue("id", tt.pathValue)
-			}
-			got := operationIDFromRequest(req)
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
 	}
 }

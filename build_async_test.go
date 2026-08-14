@@ -127,10 +127,9 @@ func TestBuildLiveOutput(t *testing.T) {
 
 	// Read logs while the operation is still running.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	var logsResp map[string]any
 	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {
@@ -371,10 +370,9 @@ func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
 
 	// Fetch all logs.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	var logsResp map[string]any
 	if err := json.NewDecoder(logsW.Body).Decode(&logsResp); err != nil {

@@ -429,55 +429,6 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	}
 }
 
-// TestSessionTableWithHistoricalRevokedAtColumn verifies that the current
-// code operates correctly against an existing sessions table that still
-// contains the historical revoked_at column. This locks in the
-// no-migration backward compatibility assumption.
-func TestSessionTableWithHistoricalRevokedAtColumn(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := openDatabase(dbPath)
-	if err != nil {
-		t.Fatalf("openDatabase() error: %v", err)
-	}
-	defer db.Close()
-
-	// Create the old schema with revoked_at.
-	if _, err := db.Exec(`
-		CREATE TABLE sessions (
-			id TEXT PRIMARY KEY,
-			token_hash TEXT NOT NULL UNIQUE,
-			workspace TEXT NOT NULL,
-			created_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL,
-			revoked_at INTEGER
-		);
-	`); err != nil {
-		t.Fatalf("cannot create table: %v", err)
-	}
-
-	// Insert a session using the old schema.
-	now := time.Now().Unix()
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, NULL)`,
-		"dhs_old", "hash_old", dir, now, now+3600,
-	)
-	if err != nil {
-		t.Fatalf("cannot insert: %v", err)
-	}
-
-	// Verify the current scanSession works against this table.
-	row := db.QueryRow("SELECT id, workspace, created_at, expires_at, NULL FROM sessions WHERE id = ?", "dhs_old")
-	s, err := scanSession(row)
-	if err != nil {
-		t.Fatalf("scanSession() error: %v", err)
-	}
-	if s.ID != "dhs_old" {
-		t.Errorf("ID = %q, want %q", s.ID, "dhs_old")
-	}
-}
-
 // --- cleanupExpiredSessions tests ---
 
 func TestCleanupExpiredSessionsDeletesExpired(t *testing.T) {

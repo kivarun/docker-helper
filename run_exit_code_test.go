@@ -82,10 +82,9 @@ func TestRunNonZeroExit(t *testing.T) {
 
 	// Check operation logs for output.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)

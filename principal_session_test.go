@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -102,7 +103,7 @@ func TestCredentialAuthRevoked(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for revoked credential")
 	}
-	if !isErrCredentialRevoked(err) {
+	if !errors.Is(err, ErrCredentialRevoked) {
 		t.Errorf("expected ErrCredentialRevoked, got: %v", err)
 	}
 }
@@ -139,7 +140,7 @@ func TestCredentialAuthDisabledPrincipal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for disabled principal")
 	}
-	if !isErrCredentialDisabled(err) {
+	if !errors.Is(err, ErrCredentialDisabled) {
 		t.Errorf("expected ErrCredentialDisabled, got: %v", err)
 	}
 }
@@ -155,7 +156,7 @@ func TestCredentialAuthDBError(t *testing.T) {
 		t.Fatal("expected error for DB failure")
 	}
 	// Should be a generic error, not credential-specific.
-	if isErrCredentialNotFound(err) || isErrCredentialRevoked(err) || isErrCredentialDisabled(err) {
+	if errors.Is(err, ErrCredentialNotFound) || errors.Is(err, ErrCredentialRevoked) || errors.Is(err, ErrCredentialDisabled) {
 		t.Errorf("expected generic DB error, got: %v", err)
 	}
 }

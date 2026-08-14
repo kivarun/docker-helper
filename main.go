@@ -186,6 +186,30 @@ func serveWithShutdownMulti(
 	}
 }
 
+// registerRoutes registers all production API endpoints on the given mux.
+func registerRoutes(mux *http.ServeMux, app *App) {
+	mux.HandleFunc("POST /build", app.handleBuild)
+	mux.HandleFunc("GET /health", app.handleHealth)
+	mux.HandleFunc("POST /pull", app.handlePull)
+	mux.HandleFunc("POST /run", app.handleRun)
+	mux.HandleFunc("POST /registry/login", app.handleRegistryLogin)
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("GET /sessions", app.handleListSessions)
+	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+	mux.HandleFunc("POST /reload", app.handleReload)
+	mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
+	mux.HandleFunc("GET /operations/{id}/logs", app.handleOperationLogs)
+	mux.HandleFunc("POST /operations/{id}/cancel", app.handleOperationCancel)
+	mux.HandleFunc("POST /principals", app.handleCreatePrincipal)
+	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
+	mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
+	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
+	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
+	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
+}
+
 func runServe(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
 	initLoggers(stderr, stdout, slog.LevelInfo, false)
@@ -245,26 +269,7 @@ func runServe(stdout, stderr io.Writer) error {
 		}
 
 		mux := http.NewServeMux()
-		mux.HandleFunc("POST /build", app.handleBuild)
-		mux.HandleFunc("GET /health", app.handleHealth)
-		mux.HandleFunc("POST /pull", app.handlePull)
-		mux.HandleFunc("POST /run", app.handleRun)
-		mux.HandleFunc("POST /registry/login", app.handleRegistryLogin)
-		mux.HandleFunc("POST /sessions", app.handleCreateSession)
-		mux.HandleFunc("GET /sessions", app.handleListSessions)
-		mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
-		mux.HandleFunc("POST /reload", app.handleReload)
-		mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
-		mux.HandleFunc("GET /operations/{id}/logs", app.handleOperationLogs)
-		mux.HandleFunc("POST /operations/{id}/cancel", app.handleOperationCancel)
-		mux.HandleFunc("POST /principals", app.handleCreatePrincipal)
-		mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
-		mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
-		mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
-		mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
-		mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
-		mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
-		mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
+		registerRoutes(mux, app)
 
 		server := newHTTPServer(withRequestID(withLogging(http.HandlerFunc(mux.ServeHTTP))))
 

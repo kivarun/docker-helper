@@ -150,10 +150,9 @@ func TestShmSizeIntegration(t *testing.T) {
 
 	// Read the logs to get the /dev/shm size.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+op.ID+"/logs", nil)
-	logsReq.SetPathValue("id", op.ID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
@@ -433,7 +432,7 @@ func TestContainerLifecycleGracefulCancel(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	newOperationMux(app).ServeHTTP(cancelW, cancelReq)
 	elapsed := time.Since(start)
 
 	if cancelW.Code != http.StatusOK {
@@ -537,7 +536,7 @@ func TestContainerLifecycleForcedCancel(t *testing.T) {
 	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
 	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
 	cancelW := httptest.NewRecorder()
-	app.handleOperationCancel(cancelW, cancelReq)
+	newOperationMux(app).ServeHTTP(cancelW, cancelReq)
 	elapsed := time.Since(start)
 
 	if cancelW.Code != http.StatusOK {

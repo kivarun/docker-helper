@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -128,3 +129,12 @@ func newTestStagedContext(t *testing.T, dfrel string, removeAll func(string) err
 // sentinelCleanupErr is a sentinel error used in tests to verify that
 // cleanup errors are propagated correctly.
 var sentinelCleanupErr = errors.New("injected cleanup error")
+
+// newOperationMux creates a mux with the operation routes registered for testing.
+func newOperationMux(app *App) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
+	mux.HandleFunc("GET /operations/{id}/logs", app.handleOperationLogs)
+	mux.HandleFunc("POST /operations/{id}/cancel", app.handleOperationCancel)
+	return mux
+}

@@ -14,8 +14,6 @@ import (
 	"time"
 )
 
-var ErrInternal = errors.New("internal error")
-
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSession(w, r)
 	if !ok {
@@ -33,14 +31,6 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
 	if err != nil {
-		if errors.Is(err, ErrInternal) {
-			opLog(ctx).Error("build validation error",
-				slog.String("operation", "build_validate"),
-				slog.String("error", err.Error()),
-			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-			return
-		}
 		writeError(ctx, w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
 		return
 	}
@@ -235,25 +225,6 @@ func (a *App) operationForSession(sessionID, operationID string) *operation {
 	return op
 }
 
-// operationIDFromRequest extracts the operation ID from the request.
-// It prefers r.PathValue("id") when set by the ServeMux, and falls back
-// to parsing the URL path for direct handler invocations in tests.
-func operationIDFromRequest(r *http.Request) string {
-	if id := r.PathValue("id"); id != "" {
-		return id
-	}
-	parts := strings.Split(r.URL.Path, "/")
-	if len(parts) >= 3 && parts[1] == "operations" && parts[2] != "" {
-		if len(parts) == 3 {
-			return parts[2]
-		}
-		if len(parts) == 4 && (parts[3] == "logs" || parts[3] == "cancel") {
-			return parts[2]
-		}
-	}
-	return ""
-}
-
 func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSession(w, r)
 	if !ok {
@@ -261,7 +232,7 @@ func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := withSessionID(r.Context(), session.ID)
-	opID := operationIDFromRequest(r)
+	opID := r.PathValue("id")
 
 	op := a.operationForSession(session.ID, opID)
 	if op == nil {
@@ -298,7 +269,7 @@ func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := withSessionID(r.Context(), session.ID)
-	opID := operationIDFromRequest(r)
+	opID := r.PathValue("id")
 
 	op := a.operationForSession(session.ID, opID)
 	if op == nil {
@@ -347,7 +318,7 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := withSessionID(r.Context(), session.ID)
-	opID := operationIDFromRequest(r)
+	opID := r.PathValue("id")
 
 	op := a.operationForSession(session.ID, opID)
 	if op == nil {

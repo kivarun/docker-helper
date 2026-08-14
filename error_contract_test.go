@@ -325,10 +325,9 @@ func TestErrorContractDockerBuildFailed(t *testing.T) {
 
 	// Check operation status for failure.
 	opReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID, nil)
-	opReq.SetPathValue("id", opID)
 	opReq.Header.Set("Authorization", "Bearer "+result.Token)
 	opW := httptest.NewRecorder()
-	app.handleOperationStatus(opW, opReq)
+	newOperationMux(app).ServeHTTP(opW, opReq)
 
 	if opW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation status, got %d, body: %s", opW.Code, opW.Body.String())
@@ -350,10 +349,9 @@ func TestErrorContractDockerBuildFailed(t *testing.T) {
 
 	// Check logs contain build output.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
@@ -451,10 +449,9 @@ func TestErrorContractDockerRunFailed(t *testing.T) {
 
 	// Check logs contain run output.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
@@ -730,10 +727,9 @@ func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 
 	// Check logs contain output.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
@@ -1097,10 +1093,9 @@ func TestDockerErrorLogBuild(t *testing.T) {
 
 	// Check operation status for failure.
 	opReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID, nil)
-	opReq.SetPathValue("id", opID)
 	opReq.Header.Set("Authorization", "Bearer "+result.Token)
 	opW := httptest.NewRecorder()
-	app.handleOperationStatus(opW, opReq)
+	newOperationMux(app).ServeHTTP(opW, opReq)
 
 	if opW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation status, got %d", opW.Code)
@@ -1116,10 +1111,9 @@ func TestDockerErrorLogBuild(t *testing.T) {
 
 	// Check logs contain build output.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
@@ -1253,10 +1247,9 @@ func TestDockerErrorLogRun(t *testing.T) {
 
 	// Check operation status for failure.
 	opReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID, nil)
-	opReq.SetPathValue("id", opID)
 	opReq.Header.Set("Authorization", "Bearer "+result.Token)
 	opW := httptest.NewRecorder()
-	app.handleOperationStatus(opW, opReq)
+	newOperationMux(app).ServeHTTP(opW, opReq)
 
 	if opW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation status, got %d", opW.Code)
@@ -1272,10 +1265,9 @@ func TestDockerErrorLogRun(t *testing.T) {
 
 	// Check logs contain run output.
 	logsReq := httptest.NewRequest(http.MethodGet, "/operations/"+opID+"/logs", nil)
-	logsReq.SetPathValue("id", opID)
 	logsReq.Header.Set("Authorization", "Bearer "+result.Token)
 	logsW := httptest.NewRecorder()
-	app.handleOperationLogs(logsW, logsReq)
+	newOperationMux(app).ServeHTTP(logsW, logsReq)
 
 	if logsW.Code != http.StatusOK {
 		t.Fatalf("expected 200 from operation logs, got %d", logsW.Code)
