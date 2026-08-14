@@ -165,6 +165,15 @@ func stageBuildContextInternal(
 	if err := os.MkdirAll(filepath.Dir(opDir), 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create parent directories: %w", err)
 	}
+
+	// Reject if opDir path already exists (including symlinks).
+	if info, err := os.Lstat(opDir); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("operation directory is a symlink: %s", opDir)
+		}
+		return nil, fmt.Errorf("operation directory already exists: %s", opDir)
+	}
+
 	if err := os.Mkdir(opDir, 0o700); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("operation directory already exists: %s", opDir)
@@ -187,7 +196,7 @@ func stageBuildContextInternal(
 
 	hardlinkMap := make(map[devIno]string)
 
-	err = walkAndCopy(ctx, sourceFD, stagingFD, hardlinkMap, hooks)
+	err = walkAndCopy(ctx, sourceFD, stagingFD, stagingFD, "", hardlinkMap, hooks)
 	unix.Close(stagingFD)
 	if err != nil {
 		os.RemoveAll(opDir)
@@ -238,7 +247,7 @@ type devIno struct {
 	ino uint64
 }
 
-func walkAndCopy(ctx context.Context, sourceFD int, stagingFD int, hardlinkMap map[devIno]string, hooks *stagingHooks) error {
+func walkAndCopy(ctx context.Context, sourceFD int, stagingRootFD int, stagingFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -257,7 +266,7 @@ func walkAndCopy(ctx context.Context, sourceFD int, stagingFD int, hardlinkMap m
 		default:
 		}
 
-		if err := copyEntry(ctx, sourceFD, entry.name, stagingFD, hardlinkMap, hooks); err != nil {
+		if err := copyEntry(ctx, sourceFD, entry.name, stagingRootFD, stagingFD, relPrefix, hardlinkMap, hooks); err != nil {
 			return err
 		}
 	}
@@ -325,7 +334,7 @@ func readDirectoryEntries(fd int) ([]dirEntry, error) {
 	return entries, nil
 }
 
-func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingDirFD int, hardlinkMap map[devIno]string, hooks *stagingHooks) error {
+func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingRootFD int, stagingDirFD int, relPrefix string, hardlinkMap map[devIno]string, hooks *stagingHooks) error {
 	oPathFD, err := unix.Openat(sourceDirFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return fmt.Errorf("cannot O_PATH open %s: %w", name, err)
@@ -372,7 +381,7 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingDirFD i
 		di := devIno{dev: st.Dev, ino: st.Ino}
 		if relPath, ok := hardlinkMap[di]; ok {
 			unix.Close(oPathFD)
-			if err := unix.Linkat(stagingDirFD, relPath, stagingDirFD, name, 0); err != nil {
+			if err := unix.Linkat(stagingRootFD, relPath, stagingDirFD, name, 0); err != nil {
 				return fmt.Errorf("cannot create hardlink %s: %w", name, err)
 			}
 			return nil
@@ -421,18 +430,14 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingDirFD i
 		unix.Close(readFD)
 		unix.Close(createFD)
 
-		chmodFD, _ := unix.Openat(stagingDirFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if chmodFD >= 0 {
-			unix.Fchmod(chmodFD, uint32(st.Mode&0o7777))
-			unix.Close(chmodFD)
-		}
+		unix.Fchmodat(stagingDirFD, name, uint32(st.Mode&0o7777), 0)
 
 		if err := setTimesFromStat(stagingDirFD, name, &st); err != nil {
 			unix.Unlinkat(stagingDirFD, name, 0)
 			return fmt.Errorf("cannot set file times %s: %w", name, err)
 		}
 
-		hardlinkMap[di] = name
+		hardlinkMap[di] = filepath.Join(relPrefix, name)
 
 		if hooks != nil && hooks.afterCreateDest != nil {
 			if err := hooks.afterCreateDest(name); err != nil {
@@ -485,7 +490,7 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingDirFD i
 			return fmt.Errorf("cannot open destination directory %s: %w", name, err)
 		}
 
-		err = walkAndCopy(ctx, sourceReadFD, destFD, hardlinkMap, hooks)
+		err = walkAndCopy(ctx, sourceReadFD, stagingRootFD, destFD, filepath.Join(relPrefix, name), hardlinkMap, hooks)
 		unix.Close(sourceReadFD)
 		unix.Close(destFD)
 
@@ -494,11 +499,7 @@ func copyEntry(ctx context.Context, sourceDirFD int, name string, stagingDirFD i
 			return fmt.Errorf("cannot copy directory %s: %w", name, err)
 		}
 
-		chmodFD, _ := unix.Openat(stagingDirFD, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if chmodFD >= 0 {
-			unix.Fchmod(chmodFD, uint32(st.Mode&0o7777))
-			unix.Close(chmodFD)
-		}
+		unix.Fchmodat(stagingDirFD, name, uint32(st.Mode&0o7777), 0)
 
 		if err := setTimesFromStat(stagingDirFD, name, &st); err != nil {
 			unix.Unlinkat(stagingDirFD, name, unix.AT_REMOVEDIR)
