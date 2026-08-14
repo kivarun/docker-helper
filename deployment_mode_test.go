@@ -207,7 +207,8 @@ func TestDOCKER_HELPER_CONFIGOverride(t *testing.T) {
 
 func TestModeCannotBeConfigured(t *testing.T) {
 	// "mode" is read-only and should be rejected in config.json.
-	if !isReadOnlyField("mode") {
+	spec, ok := lookupConfigField("mode")
+	if !ok || spec.writable {
 		t.Error("mode should be read-only")
 	}
 }

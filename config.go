@@ -95,6 +95,61 @@ func ptrOf[T any](v T) *T {
 	return &v
 }
 
+type configFieldSpec struct {
+	name     string
+	writable bool
+	required bool
+}
+
+var configFields = []configFieldSpec{
+	{name: "allowed_root", writable: true, required: true},
+	{name: "session_ttl", writable: true, required: true},
+	{name: "log_level", writable: true},
+	{name: "audit_enabled", writable: true},
+	{name: "shutdown_timeout", writable: true},
+	{name: "operation_retention_ttl", writable: true},
+	{name: "operation_max_completed", writable: true},
+	{name: "operation_log_max_bytes", writable: true},
+	{name: "trusted_ca_path", writable: true},
+	{name: "trusted_ca_injection", writable: true},
+	{name: "http_address", writable: true},
+	{name: "audit_enabled_source"},
+	{name: "config_path"},
+	{name: "config_dir"},
+	{name: "runtime_dir"},
+	{name: "socket_path"},
+	{name: "lock_path"},
+	{name: "state_dir"},
+	{name: "database_path"},
+	{name: "admin_token_path"},
+	{name: "admin_token"},
+	{name: "mode"},
+}
+
+func lookupConfigField(name string) (configFieldSpec, bool) {
+	for _, f := range configFields {
+		if f.name == name {
+			return f, true
+		}
+	}
+	return configFieldSpec{}, false
+}
+
+func isKnownField(name string) bool {
+	_, ok := lookupConfigField(name)
+	return ok
+}
+
+func isReadOnlyField(name string) bool {
+	f, ok := lookupConfigField(name)
+	return ok && !f.writable
+}
+
+func isRequiredField(name string) bool {
+	f, ok := lookupConfigField(name)
+	return ok && f.required
+}
+
 // deprecatedConfigFields were renamed and must not appear in config.json.
 // The map value is the new field name for the diagnostic message.
 var deprecatedConfigFields = map[string]string{

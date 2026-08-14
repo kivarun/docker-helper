@@ -2027,9 +2027,9 @@ func TestConfigShowHelp(t *testing.T) {
 	}
 
 	// Check all fields from the authoritative registry are listed
-	for _, field := range allFieldNames() {
-		if !strings.Contains(out, field) {
-			t.Errorf("help should list field %q", field)
+	for _, f := range configFields {
+		if !strings.Contains(out, f.name) {
+			t.Errorf("help should list field %q", f.name)
 		}
 	}
 }
@@ -2045,9 +2045,9 @@ func TestConfigSetHelp(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, field := range writableFieldNames() {
-		if !strings.Contains(out, field) {
-			t.Errorf("help should list writable field %q", field)
+	for _, f := range configFields {
+		if f.writable && !strings.Contains(out, f.name) {
+			t.Errorf("help should list writable field %q", f.name)
 		}
 	}
 	if !strings.Contains(out, "absolute path") {
@@ -2201,7 +2201,8 @@ func TestConfigFieldRegistryInvariants(t *testing.T) {
 	}
 
 	// http_address is registered as writable.
-	if !isWritableField("http_address") {
+	spec, ok := lookupConfigField("http_address")
+	if !ok || !spec.writable {
 		t.Error("http_address must be writable")
 	}
 }
