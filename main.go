@@ -56,15 +56,6 @@ func acquireLock(path string) (*os.File, error) {
 	return f, nil
 }
 
-// prepareListener checks the socket path and creates a Unix listener.
-// The caller must hold the lock when calling this function.
-// Returns the listener, a flag indicating whether the socket was created
-// by this call (true means the caller should clean it up on shutdown),
-// and an error if any.
-func prepareListener(socketPath string) (net.Listener, bool, error) {
-	return safePrepareUnixListener(socketPath, 0600)
-}
-
 // dialUnixFunc is the dial function used to probe a Unix socket.
 // It can be replaced in tests to simulate specific dial errors.
 var dialUnixFunc = func(addr string, timeout time.Duration) (net.Conn, error) {
@@ -103,84 +94,7 @@ func runWithLock(lockPath string, fn func() error) error {
 	return fn()
 }
 
-// serveWithShutdown runs server.Serve(listener) in a background goroutine and
-// waits for either signalCtx cancellation (graceful shutdown) or a Serve error.
-// On either path it invokes onShutdown (if non-nil), creates a shutdown
-// context with the given timeout, and starts server.Shutdown in a goroutine
-// to drain in-flight HTTP connections.
-// Returns the shutdown context, its cancel func, a drain-done channel that
-// carries the drain result (nil on success, timeout error on deadline expiry),
-// and the original Serve error (non-nil only when Serve returned an error
-// without a shutdown signal).
-// The caller runs operation termination concurrently, then waits for drain.
-// The caller must call shutdownCancel() after both terminateAll and drain complete.
-// The callback in runWithLock must not return until drain completes so the
-// lock stays held during the entire drain.
-func serveWithShutdown(
-	signalCtx context.Context,
-	server *http.Server,
-	listener net.Listener,
-	timeout time.Duration,
-	onShutdown func(),
-) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error, err error) {
-	serveDone := make(chan error, 1)
-	go func() {
-		serveDone <- server.Serve(listener)
-	}()
-
-	drainDoneCh := make(chan error, 1)
-
-	// startShutdown closes the operation gate, starts HTTP drain, and
-	// sends the drain result to drainDoneCh.
-	// serveErr is the Serve error if Serve already returned, or nil if
-	// Serve is still running (signal path).
-	startShutdown := func(serveErr error) {
-		if onShutdown != nil {
-			onShutdown()
-		}
-		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
-
-		// Start HTTP drain in background; caller runs operation termination
-		// concurrently, then waits for drain to complete.
-		go func() {
-			shutdownErr := server.Shutdown(shutdownCtx)
-			var drainErr error
-			if shutdownErr == context.DeadlineExceeded {
-				server.Close()
-				drainErr = fmt.Errorf("graceful shutdown timeout after %v", timeout)
-			} else if shutdownErr != nil {
-				drainErr = shutdownErr
-			}
-			// Drain serveDone to avoid leaking the goroutine.
-			// If serveErr is non-nil, Serve already returned and we consumed
-			// the value; skip the receive in that case.
-			if serveErr == nil {
-				<-serveDone
-			}
-			drainDoneCh <- drainErr
-		}()
-	}
-
-	select {
-	case <-signalCtx.Done():
-		// Signal received — start graceful shutdown.
-		startShutdown(nil)
-		drainDone = drainDoneCh
-		return
-
-	case serveErr := <-serveDone:
-		// Serve returned an error without a shutdown signal.
-		// Start the same graceful shutdown sequence so that the operation
-		// gate is closed and in-flight HTTP connections are drained before
-		// the lock, listener, and socket are released.
-		startShutdown(serveErr)
-		drainDone = drainDoneCh
-		err = serveErr
-		return
-	}
-}
-
-// serveWithShutdownMulti is like serveWithShutdown but handles both Unix and TCP listeners.
+// serveWithShutdownMulti handles both Unix and TCP listeners.
 // In user mode, tcpListener is nil and only unixListener is served.
 // In system mode, both listeners are served concurrently.
 // A signal or error on ANY listener triggers shutdown of all.

@@ -51,7 +51,7 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	signalCtx, signalCancel := context.WithCancel(context.Background())
 	defer signalCancel()
 
-	// Start serveWithShutdown in a goroutine so we can close the listener
+	// Start serveWithShutdownMulti in a goroutine so we can close the listener
 	// to trigger the Serve error path.
 	type result struct {
 		shutdownCtx    context.Context
@@ -62,7 +62,7 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	resultCh := make(chan result, 1)
 
 	go func() {
-		sc, scancel, dd, e := serveWithShutdown(signalCtx, server, listener, 3*time.Second, func() {
+		sc, scancel, dd, e := serveWithShutdownMulti(signalCtx, server, listener, nil, 3*time.Second, func() {
 			callbackCalled.Store(true)
 			reg.setShuttingDown()
 		})
@@ -91,7 +91,7 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	// Close the listener to force Serve() to return an error.
 	listener.Close()
 
-	// Collect the result from serveWithShutdown.
+	// Collect the result from serveWithShutdownMulti.
 	res := <-resultCh
 
 	// Verify the Serve error was returned.

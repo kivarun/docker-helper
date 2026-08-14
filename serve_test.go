@@ -100,7 +100,7 @@ func TestLockReacquireAfterRelease(t *testing.T) {
 	f2.Close()
 }
 
-func TestPrepareListenerStaleSocket(t *testing.T) {
+func TestPrepareListenersStaleSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -120,13 +120,13 @@ func TestPrepareListenerStaleSocket(t *testing.T) {
 		t.Fatal("stale socket should still exist on disk after Close")
 	}
 
-	listener, created, err := prepareListener(socketPath)
+	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
 	if err != nil {
-		t.Fatalf("prepareListener() error: %v", err)
+		t.Fatalf("prepareListeners() error: %v", err)
 	}
-	defer listener.Close()
-	if !created {
-		t.Error("should report socket created")
+	defer unixListener.Close()
+	if tcpListener != nil {
+		t.Error("TCP listener should be nil in user mode")
 	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -134,7 +134,7 @@ func TestPrepareListenerStaleSocket(t *testing.T) {
 	}
 }
 
-func TestPrepareListenerLiveSocket(t *testing.T) {
+func TestPrepareListenersLiveSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -144,12 +144,15 @@ func TestPrepareListenerLiveSocket(t *testing.T) {
 	}
 	defer listener.Close()
 
-	_, created, err := prepareListener(socketPath)
+	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket has a live listener")
 	}
-	if created {
-		t.Error("should not report socket created when live socket exists")
+	if unixListener != nil {
+		t.Error("Unix listener should be nil on error")
+	}
+	if tcpListener != nil {
+		t.Error("TCP listener should be nil on error")
 	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -157,7 +160,7 @@ func TestPrepareListenerLiveSocket(t *testing.T) {
 	}
 }
 
-func TestPrepareListenerRegularFile(t *testing.T) {
+func TestPrepareListenersRegularFile(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -165,12 +168,15 @@ func TestPrepareListenerRegularFile(t *testing.T) {
 		t.Fatalf("cannot create file: %v", err)
 	}
 
-	_, created, err := prepareListener(socketPath)
+	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket path is a regular file")
 	}
-	if created {
-		t.Error("should not report socket created for regular file")
+	if unixListener != nil {
+		t.Error("Unix listener should be nil on error")
+	}
+	if tcpListener != nil {
+		t.Error("TCP listener should be nil on error")
 	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -178,7 +184,7 @@ func TestPrepareListenerRegularFile(t *testing.T) {
 	}
 }
 
-func TestPrepareListenerDirectory(t *testing.T) {
+func TestPrepareListenersDirectory(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -186,26 +192,29 @@ func TestPrepareListenerDirectory(t *testing.T) {
 		t.Fatalf("cannot create directory: %v", err)
 	}
 
-	_, created, err := prepareListener(socketPath)
+	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
 		t.Fatal("expected error when socket path is a directory")
 	}
-	if created {
-		t.Error("should not report socket created for directory")
+	if unixListener != nil {
+		t.Error("Unix listener should be nil on error")
+	}
+	if tcpListener != nil {
+		t.Error("TCP listener should be nil on error")
 	}
 }
 
-func TestPrepareListenerNewSocket(t *testing.T) {
+func TestPrepareListenersNewSocket(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
-	listener, created, err := prepareListener(socketPath)
+	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
 	if err != nil {
-		t.Fatalf("prepareListener() error: %v", err)
+		t.Fatalf("prepareListeners() error: %v", err)
 	}
-	defer listener.Close()
-	if !created {
-		t.Error("should report socket created")
+	defer unixListener.Close()
+	if tcpListener != nil {
+		t.Error("TCP listener should be nil in user mode")
 	}
 
 	info, err := os.Stat(socketPath)
@@ -324,7 +333,7 @@ func TestCheckSocketUnknownError(t *testing.T) {
 	}
 }
 
-func TestPrepareListenerUnknownDialError(t *testing.T) {
+func TestPrepareListenersUnknownDialError(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -346,12 +355,15 @@ func TestPrepareListenerUnknownDialError(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected failure")}
 	}
 
-	_, created, err := prepareListener(socketPath)
+	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
 	if err == nil {
-		t.Fatal("expected error from prepareListener on unknown dial error")
+		t.Fatal("expected error from prepareListeners on unknown dial error")
 	}
-	if created {
-		t.Error("should not report socket created on unknown dial error")
+	if unixListener != nil {
+		t.Error("Unix listener should be nil on error")
+	}
+	if tcpListener != nil {
+		t.Error("TCP listener should be nil on error")
 	}
 
 	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
@@ -382,13 +394,13 @@ func TestSocketDisappearsDuringCheck(t *testing.T) {
 		return nil, &net.OpError{Op: "dial", Net: "unix", Err: errors.New("unexpected")}
 	}
 
-	listener, created, err := prepareListener(socketPath)
+	unixListener, tcpListener, err := prepareListeners(ModeUser, socketPath, "")
 	if err != nil {
-		t.Fatalf("prepareListener: %v", err)
+		t.Fatalf("prepareListeners: %v", err)
 	}
-	defer listener.Close()
-	if !created {
-		t.Error("should report socket created")
+	defer unixListener.Close()
+	if tcpListener != nil {
+		t.Error("TCP listener should be nil in user mode")
 	}
 }
 
@@ -453,7 +465,7 @@ func TestCallbackReturnCleansSocket(t *testing.T) {
 	lockFile.Close()
 }
 
-// prepareListener error inside runWithLock: callback not called, lock released,
+// Listener creation error inside runWithLock: callback called, lock released,
 // regular file untouched (content, size, mode), lock file remains.
 func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 	dir := t.TempDir()
@@ -682,7 +694,7 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainCh, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
+		_, shutdownCancel, drainCh, serveDoneErr := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
 		<-drainCh
 		shutdownCancel()
 		serveDone <- serveDoneErr
@@ -693,7 +705,7 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	err = <-serveDone
 	if err != nil {
-		t.Fatalf("serveWithShutdown: %v", err)
+		t.Fatalf("serveWithShutdownMulti: %v", err)
 	}
 
 	// New connection must fail.
@@ -721,7 +733,7 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 			}
 			defer listener.Close()
 			defer os.Remove(socketPath)
-			_, shutdownCancel, drainCh, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
+			_, shutdownCancel, drainCh, err := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
 			<-drainCh
 			shutdownCancel()
 			return err
@@ -733,7 +745,7 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 
 	err := <-serveDone
 	if err != nil {
-		t.Fatalf("first serveWithShutdown: %v", err)
+		t.Fatalf("first serveWithShutdownMulti: %v", err)
 	}
 
 	// Subsequent startup must work.
@@ -763,7 +775,7 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainCh, serveDoneErr := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
+		_, shutdownCancel, drainCh, serveDoneErr := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
 		<-drainCh
 		shutdownCancel()
 		serveDone <- serveDoneErr
@@ -774,7 +786,7 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	err = <-serveDone
 	if err == nil {
-		t.Fatal("expected error from serveWithShutdown when listener is closed")
+		t.Fatal("expected error from serveWithShutdownMulti when listener is closed")
 	}
 }
 
@@ -817,7 +829,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 			defer listener.Close()
 			defer os.Remove(socketPath)
 			close(listenerReady)
-			_, shutdownCancel, drainCh, err := serveWithShutdown(signalCtx, server, listener, 30*time.Second, nil)
+			_, shutdownCancel, drainCh, err := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
 			<-drainCh
 			shutdownCancel()
 			return err
@@ -953,7 +965,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 	}
 }
 
-// When the shutdown deadline expires, serveWithShutdown forces server.Close()
+// When the shutdown deadline expires, serveWithShutdownMulti forces server.Close()
 // and the drain goroutine completes.
 func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	dir := t.TempDir()
@@ -987,7 +999,7 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 
 	go func() {
 		defer close(serverDone)
-		_, shutdownCancel, drainCh, _ := serveWithShutdown(signalCtx, server, listener, shutdownTimeout, nil)
+		_, shutdownCancel, drainCh, _ := serveWithShutdownMulti(signalCtx, server, listener, nil, shutdownTimeout, nil)
 		drainErr = <-drainCh
 		shutdownCancel()
 	}()
@@ -1050,11 +1062,11 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	// Initiate shutdown — Shutdown will hit its deadline, then server.Close().
 	signalCancel()
 
-	// Wait for serveWithShutdown + drain to return.
+	// Wait for serveWithShutdownMulti + drain to return.
 	select {
 	case <-serverDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveWithShutdown did not return")
+		t.Fatal("serveWithShutdownMulti did not return")
 	}
 
 	// Force-close may not cancel in-flight request contexts reliably.
