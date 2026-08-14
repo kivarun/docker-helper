@@ -219,6 +219,48 @@ func TestPrintSessionsTableNoToken(t *testing.T) {
 	}
 }
 
+func TestPrintSessionsTablePrincipal(t *testing.T) {
+	principal := "alice"
+	sessions := []sessionJSON{
+		{ID: "dhs_001", PrincipalName: &principal, Workspace: "/home/alice/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
+		{ID: "dhs_002", PrincipalName: nil, Workspace: "/home/user/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
+	}
+
+	var buf strings.Builder
+	printSessionsTable(&buf, sessions)
+
+	output := buf.String()
+
+	// PRINCIPAL header must be present.
+	if !strings.Contains(output, "PRINCIPAL") {
+		t.Errorf("expected PRINCIPAL header in output: %s", output)
+	}
+
+	// Principal name must appear for principal-owned session.
+	if !strings.Contains(output, "alice") {
+		t.Errorf("expected 'alice' in output: %s", output)
+	}
+
+	// Dash must appear for legacy session with nil principal.
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected at least 3 lines, got %d: %s", len(lines), output)
+	}
+
+	// Second data row should contain "-" for the principal column.
+	secondRow := lines[2]
+	if !strings.Contains(secondRow, "dhs_002") {
+		t.Errorf("expected dhs_002 in second row: %s", secondRow)
+	}
+	fields := strings.Fields(secondRow)
+	if len(fields) < 2 {
+		t.Fatalf("expected at least 2 fields in second row: %s", secondRow)
+	}
+	if fields[1] != "-" {
+		t.Errorf("expected '-' for legacy session principal, got %q: %s", fields[1], secondRow)
+	}
+}
+
 func TestSessionListJSONOutput(t *testing.T) {
 	socketPath := setupCLITestEnv(t)
 

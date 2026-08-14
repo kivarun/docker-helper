@@ -185,11 +185,15 @@ var sessionDeleteCommand = &Command{
 func printSessionsTable(w io.Writer, sessions []sessionJSON) {
 	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
 
-	fmt.Fprintln(tw, "ID\tWORKSPACE\tCREATED\tEXPIRES")
+	fmt.Fprintln(tw, "ID\tPRINCIPAL\tWORKSPACE\tCREATED\tEXPIRES")
 
 	for _, s := range sessions {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			s.ID, s.Workspace, s.CreatedAt, s.ExpiresAt)
+		principal := "-"
+		if s.PrincipalName != nil {
+			principal = *s.PrincipalName
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			s.ID, principal, s.Workspace, s.CreatedAt, s.ExpiresAt)
 	}
 
 	tw.Flush()
