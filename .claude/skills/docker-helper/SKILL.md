@@ -68,11 +68,20 @@ If `DOCKER_HELPER_SOCKET_PATH` is set, use that socket path instead.
 
 Both interfaces share the same path semantics. Define once, apply everywhere.
 
-- **Mount sources** and **build contexts** are relative to the Docker Helper
-  session workspace, never absolute agent-container paths like `/workspace/...`.
+- **Build contexts** are always relative to the session workspace.
+- **Mount sources** are never agent-container absolute paths such as
+  `/workspace/...`. The accepted source depends on deployment mode:
+  - in **user mode**, only the workspace root source `.` is accepted;
+  - in **system mode**, a workspace-relative file or subdirectory source
+    is accepted;
+  - if the deployment mode is not explicitly known, use `.` as the portable
+    mount source.
 - **Mount targets** are absolute paths inside the launched container.
 - **`--workdir`** / **`workdir`** is an absolute path inside the launched
   container.
+
+Do not call operator commands such as `config show mode` to discover the
+deployment mode.
 
 ### Trusted CA injection
 
@@ -155,6 +164,15 @@ Optional workspace mounts:
 ```bash
 docker-helper run \
   --image IMAGE \
+  --mount .:/workspace \
+  -- command arg...
+```
+
+System-mode-only: mount a workspace-relative file or subdirectory:
+
+```bash
+docker-helper run \
+  --image IMAGE \
   --mount relative/source:/container/path \
   -- command arg...
 ```
@@ -164,7 +182,7 @@ Read-only mount:
 ```bash
 docker-helper run \
   --image IMAGE \
-  --mount relative/source:/container/path:ro \
+  --mount .:/workspace:ro \
   -- command arg...
 ```
 
@@ -283,13 +301,23 @@ curl --silent --show-error \
 Useful request fields: `image`, `entrypoint`, `command`, `workdir`,
 `environment`, `mounts`, `shm_size`.
 
-Example mount:
+Example mount (portable — works in both user and system mode):
 
 ```json
 {
   "source": ".",
   "target": "/workspace",
   "read_only": true
+}
+```
+
+Example mount (system-mode-only — relative subdirectory):
+
+```json
+{
+  "source": "src",
+  "target": "/workspace/src",
+  "read_only": false
 }
 ```
 
@@ -348,6 +376,24 @@ When Docker Helper rejects or fails an operation:
   and operation logs;
 - correct the request when appropriate;
 - do not bypass Docker Helper by invoking Docker directly.
+
+## Transport failure vs. API rejection
+
+Any HTTP response from Docker Helper proves that the daemon was reached.
+Do not describe Docker Helper as unavailable after an HTTP response.
+
+- **HTTP 4xx** with a structured error `code` means the daemon responded and
+  rejected the request due to authentication, validation, or policy. This is
+  not evidence that the daemon is down.
+- **`invalid_mount`** specifically means the mount specification or mount
+  policy was rejected. After this error, inspect the source, target, and
+  deployment-mode restrictions described in the Path model section, then
+  correct the request.
+- **Transport/connectivity failure** (e.g., inability to connect to the
+  configured Unix socket) is the only condition that indicates Docker Helper
+  is unavailable.
+
+Do not switch to direct Docker access after an API rejection.
 
 If the requested capability cannot be performed through the available
 Docker Helper interface, report that limitation to the user.

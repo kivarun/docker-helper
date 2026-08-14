@@ -18,7 +18,25 @@ directory entry cannot be replaced between validation and Docker mount.
 
 If the agent has write access to the workspace parent directory, the TOCTOU
 gap is exploitable. In that scenario, use system mode with `CAP_SYS_ADMIN`
-for inode-pinned mounts (future implementation).
+for inode-pinned mounts.
+
+## Mount policy by deployment mode
+
+- **User mode** permits only the workspace-root mount (`.`). Subdirectory
+  and file mounts are rejected as `invalid_mount`.
+- **System mode** permits workspace-relative sources and uses inode-pinned
+  mounts via `open_tree` + `move_mount`. Pinning requires Linux kernel
+  support and `CAP_SYS_ADMIN`; it fails closed when unavailable.
+
+## Error interpretation
+
+- Structured HTTP errors (HTTP 4xx with an error `code`) mean the daemon
+  responded. This is a request, authentication, or policy rejection, not
+  daemon unavailability.
+- `invalid_mount` is a request or policy failure — inspect the mount
+  specification and deployment-mode restrictions, then correct the request.
+- Docker Helper is only unavailable after an actual transport/connectivity
+  failure (e.g., cannot connect to the Unix socket).
 
 ## Client interfaces
 
