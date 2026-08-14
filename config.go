@@ -2,8 +2,6 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -433,14 +431,6 @@ func parseSessionTTL(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("session_ttl must be a positive duration")
 	}
 	return d, nil
-}
-
-func generateToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("cannot generate random bytes: %w", err)
-	}
-	return "dht_" + hex.EncodeToString(b), nil
 }
 
 func runInit(allowedRoot string, stdout, stderr io.Writer) error {

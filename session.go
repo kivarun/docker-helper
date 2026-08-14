@@ -126,11 +126,10 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 	}
 	sessionID := "dhs_" + hex.EncodeToString(idBytes)
 
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
+	token, err := generateToken()
+	if err != nil {
 		return nil, fmt.Errorf("cannot generate session token: %w: %w", err, ErrSystem)
 	}
-	token := "dht_" + hex.EncodeToString(tokenBytes)
 
 	tokenHash := sha256.Sum256([]byte(token))
 	tokenHashHex := hex.EncodeToString(tokenHash[:])
