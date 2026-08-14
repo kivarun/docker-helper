@@ -1118,3 +1118,335 @@ func TestTransportErrorNotApiError(t *testing.T) {
 		t.Errorf("expected 'request failed' in transport error, got: %v", err)
 	}
 }
+
+// ---------- principal/credential client methods ----------
+
+func TestPrincipalClientMethods(t *testing.T) {
+	tests := []struct {
+		name       string
+		call       func(*apiClient) error
+		wantMethod string
+		wantPath   string
+		body       string
+	}{
+		{
+			name:       "showPrincipal",
+			call:       func(c *apiClient) error { _, err := c.showPrincipal("alice"); return err },
+			wantMethod: "GET",
+			wantPath:   "/principals/alice",
+		},
+		{
+			name:       "showPrincipalEscaped",
+			call:       func(c *apiClient) error { _, err := c.showPrincipal("ali/ce"); return err },
+			wantMethod: "GET",
+			wantPath:   "/principals/ali%2Fce",
+		},
+		{
+			name:       "listPrincipalCredentials",
+			call:       func(c *apiClient) error { _, err := c.listPrincipalCredentials("alice"); return err },
+			wantMethod: "GET",
+			wantPath:   "/principals/alice/credentials",
+		},
+		{
+			name:       "revokeCredential",
+			call:       func(c *apiClient) error { _, err := c.revokeCredential("dhcr_abc"); return err },
+			wantMethod: "POST",
+			wantPath:   "/credentials/dhcr_abc/revoke",
+		},
+		{
+			name:       "revokeCredentialEscaped",
+			call:       func(c *apiClient) error { _, err := c.revokeCredential("dhcr_a/bc"); return err },
+			wantMethod: "POST",
+			wantPath:   "/credentials/dhcr_a%2Fbc/revoke",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			socketPath := filepath.Join(dir, "test.sock")
+			tokenPath := filepath.Join(dir, "admin.token")
+
+			if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+				t.Fatalf("write token: %v", err)
+			}
+
+			var gotMethod, gotRequestURI string
+			startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				gotRequestURI = r.RequestURI
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, `{"ok":true}`)
+			})
+
+			client := newUnixAPIClient(socketPath, func() (string, error) {
+				return readAdminTokenPlain(tokenPath)
+			}, nil)
+
+			if err := tt.call(client); err != nil {
+				t.Fatalf("call error: %v", err)
+			}
+
+			if gotMethod != tt.wantMethod {
+				t.Errorf("method = %q, want %q", gotMethod, tt.wantMethod)
+			}
+			if gotRequestURI != tt.wantPath {
+				t.Errorf("RequestURI = %q, want %q", gotRequestURI, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestPrincipalClientMethodsBody(t *testing.T) {
+	tests := []struct {
+		name       string
+		call       func(*apiClient) error
+		wantMethod string
+		wantPath   string
+		wantBody   string
+	}{
+		{
+			name:       "createPrincipal",
+			call:       func(c *apiClient) error { _, err := c.createPrincipal("bob"); return err },
+			wantMethod: "POST",
+			wantPath:   "/principals",
+			wantBody:   `{"username":"bob"}`,
+		},
+		{
+			name:       "setPrincipalEnabled",
+			call:       func(c *apiClient) error { _, err := c.setPrincipalEnabled("bob", false); return err },
+			wantMethod: "PATCH",
+			wantPath:   "/principals/bob",
+			wantBody:   `{"enabled":false}`,
+		},
+		{
+			name:       "setPrincipalEnabledEscaped",
+			call:       func(c *apiClient) error { _, err := c.setPrincipalEnabled("bo/b", true); return err },
+			wantMethod: "PATCH",
+			wantPath:   "/principals/bo%2Fb",
+			wantBody:   `{"enabled":true}`,
+		},
+		{
+			name:       "addPrincipalAllowedRoot",
+			call:       func(c *apiClient) error { _, err := c.addPrincipalAllowedRoot("bob", "/data"); return err },
+			wantMethod: "POST",
+			wantPath:   "/principals/bob/allowed-roots",
+			wantBody:   `{"path":"/data"}`,
+		},
+		{
+			name:       "removePrincipalAllowedRoot",
+			call:       func(c *apiClient) error { _, err := c.removePrincipalAllowedRoot("bob", "/data"); return err },
+			wantMethod: "DELETE",
+			wantPath:   "/principals/bob/allowed-roots",
+			wantBody:   `{"path":"/data"}`,
+		},
+		{
+			name:       "createPrincipalCredential",
+			call:       func(c *apiClient) error { _, err := c.createPrincipalCredential("bob", "laptop"); return err },
+			wantMethod: "POST",
+			wantPath:   "/principals/bob/credentials",
+			wantBody:   `{"name":"laptop"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			socketPath := filepath.Join(dir, "test.sock")
+			tokenPath := filepath.Join(dir, "admin.token")
+
+			if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+				t.Fatalf("write token: %v", err)
+			}
+
+			var gotMethod, gotRequestURI, gotBody string
+			startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+				gotMethod = r.Method
+				gotRequestURI = r.RequestURI
+				buf := new(strings.Builder)
+				io.Copy(buf, r.Body)
+				gotBody = buf.String()
+				r.Body.Close()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprint(w, `{"ok":true}`)
+			})
+
+			client := newUnixAPIClient(socketPath, func() (string, error) {
+				return readAdminTokenPlain(tokenPath)
+			}, nil)
+
+			if err := tt.call(client); err != nil {
+				t.Fatalf("call error: %v", err)
+			}
+
+			if gotMethod != tt.wantMethod {
+				t.Errorf("method = %q, want %q", gotMethod, tt.wantMethod)
+			}
+			if gotRequestURI != tt.wantPath {
+				t.Errorf("RequestURI = %q, want %q", gotRequestURI, tt.wantPath)
+			}
+			if gotBody != tt.wantBody {
+				t.Errorf("body = %q, want %q", gotBody, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestPrincipalClientErrorIsApiError(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"code":    "principal_not_found",
+			"message": "principal not found",
+		})
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	_, err := client.showPrincipal("nonexistent")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *apiError, got %T: %v", err, err)
+	}
+	if apiErr.Status != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d", apiErr.Status)
+	}
+	if apiErr.Code != "principal_not_found" {
+		t.Errorf("expected code 'principal_not_found', got %q", apiErr.Code)
+	}
+}
+
+func TestCredentialClientErrorIsApiError(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"code":    "credential_not_found",
+			"message": "credential not found",
+		})
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	_, err := client.revokeCredential("dhcr_nonexistent")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var apiErr *apiError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *apiError, got %T: %v", err, err)
+	}
+	if apiErr.Code != "credential_not_found" {
+		t.Errorf("expected code 'credential_not_found', got %q", apiErr.Code)
+	}
+}
+
+func TestPrincipalClientResponseDecoding(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(principalResponse{
+			OK:           true,
+			Username:     "alice",
+			UID:          1001,
+			GID:          1001,
+			Home:         "/home/alice",
+			Enabled:      true,
+			AllowedRoots: []string{"/home/alice", "/shared"},
+		})
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	result, err := client.showPrincipal("alice")
+	if err != nil {
+		t.Fatalf("showPrincipal: %v", err)
+	}
+	if result.Username != "alice" {
+		t.Errorf("username = %q, want %q", result.Username, "alice")
+	}
+	if result.UID != 1001 {
+		t.Errorf("uid = %d, want 1001", result.UID)
+	}
+	if len(result.AllowedRoots) != 2 {
+		t.Errorf("expected 2 allowed roots, got %d", len(result.AllowedRoots))
+	}
+}
+
+func TestCredentialClientResponseDecoding(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+	tokenPath := filepath.Join(dir, "admin.token")
+
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+
+	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(createCredentialResponse{
+			OK: true,
+			Credential: credentialJSON{
+				ID:        "dhcr_abc123",
+				Principal: "alice",
+				Name:      "laptop",
+				CreatedAt: "2024-01-01T00:00:00Z",
+			},
+			Token: "dhc_secret123",
+		})
+	})
+
+	client := newUnixAPIClient(socketPath, func() (string, error) {
+		return readAdminTokenPlain(tokenPath)
+	}, nil)
+
+	result, err := client.createPrincipalCredential("alice", "laptop")
+	if err != nil {
+		t.Fatalf("createPrincipalCredential: %v", err)
+	}
+	if result.Credential.ID != "dhcr_abc123" {
+		t.Errorf("id = %q, want %q", result.Credential.ID, "dhcr_abc123")
+	}
+	if result.Token != "dhc_secret123" {
+		t.Errorf("token = %q, want %q", result.Token, "dhc_secret123")
+	}
+}

@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 )
 
 var principalCommand = &Command{
@@ -53,41 +51,9 @@ var principalCreateCommand = &Command{
 					return 1
 				}
 
-				body, err := json.Marshal(createPrincipalRequest{Username: username})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode request: %v\n", err)
-					return 1
-				}
-
-				resp, err := client.doAuthenticatedRequest("POST", "/principals", bytes.NewReader(body))
+				result, err := client.createPrincipal(username)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					switch resp.StatusCode {
-					case http.StatusConflict:
-						return 1
-					case http.StatusBadRequest:
-						return 1
-					default:
-						return 1
-					}
-				}
-
-				var result principalResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 
@@ -126,34 +92,15 @@ var principalShowCommand = &Command{
 					return 1
 				}
 
-				resp, err := client.doAuthenticatedRequest("GET", "/principals/"+username, nil)
+				result, err := client.showPrincipal(username)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					return 1
-				}
-
-				var result principalResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 
 				if len(args) == 2 {
 					field := args[1]
-					val, ok := extractPrincipalField(&result, field)
+					val, ok := extractPrincipalField(result, field)
 					if !ok {
 						fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 						return 1
@@ -237,34 +184,9 @@ var principalSetCommand = &Command{
 					return 1
 				}
 
-				body, err := json.Marshal(setPrincipalRequest{Enabled: &enabled})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode request: %v\n", err)
-					return 1
-				}
-
-				resp, err := client.doAuthenticatedRequest("PATCH", "/principals/"+username, bytes.NewReader(body))
+				result, err := client.setPrincipalEnabled(username, enabled)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					return 1
-				}
-
-				var result principalChangedResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 
@@ -311,34 +233,9 @@ var principalAllowedRootAddCommand = &Command{
 					return 1
 				}
 
-				body, err := json.Marshal(allowedRootRequest{Path: path})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode request: %v\n", err)
-					return 1
-				}
-
-				resp, err := client.doAuthenticatedRequest("POST", "/principals/"+username+"/allowed-roots", bytes.NewReader(body))
+				result, err := client.addPrincipalAllowedRoot(username, path)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					return 1
-				}
-
-				var result principalChangedResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 
@@ -376,34 +273,9 @@ var principalAllowedRootRemoveCommand = &Command{
 					return 1
 				}
 
-				body, err := json.Marshal(allowedRootRequest{Path: path})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode request: %v\n", err)
-					return 1
-				}
-
-				resp, err := client.doAuthenticatedRequest("DELETE", "/principals/"+username+"/allowed-roots", bytes.NewReader(body))
+				result, err := client.removePrincipalAllowedRoot(username, path)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					return 1
-				}
-
-				var result principalChangedResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 
@@ -452,34 +324,9 @@ var credentialCreateCommand = &Command{
 					return 1
 				}
 
-				body, err := json.Marshal(createCredentialRequest{Name: *name})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot encode request: %v\n", err)
-					return 1
-				}
-
-				resp, err := client.doAuthenticatedRequest("POST", "/principals/"+username+"/credentials", bytes.NewReader(body))
+				result, err := client.createPrincipalCredential(username, *name)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					return 1
-				}
-
-				var result createCredentialResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 
@@ -518,28 +365,9 @@ var credentialListCommand = &Command{
 					return 1
 				}
 
-				resp, err := client.doAuthenticatedRequest("GET", "/principals/"+username+"/credentials", nil)
+				result, err := client.listPrincipalCredentials(username)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					return 1
-				}
-
-				var result listCredentialsResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 
@@ -584,28 +412,9 @@ var credentialRevokeCommand = &Command{
 					return 1
 				}
 
-				resp, err := client.doAuthenticatedRequest("POST", "/credentials/"+id+"/revoke", nil)
+				result, err := client.revokeCredential(id)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				defer resp.Body.Close()
-
-				respBody, err := io.ReadAll(resp.Body)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: cannot read response: %v\n", err)
-					return 1
-				}
-
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					apiErr := parseApiError(resp.StatusCode, respBody)
-					fmt.Fprintf(stderr, "error: %v\n", apiErr)
-					return 1
-				}
-
-				var result revokeCredentialResponse
-				if err := json.Unmarshal(respBody, &result); err != nil {
-					fmt.Fprintf(stderr, "error: cannot decode response: %v\n", err)
 					return 1
 				}
 

@@ -394,3 +394,180 @@ func (c *apiClient) operationLogsCtx(ctx context.Context, opID string, offset in
 	}
 	return &result, nil
 }
+
+func (c *apiClient) createPrincipal(username string) (*principalResponse, error) {
+	body, err := json.Marshal(createPrincipalRequest{Username: username})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("POST", "/principals", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result principalResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) showPrincipal(username string) (*principalResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/principals/"+url.PathEscape(username), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result principalResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) setPrincipalEnabled(username string, enabled bool) (*principalChangedResponse, error) {
+	body, err := json.Marshal(setPrincipalRequest{Enabled: &enabled})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("PATCH", "/principals/"+url.PathEscape(username), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result principalChangedResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) addPrincipalAllowedRoot(username, path string) (*principalChangedResponse, error) {
+	body, err := json.Marshal(allowedRootRequest{Path: path})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("POST", "/principals/"+url.PathEscape(username)+"/allowed-roots", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result principalChangedResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) removePrincipalAllowedRoot(username, path string) (*principalChangedResponse, error) {
+	body, err := json.Marshal(allowedRootRequest{Path: path})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("DELETE", "/principals/"+url.PathEscape(username)+"/allowed-roots", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result principalChangedResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) createPrincipalCredential(username, name string) (*createCredentialResponse, error) {
+	body, err := json.Marshal(createCredentialRequest{Name: name})
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("POST", "/principals/"+url.PathEscape(username)+"/credentials", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result createCredentialResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) listPrincipalCredentials(username string) (*listCredentialsResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/principals/"+url.PathEscape(username)+"/credentials", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result listCredentialsResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) revokeCredential(id string) (*revokeCredentialResponse, error) {
+	resp, err := c.doAuthenticatedRequest("POST", "/credentials/"+url.PathEscape(id)+"/revoke", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result revokeCredentialResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
