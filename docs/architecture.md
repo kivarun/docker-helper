@@ -920,7 +920,23 @@ Forbidden:
 - `target` is not absolute;
 - two mounts use the same `target`.
 
-### User-mode mount restriction
+### System-mode run mounts
+
+In system mode, bind-mount sources are first validated with
+`isInside(workspace, sourcePath)`. The helper then opens "/" as a root
+file descriptor. The source path is converted to a root-relative path
+and opened with `openat2` using `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
+and `RESOLVE_NO_MAGICLINKS` relative to the root FD. The resulting inode
+is pinned with `open_tree` + `move_mount` into a helper-owned directory
+under the runtime path. Docker receives the pinned path, not the original
+workspace path.
+
+Pinning requires Linux kernel support for `openat2`, `open_tree`, and
+`move_mount`, and `CAP_SYS_ADMIN`. When any of these are unavailable or
+fail, the operation fails closed with no pathname fallback. Pinned mounts
+are cleaned up as part of the operation lifecycle.
+
+### User-mode run mounts
 
 In user mode, the resolved mount source must equal the canonical
 `session.Workspace`. Subdirectory and file mounts are rejected as
@@ -932,27 +948,6 @@ the launcher invariant: the sandboxed agent does not have host-side write
 access to the parent directory of the workspace. Since the agent cannot
 replace the workspace directory entry, the pathname remains stable between
 validation and the Docker bind mount.
-
-### System-mode run mounts
-
-In system mode, bind-mount sources are opened beneath the workspace
-using `openat2` with `RESOLVE_NO_SYMLINKS` and `RESOLVE_BENEATH` to
-prevent traversal. The resulting inode is pinned through `open_tree`
-+ `move_mount` into a helper-owned directory under the runtime path.
-Docker receives the pinned path, not the original workspace path.
-
-If `openat2`, `open_tree`, or `move_mount` is unavailable or fails, the
-operation fails closed with no pathname fallback. Pinned mounts are
-cleaned up as part of the operation lifecycle.
-
-### User-mode run mounts
-
-In user mode, only the workspace root may be mounted. Subdirectory and
-file mounts are rejected. Security relies on the documented launcher
-invariant: the sandboxed agent cannot replace the workspace directory
-entry on the host. Because the agent has no host-side write access to
-the parent directory of the workspace, the pathname remains stable
-between validation and the Docker bind mount.
 
 ### Build context
 
