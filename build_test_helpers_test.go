@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -12,30 +14,7 @@ import (
 // copied from the source context.
 func setupStagingSeam(t *testing.T, app *App) {
 	t.Helper()
-	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
-		stagingDir := t.TempDir()
-		opDir := filepath.Join(stagingDir, opID)
-		if err := os.MkdirAll(opDir, 0o700); err != nil {
-			return nil, err
-		}
-		ctxDir := filepath.Join(opDir, "context")
-		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
-			return nil, err
-		}
-		srcDockerfile := filepath.Join(cpath, dfrel)
-		data, err := os.ReadFile(srcDockerfile)
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
-			return nil, err
-		}
-		return &stagedBuildContext{
-			ContextPath:    ctxDir,
-			DockerfilePath: filepath.Join(ctxDir, dfrel),
-			cleanupPath:    opDir,
-		}, nil
-	}
+	app.StageBuildContextFn = newStagingSeam(t, stagingSeamOptions{})
 }
 
 // newTestAppWithAuthAndStaging creates a test app with auth and staging seam.
@@ -46,18 +25,29 @@ func newTestAppWithAuthAndStaging(t *testing.T) *App {
 	return app
 }
 
+// stagingSeamOptions controls the behavior of a staging seam.
+type stagingSeamOptions struct {
+	// Capture stores the dockerfileRel and cleanupPath if non-nil.
+	Capture *capturedStaging
+	// RemoveAllError is returned by Cleanup() when non-nil.
+	RemoveAllError error
+	// RemoveAllCount tracks how many times removeAll was invoked.
+	RemoveAllCount *atomic.Int32
+}
+
 // capturedStaging holds the dockerfileRel value captured by a staging seam.
 type capturedStaging struct {
 	dockerfileRel string
 	cleanupPath   string
 }
 
-// stagingSeamWithCapture creates a staging seam that captures the dockerfileRel
-// argument and returns a real staged context.
-func stagingSeamWithCapture(t *testing.T, capture *capturedStaging) func(context.Context, string, string, string, string, string) (*stagedBuildContext, error) {
+// newStagingSeam creates a staging seam with the given options.
+func newStagingSeam(t *testing.T, opts stagingSeamOptions) func(context.Context, string, string, string, string, string) (*stagedBuildContext, error) {
 	t.Helper()
 	return func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
-		capture.dockerfileRel = dfrel
+		if opts.Capture != nil {
+			opts.Capture.dockerfileRel = dfrel
+		}
 		stagingDir := t.TempDir()
 		opDir := filepath.Join(stagingDir, opID)
 		if err := os.MkdirAll(opDir, 0o700); err != nil {
@@ -75,18 +65,45 @@ func stagingSeamWithCapture(t *testing.T, capture *capturedStaging) func(context
 		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
 			return nil, err
 		}
-		capture.cleanupPath = opDir
-		return &stagedBuildContext{
+		if opts.Capture != nil {
+			opts.Capture.cleanupPath = opDir
+		}
+		s := &stagedBuildContext{
 			ContextPath:    ctxDir,
 			DockerfilePath: filepath.Join(ctxDir, dfrel),
 			cleanupPath:    opDir,
-		}, nil
+		}
+		if opts.RemoveAllError != nil || opts.RemoveAllCount != nil {
+			rmErr := opts.RemoveAllError
+			rmCount := opts.RemoveAllCount
+			s.removeAll = func(path string) error {
+				if rmCount != nil {
+					rmCount.Add(1)
+				}
+				return rmErr
+			}
+		}
+		return s, nil
 	}
 }
 
+// stagingSeamWithCapture creates a staging seam that captures the dockerfileRel
+// argument and returns a real staged context.
+func stagingSeamWithCapture(t *testing.T, capture *capturedStaging) func(context.Context, string, string, string, string, string) (*stagedBuildContext, error) {
+	t.Helper()
+	return newStagingSeam(t, stagingSeamOptions{Capture: capture})
+}
+
+// stagingSeamWithCleanupError creates a staging seam where Cleanup() returns
+// the given error deterministically, without relying on filesystem permissions.
+func stagingSeamWithCleanupError(t *testing.T, err error) func(context.Context, string, string, string, string, string) (*stagedBuildContext, error) {
+	t.Helper()
+	return newStagingSeam(t, stagingSeamOptions{RemoveAllError: err})
+}
+
 // newTestStagedContext creates a fake staged context in a temp directory
-// with the given dockerfile relative path.
-func newTestStagedContext(t *testing.T, dfrel string) *stagedBuildContext {
+// with the given dockerfile relative path and optional removeAll injection.
+func newTestStagedContext(t *testing.T, dfrel string, removeAll func(string) error) *stagedBuildContext {
 	t.Helper()
 	stagingDir := t.TempDir()
 	opDir := filepath.Join(stagingDir, "opdir")
@@ -104,55 +121,10 @@ func newTestStagedContext(t *testing.T, dfrel string) *stagedBuildContext {
 		ContextPath:    ctxDir,
 		DockerfilePath: filepath.Join(ctxDir, dfrel),
 		cleanupPath:    opDir,
+		removeAll:      removeAll,
 	}
 }
 
-// stagingSeamWithCleanupError creates a staging seam where Cleanup() will fail
-// because the parent directory is made unwritable before cleanup runs.
-// The parent permissions are restored after the staged context is created
-// so that temp directory cleanup can proceed.
-func stagingSeamWithCleanupError(t *testing.T) func(context.Context, string, string, string, string, string) (*stagedBuildContext, error) {
-	t.Helper()
-	return func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
-		stagingDir := t.TempDir()
-		opDir := filepath.Join(stagingDir, "opdir")
-		if err := os.MkdirAll(opDir, 0o700); err != nil {
-			return nil, err
-		}
-		ctxDir := filepath.Join(opDir, "context")
-		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
-			return nil, err
-		}
-		srcDockerfile := filepath.Join(cpath, dfrel)
-		data, err := os.ReadFile(srcDockerfile)
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
-			return nil, err
-		}
-		// Make parent of opDir unwritable so RemoveAll fails,
-		// then immediately restore so temp dir cleanup works.
-		os.Chmod(stagingDir, 0o555)
-		s := &stagedBuildContext{
-			ContextPath:    ctxDir,
-			DockerfilePath: filepath.Join(ctxDir, dfrel),
-			cleanupPath:    opDir,
-		}
-		// Restore permissions after staging so test cleanup works.
-		// The staged context still points to the unwritable dir,
-		// so Cleanup() will fail when called.
-		os.Chmod(stagingDir, 0o755)
-		// Re-restrict so Cleanup() actually fails.
-		// We use a channel to defer the restore until test end.
-		restoreCh := make(chan struct{})
-		go func() {
-			<-restoreCh
-			os.Chmod(stagingDir, 0o755)
-		}()
-		t.Cleanup(func() { close(restoreCh) })
-		// Re-restrict for the actual test.
-		os.Chmod(stagingDir, 0o555)
-		return s, nil
-	}
-}
+// sentinelCleanupErr is a sentinel error used in tests to verify that
+// cleanup errors are propagated correctly.
+var sentinelCleanupErr = errors.New("injected cleanup error")

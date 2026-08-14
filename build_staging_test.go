@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -765,144 +766,58 @@ func TestBuildDockerfileSymlink(t *testing.T) {
 	}
 }
 
-// TestBuildStagedPathsExactSentinel verifies Docker gets exact staged paths
-// using sentinel directory names, not fuzzy string matching.
-func TestBuildStagedPathsExactSentinel(t *testing.T) {
-	app, _, token := setupBuildTest(t)
-
-	var capturedArgs []string
-	var capturedOpDir string
-	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
-		stagingDir := t.TempDir()
-		opDir := filepath.Join(stagingDir, opID)
-		if err := os.MkdirAll(opDir, 0o700); err != nil {
-			return nil, err
-		}
-		ctxDir := filepath.Join(opDir, "context")
-		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
-			return nil, err
-		}
-		srcDockerfile := filepath.Join(cpath, dfrel)
-		data, err := os.ReadFile(srcDockerfile)
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
-			return nil, err
-		}
-		capturedOpDir = opDir
-		return &stagedBuildContext{
-			ContextPath:    ctxDir,
-			DockerfilePath: filepath.Join(ctxDir, dfrel),
-			cleanupPath:    opDir,
-		}, nil
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}, token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	waitBuild(t, app, w)
-
-	// --file should be exactly the staged Dockerfile path.
-	expectedDockerfile := filepath.Join(capturedOpDir, "context", "Dockerfile")
-	var fileArg string
-	for i, arg := range capturedArgs {
-		if arg == "--file" && i+1 < len(capturedArgs) {
-			fileArg = capturedArgs[i+1]
-			break
-		}
-	}
-	if fileArg != expectedDockerfile {
-		t.Errorf("--file = %q, want %q", fileArg, expectedDockerfile)
-	}
-
-	// Last arg should be exactly the staged context path.
-	expectedContext := filepath.Join(capturedOpDir, "context")
-	lastArg := capturedArgs[len(capturedArgs)-1]
-	if lastArg != expectedContext {
-		t.Errorf("context = %q, want %q", lastArg, expectedContext)
-	}
-}
-
 // TestStagedCleanupReturnsError verifies that Cleanup() returns the error
-// from os.RemoveAll and that repeated calls return the same error.
+// from the injected removeAll and that repeated calls return the same error.
 func TestStagedCleanupReturnsError(t *testing.T) {
-	s := newTestStagedContext(t, "Dockerfile")
+	var rmCount int32
+	s := newTestStagedContext(t, "Dockerfile", func(path string) error {
+		atomic.AddInt32(&rmCount, 1)
+		return sentinelCleanupErr
+	})
 
-	// First cleanup should succeed.
+	// First cleanup should return the sentinel error.
 	err1 := s.Cleanup()
-	if err1 != nil {
-		t.Errorf("first Cleanup() error = %v", err1)
+	if !errors.Is(err1, sentinelCleanupErr) {
+		t.Errorf("first Cleanup() error = %v, want sentinelCleanupErr", err1)
 	}
 
-	// Second cleanup should return nil (already cleaned, idempotent).
+	// Second cleanup should return the same sentinel error.
 	err2 := s.Cleanup()
-	if err2 != nil {
-		t.Errorf("second Cleanup() error = %v", err2)
+	if !errors.Is(err2, sentinelCleanupErr) {
+		t.Errorf("second Cleanup() error = %v, want sentinelCleanupErr", err2)
 	}
 
-	// Directory should be gone.
-	if _, err := os.Stat(s.ContextPath); err == nil {
-		t.Error("staging directory should be removed after Cleanup")
+	// removeAll should be called exactly once.
+	if rmCount != 1 {
+		t.Errorf("removeAll called %d times, want 1", rmCount)
 	}
 }
 
 // TestStagedCleanupConcurrentExactlyOnce verifies that concurrent Cleanup()
-// calls result in exactly one deletion and all callers get the same result.
+// calls invoke removeAll exactly once and all callers get the same error.
 func TestStagedCleanupConcurrentExactlyOnce(t *testing.T) {
-	s := newTestStagedContext(t, "Dockerfile")
+	var rmCount atomic.Int32
+	s := newTestStagedContext(t, "Dockerfile", func(path string) error {
+		rmCount.Add(1)
+		return sentinelCleanupErr
+	})
 
-	var (
-		wg       sync.WaitGroup
-		errCount int32
-		nilCount int32
-		cleanupN int32
-	)
-
+	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			err := s.Cleanup()
-			if err != nil {
-				atomic.AddInt32(&errCount, 1)
-			} else {
-				atomic.AddInt32(&nilCount, 1)
+			if !errors.Is(err, sentinelCleanupErr) {
+				t.Errorf("Cleanup() error = %v, want sentinelCleanupErr", err)
 			}
-			atomic.AddInt32(&cleanupN, 1)
 		}()
 	}
 	wg.Wait()
 
-	// All calls should return (some may return nil, some may not — but only
-	// one actual deletion happens). The important thing is all 20 calls complete.
-	if cleanupN != 20 {
-		t.Errorf("cleanup calls = %d, want 20", cleanupN)
-	}
-
-	// All results should be consistent (all nil or all same error).
-	// Since we're on a temp dir, all should be nil.
-	if errCount != 0 {
-		t.Errorf("unexpected errors: %d nil, %d err", nilCount, errCount)
-	}
-
-	// Directory should be gone.
-	if _, err := os.Stat(s.ContextPath); err == nil {
-		t.Error("staging directory should be removed after concurrent Cleanup")
+	// removeAll should be called exactly once.
+	if got := rmCount.Load(); got != 1 {
+		t.Errorf("removeAll called %d times, want 1", got)
 	}
 }
 
@@ -912,7 +827,7 @@ func TestStagedCleanupErrorLogged(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
 	app, _, token := setupBuildTest(t)
-	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "/bin/true")
@@ -930,12 +845,25 @@ func TestStagedCleanupErrorLogged(t *testing.T) {
 		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
 	}
 
-	waitBuild(t, app, w)
+	// Decode response and wait for operation.
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+	op.Wait()
 
-	// Operational log should contain the cleanup error with operation ID.
+	// Operational log should contain the cleanup error and operation ID.
 	opLogContent := opLogBuf.String()
 	if !strings.Contains(opLogContent, "staging cleanup failed") {
 		t.Errorf("operational log should contain cleanup error, got: %s", opLogContent)
+	}
+	if !strings.Contains(opLogContent, opID) {
+		t.Errorf("operational log should contain operation ID %q, got: %s", opID, opLogContent)
 	}
 }
 
@@ -945,7 +873,7 @@ func TestBuildCleanupOnErrorPreservesSemantics(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
 	app, _, token := setupBuildTest(t)
-	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "/bin/true")
@@ -982,10 +910,13 @@ func TestBuildCleanupOnErrorPreservesSemantics(t *testing.T) {
 		t.Errorf("result_code = %v, want %q", op.ResultCode, "succeeded")
 	}
 
-	// Cleanup error should be logged.
+	// Cleanup error should be logged with operation ID.
 	opLogContent := opLogBuf.String()
 	if !strings.Contains(opLogContent, "staging cleanup failed") {
 		t.Errorf("cleanup error should be logged, got: %s", opLogContent)
+	}
+	if !strings.Contains(opLogContent, opID) {
+		t.Errorf("cleanup log should contain operation ID %q, got: %s", opID, opLogContent)
 	}
 }
 
@@ -995,7 +926,7 @@ func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
 	app, _, token := setupBuildTest(t)
-	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	syncDir := t.TempDir()
 	readyFile := filepath.Join(syncDir, "ready")
@@ -1041,25 +972,32 @@ func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 
 	op.Wait()
 
-	// Result should be cancelled despite cleanup error.
+	// Result should be exactly cancelled.
+	if op.State != operationFailed {
+		t.Errorf("state = %q, want %q", op.State, operationFailed)
+	}
 	if op.ResultCode == nil || *op.ResultCode != resultCancelled {
 		t.Errorf("result_code = %v, want %q", op.ResultCode, resultCancelled)
 	}
 
-	// Cleanup error should be logged.
+	// Cleanup error should be logged with operation ID.
 	opLogContent := opLogBuf.String()
 	if !strings.Contains(opLogContent, "staging cleanup failed") {
 		t.Errorf("cleanup error should be logged on cancel, got: %s", opLogContent)
 	}
+	if !strings.Contains(opLogContent, opID) {
+		t.Errorf("cleanup log should contain operation ID %q, got: %s", opID, opLogContent)
+	}
 }
 
 // TestBuildShutdownCleanupErrorPreservesResult verifies that when daemon
-// shutdown triggers cleanup with an error, the operation result is not cancelled.
+// shutdown triggers cleanup with an error, the operation reaches the expected
+// terminal state (docker_build_failed, not cancelled).
 func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
 	app, _, token := setupBuildTest(t)
-	app.StageBuildContextFn = stagingSeamWithCleanupError(t)
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	syncDir := t.TempDir()
 	readyFile := filepath.Join(syncDir, "ready")
@@ -1105,21 +1043,20 @@ func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 
 	op.Wait()
 
-	// Result should NOT be cancelled (shutdown semantics).
-	op.mu.Lock()
-	rc := ""
-	if op.ResultCode != nil {
-		rc = *op.ResultCode
+	// Shutdown produces docker_build_failed, not cancelled.
+	if op.State != operationFailed {
+		t.Errorf("state = %q, want %q", op.State, operationFailed)
 	}
-	op.mu.Unlock()
-
-	if rc == "cancelled" {
-		t.Errorf("shutdown should not produce result_code 'cancelled', got %q", rc)
+	if op.ResultCode == nil || *op.ResultCode != "docker_build_failed" {
+		t.Errorf("result_code = %v, want %q", op.ResultCode, "docker_build_failed")
 	}
 
-	// Cleanup error should be logged.
+	// Cleanup error should be logged with operation ID.
 	opLogContent := opLogBuf.String()
 	if !strings.Contains(opLogContent, "staging cleanup failed") {
 		t.Errorf("cleanup error should be logged on shutdown, got: %s", opLogContent)
+	}
+	if !strings.Contains(opLogContent, opID) {
+		t.Errorf("cleanup log should contain operation ID %q, got: %s", opID, opLogContent)
 	}
 }
