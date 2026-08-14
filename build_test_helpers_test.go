@@ -130,11 +130,9 @@ func newTestStagedContext(t *testing.T, dfrel string, removeAll func(string) err
 // cleanup errors are propagated correctly.
 var sentinelCleanupErr = errors.New("injected cleanup error")
 
-// newOperationMux creates a mux with the operation routes registered for testing.
+// newOperationMux creates a mux with production routes registered for testing.
 func newOperationMux(app *App) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/{id}", app.handleOperationStatus)
-	mux.HandleFunc("GET /operations/{id}/logs", app.handleOperationLogs)
-	mux.HandleFunc("POST /operations/{id}/cancel", app.handleOperationCancel)
+	registerRoutes(mux, app)
 	return mux
 }
