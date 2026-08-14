@@ -275,65 +275,71 @@ func TestConfigShowAdminToken(t *testing.T) {
 	}
 }
 
-// Req 10: each writable field set with correct JSON type
-func TestConfigSetWritableFields(t *testing.T) {
+// Req 10: core writable field types are handled correctly
+func TestConfigSetCoreFieldTypes(t *testing.T) {
 	cfg := `{
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
 
-	// set allowed_root
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "allowed_root", "/new/path"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set allowed_root: expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	raw := readConfigJSON(t, configPath)
-	var v string
-	json.Unmarshal(raw["allowed_root"], &v)
-	if v != "/new/path" {
-		t.Errorf("allowed_root = %q, want /new/path", v)
+	tests := []struct {
+		field string
+		value string
+		check func(map[string]json.RawMessage)
+	}{
+		{
+			"allowed_root", "/new/path",
+			func(raw map[string]json.RawMessage) {
+				var v string
+				json.Unmarshal(raw["allowed_root"], &v)
+				if v != "/new/path" {
+					t.Errorf("allowed_root = %q, want /new/path", v)
+				}
+			},
+		},
+		{
+			"session_ttl", "24h",
+			func(raw map[string]json.RawMessage) {
+				var v string
+				json.Unmarshal(raw["session_ttl"], &v)
+				if v != "24h" {
+					t.Errorf("session_ttl = %q, want 24h", v)
+				}
+			},
+		},
+		{
+			"log_level", "debug",
+			func(raw map[string]json.RawMessage) {
+				var v string
+				json.Unmarshal(raw["log_level"], &v)
+				if v != "debug" {
+					t.Errorf("log_level = %q, want debug", v)
+				}
+			},
+		},
+		{
+			"audit_enabled", "true",
+			func(raw map[string]json.RawMessage) {
+				var b bool
+				json.Unmarshal(raw["audit_enabled"], &b)
+				if !b {
+					t.Errorf("audit_enabled = %v, want true", b)
+				}
+			},
+		},
 	}
 
-	// set session_ttl
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "session_ttl", "24h"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set session_ttl: expected exit code 0, got %d", code)
-	}
-	raw = readConfigJSON(t, configPath)
-	json.Unmarshal(raw["session_ttl"], &v)
-	if v != "24h" {
-		t.Errorf("session_ttl = %q, want 24h", v)
-	}
-
-	// set log_level
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set log_level: expected exit code 0, got %d", code)
-	}
-	raw = readConfigJSON(t, configPath)
-	json.Unmarshal(raw["log_level"], &v)
-	if v != "debug" {
-		t.Errorf("log_level = %q, want debug", v)
-	}
-
-	// set audit_enabled
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "audit_enabled", "true"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set audit_enabled: expected exit code 0, got %d", code)
-	}
-	raw = readConfigJSON(t, configPath)
-	var b bool
-	json.Unmarshal(raw["audit_enabled"], &b)
-	if !b {
-		t.Errorf("audit_enabled = %v, want true", b)
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{"config", "set", tt.field, tt.value}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("set %s: expected exit code 0, got %d, stderr: %s", tt.field, code, stderr.String())
+			}
+			raw := readConfigJSON(t, configPath)
+			tt.check(raw)
+		})
 	}
 }
 
@@ -2020,8 +2026,8 @@ func TestConfigShowHelp(t *testing.T) {
 		t.Error("help should mention admin_token exception")
 	}
 
-	// Check all 14 fields are listed
-	for _, field := range allFields {
+	// Check all fields from the authoritative registry are listed
+	for _, field := range allFieldNames() {
 		if !strings.Contains(out, field) {
 			t.Errorf("help should list field %q", field)
 		}
@@ -2039,7 +2045,7 @@ func TestConfigSetHelp(t *testing.T) {
 	}
 
 	out := stdout.String()
-	for _, field := range writableFields {
+	for _, field := range writableFieldNames() {
 		if !strings.Contains(out, field) {
 			t.Errorf("help should list writable field %q", field)
 		}
@@ -2174,6 +2180,29 @@ func TestConfigHelpStdoutStderrSeparation(t *testing.T) {
 				t.Error("help should write to stdout")
 			}
 		})
+	}
+}
+
+func TestConfigFieldRegistryInvariants(t *testing.T) {
+	// Names are unique.
+	seen := make(map[string]bool)
+	for _, f := range configFields {
+		if seen[f.name] {
+			t.Errorf("duplicate field name %q", f.name)
+		}
+		seen[f.name] = true
+	}
+
+	// Required fields are always writable.
+	for _, f := range configFields {
+		if f.required && !f.writable {
+			t.Errorf("required field %q must be writable", f.name)
+		}
+	}
+
+	// http_address is registered as writable.
+	if !isWritableField("http_address") {
+		t.Error("http_address must be writable")
 	}
 }
 

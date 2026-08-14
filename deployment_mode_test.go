@@ -206,9 +206,9 @@ func TestDOCKER_HELPER_CONFIGOverride(t *testing.T) {
 }
 
 func TestModeCannotBeConfigured(t *testing.T) {
-	// "mode" is in reservedConfigFields and should be rejected in config.json.
-	if !reservedConfigFields["mode"] {
-		t.Error("mode should be in reservedConfigFields")
+	// "mode" is read-only and should be rejected in config.json.
+	if !isReadOnlyField("mode") {
+		t.Error("mode should be read-only")
 	}
 }
 

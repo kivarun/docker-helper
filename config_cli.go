@@ -22,53 +22,89 @@ var configCommand = &Command{
 	},
 }
 
-var (
-	writableFields = []string{
-		"allowed_root",
-		"session_ttl",
-		"log_level",
-		"audit_enabled",
-		"shutdown_timeout",
-		"operation_retention_ttl",
-		"operation_max_completed",
-		"operation_log_max_bytes",
-		"trusted_ca_path",
-		"trusted_ca_injection",
-	}
-	requiredFields = map[string]bool{"allowed_root": true, "session_ttl": true}
-	allFields      = []string{
-		"allowed_root",
-		"session_ttl",
-		"log_level",
-		"audit_enabled",
-		"audit_enabled_source",
-		"config_path",
-		"config_dir",
-		"runtime_dir",
-		"socket_path",
-		"lock_path",
-		"state_dir",
-		"database_path",
-		"admin_token_path",
-		"admin_token",
-		"shutdown_timeout",
-		"operation_retention_ttl",
-		"operation_max_completed",
-		"operation_log_max_bytes",
-		"trusted_ca_path",
-		"trusted_ca_injection",
-		"mode",
-		"http_address",
-	}
-)
+type configFieldSpec struct {
+	name     string
+	writable bool
+	required bool
+}
+
+var configFields = []configFieldSpec{
+	{name: "allowed_root", writable: true, required: true},
+	{name: "session_ttl", writable: true, required: true},
+	{name: "log_level", writable: true},
+	{name: "audit_enabled", writable: true},
+	{name: "shutdown_timeout", writable: true},
+	{name: "operation_retention_ttl", writable: true},
+	{name: "operation_max_completed", writable: true},
+	{name: "operation_log_max_bytes", writable: true},
+	{name: "trusted_ca_path", writable: true},
+	{name: "trusted_ca_injection", writable: true},
+	{name: "http_address", writable: true},
+	{name: "audit_enabled_source"},
+	{name: "config_path"},
+	{name: "config_dir"},
+	{name: "runtime_dir"},
+	{name: "socket_path"},
+	{name: "lock_path"},
+	{name: "state_dir"},
+	{name: "database_path"},
+	{name: "admin_token_path"},
+	{name: "admin_token"},
+	{name: "mode"},
+}
 
 func isKnownField(name string) bool {
-	for _, f := range allFields {
-		if f == name {
+	for _, f := range configFields {
+		if f.name == name {
 			return true
 		}
 	}
 	return false
+}
+
+func isWritableField(name string) bool {
+	for _, f := range configFields {
+		if f.name == name {
+			return f.writable
+		}
+	}
+	return false
+}
+
+func isReadOnlyField(name string) bool {
+	for _, f := range configFields {
+		if f.name == name {
+			return !f.writable
+		}
+	}
+	return false
+}
+
+func isRequiredField(name string) bool {
+	for _, f := range configFields {
+		if f.name == name {
+			return f.required
+		}
+	}
+	return false
+}
+
+func allFieldNames() []string {
+	names := make([]string, len(configFields))
+	for i, f := range configFields {
+		names[i] = f.name
+	}
+	return names
+}
+
+func writableFieldNames() []string {
+	var names []string
+	for _, f := range configFields {
+		if f.writable {
+			names = append(names, f.name)
+		}
+	}
+	return names
 }
 
 // deprecatedFieldMessage returns the rename diagnostic for a deprecated field.
@@ -589,7 +625,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	if reservedConfigFields[field] {
+	if isReadOnlyField(field) {
 		fmt.Fprintf(stderr, "error: field %q is read-only\n", field)
 		return 2
 	}
@@ -739,11 +775,11 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	if reservedConfigFields[field] {
+	if isReadOnlyField(field) {
 		fmt.Fprintf(stderr, "error: field %q is read-only\n", field)
 		return 2
 	}
-	if requiredFields[field] {
+	if isRequiredField(field) {
 		fmt.Fprintf(stderr, "error: field %q is required and cannot be unset\n", field)
 		return 2
 	}

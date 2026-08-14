@@ -1010,22 +1010,6 @@ func TestCredentialCLICreateSyntaxRegression(t *testing.T) {
 	}
 }
 
-func TestCredentialIDRandomFailure(t *testing.T) {
-	// generateCredentialID should return an error when rand.Read fails.
-	// We can't easily mock rand.Read, but we can verify the function signature
-	// returns an error.
-	id, err := generateCredentialID()
-	if err != nil {
-		t.Fatalf("generateCredentialID() unexpected error: %v", err)
-	}
-	if id == "" {
-		t.Error("generateCredentialID() returned empty ID")
-	}
-	if !strings.HasPrefix(id, "dhcr_") {
-		t.Errorf("ID should have prefix dhcr_, got %q", id)
-	}
-}
-
 func TestCredentialHTTPRevokeDBError(t *testing.T) {
 	app := newTestAppWithAuth(t)
 

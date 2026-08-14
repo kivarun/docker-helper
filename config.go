@@ -95,21 +95,6 @@ func ptrOf[T any](v T) *T {
 	return &v
 }
 
-// reservedConfigFields are computed or read-only and must not appear in config.json.
-var reservedConfigFields = map[string]bool{
-	"audit_enabled_source": true,
-	"config_path":          true,
-	"config_dir":           true,
-	"runtime_dir":          true,
-	"socket_path":          true,
-	"lock_path":            true,
-	"state_dir":            true,
-	"database_path":        true,
-	"admin_token_path":     true,
-	"admin_token":          true,
-	"mode":                 true,
-}
-
 // deprecatedConfigFields were renamed and must not appear in config.json.
 // The map value is the new field name for the diagnostic message.
 var deprecatedConfigFields = map[string]string{
@@ -567,7 +552,7 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 
 	// Reject reserved/computed fields.
 	for field := range raw {
-		if reservedConfigFields[field] {
+		if isReadOnlyField(field) {
 			return fmt.Errorf("%s is computed and cannot be configured", field)
 		}
 	}
