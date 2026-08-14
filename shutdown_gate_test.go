@@ -16,7 +16,7 @@ import (
 // TestShutdownGateOpensBeforeSignal verifies that the operation registry
 // accepts new operations before the shutdown signal is received.
 func TestShutdownGateOpensBeforeSignal(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
@@ -69,7 +69,7 @@ func TestShutdownGateOpensBeforeSignal(t *testing.T) {
 // is received (simulated by setShuttingDown), new operations are rejected
 // while existing operations remain under shutdown lifecycle.
 func TestShutdownGateClosesOnSignal(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
@@ -146,7 +146,7 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 // in flight when the signal arrives is handled correctly: either accepted
 // (if tryCreate completed before gate close) or rejected (if gate closed first).
 func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 

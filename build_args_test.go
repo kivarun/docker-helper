@@ -15,7 +15,7 @@ import (
 )
 
 func TestBuildArgsProducesExpectedArgv(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -77,7 +77,7 @@ func TestBuildArgsProducesExpectedArgv(t *testing.T) {
 }
 
 func TestBuildArgsDeterministicOrder(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -140,7 +140,7 @@ func TestBuildArgsDeterministicOrder(t *testing.T) {
 }
 
 func TestBuildArgsEmptyValue(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -190,7 +190,7 @@ func TestBuildArgsEmptyValue(t *testing.T) {
 }
 
 func TestBuildArgsInvalidKeyRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -237,7 +237,7 @@ func TestBuildArgsInvalidKeyRejected(t *testing.T) {
 }
 
 func TestBuildArgsOmittedPreservesBehavior(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -285,7 +285,7 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 	initLoggers(new(bytes.Buffer), auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)

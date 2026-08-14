@@ -183,7 +183,7 @@ func assertNoAuthFailure(t *testing.T, buf *bytes.Buffer) {
 
 func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const headerMarker = "hdr_admin_parse_secret_x7k2m"
 	const bodyMarker = "body_admin_parse_secret_p9q4n"
@@ -206,7 +206,7 @@ func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 
 func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const authHeader = "Basic dXNlcjpwYXNz"
 
@@ -228,7 +228,7 @@ func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 
 func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const authHeader = "Bearer "
 
@@ -254,7 +254,7 @@ func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 
 func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const token = "dht_wrong_admin_token_xyz"
 	const authHeader = "Bearer " + token
@@ -280,7 +280,7 @@ func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 
 func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const token = "dht_wrong_admin_token_abc"
 	const authHeader = "Bearer " + token
@@ -303,7 +303,7 @@ func TestAuthAuditAdminWrongToken_ListSessions(t *testing.T) {
 
 func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const token = "dht_wrong_admin_token_del"
 	const authHeader = "Bearer " + token
@@ -330,7 +330,7 @@ func TestAuthAuditAdminWrongToken_DeleteSession(t *testing.T) {
 
 func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const headerMarker = "hdr_session_parse_secret_g2h6j"
 	const bodyMarker = "auth_test_body_session_parse:v1"
@@ -353,7 +353,7 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
 
 func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const authHeader = "Basic dXNlcjpwYXNz"
 
@@ -375,7 +375,7 @@ func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
 
 func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const authHeader = "Bearer "
 
@@ -397,7 +397,7 @@ func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
 
 func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
 	w := httptest.NewRecorder()
@@ -420,7 +420,7 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
 
 func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const token = "dht_unknown_token_abc123"
 	const authHeader = "Bearer " + token
@@ -446,7 +446,7 @@ func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
 
 func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -479,7 +479,7 @@ func TestAuthAuditSessionNotFound_ExpiredSession(t *testing.T) {
 
 func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -511,7 +511,7 @@ func TestAuthAuditSessionNotFound_DeletedSession(t *testing.T) {
 
 func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const authHeader = "Bearer " + testAdminToken
 
@@ -533,7 +533,7 @@ func TestAuthAuditSessionNotFound_AdminTokenOnRun(t *testing.T) {
 
 func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	const token = "dht_unknown_build_token"
 	const authHeader = "Bearer " + token
@@ -560,7 +560,7 @@ func TestAuthAuditSessionNotFound_UnknownToken_Build(t *testing.T) {
 
 func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	// Create a real session so the token is known.
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -597,7 +597,7 @@ func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 
 func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -633,7 +633,7 @@ func TestAuthAuditSessionDatabaseError_Build(t *testing.T) {
 
 func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
 	body, _ := json.Marshal(reqBody)
@@ -652,7 +652,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 
 func TestAuthAuditNoFailureOnValidAdminAuth_ListSessions(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
 	withAuth(req)
@@ -668,7 +668,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_ListSessions(t *testing.T) {
 
 func TestAuthAuditNoFailureOnValidAdminAuth_DeleteSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -692,7 +692,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_DeleteSession(t *testing.T) {
 
 func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -732,7 +732,7 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 
 func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -771,7 +771,7 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Build(t *testing.T) {
 
 func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -790,7 +790,7 @@ func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
 
 func TestAuthAuditAdminHashNotLeaked(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	adminHash := sha256.Sum256([]byte(testAdminToken))
 	hashHex := strings.ToLower(fmt.Sprintf("%x", adminHash[:]))
@@ -812,7 +812,7 @@ func TestAuthAuditAdminHashNotLeaked(t *testing.T) {
 
 func TestAuthAuditRawJSONStructure_Complete(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
 	w := httptest.NewRecorder()
@@ -855,7 +855,7 @@ func TestAuthAuditRawJSONStructure_Complete(t *testing.T) {
 
 func TestAuthAuditNoInternalErrorText_UnknownToken(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine:latest"}`)))
 	req.Header.Set("Authorization", "Bearer dht_nonexistent")
@@ -878,7 +878,7 @@ func TestAuthAuditNoInternalErrorText_UnknownToken(t *testing.T) {
 
 func TestAuthAuditNoInternalErrorText_DatabaseError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {

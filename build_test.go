@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,7 +35,7 @@ func itoa(n int) string {
 }
 
 func TestBuildSessionAuthValidToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -70,7 +71,7 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 }
 
 func TestBuildSessionAuthMissingToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -90,7 +91,7 @@ func TestBuildSessionAuthMissingToken(t *testing.T) {
 }
 
 func TestBuildSessionAuthInvalidToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -111,7 +112,7 @@ func TestBuildSessionAuthInvalidToken(t *testing.T) {
 }
 
 func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	called := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -142,7 +143,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 }
 
 func TestBuildContextDotUsesWorkspace(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -180,22 +181,15 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// Check that context path is the workspace
-	found := false
-	for i := range capturedArgs {
-		if i+1 < len(capturedArgs) && capturedArgs[i+1] == result.Session.Workspace {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("expected workspace path in args %v", capturedArgs)
+	// Check that context path is a staged path (contains "context" in path)
+	lastArg := capturedArgs[len(capturedArgs)-1]
+	if !strings.Contains(lastArg, "context") {
+		t.Errorf("expected staged context path in last arg, got %v", capturedArgs)
 	}
 }
 
 func TestBuildContextRelativeSubdir(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
@@ -243,7 +237,7 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 }
 
 func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
@@ -286,7 +280,7 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 }
 
 func TestBuildContextSiblingDirectoryRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -336,7 +330,7 @@ func TestBuildContextSiblingDirectoryRejected(t *testing.T) {
 }
 
 func TestBuildContextOutsideAllowedRootRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	escapeDir := t.TempDir()
 
@@ -369,7 +363,7 @@ func TestBuildContextOutsideAllowedRootRejected(t *testing.T) {
 }
 
 func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	escapeDir := t.TempDir()
 	linkPath := filepath.Join(app.Config.AllowedRoot, "escape-link")
@@ -407,7 +401,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 }
 
 func TestBuildWorkspaceIsSymlink(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	realDir := filepath.Join(app.Config.AllowedRoot, "real-dir")
@@ -455,7 +449,7 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 }
 
 func TestBuildDockerfileInsideContext(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -493,11 +487,11 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// Check that --file contains the full dockerfile path
+	// Check that --file contains the staged dockerfile path (contains "context")
 	found := false
 	for i, arg := range capturedArgs {
 		if arg == "--file" && i+1 < len(capturedArgs) {
-			if capturedArgs[i+1] == dockerfilePath {
+			if strings.Contains(capturedArgs[i+1], "context") {
 				found = true
 				break
 			}
@@ -505,12 +499,12 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 	}
 
 	if !found {
-		t.Errorf("expected --file %s in args %v", dockerfilePath, capturedArgs)
+		t.Errorf("expected --file with staged path (containing 'context') in args %v", capturedArgs)
 	}
 }
 
 func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -541,7 +535,7 @@ func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
 }
 
 func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -579,14 +573,15 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 
 	waitBuild(t, app, w)
 
-	// Last arg should be the canonical context path
-	if len(capturedArgs) == 0 || capturedArgs[len(capturedArgs)-1] != result.Session.Workspace {
-		t.Errorf("expected last arg to be %q, got %v", result.Session.Workspace, capturedArgs)
+	// Last arg should be the staged context path (contains "context")
+	lastArg := capturedArgs[len(capturedArgs)-1]
+	if !strings.Contains(lastArg, "context") {
+		t.Errorf("expected last arg to contain 'context' (staged path), got %v", capturedArgs)
 	}
 }
 
 func TestBuildContextErrorContainsCode(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
 	if err != nil {
@@ -654,7 +649,7 @@ func TestParseOffset(t *testing.T) {
 }
 
 func TestHandleOperationLogsInvalidOffset(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)

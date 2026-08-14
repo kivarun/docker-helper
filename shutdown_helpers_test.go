@@ -25,8 +25,34 @@ func setupBuildTest(t *testing.T) (*App, *operationRegistry, string) {
 	}
 
 	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
+	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0o644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
+	}
+
+	// Default staging seam: create a minimal staging directory with the Dockerfile.
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		stagingDir := t.TempDir()
+		opDir := filepath.Join(stagingDir, opID)
+		if err := os.MkdirAll(opDir, 0o700); err != nil {
+			return nil, err
+		}
+		ctxDir := filepath.Join(opDir, "context")
+		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
+			return nil, err
+		}
+		srcDockerfile := filepath.Join(cpath, dfrel)
+		data, err := os.ReadFile(srcDockerfile)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
+			return nil, err
+		}
+		return &stagedBuildContext{
+			ContextPath:    ctxDir,
+			DockerfilePath: filepath.Join(ctxDir, dfrel),
+			cleanupPath:    opDir,
+		}, nil
 	}
 
 	return app, reg, result.Token

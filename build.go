@@ -31,7 +31,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
+	contextPath, _, err := validateBuildRequest(session.Workspace, req)
 	if err != nil {
 		if errors.Is(err, ErrInternal) {
 			opLog(ctx).Error("build validation error",
@@ -67,11 +67,24 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create the operation first so we have an ID for staging.
 	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName)
 	op.auditBuildArgKeys = buildArgKeys
 
+	// Stage the build context into an isolated directory.
+	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, req.Dockerfile, cfg.RuntimeDir, op.ID)
+	if err != nil {
+		opLog(ctx).Error("build context staging failed",
+			slog.String("operation", "build"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
+			staged.Cleanup()
 			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
 			return
 		}
@@ -89,14 +102,14 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		PrincipalName: session.PrincipalName,
 	})
 
-	// Build the command synchronously and start it.
+	// Build the command using staged paths — Docker never sees workspace paths.
 	args := []string{
 		"--config", dockerDir,
 		"build",
 		"--pull",
 		"--provenance=false",
 		"--sbom=false",
-		"--file", dockerfilePath,
+		"--file", staged.DockerfilePath,
 		"--tag", req.Image,
 	}
 
@@ -104,7 +117,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	for _, key := range buildArgKeys {
 		args = append(args, "--build-arg", key+"="+req.BuildArgs[key])
 	}
-	args = append(args, contextPath)
+	args = append(args, staged.ContextPath)
 
 	cmdCtx, cancel := context.WithCancel(context.Background())
 
@@ -114,6 +127,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	if result.Terminated {
 		cancel()
+		staged.Cleanup()
 		msg := "build cancelled: daemon is shutting down"
 		if op.reason == terminationCancelled {
 			msg = "build cancelled"
@@ -126,11 +140,15 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Err != nil {
 		cancel()
+		staged.Cleanup()
 		msg := fmt.Sprintf("cannot start build: %v", result.Err)
 		op.fail("docker_build_failed", msg, nil)
 		writeOperationCreated(ctx, w, op.ID, op.State)
 		return
 	}
+
+	// Store staged context for cleanup in waitBuildCompletion.
+	op.stagedCtx = staged
 
 	// Start goroutine for process completion.
 	go func() {
@@ -145,6 +163,12 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 // the operation to succeeded or failed. It is the single owner of cmd.Wait().
 func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 	err := op.cmd.Wait()
+
+	// Cleanup staging directory regardless of outcome.
+	if op.stagedCtx != nil {
+		op.stagedCtx.Cleanup()
+	}
+
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	op.mu.Lock()

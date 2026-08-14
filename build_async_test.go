@@ -15,7 +15,7 @@ import (
 // TestBuildStartFailureReturns201WithFailedOperation proves that when
 // cmd.Start() fails, POST /build returns 201 with a failed operation.
 func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -72,7 +72,7 @@ func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
 // TestBuildLiveOutput proves build output becomes visible through logs
 // while the command is still running.
 func TestBuildLiveOutput(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -168,7 +168,7 @@ func TestBuildLiveOutput(t *testing.T) {
 
 // TestBuildSuccessTransition proves running -> succeeded transition.
 func TestBuildSuccessTransition(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -222,7 +222,7 @@ func TestBuildSuccessTransition(t *testing.T) {
 
 // TestBuildNonZeroExitTransition proves running -> failed with exit code.
 func TestBuildNonZeroExitTransition(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -276,7 +276,7 @@ func TestBuildNonZeroExitTransition(t *testing.T) {
 func TestAuditFinishEmittedOnce(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -325,7 +325,7 @@ func TestAuditFinishEmittedOnce(t *testing.T) {
 // the process exits. This is a regression test for the old
 // io.MultiReader(stdout, stderr) approach which could block.
 func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)

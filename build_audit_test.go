@@ -34,7 +34,7 @@ func waitBuild(t *testing.T, app *App, w *httptest.ResponseRecorder) {
 func TestBuildStartContainsFields(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -91,7 +91,7 @@ func TestBuildStartContainsFields(t *testing.T) {
 func TestBuildFinishSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -142,7 +142,7 @@ func TestBuildFinishSuccess(t *testing.T) {
 func TestBuildFinishErrorWithExitCode(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -195,7 +195,7 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 
 	const buildOutput = "Step 1/1 : FROM alpine\n ---> somehash\nSuccessfully built abc123\n"
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -247,7 +247,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 
 	const buildOutput = "ERROR: failed to solve: something went wrong\n"
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -295,7 +295,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 }
 
 func TestBuildDockerArgsUnchanged(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -329,25 +329,42 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 	waitBuild(t, app, w)
 
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	expectedArgs := []string{
+
+	// Verify arg structure (staged paths replace workspace paths).
+	if len(capturedArgs) < 10 {
+		t.Fatalf("expected at least 10 args, got %d: %v", len(capturedArgs), capturedArgs)
+	}
+
+	// Check fixed args.
+	expectedPrefix := []string{
 		"--config", dockerDir,
 		"build",
 		"--pull",
 		"--provenance=false",
 		"--sbom=false",
-		"--file", dockerfilePath,
-		"--tag", "example:test",
-		app.Config.AllowedRoot,
+		"--file",
 	}
-
-	if len(capturedArgs) != len(expectedArgs) {
-		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(capturedArgs), capturedArgs)
-	}
-
-	for i, exp := range expectedArgs {
+	for i, exp := range expectedPrefix {
 		if capturedArgs[i] != exp {
 			t.Errorf("arg[%d]: expected %q, got %q", i, exp, capturedArgs[i])
 		}
+	}
+
+	// --file value should be a staged path (contains "context").
+	fileArg := capturedArgs[7]
+	if !strings.Contains(fileArg, "context") {
+		t.Errorf("--file should be a staged path containing 'context', got %q", fileArg)
+	}
+
+	// --tag should be present.
+	if capturedArgs[8] != "--tag" || capturedArgs[9] != "example:test" {
+		t.Errorf("expected --tag example:test, got %v", capturedArgs[8:11])
+	}
+
+	// Last arg should be a staged context path (contains "context").
+	lastArg := capturedArgs[len(capturedArgs)-1]
+	if !strings.Contains(lastArg, "context") {
+		t.Errorf("last arg should be a staged context path containing 'context', got %q", lastArg)
 	}
 }
 

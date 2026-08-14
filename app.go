@@ -20,6 +20,10 @@ type App struct {
 	// Production default calls the real PinMount; tests can return
 	// a fake pinnedMount with controlled Cleanup behavior.
 	PinMountFn func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error)
+	// StageBuildContextFn is a test seam for the build context staging primitive.
+	// Production default calls the real StageBuildContext; tests can return
+	// a fake stagedBuildContext with controlled Cleanup behavior.
+	StageBuildContextFn func(ctx context.Context, workspace, contextPath, dockerfileRel, runtimeDir, operationID string) (*stagedBuildContext, error)
 }
 
 // pinMount calls PinMountFn if set, otherwise the real PinMount.
@@ -28,6 +32,14 @@ func (a *App) pinMount(workspace, sourcePath, runtimeDir, operationID string, mo
 		return a.PinMountFn(workspace, sourcePath, runtimeDir, operationID, mountIndex)
 	}
 	return PinMount(workspace, sourcePath, runtimeDir, operationID, mountIndex)
+}
+
+// stageBuildContext calls StageBuildContextFn if set, otherwise the real StageBuildContext.
+func (a *App) stageBuildContext(ctx context.Context, workspace, contextPath, dockerfileRel, runtimeDir, operationID string) (*stagedBuildContext, error) {
+	if a.StageBuildContextFn != nil {
+		return a.StageBuildContextFn(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID)
+	}
+	return StageBuildContext(ctx, workspace, contextPath, dockerfileRel, runtimeDir, operationID)
 }
 
 // getConfig returns a snapshot copy of the current configuration under a read lock.

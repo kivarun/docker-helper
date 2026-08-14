@@ -76,6 +76,9 @@ type operation struct {
 	// pinnedMounts are the inode-pinned mount destinations for system-mode
 	// run operations. They are cleaned up after cmd.Wait completes.
 	pinnedMounts []*pinnedMount
+	// stagedCtx is the staged build context for build operations.
+	// It is cleaned up after the operation completes or fails.
+	stagedCtx *stagedBuildContext
 	// audit metadata for finish event, set by operation-specific factory.
 	auditCommandArgCount   *int
 	auditMounts            []auditMount

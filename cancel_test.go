@@ -18,7 +18,7 @@ import (
 // TestCancelRunningBuild proves that cancelling a running build
 // terminates the process and returns result_code=cancelled.
 func TestCancelRunningBuild(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -109,7 +109,7 @@ func TestCancelRunningBuild(t *testing.T) {
 // TestCancelRunningRun proves that cancelling a running run
 // terminates the process and returns result_code=cancelled.
 func TestCancelRunningRun(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -165,7 +165,7 @@ func TestCancelRunningRun(t *testing.T) {
 
 // TestCancelUnknownOperation returns 404 for unknown operation ID.
 func TestCancelUnknownOperation(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -185,7 +185,7 @@ func TestCancelUnknownOperation(t *testing.T) {
 
 // TestCancelOtherSessionOperation returns 404 for operation belonging to another session.
 func TestCancelOtherSessionOperation(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	session1, err := app.createSession(app.Config.AllowedRoot)
@@ -231,7 +231,7 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 
 // TestCancelAlreadyCompletedOperation returns current terminal state.
 func TestCancelAlreadyCompletedOperation(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -283,7 +283,7 @@ func TestCancelAlreadyCompletedOperation(t *testing.T) {
 // TestCancelVsNaturalCompletion proves that when the operation completes
 // naturally before cancel processes it, the natural result is preserved.
 func TestCancelVsNaturalCompletion(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -339,7 +339,7 @@ func TestCancelVsNaturalCompletion(t *testing.T) {
 
 // TestCancelPreservesLogs proves that operation logs remain accessible after cancel.
 func TestCancelPreservesLogs(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -412,7 +412,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 // TestCancelAuditEvent proves that cancelled operations emit the correct
 // audit event with result=cancelled.
 func TestCancelAuditEvent(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -455,7 +455,7 @@ func TestCancelAuditEvent(t *testing.T) {
 
 // TestCancelNoRegistry proves that cancel returns 404 when registry is nil.
 func TestCancelNoRegistry(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = nil
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -476,7 +476,7 @@ func TestCancelNoRegistry(t *testing.T) {
 // TestCancelIdempotent proves that cancelling an already-cancelled operation
 // returns the terminal state without error.
 func TestCancelIdempotent(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -534,7 +534,7 @@ func TestCancelIdempotent(t *testing.T) {
 // TestCancelRunCidfileCleanup proves that cancelling a run operation
 // cleans up the cidfile.
 func TestCancelRunCidfileCleanup(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -575,7 +575,7 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 // TestCancelPreservesExitCode proves that cancelled operations preserve
 // the exit code from the terminated process.
 func TestCancelPreservesExitCode(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -619,7 +619,7 @@ func TestCancelPreservesExitCode(t *testing.T) {
 // TestShutdownDoesNotProduceCancelledResult proves that daemon shutdown
 // does not produce result_code=cancelled for build operations.
 func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -688,7 +688,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 // TestShutdownDoesNotProduceCancelledResultRun proves that daemon shutdown
 // does not produce result_code=cancelled for run operations.
 func TestShutdownDoesNotProduceCancelledResultRun(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -752,7 +752,7 @@ func TestShutdownDoesNotProduceCancelledResultRun(t *testing.T) {
 // Uses a synchronization channel to deterministically control ordering:
 // terminateOne acquires op.mu and sets reason, then terminateAll runs.
 func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -804,7 +804,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 // Uses a synchronization channel to deterministically control ordering:
 // terminateAll acquires op.mu and sets reason, then terminateOne runs.
 func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -858,7 +858,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 func TestTerminalTransitionSucceedWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -948,7 +948,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 func TestTerminalTransitionFailWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -1035,7 +1035,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 // operation completes naturally before cancel processes it, the natural
 // result is preserved (sequential idempotency).
 func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -1106,7 +1106,7 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 func TestConcurrentDoubleCancel(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -1244,7 +1244,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 func TestCancelPlusShutdownCleanup(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -1392,7 +1392,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 // the shared force deadline (the context deadline), not a fresh full
 // defaultForceCleanupTimeout.
 func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -1452,7 +1452,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 // TestCancelResponseNoTimestampFields verifies that the cancel response
 // does not contain timestamp fields (created_at, started_at, completed_at, duration).
 func TestCancelResponseNoTimestampFields(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
 	result, err := app.createSession(app.Config.AllowedRoot)

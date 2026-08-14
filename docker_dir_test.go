@@ -250,7 +250,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 // ensureSessionDockerDir fails during handlePull, the handler
 // returns 500 without writing any audit events.
 func TestPullEnsureSessionDockerDirFails(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAuthAndStaging(t)
 
 	// Block MkdirAll by placing a regular file at the sessions path.
 	sessionsFile := filepath.Join(app.Config.RuntimeDir, "sessions")
