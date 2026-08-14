@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -222,42 +223,46 @@ func TestPrintSessionsTableNoToken(t *testing.T) {
 func TestPrintSessionsTablePrincipal(t *testing.T) {
 	principal := "alice"
 	sessions := []sessionJSON{
-		{ID: "dhs_001", PrincipalName: &principal, Workspace: "/home/alice/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
-		{ID: "dhs_002", PrincipalName: nil, Workspace: "/home/user/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
+		{ID: "dhs_001", PrincipalName: &principal, Workspace: "/srv/ws-a", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
+		{ID: "dhs_002", PrincipalName: nil, Workspace: "/srv/ws-b", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
 	}
 
 	var buf strings.Builder
 	printSessionsTable(&buf, sessions)
 
-	output := buf.String()
-
-	// PRINCIPAL header must be present.
-	if !strings.Contains(output, "PRINCIPAL") {
-		t.Errorf("expected PRINCIPAL header in output: %s", output)
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected exactly 3 lines, got %d: %s", len(lines), buf.String())
 	}
 
-	// Principal name must appear for principal-owned session.
-	if !strings.Contains(output, "alice") {
-		t.Errorf("expected 'alice' in output: %s", output)
+	header := strings.Fields(lines[0])
+	if len(header) != 5 {
+		t.Fatalf("expected 5 header columns, got %d: %v", len(header), header)
+	}
+	if !slices.Equal(header, []string{"ID", "PRINCIPAL", "WORKSPACE", "CREATED", "EXPIRES"}) {
+		t.Errorf("header = %v, want [ID PRINCIPAL WORKSPACE CREATED EXPIRES]", header)
 	}
 
-	// Dash must appear for legacy session with nil principal.
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) < 3 {
-		t.Fatalf("expected at least 3 lines, got %d: %s", len(lines), output)
+	first := strings.Fields(lines[1])
+	if len(first) != 5 {
+		t.Fatalf("expected 5 fields in first data row, got %d: %v", len(first), first)
+	}
+	if first[0] != "dhs_001" {
+		t.Errorf("fields[0] = %q, want %q", first[0], "dhs_001")
+	}
+	if first[1] != "alice" {
+		t.Errorf("fields[1] = %q, want %q", first[1], "alice")
 	}
 
-	// Second data row should contain "-" for the principal column.
-	secondRow := lines[2]
-	if !strings.Contains(secondRow, "dhs_002") {
-		t.Errorf("expected dhs_002 in second row: %s", secondRow)
+	second := strings.Fields(lines[2])
+	if len(second) != 5 {
+		t.Fatalf("expected 5 fields in second data row, got %d: %v", len(second), second)
 	}
-	fields := strings.Fields(secondRow)
-	if len(fields) < 2 {
-		t.Fatalf("expected at least 2 fields in second row: %s", secondRow)
+	if second[0] != "dhs_002" {
+		t.Errorf("fields[0] = %q, want %q", second[0], "dhs_002")
 	}
-	if fields[1] != "-" {
-		t.Errorf("expected '-' for legacy session principal, got %q: %s", fields[1], secondRow)
+	if second[1] != "-" {
+		t.Errorf("fields[1] = %q, want %q", second[1], "-")
 	}
 }
 
