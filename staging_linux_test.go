@@ -617,3 +617,117 @@ func TestStageBuildContextPartialCopy(t *testing.T) {
 		t.Error("operation directory should be cleaned up after error")
 	}
 }
+
+func TestStageBuildContextDockerfileRelTraversal(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	absCtx := abs(t, ctxDir)
+
+	for _, rel := range []string{"../Dockerfile", "subdir/../../Dockerfile", "Dockerfile/.."} {
+		_, err := StageBuildContext(context.Background(), workspace, absCtx, rel, runtimeDir, "op1")
+		if err == nil {
+			t.Errorf("expected error for dockerfileRel %q, got nil", rel)
+		}
+	}
+}
+
+func TestStageBuildContextContextPathEscape(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	_ = createBuildContext(t, workspace)
+
+	outsideDir := t.TempDir()
+	os.WriteFile(filepath.Join(outsideDir, "Dockerfile"), []byte("FROM alpine:3.24\n"), 0o644)
+
+	escapePath := filepath.Join(workspace, "escape")
+	os.Symlink(outsideDir, escapePath)
+
+	_, err := StageBuildContext(context.Background(), workspace, abs(t, escapePath), "Dockerfile", runtimeDir, "op1")
+	if err == nil {
+		t.Error("expected error for context path escape, got nil")
+	}
+}
+
+func TestStageBuildContextBuildsSymlink(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	externalDir := t.TempDir()
+	buildsPath := filepath.Join(runtimeDir, "builds")
+	os.Symlink(externalDir, buildsPath)
+
+	_, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1")
+	if err == nil {
+		t.Error("expected error for symlink builds directory, got nil")
+	}
+
+	entries, _ := os.ReadDir(externalDir)
+	if len(entries) > 0 {
+		t.Errorf("external directory should be empty, got %d entries", len(entries))
+	}
+}
+
+func TestStageBuildContextUnexpectedEOF(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	largeFile := filepath.Join(ctxDir, "truncate.bin")
+	data := make([]byte, 256*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	os.WriteFile(largeFile, data, 0o644)
+
+	hooks := &stagingHooks{
+		duringCopy: func(name string, copied int64) error {
+			if name == "truncate.bin" && copied == 128*1024 {
+				os.Truncate(largeFile, int64(copied))
+			}
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	if err == nil {
+		t.Error("expected error for unexpected EOF, got nil")
+	}
+	if !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Errorf("expected unexpected EOF error, got: %v", err)
+	}
+
+	opDir := filepath.Join(runtimeDir, "builds", "op1")
+	if _, err := os.Stat(opDir); err == nil {
+		t.Error("operation directory should be cleaned up after error")
+	}
+}
+
+func TestStageBuildContextContextReplacement(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+	absCtx := abs(t, ctxDir)
+
+	outsideDir := t.TempDir()
+	os.WriteFile(filepath.Join(outsideDir, "secret.txt"), []byte("secret\n"), 0o644)
+
+	replaced := atomic.Bool{}
+	hooks := &stagingHooks{
+		afterWorkspacePin: func() error {
+			os.RemoveAll(ctxDir)
+			os.Symlink(outsideDir, ctxDir)
+			replaced.Store(true)
+			return nil
+		},
+	}
+
+	_, err := stageBuildContextInternal(context.Background(), workspace, absCtx, "Dockerfile", runtimeDir, "op1", defaultStagingSyscall(), hooks)
+	if err == nil {
+		t.Error("expected error for context replacement, got nil")
+	}
+	if !replaced.Load() {
+		t.Error("hook was not called")
+	}
+
+	opDir := filepath.Join(runtimeDir, "builds", "op1")
+	if _, err := os.Stat(opDir); err == nil {
+		t.Error("operation directory should not exist after error")
+	}
+}
