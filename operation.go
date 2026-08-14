@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -163,51 +164,65 @@ func (r *operationRegistry) get(id string) *operation {
 }
 
 func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	now := time.Now()
-	var completed []*operation
+	// Step 1: Copy operation pointers under short RLock.
+	r.mu.RLock()
+	ops := make([]*operation, 0, len(r.ops))
 	for _, op := range r.ops {
+		ops = append(ops, op)
+	}
+	r.mu.RUnlock()
+
+	// Step 2: Snapshot each operation's state under op.mu once.
+	type completedOp struct {
+		op          *operation
+		completedAt time.Time
+	}
+	var completed []completedOp
+	now := time.Now()
+	for _, op := range ops {
 		op.mu.Lock()
-		state := op.State
-		completedAt := op.CompletedAt
+		if op.State != operationRunning && op.CompletedAt != nil {
+			completed = append(completed, completedOp{op: op, completedAt: *op.CompletedAt})
+		}
 		op.mu.Unlock()
-		if state != operationRunning && completedAt != nil {
-			completed = append(completed, op)
+	}
+
+	// Step 3: Determine which operations to remove (outside all locks).
+	type removeOp struct {
+		id string
+		op *operation
+	}
+	var toRemove []removeOp
+
+	// Separate TTL-expired from non-expired.
+	var nonExpired []completedOp
+	for _, c := range completed {
+		if now.Sub(c.completedAt) > retentionTTL {
+			toRemove = append(toRemove, removeOp{id: c.op.ID, op: c.op})
+		} else {
+			nonExpired = append(nonExpired, c)
 		}
 	}
 
-	for _, op := range completed {
-		if now.Sub(*op.CompletedAt) > retentionTTL {
-			delete(r.ops, op.ID)
+	// Apply cap to non-expired: keep maxCompleted newest, remove oldest.
+	if len(nonExpired) > maxCompleted {
+		sort.Slice(nonExpired, func(i, j int) bool {
+			return nonExpired[i].completedAt.Before(nonExpired[j].completedAt)
+		})
+		for _, c := range nonExpired[:len(nonExpired)-maxCompleted] {
+			toRemove = append(toRemove, removeOp{id: c.op.ID, op: c.op})
 		}
 	}
 
-	if len(completed) > maxCompleted {
-		sorted := make([]*operation, 0, len(completed))
-		for _, op := range completed {
-			op.mu.Lock()
-			completedAt := op.CompletedAt
-			op.mu.Unlock()
-			if completedAt != nil {
-				sorted = append(sorted, op)
+	// Step 4: Remove under single Lock with TOCTOU check.
+	if len(toRemove) > 0 {
+		r.mu.Lock()
+		for _, rem := range toRemove {
+			if r.ops[rem.id] == rem.op {
+				delete(r.ops, rem.id)
 			}
 		}
-		for i := 0; i < len(sorted)-1; i++ {
-			for j := i + 1; j < len(sorted); j++ {
-				sorted[i].mu.Lock()
-				sorted[j].mu.Lock()
-				if sorted[j].CompletedAt.Before(*sorted[i].CompletedAt) {
-					sorted[i], sorted[j] = sorted[j], sorted[i]
-				}
-				sorted[i].mu.Unlock()
-				sorted[j].mu.Unlock()
-			}
-		}
-		for _, op := range sorted[:len(sorted)-maxCompleted] {
-			delete(r.ops, op.ID)
-		}
+		r.mu.Unlock()
 	}
 }
 
