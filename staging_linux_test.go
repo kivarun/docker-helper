@@ -305,15 +305,83 @@ func TestStageBuildContextExistingOperationDir(t *testing.T) {
 	workspace, runtimeDir := setupStagingTest(t)
 	ctxDir := createBuildContext(t, workspace)
 
+	// Create existing empty operation directory.
 	opDir := filepath.Join(runtimeDir, "builds", "op_existing")
-	os.MkdirAll(filepath.Join(opDir, "context"), 0o700)
+	os.MkdirAll(opDir, 0o700)
 
 	_, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op_existing")
 	if err == nil {
 		t.Error("expected error for existing operation directory, got nil")
 	}
-	if !strings.Contains(err.Error(), "exists") {
-		t.Errorf("expected 'exists' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("expected 'already exists' error, got: %v", err)
+	}
+	// Directory should remain unchanged.
+	if _, err := os.Stat(opDir); err != nil {
+		t.Error("existing operation directory should remain")
+	}
+}
+
+func TestStageBuildContextExistingOperationDirWithContent(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	// Create existing operation directory with content.
+	opDir := filepath.Join(runtimeDir, "builds", "op_existing")
+	os.MkdirAll(filepath.Join(opDir, "context"), 0o700)
+	os.WriteFile(filepath.Join(opDir, "context", "marker"), []byte("marker\n"), 0o644)
+
+	_, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op_existing")
+	if err == nil {
+		t.Error("expected error for existing operation directory, got nil")
+	}
+	// Marker and directory should remain unchanged.
+	if _, err := os.Stat(filepath.Join(opDir, "context", "marker")); err != nil {
+		t.Error("marker file should remain")
+	}
+}
+
+func TestStageBuildContextExistingSymlinkOperationID(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	// Create symlink where operationID would go.
+	buildsDir := filepath.Join(runtimeDir, "builds")
+	os.MkdirAll(buildsDir, 0o700)
+	symlinkPath := filepath.Join(buildsDir, "op_symlink")
+	os.Symlink("/tmp/escape", symlinkPath)
+
+	_, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op_symlink")
+	if err == nil {
+		t.Error("expected error for existing symlink operation ID, got nil")
+	}
+	// Symlink should remain unchanged.
+	info, err := os.Lstat(symlinkPath)
+	if err != nil {
+		t.Fatalf("symlink should remain: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("symlink should remain a symlink")
+	}
+}
+
+func TestStageBuildContextExistingFileOperationID(t *testing.T) {
+	workspace, runtimeDir := setupStagingTest(t)
+	ctxDir := createBuildContext(t, workspace)
+
+	// Create file where operationID would go.
+	buildsDir := filepath.Join(runtimeDir, "builds")
+	os.MkdirAll(buildsDir, 0o700)
+	filePath := filepath.Join(buildsDir, "op_file")
+	os.WriteFile(filePath, []byte("file\n"), 0o644)
+
+	_, err := StageBuildContext(context.Background(), workspace, abs(t, ctxDir), "Dockerfile", runtimeDir, "op_file")
+	if err == nil {
+		t.Error("expected error for existing file operation ID, got nil")
+	}
+	// File should remain unchanged.
+	if _, err := os.Stat(filePath); err != nil {
+		t.Error("file should remain")
 	}
 }
 

@@ -228,30 +228,25 @@ func stageBuildContextInternal(
 	defer unix.Close(buildsFD)
 
 	// Create operation directory exclusively via mkdirat.
+	if err := unix.Mkdirat(buildsFD, operationID, 0o700); err != nil {
+		if err == unix.EEXIST {
+			return nil, fmt.Errorf("operation directory already exists: %s", operationID)
+		}
+		return nil, fmt.Errorf("cannot create operation directory: %w", err)
+	}
+
+	// We own this operation directory. Open it via openat2 to verify.
 	opFD, err := sy.Openat2(buildsFD, operationID, &unix.OpenHow{
 		Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	})
 	if err != nil {
-		if err == unix.ENOENT {
-			if err := unix.Mkdirat(buildsFD, operationID, 0o700); err != nil {
-				return nil, fmt.Errorf("cannot create operation directory: %w", err)
-			}
-			opFD, err = sy.Openat2(buildsFD, operationID, &unix.OpenHow{
-				Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
-				Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
-			})
-			if err != nil {
-				removeAllAtRecursive(buildsFD, operationID)
-				return nil, fmt.Errorf("cannot open operation directory: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("operation directory already exists: %s", operationID)
-		}
+		removeAllAtRecursive(buildsFD, operationID)
+		return nil, fmt.Errorf("cannot open operation directory: %w", err)
 	}
 	defer unix.Close(opFD)
 
-	// Track operation directory for cleanup via buildsFD.
+	// We own operation directory; cleanup is safe on any subsequent error.
 
 	// Create staging directory via mkdirat.
 	if err := unix.Mkdirat(opFD, "context", 0o700); err != nil {
