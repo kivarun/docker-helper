@@ -700,10 +700,13 @@ Note: `docker-helper config show` (without a field) displays
 ## Security
 
 - **Host path policy** — build contexts, Dockerfiles, and bind-mount
-  sources are validated against the session workspace.
-- **Bearer authentication** — admin token, launcher credentials, and
-  session tokens use Bearer authentication with SHA-256 hashing and
-  constant-time comparison.
+  sources are validated against the session workspace. Builds use an
+  isolated staging copy with FD-relative traversal; system-mode run
+  mounts use inode-pinned helper-owned mounts.
+- **Bearer authentication** — admin token uses SHA-256 hashing with
+  constant-time comparison in memory; launcher credentials and session
+  tokens use SHA-256 hashes stored in SQLite and resolved through
+  database lookup.
 - **Socket permissions** — user mode Unix socket has 0600 permissions;
   system mode Unix socket has 0666 permissions. In system mode, the
   socket is accessible to any local user, but security is enforced

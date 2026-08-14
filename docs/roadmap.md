@@ -19,7 +19,8 @@ docker-helper remains a narrow policy-enforcing daemon, not a generic agent cont
 Verified against current implementation:
 
 - Unix-socket HTTP service (`docker-helper serve`, 0600 permissions);
-- admin/session two-token authentication (SHA-256, constant-time compare);
+- admin/session two-token authentication (SHA-256; admin token uses
+  constant-time compare, session tokens use database lookup);
 - canonical workspace containment (`EvalSymlinks`, `isInside`);
 - mount validation and symlink escape protection;
 - environment policy (name validation, sorted, values never logged);

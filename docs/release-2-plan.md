@@ -173,7 +173,10 @@ Accepted Release 2 decisions:
 - Multi-user audit records must carry principal identity in addition to session,
   request, and operation identifiers.
 
-## Phase 1: principal persistence and administrative API
+The sections below are the detailed implementation breakdown for each workstream.
+The top-level Phase 0–8 progress sequence above is the authoritative roadmap.
+
+## Workstream 1: principal persistence and administrative API
 
 Introduce the multi-user identity objects without changing existing session
 behavior yet.
@@ -223,7 +226,7 @@ behavior yet.
 - Unit tests cover unknown users, duplicate principals, root normalization,
   authorization failures, and CLI/API round trips.
 
-## Phase 2: launcher credentials
+## Workstream 2: launcher credentials
 
 Add multiple revocable credentials per principal.
 
@@ -246,7 +249,7 @@ Add multiple revocable credentials per principal.
 - Audit identifies both the principal and, where useful, the credential ID/name
   without exposing its secret.
 
-## Phase 3: principal-owned sessions and authorization
+## Workstream 3: principal-owned sessions and authorization
 
 Replace the system-mode launcher dependency on the global admin token with
 principal credentials for ordinary session lifecycle.
@@ -272,7 +275,7 @@ principal credentials for ordinary session lifecycle.
   launcher credential.
 - Existing async operation semantics remain unchanged.
 
-## Phase 4: deployment profiles, system paths, and runtime UID/GID
+## Workstream 4: deployment profiles, system paths, and runtime UID/GID
 
 Introduce the root system-daemon profile while preserving Release 1 user mode.
 
@@ -309,7 +312,7 @@ System mode:
 - Private user workspaces work without requiring ACL changes for a dedicated
   helper service account.
 
-## Phase 5: dual local listener lifecycle and client discovery
+## Workstream 5: dual local listener lifecycle and client discovery
 
 Generalize the listener lifecycle only as far as required for the accepted two
 local transports.
@@ -342,7 +345,7 @@ operational experience justifies it.
 - A host client can use either system local transport.
 - Listener startup/failure/shutdown tests cover both listeners together.
 
-## Phase 6: systemd system service and hardening
+## Workstream 6: systemd system service and hardening
 
 - Add a system service unit for root system mode.
 - Keep the existing user unit for user mode.
@@ -359,7 +362,7 @@ operational experience justifies it.
 - Effective permissions for config, credentials, database, sockets, and runtime
   directories are documented and tested.
 
-## Phase 7: native distribution and manuals
+## Workstream 7: native distribution and manuals
 
 - Build native DEB and RPM packages.
 - Keep openSUSE and Ubuntu as important targets; select the exact RHEL-family
@@ -376,7 +379,7 @@ operational experience justifies it.
 Release 1 sessions are not migrated to the Release 2 system service. User-mode
 state remains user-mode state.
 
-## Phase 8: Release 2 acceptance
+## Workstream 8: Release 2 acceptance
 
 Run the complete regression and system acceptance pass:
 

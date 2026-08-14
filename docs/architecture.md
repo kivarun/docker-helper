@@ -542,7 +542,8 @@ Three credential classes provide different levels of access:
 - grants full administrative access: manage principals, credentials, and
   all sessions;
 - sent as `Authorization: Bearer <admin-token>`;
-- compared via `crypto/subtle.ConstantTimeCompare`.
+- compared with `crypto/subtle.ConstantTimeCompare` to prevent timing
+  attacks.
 
 ### Launcher credential
 
@@ -553,7 +554,8 @@ Three credential classes provide different levels of access:
 - grants access scoped to the principal: create sessions for that principal,
   list and delete only that principal's sessions;
 - cannot manage principals or credentials;
-- sent as `Authorization: Bearer <credential-token>`.
+- sent as `Authorization: Bearer <credential-token>`;
+- resolved through database lookup by token hash.
 
 ### Session token
 
@@ -563,7 +565,7 @@ Three credential classes provide different levels of access:
 - required for Docker operations: `POST /build`, `POST /run`, `POST /pull`,
   `POST /registry/login`;
 - sent as `Authorization: Bearer <session-token>`;
-- looked up by hash and checked for expiration;
+- resolved through database lookup by token hash and checked for expiration;
 - deletion removes the session and invalidates subsequent requests.
 
 Session management is dual-authenticated:
@@ -578,7 +580,13 @@ Each session is bound to a single workspace directory.
 ### Canonical paths
 
 All paths are resolved through `filepath.EvalSymlinks` before comparison.
-This prevents symlink-based escape attacks.
+This prevents symlink-based escape attacks at validation time.
+
+Note: `EvalSymlinks` resolves the path at a point in time. By itself it
+does not solve TOCTOU problems where the filesystem changes between
+validation and use. For operations that pass paths to Docker as strings,
+additional measures (such as FD-relative traversal or inode pinning) are
+required to close the gap.
 
 ### isInside()
 
@@ -594,6 +602,20 @@ When a session is created, the workspace path is resolved through
 When a build or run request specifies a path relative to the workspace,
 the resolved path is compared against the canonical workspace. If the
 resolved path escapes the workspace, the request is rejected.
+
+This validation catches static symlink escapes at request time. It does
+not by itself prevent a TOCTOU attack where the workspace contents change
+between validation and Docker execution. The specific mitigation depends
+on the operation:
+
+- **Builds** (both modes): an isolated staging copy eliminates the gap
+  (see Build context below).
+- **System-mode run mounts**: inode-pinned helper-owned mounts via
+  `open_tree` + `move_mount` close the gap (see System-mode mounts
+  below).
+- **User-mode run mounts**: only the workspace root may be mounted;
+  security relies on the launcher invariant that the agent cannot
+  replace the workspace directory entry (see User-mode mounts below).
 
 ### Per-session workspace
 
@@ -911,25 +933,40 @@ access to the parent directory of the workspace. Since the agent cannot
 replace the workspace directory entry, the pathname remains stable between
 validation and the Docker bind mount.
 
-### System-mode mount TOCTOU gap
+### System-mode run mounts
 
-System mode accepts any mount source inside the workspace. The TOCTOU gap
-remains: the helper validates canonical paths but passes them to Docker as
-strings. A workspace owner can replace the validated object with a symlink
-between validation and Docker mount.
+In system mode, bind-mount sources are opened beneath the workspace
+using `openat2` with `RESOLVE_NO_SYMLINKS` and `RESOLVE_BENEATH` to
+prevent traversal. The resulting inode is pinned through `open_tree`
++ `move_mount` into a helper-owned directory under the runtime path.
+Docker receives the pinned path, not the original workspace path.
 
-The confirmed resolution is inode-pinned helper-owned mount via
-`open_tree` + `move_mount` (requires `CAP_SYS_ADMIN`). Until this is
-implemented and verified, system-mode mounts have the same TOCTOU gap as
-build context in both modes.
+If `openat2`, `open_tree`, or `move_mount` is unavailable or fails, the
+operation fails closed with no pathname fallback. Pinned mounts are
+cleaned up as part of the operation lifecycle.
 
-### Build context TOCTOU
+### User-mode run mounts
 
-The build context and Dockerfile paths have a time-of-check/time-of-use
-gap: the helper validates canonical paths but passes them to Docker as
-strings. The build context TOCTOU gap remains open for both user and
-system mode. `open_tree`/`move_mount` does not directly solve this because
-Docker CLI independently processes the build context and Dockerfile paths.
+In user mode, only the workspace root may be mounted. Subdirectory and
+file mounts are rejected. Security relies on the documented launcher
+invariant: the sandboxed agent cannot replace the workspace directory
+entry on the host. Because the agent has no host-side write access to
+the parent directory of the workspace, the pathname remains stable
+between validation and the Docker bind mount.
+
+### Build context
+
+The Linux build implementation creates an isolated helper-owned staging
+copy of the build context. Traversal is FD-relative and restricted with
+`openat2` flags (`RESOLVE_NO_SYMLINKS`, `RESOLVE_BENEATH`). Docker
+receives only the staged context and Dockerfile paths, never the
+original workspace paths.
+
+On platforms or kernels where `openat2` is unavailable, the operation
+fails closed without falling back to original workspace paths.
+
+Staging directories are cleaned up as part of the build operation
+lifecycle.
 
 ### Why source must be relative
 
@@ -1403,10 +1440,20 @@ All paths are resolved through `filepath.Abs` and `filepath.EvalSymlinks`
 before comparison. The `isInside` function uses `filepath.Rel`, which
 operates on canonical paths.
 
+For operations that pass paths to Docker, additional measures close the
+TOCTOU gap: builds use an isolated staging copy with FD-relative
+`openat2` traversal; system-mode run mounts use inode-pinned
+helper-owned mounts via `open_tree` + `move_mount`.
+
 ### Symlink escape
 
-`EvalSymlinks` resolves all symlinks in a path. If a symlink inside the
-workspace points outside, the resolved path will fail the `isInside` check.
+`EvalSymlinks` resolves all symlinks in a path at validation time.
+If a symlink inside the workspace points outside, the resolved path
+will fail the `isInside` check.
+
+Note: `EvalSymlinks` alone does not prevent TOCTOU attacks where the
+filesystem changes between validation and use. The specific operation
+mitigations (staging, inode pinning) address this gap.
 
 ### Cross-workspace access
 
@@ -1417,8 +1464,9 @@ session's workspace.
 ### Session token leakage
 
 Session tokens are returned once during creation. The full token is never
-stored in the database — only its SHA-256 hash. Token comparison uses
-`ConstantTimeCompare` to prevent timing attacks.
+stored in the database — only its SHA-256 hash. Admin token comparison
+uses `ConstantTimeCompare` to prevent timing attacks. Launcher credentials
+and session tokens are resolved through database lookup by hash.
 
 ### Direct docker.sock access
 
