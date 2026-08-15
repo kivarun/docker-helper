@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 )
 
 const (
@@ -64,6 +65,42 @@ type inputError struct {
 
 func (e *inputError) Error() string { return e.msg }
 
+// rootResult is the structured return value for addRoot and removeRoot.
+type rootResult struct {
+	Path    string
+	Changed bool
+}
+
+// validateRootLexical checks a path string without filesystem access.
+// It is the authoritative lexical validator for stored roots.
+func validateRootLexical(path string) error {
+	if !utf8.ValidString(path) {
+		return &inputError{msg: "path is not valid UTF-8"}
+	}
+	if !filepath.IsAbs(path) {
+		return &inputError{msg: "path must be absolute"}
+	}
+	if path == "/" {
+		return &inputError{msg: "cannot use root directory as workspace root"}
+	}
+	if filepath.Clean(path) != path {
+		return &inputError{msg: "path is not in clean form"}
+	}
+	if strings.HasSuffix(path, "/") {
+		return &inputError{msg: "path must not end with /"}
+	}
+	for _, c := range path {
+		switch c {
+		case '*', '?', '[', ']', '{', '}':
+			return &inputError{msg: fmt.Sprintf("path contains invalid character %q", string(c))}
+		}
+		if c < 0x20 || c == 0x7f {
+			return &inputError{msg: fmt.Sprintf("path contains control character %q", string(c))}
+		}
+	}
+	return nil
+}
+
 func validateRootPathForAdd(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", &inputError{msg: "path must be absolute"}
@@ -85,11 +122,7 @@ func validateRootPathForAdd(path string) (string, error) {
 		return "", &inputError{msg: fmt.Sprintf("cannot resolve path: %v", err)}
 	}
 
-	if canonical == "/" {
-		return "", &inputError{msg: "cannot use root directory as workspace root"}
-	}
-
-	if err := validatePathCharacters(canonical); err != nil {
+	if err := validateRootLexical(canonical); err != nil {
 		return "", err
 	}
 
@@ -102,42 +135,34 @@ func validateRootPathForRemove(path string) (string, error) {
 	}
 
 	info, err := os.Stat(path)
-	if err == nil && info.IsDir() {
-		canonical, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return "", &inputError{msg: fmt.Sprintf("cannot resolve path: %v", err)}
+	if err == nil {
+		if info.IsDir() {
+			canonical, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return "", &inputError{msg: fmt.Sprintf("cannot resolve path: %v", err)}
+			}
+			if err := validateRootLexical(canonical); err != nil {
+				return "", err
+			}
+			return canonical, nil
 		}
-		if canonical == "/" {
-			return "", &inputError{msg: "cannot use root directory as workspace root"}
-		}
-		if err := validatePathCharacters(canonical); err != nil {
+		// Existing non-directory: treat as lexical stale root candidate.
+		cleaned := filepath.Clean(path)
+		if err := validateRootLexical(cleaned); err != nil {
 			return "", err
 		}
-		return canonical, nil
+		return cleaned, nil
+	}
+
+	if !os.IsNotExist(err) {
+		return "", fmt.Errorf("cannot stat path: %w", err)
 	}
 
 	cleaned := filepath.Clean(path)
-	if cleaned == "/" {
-		return "", &inputError{msg: "cannot use root directory as workspace root"}
-	}
-	if err := validatePathCharacters(cleaned); err != nil {
+	if err := validateRootLexical(cleaned); err != nil {
 		return "", err
 	}
-
 	return cleaned, nil
-}
-
-func validatePathCharacters(path string) error {
-	for _, c := range path {
-		switch c {
-		case '*', '?', '[', ']', '{', '}', '\n', '\r':
-			return &inputError{msg: fmt.Sprintf("path contains invalid character %q", string(c))}
-		}
-		if c < 0x20 && c != '\t' {
-			return &inputError{msg: fmt.Sprintf("path contains control character %q", string(c))}
-		}
-	}
-	return nil
 }
 
 func jsonQuote(s string) string {
@@ -211,6 +236,9 @@ func parseFragment(data []byte) ([]string, error) {
 			if err != nil {
 				return nil, fmt.Errorf("malformed root-json metadata at line %d: %w", i+1, err)
 			}
+			if err := validateRootLexical(root); err != nil {
+				return nil, fmt.Errorf("invalid root at line %d: %w", i+1, err)
+			}
 			roots = append(roots, root)
 		}
 	}
@@ -261,30 +289,23 @@ func (m *apparmorManager) acquireApparmorLock() (*os.File, error) {
 	return f, nil
 }
 
-func (m *apparmorManager) checkSymlink() error {
-	info, err := os.Lstat(m.managedFragmentPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("cannot stat managed fragment: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("managed fragment path is a symlink")
-	}
-	return nil
-}
-
 func (m *apparmorManager) readFragment() ([]string, error) {
-	if err := m.checkSymlink(); err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(m.managedFragmentPath)
+	info, err := os.Lstat(m.managedFragmentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []string{}, nil
 		}
+		return nil, fmt.Errorf("cannot stat managed fragment: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("managed fragment path is a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("managed fragment is not a regular file")
+	}
+
+	data, err := os.ReadFile(m.managedFragmentPath)
+	if err != nil {
 		return nil, fmt.Errorf("cannot read managed fragment: %w", err)
 	}
 
@@ -350,6 +371,12 @@ func (m *apparmorManager) snapshotFragment() (*fragmentSnapshot, error) {
 		}
 		return nil, fmt.Errorf("cannot lstat managed fragment: %w", err)
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("managed fragment path is a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("managed fragment is not a regular file")
+	}
 
 	data, err := os.ReadFile(m.managedFragmentPath)
 	if err != nil {
@@ -379,6 +406,9 @@ func (m *apparmorManager) preflight() error {
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("apparmor_parser is not a regular file: %s", m.parserPath)
+	}
+	if info.Mode().Perm()&0111 == 0 {
+		return fmt.Errorf("apparmor_parser is not executable: %s", m.parserPath)
 	}
 
 	pinfo, err := os.Stat(m.mainProfilePath)
@@ -450,30 +480,30 @@ func (m *apparmorManager) listRoots() ([]string, error) {
 	return m.readFragment()
 }
 
-func (m *apparmorManager) addRoot(path string) (string, error) {
+func (m *apparmorManager) addRoot(path string) (rootResult, error) {
 	canonical, err := validateRootPathForAdd(path)
 	if err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	lockFile, err := m.acquireApparmorLock()
 	if err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 	defer lockFile.Close()
 
 	if err := m.preflight(); err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	snap, err := m.snapshotFragment()
 	if err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	for _, r := range snap.roots {
 		if r == canonical {
-			return canonical, nil
+			return rootResult{Path: canonical, Changed: false}, nil
 		}
 	}
 
@@ -483,39 +513,39 @@ func (m *apparmorManager) addRoot(path string) (string, error) {
 	sort.Strings(newRoots)
 
 	if err := m.writeFragment(newRoots); err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	if err := m.reloadProfile(); err != nil {
 		rollbackErr := m.rollbackFragment(snap)
 		if rollbackErr != nil {
-			return "", fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
+			return rootResult{}, fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
 		}
-		return "", fmt.Errorf("reload failed: %w", err)
+		return rootResult{}, fmt.Errorf("reload failed: %w", err)
 	}
 
-	return canonical, nil
+	return rootResult{Path: canonical, Changed: true}, nil
 }
 
-func (m *apparmorManager) removeRoot(path string) (string, error) {
+func (m *apparmorManager) removeRoot(path string) (rootResult, error) {
 	canonical, err := validateRootPathForRemove(path)
 	if err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	lockFile, err := m.acquireApparmorLock()
 	if err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 	defer lockFile.Close()
 
 	if err := m.preflight(); err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	snap, err := m.snapshotFragment()
 	if err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	newRoots := make([]string, 0, len(snap.roots))
@@ -529,22 +559,22 @@ func (m *apparmorManager) removeRoot(path string) (string, error) {
 	}
 
 	if !found {
-		return canonical, nil
+		return rootResult{Path: canonical, Changed: false}, nil
 	}
 
 	if err := m.writeFragment(newRoots); err != nil {
-		return "", err
+		return rootResult{}, err
 	}
 
 	if err := m.reloadProfile(); err != nil {
 		rollbackErr := m.rollbackFragment(snap)
 		if rollbackErr != nil {
-			return "", fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
+			return rootResult{}, fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
 		}
-		return "", fmt.Errorf("reload failed: %w", err)
+		return rootResult{}, fmt.Errorf("reload failed: %w", err)
 	}
 
-	return canonical, nil
+	return rootResult{Path: canonical, Changed: true}, nil
 }
 
 func (m *apparmorManager) check() error {

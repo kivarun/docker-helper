@@ -137,7 +137,11 @@ func runApparmorRootAdd(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "added %s\n", result)
+	if result.Changed {
+		fmt.Fprintf(stdout, "added %s\n", result.Path)
+	} else {
+		fmt.Fprintf(stdout, "already present %s\n", result.Path)
+	}
 	return 0
 }
 
@@ -159,7 +163,11 @@ func runApparmorRootRemove(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "removed %s\n", result)
+	if result.Changed {
+		fmt.Fprintf(stdout, "removed %s\n", result.Path)
+	} else {
+		fmt.Fprintf(stdout, "not present %s\n", result.Path)
+	}
 	return 0
 }
 
