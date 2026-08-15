@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -94,7 +95,7 @@ func validateRootLexical(path string) error {
 		case '*', '?', '[', ']', '{', '}':
 			return &inputError{msg: fmt.Sprintf("path contains invalid character %q", string(c))}
 		}
-		if c < 0x20 || c == 0x7f {
+		if unicode.IsControl(c) {
 			return &inputError{msg: fmt.Sprintf("path contains control character %q", string(c))}
 		}
 	}

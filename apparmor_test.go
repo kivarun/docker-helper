@@ -10,7 +10,6 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured *struct {
@@ -1523,10 +1522,9 @@ func TestApparmorConcurrentLockBusy(t *testing.T) {
 		}
 	}
 
-	var firstInRunner chan struct{}
-	firstInRunner = make(chan struct{})
-	var firstDone chan struct{}
-	firstDone = make(chan struct{})
+	firstInRunner := make(chan struct{})
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
 
 	fakeRunner := func(exe string, args []string) error {
 		close(firstInRunner)
@@ -1555,15 +1553,11 @@ func TestApparmorConcurrentLockBusy(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		_, errB = mgr.addRoot(testDirB)
+		close(secondDone)
 	}()
 
-	// Give second goroutine time to try and fail
-	select {
-	case <-time.After(50 * time.Millisecond):
-		// Second goroutine should have tried by now
-	case <-firstDone:
-		// Shouldn't happen yet
-	}
+	// Wait for second goroutine to complete (should get lock-busy error)
+	<-secondDone
 
 	// Release first goroutine
 	close(firstDone)
@@ -1608,6 +1602,26 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a valid fragment before the operation
+	validFragment := renderFragment([]string{"/existing"})
+	if err := os.MkdirAll(filepath.Dir(fragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fragment, validFragment, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save original fragment state
+	origData, err := os.ReadFile(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origInfo, err := os.Stat(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origMode := origInfo.Mode().Perm()
+
 	runnerCalled := false
 	fakeRunner := func(exe string, args []string) error {
 		runnerCalled = true
@@ -1616,7 +1630,7 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 
 	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	_, err := mgr.addRoot(testDir)
+	_, err = mgr.addRoot(testDir)
 	if err == nil {
 		t.Fatal("expected error for non-executable parser")
 	}
@@ -1627,9 +1641,21 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 		t.Error("runner should not be called when parser is not executable")
 	}
 
-	// Fragment should not have been created
-	if _, err := os.Stat(fragment); !os.IsNotExist(err) {
-		t.Error("fragment should not be created when parser is not executable")
+	// Fragment should be unchanged
+	afterData, err := os.ReadFile(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterData, origData) {
+		t.Error("fragment bytes should not be modified")
+	}
+
+	afterInfo, err := os.Stat(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterInfo.Mode().Perm() != origMode {
+		t.Errorf("fragment mode should not be modified: expected %o, got %o", origMode, afterInfo.Mode().Perm())
 	}
 }
 
@@ -2339,6 +2365,8 @@ func TestValidateRootLexical(t *testing.T) {
 		{"CR", "/with\rCR", true},
 		{"DEL", "/with\x7fDEL", true},
 		{"control", "/with\x01control", true},
+		{"unicode control NEL", "/with\u0085control", true},
+		{"unicode control", "/with\u009fcontrol", true},
 		{"invalid UTF-8", string([]byte{0xff, 0xfe}), true},
 	}
 
@@ -2365,28 +2393,30 @@ func TestParseFragmentRejectsInvalidRoots(t *testing.T) {
 		name string
 		root string
 	}{
-		{"relative", "# root-json: \"relative\"\n"},
-		{"root dir", "# root-json: \"/\"\n"},
-		{"non-clean", "# root-json: \"/a//b\"\n"},
-		{"glob", "# root-json: \"/workspace*\"\n"},
-		{"tab", "# root-json: \"/with\\ttab\"\n"},
-		{"DEL", "# root-json: \"/with\\u007fDEL\"\n"},
+		{"relative", "relative"},
+		{"root dir", "/"},
+		{"non-clean", "/a//b"},
+		{"glob", "/workspace*"},
+		{"tab", "/with\ttab"},
+		{"DEL", "/with\x7fDEL"},
+		{"unicode control", "/with\u0085control"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			data := []byte(fragmentHeader1 + "\n" + fragmentHeader2 + "\n\n" + tc.root + "\n/workspace/ r,\n/workspace/** r,\n")
+			// Use renderFragment to create a properly formatted fragment
+			data := renderFragment([]string{tc.root})
 			_, err := parseFragment(data)
 			if err == nil {
-				t.Fatalf("expected error for invalid root, got nil")
+				t.Fatalf("expected error for invalid root %q, got nil", tc.root)
 			}
 		})
 	}
 }
 
-// --- Idempotent operation output ---
+// --- Idempotent operation result ---
 
-func TestApparmorIdempotentAddOutput(t *testing.T) {
+func TestApparmorIdempotentAddResult(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -2412,7 +2442,7 @@ func TestApparmorIdempotentAddOutput(t *testing.T) {
 	}
 }
 
-func TestApparmorIdempotentRemoveOutput(t *testing.T) {
+func TestApparmorIdempotentRemoveResult(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -2433,9 +2463,33 @@ func TestApparmorIdempotentRemoveOutput(t *testing.T) {
 // --- Stat error in remove ---
 
 func TestValidateRootPathForRemoveStatError(t *testing.T) {
-	// This test verifies that non-ENOENT stat errors are returned as operational errors
-	// We can't easily simulate a stat error that's not ENOENT, but we can verify
-	// the behavior for existing non-directory paths
+	// Test with a symlink loop to get ELOOP error
+	dir := t.TempDir()
+	linkPath := filepath.Join(dir, "loop")
+	if err := os.Symlink(linkPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := validateRootPathForRemove(linkPath)
+	if err == nil {
+		t.Fatal("expected error for symlink loop")
+	}
+
+	// Check that it's not an inputError (it's a stat error)
+	var ie *inputError
+	if errors.As(err, &ie) {
+		t.Error("symlink loop error should not be an inputError")
+	}
+
+	// Check that it wraps or contains ELOOP
+	if !strings.Contains(err.Error(), "too many levels of symbolic links") {
+		t.Errorf("expected ELOOP error, got: %v", err)
+	}
+}
+
+// --- Existing non-directory path as lexical stale root ---
+
+func TestValidateRootPathForRemoveNonDirectory(t *testing.T) {
 	dir := t.TempDir()
 	tmpfile := filepath.Join(dir, "notadir")
 	if err := os.WriteFile(tmpfile, []byte("data"), 0644); err != nil {
