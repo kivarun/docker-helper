@@ -1567,3 +1567,199 @@ esac
 		t.Error("must not print Installation complete on start failure")
 	}
 }
+
+// --- Systemd system unit tests ---
+
+func TestSystemUnitExists(t *testing.T) {
+	path := "packaging/systemd/system/docker-helper.service"
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("system unit %s does not exist: %v", path, err)
+	}
+}
+
+func TestSystemUnitExecStart(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "ExecStart=/usr/bin/docker-helper serve") {
+		t.Error("system unit ExecStart must point to /usr/bin/docker-helper serve")
+	}
+}
+
+func TestSystemUnitNoDedicatedUser(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "User=") {
+			t.Error("system unit must not contain User= (runs as root)")
+		}
+	}
+}
+
+func TestSystemUnitRestartSettings(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "Restart=on-failure") {
+		t.Error("system unit must contain Restart=on-failure")
+	}
+	if !strings.Contains(content, "TimeoutStopSec=") {
+		t.Error("system unit must contain bounded TimeoutStopSec")
+	}
+}
+
+func TestUserUnitStillExists(t *testing.T) {
+	path := "packaging/systemd/user/docker-helper.service"
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("user unit %s must still exist: %v", path, err)
+	}
+}
+
+// --- System AppArmor profile tests ---
+
+func TestSystemAppArmorProfileExists(t *testing.T) {
+	path := "packaging/apparmor/docker-helper-system"
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("system AppArmor profile %s does not exist: %v", path, err)
+	}
+}
+
+func TestSystemAppArmorProfileReferencesManagedRoots(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "docker-helper.d/managed-roots") {
+		t.Error("system AppArmor profile must include managed-roots fragment")
+	}
+}
+
+func TestSystemAppArmorProfileNoBroadHomeAccess(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if strings.Contains(content, "/home/**") {
+		t.Error("system AppArmor profile must not contain broad /home/** access")
+	}
+}
+
+func TestSystemAppArmorProfileBinaryPath(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "/usr/bin/docker-helper") {
+		t.Error("system AppArmor profile must reference /usr/bin/docker-helper")
+	}
+}
+
+// --- Managed fragment tests ---
+
+func TestManagedFragmentMatchesRenderFragmentEmpty(t *testing.T) {
+	expected := renderFragment([]string{})
+	actual, err := os.ReadFile("packaging/apparmor/docker-helper.d/managed-roots")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(actual) != string(expected) {
+		t.Errorf("managed fragment does not match renderFragment([])\nexpected: %q\nactual:   %q", string(expected), string(actual))
+	}
+}
+
+func TestManagedFragmentAssetNameMatchesProduction(t *testing.T) {
+	expectedName := filepath.Base(apparmorManagedFragment)
+	actualName := filepath.Base("packaging/apparmor/docker-helper.d/managed-roots")
+	if actualName != expectedName {
+		t.Errorf("managed fragment asset name %q does not match production constant %q", actualName, expectedName)
+	}
+}
+
+func TestSystemAppArmorAssetNameMatchesProduction(t *testing.T) {
+	expectedName := filepath.Base(apparmorMainProfile)
+	actualName := filepath.Base("packaging/apparmor/docker-helper-system")
+	if actualName != expectedName {
+		t.Errorf("system profile asset name %q does not match production constant %q", actualName, expectedName)
+	}
+}
+
+// --- User AppArmor asset preserved ---
+
+func TestUserAppArmorAssetExists(t *testing.T) {
+	path := "packaging/apparmor/docker-helper"
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("user AppArmor asset %s must still exist: %v", path, err)
+	}
+}
+
+// --- System unit directory declarations ---
+
+func TestSystemUnitDirectoryDeclarations(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "ConfigurationDirectory=docker-helper") {
+		t.Error("system unit must declare ConfigurationDirectory=docker-helper")
+	}
+	if !strings.Contains(content, "StateDirectory=docker-helper") {
+		t.Error("system unit must declare StateDirectory=docker-helper")
+	}
+	if !strings.Contains(content, "RuntimeDirectory=docker-helper") {
+		t.Error("system unit must declare RuntimeDirectory=docker-helper")
+	}
+}
+
+// --- System unit hardening ---
+
+func TestSystemUnitHardening(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "NoNewPrivileges=true") {
+		t.Error("system unit must contain NoNewPrivileges=true")
+	}
+	if !strings.Contains(content, "ProtectKernelTunables=true") {
+		t.Error("system unit must contain ProtectKernelTunables=true")
+	}
+	if strings.Contains(content, "ProtectHome=true") {
+		t.Error("system unit must NOT contain ProtectHome=true (workspace access required)")
+	}
+}
+
+// --- System unit reload ---
+
+func TestSystemUnitReload(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "ExecReload=") {
+		t.Error("system unit must contain ExecReload=")
+	}
+}

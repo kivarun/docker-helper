@@ -1,0 +1,48 @@
+[Unit]
+Description=Docker Helper (system)
+Documentation=man:docker-helper(1)
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+After=network-online.target docker.socket
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/docker-helper serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+ConfigurationDirectory=docker-helper
+StateDirectory=docker-helper
+RuntimeDirectory=docker-helper
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=docker-helper
+
+# Hardening
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictRTP=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryDenyWriteExecute=true
+LockPersonality=true
+PrivateTmp=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+
+# Docker socket access (required for Docker operations)
+# Principal workspaces are accessed via managed AppArmor roots,
+# not hardcoded here. ProtectHome is disabled to allow workspace access.
+
+[Install]
+WantedBy=multi-user.target
