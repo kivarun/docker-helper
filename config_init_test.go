@@ -152,11 +152,14 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
 	rootDir := t.TempDir()
+	// Distinct path that addRoot returns to prove rollback uses result.Path
+	distinctPath := filepath.Join(dir, "distinct-apparmor-path")
 
 	var rollbackCalled bool
 	var rollbackPath string
 	addRoot := func(path string) (rootResult, error) {
-		return rootResult{Path: path, Changed: true}, nil
+		// Return a different path than requested to prove rollback uses result.Path
+		return rootResult{Path: distinctPath, Changed: true}, nil
 	}
 	removeRoot := func(path string) (rootResult, error) {
 		rollbackCalled = true
@@ -176,8 +179,12 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 	if !rollbackCalled {
 		t.Error("removeRoot should have been called for rollback")
 	}
-	if rollbackPath != rootDir {
-		t.Errorf("expected rollback path %s, got %s", rootDir, rollbackPath)
+	if rollbackPath != distinctPath {
+		t.Errorf("expected rollback with addRoot result.Path %s, got %s", distinctPath, rollbackPath)
+	}
+	// Verify rollback did NOT use the original requested path
+	if rollbackPath == rootDir {
+		t.Error("rollback should use addRoot result.Path, not original requested path")
 	}
 }
 
@@ -284,16 +291,10 @@ func TestInitSystemExistingConfigMismatch(t *testing.T) {
 		t.Error("addRoot should not be called on config mismatch")
 	}
 
-	if !strings.Contains(err.Error(), "existing configuration allowed_root") {
-		t.Errorf("expected config mismatch error, got: %v", err)
-	}
-
-	// Verify canonical paths are in the diagnostic
-	if !strings.Contains(err.Error(), oldRoot) {
-		t.Errorf("expected old root %s in error, got: %v", oldRoot, err)
-	}
-	if !strings.Contains(err.Error(), newRoot) {
-		t.Errorf("expected new root %s in error, got: %v", newRoot, err)
+	// Verify exact error message with canonical paths
+	expectedMsg := fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", oldRoot, newRoot)
+	if err.Error() != expectedMsg {
+		t.Errorf("exact mismatch error expected\ngot:  %s\nwant: %s", err.Error(), expectedMsg)
 	}
 }
 
@@ -532,18 +533,124 @@ func TestInitSystemOrderingAddRootBeforeCore(t *testing.T) {
 // --- CLI integration tests ---
 
 func TestInitCLIInputErrorExitCode(t *testing.T) {
-	// This test would require mocking the production AppArmor manager,
-	// which is not feasible in an integration test. The exit code mapping
-	// is verified by unit tests that use the injectable seam.
-	t.Skip("requires AppArmor manager mocking in integration context")
+	dir := t.TempDir()
+
+	// Create two real directories for the mismatch
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+
+	// Create existing config with mismatch at a controlled path
+	configPath := filepath.Join(dir, "config.json")
+	configData := fmt.Sprintf(`{"allowed_root": %q, "session_ttl": "12h"}`, oldRoot)
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock system mode, config path, and inject fake AppArmor operations
+	origUID := EffectiveUID
+	origGetConfig := getConfigPathFunc
+	origAdd := appArmorAddRoot
+	origRemove := appArmorRemoveRoot
+	EffectiveUID = func() int { return 0 }
+	getConfigPathFunc = func() string { return configPath }
+	appArmorAddRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			t.Error("addRoot should not be called on mismatch")
+			return rootResult{}, nil
+		}
+	}
+	appArmorRemoveRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			t.Error("removeRoot should not be called on mismatch")
+			return rootResult{}, nil
+		}
+	}
+	defer func() {
+		EffectiveUID = origUID
+		getConfigPathFunc = origGetConfig
+		appArmorAddRoot = origAdd
+		appArmorRemoveRoot = origRemove
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--allowed-root", newRoot}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2 for input error, got %d (stderr: %s)", code, stderr.String())
+	}
 }
 
-func TestInitCLIAppArmorFailureExitCode(t *testing.T) {
-	// This test verifies that operational AppArmor errors return exit 1.
-	// We cannot easily mock the production AppArmor manager in an integration test,
-	// so we rely on the unit tests above for the detailed behavior.
-	// The CLI error mapping is verified by TestInitCLIInputErrorExitCode above.
-	t.Skip("requires AppArmor manager mocking in integration context")
+func TestInitCLIAppArmorInputErrorExit2(t *testing.T) {
+	dir := t.TempDir()
+
+	rootDir := t.TempDir()
+
+	// Mock system mode, config path, and inject fake AppArmor that returns inputError
+	origUID := EffectiveUID
+	origGetConfig := getConfigPathFunc
+	origAdd := appArmorAddRoot
+	origRemove := appArmorRemoveRoot
+	EffectiveUID = func() int { return 0 }
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	appArmorAddRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			return rootResult{}, &inputError{msg: "path contains invalid character"}
+		}
+	}
+	appArmorRemoveRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			t.Error("removeRoot should not be called on add failure")
+			return rootResult{}, nil
+		}
+	}
+	defer func() {
+		EffectiveUID = origUID
+		getConfigPathFunc = origGetConfig
+		appArmorAddRoot = origAdd
+		appArmorRemoveRoot = origRemove
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--allowed-root", rootDir}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2 for typed inputError, got %d (stderr: %s)", code, stderr.String())
+	}
+}
+
+func TestInitCLIAppArmorOperationalErrorExit1(t *testing.T) {
+	dir := t.TempDir()
+
+	rootDir := t.TempDir()
+
+	// Mock system mode, config path, and inject fake AppArmor that returns operational error
+	origUID := EffectiveUID
+	origGetConfig := getConfigPathFunc
+	origAdd := appArmorAddRoot
+	origRemove := appArmorRemoveRoot
+	EffectiveUID = func() int { return 0 }
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	appArmorAddRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			return rootResult{}, errors.New("parser failed")
+		}
+	}
+	appArmorRemoveRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			t.Error("removeRoot should not be called on add failure")
+			return rootResult{}, nil
+		}
+	}
+	defer func() {
+		EffectiveUID = origUID
+		getConfigPathFunc = origGetConfig
+		appArmorAddRoot = origAdd
+		appArmorRemoveRoot = origRemove
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"init", "--allowed-root", rootDir}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 for operational error, got %d (stderr: %s)", code, stderr.String())
+	}
 }
 
 func TestInitHelpContainsAutomationBoundary(t *testing.T) {
@@ -602,6 +709,49 @@ func TestInitSystemRollbackChangedFalseNotError(t *testing.T) {
 	// Should NOT contain rollback error
 	if strings.Contains(err.Error(), "rollback") {
 		t.Errorf("should not report rollback error when Changed=false, got: %v", err)
+	}
+}
+
+// --- Existing config as directory -> preflight failure ---
+
+func TestInitSystemConfigPathIsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	rootDir := t.TempDir()
+
+	// Create config.json as a directory
+	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	if err := os.MkdirAll(configPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	addCalled := false
+	addRoot := func(path string) (rootResult, error) {
+		addCalled = true
+		return rootResult{}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := initSystemWithAppArmor(rootDir, &stdout, &stderr, addRoot,
+		func(path string) (rootResult, error) {
+			t.Error("removeRoot should not be called")
+			return rootResult{}, nil
+		},
+		func(ar string, so, se io.Writer) error {
+			t.Error("core should not be called")
+			return nil
+		})
+	if err == nil {
+		t.Fatal("expected error for config path as directory")
+	}
+
+	if addCalled {
+		t.Error("addRoot should not be called when config path is a directory")
+	}
+
+	if !strings.Contains(err.Error(), "directory") {
+		t.Errorf("expected directory error, got: %v", err)
 	}
 }
 
@@ -700,71 +850,7 @@ func TestInitSystemExistingConfigInvalid(t *testing.T) {
 	}
 }
 
-// --- Typed AppArmor input error -> exit 2 ---
-
-func TestInitCLIAppArmorInputErrorExit2(t *testing.T) {
-	// This test verifies that when AppArmor returns an inputError,
-	// the CLI returns exit code 2. This is tested via the unit tests
-	// above (TestInitSystemInvalidAppArmorPath) which verify the typed error.
-	// The CLI mapping is verified by the error handling in cli.go.
-	t.Skip("verified by unit tests and CLI error mapping")
-}
-
-// --- Operational AppArmor add error -> exit 1 ---
-
-func TestInitCLIAppArmorOperationalErrorExit1(t *testing.T) {
-	// This test verifies that operational AppArmor errors return exit 1.
-	// The CLI error mapping handles this: inputError -> 2, other -> 1.
-	t.Skip("verified by unit tests and CLI error mapping")
-}
-
-// --- Existing config parse error ---
-
-func TestInitSystemExistingConfigParseError(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-
-	rootDir := t.TempDir()
-
-	// Create unparseable config
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, []byte("not json"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	addCalled := false
-	addRoot := func(path string) (rootResult, error) {
-		addCalled = true
-		return rootResult{}, nil
-	}
-
-	var stdout, stderr bytes.Buffer
-	err := initSystemWithAppArmor(rootDir, &stdout, &stderr, addRoot,
-		func(path string) (rootResult, error) {
-			t.Error("removeRoot should not be called")
-			return rootResult{}, nil
-		},
-		func(ar string, so, se io.Writer) error {
-			t.Error("core should not be called")
-			return nil
-		})
-	if err == nil {
-		t.Fatal("expected error for parse error")
-	}
-
-	if addCalled {
-		t.Error("addRoot should not be called when config parse fails")
-	}
-
-	if !strings.Contains(err.Error(), "parse") {
-		t.Errorf("expected parse error, got: %v", err)
-	}
-}
-
-// --- Verify raw config validation ---
+// --- Validate raw config validation ---
 
 func TestValidateRawConfigRejectsMissingAllowedRoot(t *testing.T) {
 	raw := map[string]json.RawMessage{

@@ -187,6 +187,9 @@ func getConfigPath() string {
 	return filepath.Join(xdgConfig, "docker-helper", "config.json")
 }
 
+// getConfigPathFunc is injectable for testing.
+var getConfigPathFunc = getConfigPath
+
 func getConfigDir() string {
 	return filepath.Dir(getConfigPath())
 }
@@ -445,7 +448,7 @@ type initCoreResult struct {
 // It does not perform any AppArmor operations.
 func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, error) {
 	mode := resolveDeploymentMode()
-	configPath := getConfigPath()
+	configPath := getConfigPathFunc()
 	configDir := filepath.Dir(configPath)
 	stateDir := getStateDir()
 
@@ -531,7 +534,7 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 	removeRoot func(string) (rootResult, error),
 	core func(string, io.Writer, io.Writer) error,
 ) error {
-	configPath := getConfigPath()
+	configPath := getConfigPathFunc()
 	configDir := filepath.Dir(configPath)
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
@@ -549,28 +552,30 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 	configExists := false
 
 	if stat, err := os.Stat(configPath); err == nil {
-		if !stat.IsDir() {
-			configExists = true
-			data, err := os.ReadFile(configPath)
-			if err != nil {
-				return fmt.Errorf("cannot read existing configuration: %w", err)
-			}
-
-			var raw map[string]json.RawMessage
-			if err := json.Unmarshal(data, &raw); err != nil {
-				return fmt.Errorf("cannot parse existing configuration: %w", err)
-			}
-			if err := validateRawConfig(raw); err != nil {
-				return fmt.Errorf("existing configuration is invalid: %w", err)
-			}
-
-			var fc fileConfig
-			if err := json.Unmarshal(data, &fc); err != nil {
-				return fmt.Errorf("cannot decode existing configuration: %w", err)
-			}
-
-			existingAllowedRoot = fc.AllowedRoot
+		if stat.IsDir() {
+			// config.json as a directory is an operational failure.
+			return fmt.Errorf("configuration path is a directory: %s", configPath)
 		}
+		configExists = true
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return fmt.Errorf("cannot read existing configuration: %w", err)
+		}
+
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("cannot parse existing configuration: %w", err)
+		}
+		if err := validateRawConfig(raw); err != nil {
+			return fmt.Errorf("existing configuration is invalid: %w", err)
+		}
+
+		var fc fileConfig
+		if err := json.Unmarshal(data, &fc); err != nil {
+			return fmt.Errorf("cannot decode existing configuration: %w", err)
+		}
+
+		existingAllowedRoot = fc.AllowedRoot
 	} else if !os.IsNotExist(err) {
 		// Non-ENOENT error is operational failure.
 		return fmt.Errorf("cannot stat existing configuration: %w", err)
@@ -642,19 +647,38 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 
 	// System mode: integrate with AppArmor.
 	return initSystemWithAppArmor(allowedRoot, stdout, stderr,
-		func(path string) (rootResult, error) {
-			mgr := newProductionApparmorManager()
-			return mgr.addRoot(path)
-		},
-		func(path string) (rootResult, error) {
-			mgr := newProductionApparmorManager()
-			return mgr.removeRoot(path)
-		},
+		getAppArmorAddRoot(),
+		getAppArmorRemoveRoot(),
 		func(ar string, so, se io.Writer) error {
 			_, err := initCore(ar, so, se)
 			return err
 		},
 	)
+}
+
+// appArmorAddRoot and appArmorRemoveRoot are injectable production seams
+// for testing CLI exit codes without requiring real AppArmor.
+var (
+	appArmorAddRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			mgr := newProductionApparmorManager()
+			return mgr.addRoot(path)
+		}
+	}
+	appArmorRemoveRoot = func() func(string) (rootResult, error) {
+		return func(path string) (rootResult, error) {
+			mgr := newProductionApparmorManager()
+			return mgr.removeRoot(path)
+		}
+	}
+)
+
+func getAppArmorAddRoot() func(string) (rootResult, error) {
+	return appArmorAddRoot()
+}
+
+func getAppArmorRemoveRoot() func(string) (rootResult, error) {
+	return appArmorRemoveRoot()
 }
 
 // resolveAllowedRoot normalizes and validates an allowed-root path.
