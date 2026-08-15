@@ -17,24 +17,35 @@
 
 set -euo pipefail
 
-# --- Constants ---
-readonly BINARY_NAME="docker-helper"
-readonly BINARY_DEST="/usr/bin/docker-helper"
-readonly UNIT_SRC="systemd/system/docker-helper.service"
-readonly UNIT_DEST="/etc/systemd/system/docker-helper.service"
-readonly UNIT_NAME="docker-helper.service"
-readonly AA_PROFILE_SRC="apparmor/docker-helper-system"
-readonly AA_PROFILE_DEST="/etc/apparmor.d/docker-helper-system"
-readonly AA_FRAGMENT_SRC="apparmor/docker-helper.d/managed-roots"
-readonly AA_FRAGMENT_DEST="/etc/apparmor.d/docker-helper.d/managed-roots"
-readonly AA_PARSER="/usr/sbin/apparmor_parser"
-readonly CONFIG_PATH="/etc/docker-helper/config.json"
+# --- Constants (overridable for testing) ---
+BINARY_NAME="${BINARY_NAME:-docker-helper}"
+BINARY_DEST="${BINARY_DEST:-/usr/bin/docker-helper}"
+UNIT_SRC="${UNIT_SRC:-systemd/system/docker-helper.service}"
+UNIT_DEST="${UNIT_DEST:-/etc/systemd/system/docker-helper.service}"
+UNIT_NAME="${UNIT_NAME:-docker-helper.service}"
+AA_PROFILE_SRC="${AA_PROFILE_SRC:-apparmor/docker-helper-system}"
+AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
+AA_FRAGMENT_SRC="${AA_FRAGMENT_SRC:-apparmor/docker-helper.d/managed-roots}"
+AA_FRAGMENT_DEST="${AA_FRAGMENT_DEST:-/etc/apparmor.d/docker-helper.d/managed-roots}"
+AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
+CONFIG_PATH="${CONFIG_PATH:-/etc/docker-helper/config.json}"
+SYSTEMCTL="${SYSTEMCTL:-systemctl}"
+DOCKER="${DOCKER:-docker}"
 
 # --- State ---
 interactive=true
 allowed_root=""
 script_dir=""
 service_was_active=false
+install_binary_called=false
+install_unit_called=false
+install_apparmor_profile_called=false
+load_apparmor_profile_called=false
+run_init_called=false
+init_allowed_root=""
+reload_systemd_called=false
+enable_service_called=false
+start_service_called=false
 
 # --- Helpers ---
 
@@ -71,21 +82,22 @@ ask() {
 parse_args() {
 	script_dir="$(cd "$(dirname "$0")" && pwd)"
 
-	for arg in "$@"; do
-		case "$arg" in
+	while (($#)); do
+		case "$1" in
 			--yes)
 				interactive=false
+				shift
 				;;
 			--allowed-root)
-				shift
-				if [[ $# -eq 0 ]]; then
+				if [[ $# -lt 2 ]]; then
 					error "--allowed-root requires a path argument"
 					exit 1
 				fi
-				allowed_root="$1"
+				allowed_root="$2"
+				shift 2
 				;;
 			*)
-				error "unknown option: $arg"
+				error "unknown option: $1"
 				exit 1
 				;;
 		esac
@@ -128,7 +140,7 @@ check_bundled_assets() {
 }
 
 check_systemctl() {
-	if ! command -v systemctl >/dev/null 2>&1; then
+	if ! command -v "$SYSTEMCTL" >/dev/null 2>&1; then
 		error "systemctl not found in PATH"
 		exit 1
 	fi
@@ -149,7 +161,7 @@ check_docker() {
 	info "privileges on the host. Ensure you trust this access."
 	info ""
 
-	if ! docker info >/dev/null 2>&1; then
+	if ! "$DOCKER" info >/dev/null 2>&1; then
 		error "cannot access Docker daemon (docker info failed)"
 		exit 1
 	fi
@@ -168,7 +180,7 @@ check_allowed_root() {
 # --- Service check ---
 
 check_active_service() {
-	if ! systemctl is-active --quiet "$UNIT_NAME" 2>/dev/null; then
+	if ! "$SYSTEMCTL" is-active --quiet "$UNIT_NAME" 2>/dev/null; then
 		return
 	fi
 
@@ -206,7 +218,7 @@ check_active_service() {
 	fi
 
 	info "Stopping $UNIT_NAME"
-	if ! systemctl stop "$UNIT_NAME" 2>/dev/null; then
+	if ! "$SYSTEMCTL" stop "$UNIT_NAME" 2>/dev/null; then
 		error "Failed to stop $UNIT_NAME"
 		error "Aborting without changes. Stop the service manually and retry."
 		exit 1
@@ -219,18 +231,21 @@ check_active_service() {
 
 install_binary() {
 	info "Installing $BINARY_NAME to $BINARY_DEST"
+	install_binary_called=true
 	cp "$script_dir/$BINARY_NAME" "$BINARY_DEST"
 	chmod 0755 "$BINARY_DEST"
 }
 
 install_unit() {
 	info "Installing systemd system unit to $UNIT_DEST"
+	install_unit_called=true
 	cp "$script_dir/$UNIT_SRC" "$UNIT_DEST"
 	chmod 0644 "$UNIT_DEST"
 }
 
 install_apparmor_profile() {
 	info "Installing AppArmor profile to $AA_PROFILE_DEST"
+	install_apparmor_profile_called=true
 	cp "$script_dir/$AA_PROFILE_SRC" "$AA_PROFILE_DEST"
 	chmod 0644 "$AA_PROFILE_DEST"
 }
@@ -251,7 +266,8 @@ install_apparmor_fragment() {
 
 load_apparmor_profile() {
 	info "Loading AppArmor profile $AA_PROFILE_DEST"
-	if ! "$AA_PARSER" -a "$AA_PROFILE_DEST" 2>/dev/null; then
+	load_apparmor_profile_called=true
+	if ! "$AA_PARSER" --replace --skip-read-cache "$AA_PROFILE_DEST" 2>&1; then
 		error "Failed to load AppArmor profile"
 		error "Installation aborted. Service will not be started."
 		exit 1
@@ -264,6 +280,8 @@ run_init() {
 		return
 	fi
 
+	run_init_called=true
+	init_allowed_root="$allowed_root"
 	info "Running initial system init"
 	if [[ -n "$allowed_root" ]]; then
 		if ! "$BINARY_DEST" init --allowed-root "$allowed_root"; then
@@ -280,7 +298,8 @@ run_init() {
 
 reload_systemd() {
 	info "Reloading systemd daemon"
-	if ! systemctl daemon-reload; then
+	reload_systemd_called=true
+	if ! "$SYSTEMCTL" daemon-reload; then
 		error "daemon-reload failed"
 		exit 1
 	fi
@@ -288,13 +307,15 @@ reload_systemd() {
 
 enable_and_start_service() {
 	info "Enabling $UNIT_NAME"
-	if ! systemctl enable "$UNIT_NAME"; then
+	enable_service_called=true
+	if ! "$SYSTEMCTL" enable "$UNIT_NAME"; then
 		error "Failed to enable $UNIT_NAME"
 		exit 1
 	fi
 
 	info "Starting $UNIT_NAME"
-	if ! systemctl start "$UNIT_NAME"; then
+	start_service_called=true
+	if ! "$SYSTEMCTL" start "$UNIT_NAME"; then
 		error "Failed to start $UNIT_NAME"
 		info ""
 		info "Check status with:"
@@ -306,7 +327,8 @@ enable_and_start_service() {
 
 start_service() {
 	info "Starting $UNIT_NAME"
-	if ! systemctl start "$UNIT_NAME"; then
+	start_service_called=true
+	if ! "$SYSTEMCTL" start "$UNIT_NAME"; then
 		error "Failed to start $UNIT_NAME"
 		info ""
 		info "Check status with:"
@@ -364,4 +386,7 @@ main() {
 	info "  docker-helper apparmor root remove PATH"
 }
 
-main "$@"
+# Only run main when executed directly (not when sourced for testing)
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi

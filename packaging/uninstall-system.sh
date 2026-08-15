@@ -20,22 +20,31 @@
 
 set -euo pipefail
 
-# --- Constants ---
-readonly BINARY_NAME="docker-helper"
-readonly BINARY_DEST="/usr/bin/docker-helper"
-readonly UNIT_DEST="/etc/systemd/system/docker-helper.service"
-readonly UNIT_NAME="docker-helper.service"
-readonly AA_PROFILE_DEST="/etc/apparmor.d/docker-helper-system"
-readonly AA_FRAGMENT_DEST="/etc/apparmor.d/docker-helper.d/managed-roots"
-readonly AA_FRAGMENT_DIR="/etc/apparmor.d/docker-helper.d"
-readonly AA_PARSER="/usr/sbin/apparmor_parser"
-readonly CONFIG_DIR="/etc/docker-helper"
-readonly STATE_DIR="/var/lib/docker-helper"
-readonly RUNTIME_DIR="/run/docker-helper"
+# --- Constants (overridable for testing) ---
+BINARY_NAME="${BINARY_NAME:-docker-helper}"
+BINARY_DEST="${BINARY_DEST:-/usr/bin/docker-helper}"
+UNIT_DEST="${UNIT_DEST:-/etc/systemd/system/docker-helper.service}"
+UNIT_NAME="${UNIT_NAME:-docker-helper.service}"
+AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
+AA_FRAGMENT_DEST="${AA_FRAGMENT_DEST:-/etc/apparmor.d/docker-helper.d/managed-roots}"
+AA_FRAGMENT_DIR="${AA_FRAGMENT_DIR:-/etc/apparmor.d/docker-helper.d}"
+AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/docker-helper}"
+STATE_DIR="${STATE_DIR:-/var/lib/docker-helper}"
+RUNTIME_DIR="${RUNTIME_DIR:-/run/docker-helper}"
+SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 
 # --- State ---
 interactive=true
 purge=false
+stop_service_called=false
+disable_service_called=false
+remove_unit_called=false
+reload_systemd_called=false
+unload_apparmor_called=false
+remove_apparmor_called=false
+remove_binary_called=false
+purge_called=false
 
 # --- Helpers ---
 
@@ -67,19 +76,35 @@ ask() {
 	fi
 }
 
+ask_no_default() {
+	# Ask with default No (Enter = no)
+	local prompt="$1"
+	local answer
+
+	if $interactive; then
+		printf '%s [y/N]: ' "$prompt"
+		read -r answer
+		[[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
+	else
+		true
+	fi
+}
+
 # --- Argument parsing ---
 
 parse_args() {
-	for arg in "$@"; do
-		case "$arg" in
+	while (($#)); do
+		case "$1" in
 			--yes)
 				interactive=false
+				shift
 				;;
 			--purge)
 				purge=true
+				shift
 				;;
 			*)
-				error "unknown option: $arg"
+				error "unknown option: $1"
 				exit 1
 				;;
 		esac
@@ -98,12 +123,13 @@ check_root() {
 # --- Service management ---
 
 stop_service() {
-	if ! systemctl is-active --quiet "$UNIT_NAME" 2>/dev/null; then
+	stop_service_called=true
+	if ! "$SYSTEMCTL" is-active --quiet "$UNIT_NAME" 2>/dev/null; then
 		return
 	fi
 
 	info "Stopping $UNIT_NAME"
-	if ! systemctl stop "$UNIT_NAME" 2>/dev/null; then
+	if ! "$SYSTEMCTL" stop "$UNIT_NAME" 2>/dev/null; then
 		error "Failed to stop $UNIT_NAME"
 		error "Aborting. Stop the service manually and retry."
 		exit 1
@@ -111,34 +137,39 @@ stop_service() {
 }
 
 disable_service() {
-	systemctl disable "$UNIT_NAME" 2>/dev/null || true
+	disable_service_called=true
+	"$SYSTEMCTL" disable "$UNIT_NAME" 2>/dev/null || true
 }
 
 remove_unit() {
+	remove_unit_called=true
 	info "Removing systemd unit $UNIT_DEST"
 	rm -f "$UNIT_DEST"
 }
 
 reload_systemd() {
+	reload_systemd_called=true
 	info "Reloading systemd daemon"
-	systemctl daemon-reload || true
+	"$SYSTEMCTL" daemon-reload || true
 }
 
 # --- AppArmor ---
 
 unload_apparmor_profile() {
+	unload_apparmor_called=true
 	if [[ ! -x "$AA_PARSER" ]]; then
 		info "AppArmor parser not available, skipping profile unload"
 		return
 	fi
 
 	info "Unloading AppArmor profile docker-helper-system"
-	if ! "$AA_PARSER" -R "$AA_PROFILE_DEST" 2>/dev/null; then
+	if ! "$AA_PARSER" -R "$AA_PROFILE_DEST" 2>&1; then
 		warn "Failed to unload AppArmor profile (may not be loaded or already removed)"
 	fi
 }
 
 remove_apparmor_profile() {
+	remove_apparmor_called=true
 	info "Removing AppArmor profile $AA_PROFILE_DEST"
 	rm -f "$AA_PROFILE_DEST"
 }
@@ -146,6 +177,7 @@ remove_apparmor_profile() {
 # --- Binary ---
 
 remove_binary() {
+	remove_binary_called=true
 	info "Removing $BINARY_DEST"
 	rm -f "$BINARY_DEST"
 }
@@ -153,6 +185,7 @@ remove_binary() {
 # --- Purge ---
 
 purge_persistent_data() {
+	purge_called=true
 	info "Purging persistent data"
 	rm -rf "$CONFIG_DIR"
 	rm -rf "$STATE_DIR"
@@ -184,7 +217,7 @@ main() {
 			info "  $RUNTIME_DIR"
 			info "  $AA_FRAGMENT_DEST"
 			info ""
-			if ! ask "Permanently delete all persistent data and continue"; then
+			if ! ask_no_default "Permanently delete all persistent data and continue"; then
 				info "Aborting without changes."
 				exit 0
 			fi
@@ -218,4 +251,7 @@ main() {
 	fi
 }
 
-main "$@"
+# Only run main when executed directly (not when sourced for testing)
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi
