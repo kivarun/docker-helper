@@ -16,11 +16,18 @@
 #     docker-helper
 #     install.sh
 #     uninstall.sh
+#     install-system.sh
+#     uninstall-system.sh
 #     systemd/
 #       user/
 #         docker-helper.service
+#       system/
+#         docker-helper.service
 #     apparmor/
 #       docker-helper
+#       docker-helper-system
+#       docker-helper.d/
+#         managed-roots
 #     skills/
 #       docker-helper/
 #         SKILL.md
@@ -65,18 +72,29 @@ cp "$SCRIPT_DIR/packaging/README.release.md" "$BUNDLE_DIR/README.md"
 # Install/uninstall scripts
 cp "$SCRIPT_DIR/packaging/install.sh" "$BUNDLE_DIR/install.sh"
 cp "$SCRIPT_DIR/packaging/uninstall.sh" "$BUNDLE_DIR/uninstall.sh"
+cp "$SCRIPT_DIR/packaging/install-system.sh" "$BUNDLE_DIR/install-system.sh"
+cp "$SCRIPT_DIR/packaging/uninstall-system.sh" "$BUNDLE_DIR/uninstall-system.sh"
 chmod 755 "$BUNDLE_DIR/install.sh"
 chmod 755 "$BUNDLE_DIR/uninstall.sh"
+chmod 755 "$BUNDLE_DIR/install-system.sh"
+chmod 755 "$BUNDLE_DIR/uninstall-system.sh"
 
-# Systemd unit
+# Systemd units
 mkdir -p "$BUNDLE_DIR/systemd/user"
+mkdir -p "$BUNDLE_DIR/systemd/system"
 cp "$SCRIPT_DIR/packaging/systemd/user/docker-helper.service" \
    "$BUNDLE_DIR/systemd/user/docker-helper.service"
+cp "$SCRIPT_DIR/packaging/systemd/system/docker-helper.service" \
+   "$BUNDLE_DIR/systemd/system/docker-helper.service"
 
-# AppArmor profile
-mkdir -p "$BUNDLE_DIR/apparmor"
+# AppArmor profiles
+mkdir -p "$BUNDLE_DIR/apparmor/docker-helper.d"
 cp "$SCRIPT_DIR/packaging/apparmor/docker-helper" \
    "$BUNDLE_DIR/apparmor/docker-helper"
+cp "$SCRIPT_DIR/packaging/apparmor/docker-helper-system" \
+   "$BUNDLE_DIR/apparmor/docker-helper-system"
+cp "$SCRIPT_DIR/packaging/apparmor/docker-helper.d/managed-roots" \
+   "$BUNDLE_DIR/apparmor/docker-helper.d/managed-roots"
 
 # Agent skill
 mkdir -p "$BUNDLE_DIR/skills/docker-helper"
@@ -137,8 +155,13 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/README.md"
   "docker-helper-${VERSION}-linux-amd64/install.sh"
   "docker-helper-${VERSION}-linux-amd64/uninstall.sh"
+  "docker-helper-${VERSION}-linux-amd64/install-system.sh"
+  "docker-helper-${VERSION}-linux-amd64/uninstall-system.sh"
   "docker-helper-${VERSION}-linux-amd64/systemd/user/docker-helper.service"
+  "docker-helper-${VERSION}-linux-amd64/systemd/system/docker-helper.service"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper"
+  "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-system"
+  "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper.d/managed-roots"
    "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
 )
 
@@ -153,7 +176,7 @@ done
 echo "OK: tarball contains all required paths"
 
 # Check executable bits for files that must be executable.
-for f in docker-helper install.sh uninstall.sh; do
+for f in docker-helper install.sh uninstall.sh install-system.sh uninstall-system.sh; do
   PERMS=$(tar tzvf "$TARBALL" | grep "docker-helper-${VERSION}-linux-amd64/${f}$" | awk '{print $1}')
   if [[ "$PERMS" =~ ^-rwx ]]; then
     echo "OK: $f has executable bit"

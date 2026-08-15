@@ -6,19 +6,68 @@ accompanying installation artifacts.
 ## Contents
 
 - `docker-helper` — static binary (Linux amd64, musl)
-- `install.sh` — host installer script
-- `uninstall.sh` — host uninstaller script
+- `install.sh` — user-mode installer script
+- `uninstall.sh` — user-mode uninstaller script
+- `install-system.sh` — system-mode installer script (requires root)
+- `uninstall-system.sh` — system-mode uninstaller script (requires root)
 - `systemd/user/docker-helper.service` — systemd user service unit
-- `apparmor/docker-helper` — optional AppArmor profile template (manual install)
+- `systemd/system/docker-helper.service` — systemd system service unit
+- `apparmor/docker-helper` — user-mode AppArmor profile template (manual install)
+- `apparmor/docker-helper-system` — system-mode AppArmor profile
+- `apparmor/docker-helper.d/managed-roots` — managed workspace roots fragment
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
 
-## Quick start
+## Deployment
 
-Install and initialize docker-helper:
+Two deployment modes are supported:
+
+### System mode (multi-user, Release 2)
+
+System mode installs docker-helper as a root-owned system service with
+AppArmor confinement. This is the recommended deployment for shared hosts.
+
+```bash
+sudo ./install-system.sh
+```
+
+Non-interactive fresh install:
+
+```bash
+sudo ./install-system.sh --yes --allowed-root /srv/workspaces
+```
+
+The system installer:
+- Copies the binary to `/usr/bin/docker-helper`
+- Installs the systemd system unit
+- Installs and loads the AppArmor system profile
+- Runs `docker-helper init` to create initial configuration
+- Enables and starts the service
+
+Uninstall:
+
+```bash
+sudo ./uninstall-system.sh
+```
+
+With `--purge` to also remove config, state, and managed-roots:
+
+```bash
+sudo ./uninstall-system.sh --yes --purge
+```
+
+### User mode (single-user, Release 1)
+
+User mode installs docker-helper for the current user only. No root required.
 
 ```bash
 ./install.sh
 export PATH="$HOME/.local/bin:$PATH"
+```
+
+Non-interactive:
+
+```bash
+./install.sh --yes
 ```
 
 Verify that the user service is running:
@@ -49,6 +98,8 @@ docker-helper run --image alpine:3.24 -- echo "docker-helper works"
 
 ## Host installation
 
+### User mode
+
 Run the installer from this directory:
 
 ```bash
@@ -64,11 +115,28 @@ For a fully non-interactive installation:
 The installer copies the binary to `~/.local/bin/docker-helper`, installs
 the systemd user unit, and optionally installs the agent skill.
 
+### System mode
+
+Run the system installer from this directory (requires root):
+
+```bash
+sudo ./install-system.sh
+```
+
+Non-interactive with explicit allowed root:
+
+```bash
+sudo ./install-system.sh --yes --allowed-root /srv/workspaces
+```
+
 ### Skill installation
 
 `install.sh` offers to install the docker-helper agent skill to
 `~/.claude/skills/docker-helper/SKILL.md`. In interactive mode, confirm
 with `y`. With `./install.sh --yes`, the skill is installed automatically.
+
+The system installer does NOT install the agent skill. The skill is a
+user/agent-side artifact, not part of the system daemon installation.
 
 To install the skill manually:
 
@@ -77,10 +145,10 @@ mkdir -p ~/.claude/skills/docker-helper
 cp skills/docker-helper/SKILL.md ~/.claude/skills/docker-helper/SKILL.md
 ```
 
-### AppArmor profile (optional)
+### AppArmor profile (user mode, optional)
 
-The `apparmor/docker-helper` file is a template for an optional AppArmor
-profile. It is **not** installed by `install.sh`. To install it manually:
+The `apparmor/docker-helper` file is a template for an optional user-mode
+AppArmor profile. It is **not** installed by `install.sh`. To install it manually:
 
 1. Replace every occurrence of `@@BINARY_PATH@@` with the absolute path to
    the docker-helper binary (e.g., `/home/user/.local/bin/docker-helper`).
@@ -96,7 +164,8 @@ by an administrator.
 ## Agent-side artifacts
 
 The `skills/docker-helper/SKILL.md` file is an agent-side artifact.
-The `docker-helper` binary is installed to `~/.local/bin` by `install.sh`.
+The `docker-helper` binary is installed to `~/.local/bin` by `install.sh`
+or `/usr/bin/docker-helper` by `install-system.sh`.
 
 To use the skill in an agent environment, copy or mount it into the agent's
 filesystem. The exact paths depend on your agent runtime:

@@ -1854,6 +1854,296 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 	}
 }
 
+// --- System install/uninstall script tests ---
+
+func TestInstallSystemScriptSyntax(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "packaging/install-system.sh")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("install-system.sh syntax error: %v", err)
+	}
+}
+
+func TestUninstallSystemScriptSyntax(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "packaging/uninstall-system.sh")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("uninstall-system.sh syntax error: %v", err)
+	}
+}
+
+func TestInstallSystemRequiresRoot(t *testing.T) {
+	// The script checks UID 0 before any mutation.
+	// We verify this by checking the script contains the check.
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "id -u") || !strings.Contains(content, "-ne 0") {
+		t.Error("install-system.sh must check for root (UID 0)")
+	}
+}
+
+func TestInstallSystemFreshYesRequiresAllowedRoot(t *testing.T) {
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Fresh --yes install must require --allowed-root
+	if !strings.Contains(content, "--allowed-root") {
+		t.Error("install-system.sh must support --allowed-root flag")
+	}
+	// Must check that --allowed-root is provided with --yes for fresh install
+	if !strings.Contains(content, "allowed_root") {
+		t.Error("install-system.sh must validate --allowed-root for fresh install")
+	}
+}
+
+func TestInstallSystemDestinationPaths(t *testing.T) {
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	expectedPaths := []string{
+		"/usr/bin/docker-helper",
+		"/etc/systemd/system/docker-helper.service",
+		"/etc/apparmor.d/docker-helper-system",
+		"/etc/apparmor.d/docker-helper.d/managed-roots",
+	}
+
+	for _, p := range expectedPaths {
+		if !strings.Contains(content, p) {
+			t.Errorf("install-system.sh must reference destination path: %s", p)
+		}
+	}
+}
+
+func TestInstallSystemPreservesExistingManagedRoots(t *testing.T) {
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Must check if fragment exists before installing
+	if !strings.Contains(content, "-f") || !strings.Contains(content, "managed-roots") {
+		t.Error("install-system.sh must check for existing managed-roots")
+	}
+	// Must contain preservation logic
+	if !strings.Contains(content, "preserved") && !strings.Contains(content, "overwrite") {
+		t.Error("install-system.sh must preserve existing managed-roots")
+	}
+}
+
+func TestInstallSystemAppArmorBeforeInit(t *testing.T) {
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// AppArmor profile must be installed before init is called
+	profileIdx := strings.Index(content, "install_apparmor_profile")
+	initIdx := strings.Index(content, "run_init")
+	if profileIdx < 0 || initIdx < 0 || profileIdx > initIdx {
+		t.Error("install-system.sh must install AppArmor profile before running init")
+	}
+}
+
+func TestInstallSystemDoesNotInstallSkill(t *testing.T) {
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if strings.Contains(content, "SKILL.md") || strings.Contains(content, ".claude") {
+		t.Error("install-system.sh must not install agent skill")
+	}
+}
+
+func TestInstallSystemDoesNotTouchUserArtifacts(t *testing.T) {
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	userPaths := []string{
+		"~/.local/bin",
+		"~/.config/systemd/user",
+		"$HOME/.local",
+	}
+
+	for _, p := range userPaths {
+		if strings.Contains(content, p) {
+			t.Errorf("install-system.sh must not touch user path: %s", p)
+		}
+	}
+}
+
+func TestUninstallSystemRequiresRoot(t *testing.T) {
+	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "id -u") || !strings.Contains(content, "-ne 0") {
+		t.Error("uninstall-system.sh must check for root (UID 0)")
+	}
+}
+
+func TestUninstallSystemPreservesConfigByDefault(t *testing.T) {
+	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Config/state/managed-roots should only be removed with --purge
+	if !strings.Contains(content, "--purge") {
+		t.Error("uninstall-system.sh must support --purge flag")
+	}
+	// Must preserve by default
+	if !strings.Contains(content, "preserve") && !strings.Contains(content, "Preserved") {
+		t.Error("uninstall-system.sh must document preservation of config/state")
+	}
+}
+
+func TestUninstallSystemPurgeRemovesPersistentData(t *testing.T) {
+	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	purgePaths := []string{
+		"/etc/docker-helper",
+		"/var/lib/docker-helper",
+		"/run/docker-helper",
+	}
+
+	for _, p := range purgePaths {
+		if !strings.Contains(content, p) {
+			t.Errorf("uninstall-system.sh --purge must remove: %s", p)
+		}
+	}
+}
+
+func TestUninstallSystemDoesNotTouchUserArtifacts(t *testing.T) {
+	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	userPaths := []string{
+		"~/.local/bin",
+		"~/.config/systemd/user",
+		"$HOME/.local",
+	}
+
+	for _, p := range userPaths {
+		if strings.Contains(content, p) {
+			t.Errorf("uninstall-system.sh must not touch user path: %s", p)
+		}
+	}
+}
+
+func TestUninstallSystemStopsServiceBeforeRemoval(t *testing.T) {
+	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Stop must come before removal
+	stopIdx := strings.Index(content, "stop_service")
+	removeIdx := strings.Index(content, "remove_binary")
+	if stopIdx < 0 || removeIdx < 0 || stopIdx > removeIdx {
+		t.Error("uninstall-system.sh must stop service before removing binary")
+	}
+}
+
+func TestUninstallSystemUnloadsAppArmor(t *testing.T) {
+	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "apparmor_parser") {
+		t.Error("uninstall-system.sh must unload AppArmor profile")
+	}
+	if !strings.Contains(content, "-R") {
+		t.Error("uninstall-system.sh must use apparmor_parser -R to remove profile")
+	}
+}
+
+// --- Bundle tests ---
+
+func TestBundleContainsSystemAssets(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	expectedAssets := []string{
+		"install-system.sh",
+		"uninstall-system.sh",
+		"systemd/system/docker-helper.service",
+		"apparmor/docker-helper-system",
+		"apparmor/docker-helper.d/managed-roots",
+	}
+
+	for _, a := range expectedAssets {
+		if !strings.Contains(content, a) {
+			t.Errorf("build-bundle.sh must include system asset: %s", a)
+		}
+	}
+}
+
+func TestBundleContainsUserAssets(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	expectedAssets := []string{
+		"install.sh",
+		"uninstall.sh",
+		"systemd/user/docker-helper.service",
+		"apparmor/docker-helper",
+		"skills/docker-helper/SKILL.md",
+	}
+
+	for _, a := range expectedAssets {
+		if !strings.Contains(content, a) {
+			t.Errorf("build-bundle.sh must still include user asset: %s", a)
+		}
+	}
+}
+
+func TestBundleSystemScriptsExecutable(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// System scripts must be set executable
+	if !strings.Contains(content, "install-system.sh") || !strings.Contains(content, "755") {
+		t.Error("build-bundle.sh must set install-system.sh executable")
+	}
+}
+
 func TestSystemAppArmorProfileBinaryPath(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
