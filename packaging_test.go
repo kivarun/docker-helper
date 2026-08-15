@@ -2501,8 +2501,12 @@ exit 1
 		"DOCKER=" + filepath.Join(fakeBinDir, "docker"),
 	}
 
-	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", "/tmp/ws")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s
+		check_root() { :; }
+		main --yes --allowed-root /tmp/ws
+	`, scriptPath))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -2551,8 +2555,12 @@ exit 0
 		"DOCKER=" + filepath.Join(fakeBinDir, "docker"),
 	}
 
-	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", "/tmp/ws")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s
+		check_root() { :; }
+		main --yes --allowed-root /tmp/ws
+	`, scriptPath))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
@@ -2594,8 +2602,8 @@ exit 0
 
 	testRoot := t.TempDir()
 
-	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", testRoot)
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`source %s; check_root() { :; }; main --yes --allowed-root %s`, scriptPath, testRoot))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
@@ -2642,8 +2650,8 @@ exit 0
 
 	testRoot := t.TempDir()
 
-	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", testRoot)
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`source %s; check_root() { :; }; main --yes --allowed-root %s`, scriptPath, testRoot))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("install failed: %v\n%s", err, out)
@@ -2735,8 +2743,12 @@ exit 1
 		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
 	}
 
-	cmd := exec.Command("bash", scriptPath, "--purge")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s
+		check_root() { :; }
+		main --purge
+	`, scriptPath))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin = strings.NewReader("\n")
 	cmd.Dir = scriptDir
 	out, err := cmd.CombinedOutput()
@@ -2827,8 +2839,12 @@ exit 1
 		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
 	}
 
-	cmd := exec.Command("bash", scriptPath, "--yes")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s
+		check_root() { :; }
+		main --yes
+	`, scriptPath))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("uninstall failed: %v\n%s", err, out)
@@ -2924,8 +2940,12 @@ exit 1
 		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
 	}
 
-	cmd := exec.Command("bash", scriptPath, "--yes", "--purge")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s
+		check_root() { :; }
+		main --yes --purge
+	`, scriptPath))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("uninstall failed: %v\n%s", err, out)
@@ -3047,8 +3067,12 @@ esac
 	}
 
 	testRoot := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join(scriptDir, "install-system.sh"), "--yes", "--allowed-root", testRoot)
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s/install-system.sh
+		check_root() { :; }
+		main --yes --allowed-root %s
+	`, scriptDir, testRoot))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("install should fail when stop fails: %s", out)
@@ -3164,8 +3188,12 @@ esac
 	}
 
 	testRoot := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join(scriptDir, "install-system.sh"), "--yes", "--allowed-root", testRoot)
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s/install-system.sh
+		check_root() { :; }
+		main --yes --allowed-root %s
+	`, scriptDir, testRoot))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("install should succeed: %v\n%s", err, out)
@@ -3284,8 +3312,12 @@ esac
 	}
 
 	testRoot := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join(scriptDir, "install-system.sh"), "--yes", "--allowed-root", testRoot)
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s/install-system.sh
+		check_root() { :; }
+		main --yes --allowed-root %s
+	`, scriptDir, testRoot))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -3396,8 +3428,12 @@ esac
 	}
 
 	testRoot := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join(scriptDir, "install-system.sh"), "--yes", "--allowed-root", testRoot)
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s/install-system.sh
+		check_root() { :; }
+		main --yes --allowed-root %s
+	`, scriptDir, testRoot))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -3485,8 +3521,12 @@ esac
 		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptDir, "uninstall-system.sh"), "--yes")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s/uninstall-system.sh
+		check_root() { :; }
+		main --yes
+	`, scriptDir))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("uninstall should fail when stop fails: %s", out)
@@ -3573,8 +3613,12 @@ exit 0
 		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptDir, "uninstall-system.sh"), "--yes")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s/uninstall-system.sh
+		check_root() { :; }
+		main --yes
+	`, scriptDir))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("uninstall failed: %v\n%s", err, out)
@@ -3665,8 +3709,12 @@ exit 42
 		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
 	}
 
-	cmd := exec.Command("bash", filepath.Join(scriptDir, "uninstall-system.sh"), "--yes")
-	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s/uninstall-system.sh
+		check_root() { :; }
+		main --yes
+	`, scriptDir))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = scriptDir
 	out, _ := cmd.CombinedOutput()
 

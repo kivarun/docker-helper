@@ -98,7 +98,7 @@ parse_args() {
 # --- Preflight checks ---
 
 check_root() {
-	if [[ "${CHECK_ROOT:-true}" == "true" ]] && [[ "$(id -u)" -ne 0 ]]; then
+	if [[ "$(id -u)" -ne 0 ]]; then
 		error "this script must be run as root (effective UID 0)"
 		exit 1
 	fi
