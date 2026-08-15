@@ -433,15 +433,17 @@ func parseSessionTTL(s string) (time.Duration, error) {
 	return d, nil
 }
 
-func runInit(allowedRoot string, stdout, stderr io.Writer) error {
-	if allowedRoot == "" {
-		var err error
-		allowedRoot, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("cannot determine current working directory: %w", err)
-		}
-	}
+// initCoreResult is the result of running the core init logic.
+type initCoreResult struct {
+	allowedRoot    string
+	token          string
+	configPath     string
+	adminTokenPath string
+}
 
+// initCore performs the file-based initialization (config and token).
+// It does not perform any AppArmor operations.
+func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, error) {
 	mode := resolveDeploymentMode()
 	configPath := getConfigPath()
 	configDir := filepath.Dir(configPath)
@@ -450,16 +452,16 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	// Create directories with mode-appropriate permissions.
 	if mode == ModeSystem {
 		if err := os.MkdirAll(configDir, 0755); err != nil {
-			return fmt.Errorf("cannot create config directory: %w", err)
+			return nil, fmt.Errorf("cannot create config directory: %w", err)
 		}
 	} else {
 		if err := os.MkdirAll(configDir, 0700); err != nil {
-			return fmt.Errorf("cannot create config directory: %w", err)
+			return nil, fmt.Errorf("cannot create config directory: %w", err)
 		}
 	}
 
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		return fmt.Errorf("cannot create state directory: %w", err)
+		return nil, fmt.Errorf("cannot create state directory: %w", err)
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -475,12 +477,12 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 
 		data, err := json.MarshalIndent(defaultConfig, "", "  ")
 		if err != nil {
-			return fmt.Errorf("cannot marshal config: %w", err)
+			return nil, fmt.Errorf("cannot marshal config: %w", err)
 		}
 		data = append(data, '\n')
 
 		if err := os.WriteFile(configPath, data, 0600); err != nil {
-			return fmt.Errorf("cannot write config: %w", err)
+			return nil, fmt.Errorf("cannot write config: %w", err)
 		}
 	}
 
@@ -491,16 +493,16 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stderr, adminTokenPath)
 		fmt.Fprintln(stderr, "")
 		fmt.Fprintln(stderr, "Will not overwrite. Use a future token rotation command to replace it.")
-		return errors.New("admin.token already exists")
+		return nil, errors.New("admin.token already exists")
 	}
 
 	token, err := generateToken()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := os.WriteFile(adminTokenPath, []byte(token+"\n"), 0600); err != nil {
-		return fmt.Errorf("cannot write admin token: %w", err)
+		return nil, fmt.Errorf("cannot write admin token: %w", err)
 	}
 
 	fmt.Fprintln(stdout, "Docker Helper initialized successfully.")
@@ -514,7 +516,126 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	fmt.Fprintln(stdout, "Configuration:")
 	fmt.Fprintln(stdout, configPath)
 
+	return &initCoreResult{
+		allowedRoot:    allowedRoot,
+		token:          token,
+		configPath:     configPath,
+		adminTokenPath: adminTokenPath,
+	}, nil
+}
+
+// initSystemWithAppArmor performs system-mode initialization with AppArmor integration.
+func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
+	addRoot func(string) (rootResult, error),
+	removeRoot func(string) (rootResult, error),
+) error {
+	// Read existing config if present to check for mismatch.
+	configPath := getConfigPath()
+	var existingAllowedRoot string
+	configExists := false
+
+	if _, err := os.Stat(configPath); err == nil {
+		configExists = true
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return fmt.Errorf("cannot read existing configuration: %w", err)
+		}
+
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("cannot parse existing configuration: %w", err)
+		}
+		if err := validateRawConfig(raw); err != nil {
+			return fmt.Errorf("existing configuration is invalid: %w", err)
+		}
+
+		var fc fileConfig
+		if err := json.Unmarshal(data, &fc); err != nil {
+			return fmt.Errorf("cannot decode existing configuration: %w", err)
+		}
+
+		existingAllowedRoot = fc.AllowedRoot
+	}
+
+	// Canonicalize the allowed root for comparison.
+	effectiveAllowedRoot, err := resolveAllowedRoot(allowedRoot)
+	if err != nil {
+		return err
+	}
+
+	// Check for mismatch with existing config.
+	if configExists && existingAllowedRoot != "" {
+		// Canonicalize existing for comparison.
+		existingCanonical, err := resolveAllowedRoot(existingAllowedRoot)
+		if err != nil {
+			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
+		}
+		if existingCanonical != effectiveAllowedRoot {
+			return &inputError{msg: fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", existingAllowedRoot, allowedRoot)}
+		}
+	}
+
+	// Add to AppArmor before creating files.
+	appArmorResult, err := addRoot(effectiveAllowedRoot)
+	if err != nil {
+		return err
+	}
+
+	// Run core init.
+	_, err = initCore(allowedRoot, stdout, stderr)
+	if err != nil {
+		// Rollback AppArmor if we added a new root.
+		if appArmorResult.Changed {
+			rollbackResult, rollbackErr := removeRoot(appArmorResult.Path)
+			if rollbackErr != nil {
+				return fmt.Errorf("init failed: %w; AppArmor rollback also failed: %v", err, rollbackErr)
+			}
+			if !rollbackResult.Changed {
+				return fmt.Errorf("init failed: %w; AppArmor rollback reported unchanged (unexpected)", err)
+			}
+		}
+		return err
+	}
+
+	// Print AppArmor status after successful init.
+	if appArmorResult.Changed {
+		fmt.Fprintf(stdout, "AppArmor workspace root added: %s\n", appArmorResult.Path)
+	} else {
+		fmt.Fprintf(stdout, "AppArmor workspace root already present: %s\n", appArmorResult.Path)
+	}
+
 	return nil
+}
+
+// runInit orchestrates the initialization process based on deployment mode.
+func runInit(allowedRoot string, stdout, stderr io.Writer) error {
+	if allowedRoot == "" {
+		var err error
+		allowedRoot, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("cannot determine current working directory: %w", err)
+		}
+	}
+
+	mode := resolveDeploymentMode()
+
+	if mode == ModeUser {
+		// User mode: no AppArmor integration.
+		_, err := initCore(allowedRoot, stdout, stderr)
+		return err
+	}
+
+	// System mode: integrate with AppArmor.
+	return initSystemWithAppArmor(allowedRoot, stdout, stderr,
+		func(path string) (rootResult, error) {
+			mgr := newProductionApparmorManager()
+			return mgr.addRoot(path)
+		},
+		func(path string) (rootResult, error) {
+			mgr := newProductionApparmorManager()
+			return mgr.removeRoot(path)
+		},
+	)
 }
 
 // resolveAllowedRoot normalizes and validates an allowed-root path.

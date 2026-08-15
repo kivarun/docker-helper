@@ -382,7 +382,19 @@ terminal), you will be prompted for the allowed root directory.
 The current working directory is used as the default.
 
 In non-interactive mode (stdin is not a terminal), --allowed-root
-is required.`,
+is required.
+
+System mode (effective UID 0):
+  The initial allowed_root is automatically added to the managed
+  AppArmor workspace roots policy. Subsequent changes to the
+  configuration or principal allowed roots do NOT automatically
+  update AppArmor. Use the following command to manage AppArmor
+  roots after init:
+
+    docker-helper apparmor root add PATH
+
+User mode (non-root):
+  No AppArmor integration.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		allowedRoot := fs.String("allowed-root", "", "Allowed root directory for agent workspaces")
 
@@ -397,6 +409,10 @@ is required.`,
 
 				if err := runInit(resolved, stdout, stderr); err != nil {
 					fmt.Fprintln(stderr, err)
+					var ie *inputError
+					if errors.As(err, &ie) {
+						return 2
+					}
 					return 1
 				}
 				return 0
