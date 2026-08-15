@@ -526,6 +526,7 @@ func init() {
 		configCommand,
 		principalCommand,
 		credentialCommand,
+		apparmorCommand,
 		versionCommand,
 		helpCommand,
 		pullCommand,
