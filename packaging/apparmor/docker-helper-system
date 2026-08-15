@@ -36,8 +36,7 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 
 	# Docker socket — AF_UNIX connection mediation.
 	# Allow connecting to the Docker daemon Unix socket.
-	unix (connect,send,recv) type=stream peer=(label=unconfined),
-	unix (connect,send,recv) type=dgram peer=(label=unconfined),
+	unix (connect,send,receive) type=stream peer=(label=unconfined),
 
 	# Docker CLI binary.
 	/usr/bin/docker rix,
@@ -96,8 +95,8 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 
 	# Mount-pin operations: open_tree, move_mount, umount.
 	# Destination is restricted to helper-owned runtime mount directory.
-	mount options=(rw,bind,slave,rslave,private,rprivate,shared,rshared) -> /run/docker-helper/mounts/**,
-	umount -> /run/docker-helper/mounts/**,
+	mount options in (rw,move) -> /run/docker-helper/mounts/**,
+	umount /run/docker-helper/mounts/**,
 
 	# Capabilities for mount-pin operations (open_tree, move_mount, umount).
 	# sys_admin is required by these mount syscalls under AppArmor.

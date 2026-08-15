@@ -1772,8 +1772,12 @@ func TestSystemAppArmorProfileHasUnixSocketPolicy(t *testing.T) {
 
 	content := string(data)
 	// Must have separate unix socket policy for Docker connection
-	if !strings.Contains(content, "unix (connect") {
+	if !strings.Contains(content, "unix (connect,send,receive)") {
 		t.Error("system AppArmor profile must contain unix socket connect policy for Docker")
+	}
+	// Must be stream only (Docker socket is stream)
+	if strings.Contains(content, "type=dgram") {
+		t.Error("system AppArmor profile must not contain dgram unix rule for Docker socket")
 	}
 	// Must still have filesystem socket rules
 	if !strings.Contains(content, "/run/docker.sock rw") {
@@ -1788,16 +1792,16 @@ func TestSystemAppArmorProfileHasMountPolicy(t *testing.T) {
 	}
 
 	content := string(data)
-	// Must have mount rules, not just capability sys_admin
-	if !strings.Contains(content, "mount options=") {
-		t.Error("system AppArmor profile must contain mount policy for mount-pin")
+	// Must have mount rules with move option for move_mount
+	if !strings.Contains(content, "mount options in (rw,move)") {
+		t.Error("system AppArmor profile must contain mount policy with move option for move_mount")
 	}
 	// Mount rules must be scoped to helper-owned directory
 	if !strings.Contains(content, "/run/docker-helper/mounts") {
 		t.Error("system AppArmor profile mount rules must be scoped to /run/docker-helper/mounts")
 	}
-	// Must have umount rule
-	if !strings.Contains(content, "umount") {
+	// Must have umount rule (correct syntax: umount PATH,)
+	if !strings.Contains(content, "umount /run/docker-helper/mounts") {
 		t.Error("system AppArmor profile must contain umount policy for mount-pin detach")
 	}
 	// Must not have blanket unrestricted mount (line that is just "mount,")
@@ -1806,6 +1810,47 @@ func TestSystemAppArmorProfileHasMountPolicy(t *testing.T) {
 		if trimmed == "mount," {
 			t.Error("system AppArmor profile must not contain blanket unrestricted mount rule")
 		}
+	}
+}
+
+// --- Optional parser syntax validation ---
+
+func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
+	parserPath := "/usr/sbin/apparmor_parser"
+	if _, err := os.Stat(parserPath); err != nil {
+		t.Skip("apparmor_parser not available, skipping syntax validation")
+	}
+
+	// Create temp include directory for managed-roots fragment
+	includeDir := t.TempDir()
+	fragmentDir := filepath.Join(includeDir, "docker-helper.d")
+	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write empty managed-roots fragment
+	fragmentData := renderFragment([]string{})
+	if err := os.WriteFile(filepath.Join(fragmentDir, "managed-roots"), fragmentData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read profile and replace include path
+	profileData, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write profile to temp file for parser
+	profileFile := filepath.Join(includeDir, "docker-helper-system")
+	if err := os.WriteFile(profileFile, profileData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run parser in dry-run mode (-Q = dry run, -T = no cache, -I = include dir)
+	cmd := exec.Command(parserPath, "-Q", "-T", "-I", includeDir, profileFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("apparmor_parser syntax validation failed: %v\noutput: %s", err, out)
 	}
 }
 
