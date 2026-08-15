@@ -14,19 +14,32 @@ import (
 	"time"
 )
 
-func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured *[]string) {
+func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured *struct {
+	exe  string
+	args []string
+}) {
 	t.Helper()
 	dir = t.TempDir()
 
 	mainProfile := filepath.Join(dir, "docker-helper-system")
 	managedFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
 	lockPath := filepath.Join(dir, "apparmor.lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
-	captured = &[]string{}
-	runCount := 0
-	fakeRunner := func(args []string) error {
-		*captured = args
-		runCount++
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	captured = &struct {
+		exe  string
+		args []string
+	}{}
+	fakeRunner := func(exe string, args []string) error {
+		captured.exe = exe
+		captured.args = args
 		return nil
 	}
 
@@ -34,27 +47,35 @@ func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured
 		mainProfile,
 		managedFragment,
 		lockPath,
+		parserPath,
 		fakeRunner,
-		func() error { return nil },
 	)
 
 	return dir, mgr, captured
 }
 
-func setupApparmorTestWithRunner(t *testing.T, runner func(args []string) error) (dir string, mgr *apparmorManager) {
+func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []string) error) (dir string, mgr *apparmorManager) {
 	t.Helper()
 	dir = t.TempDir()
 
 	mainProfile := filepath.Join(dir, "docker-helper-system")
 	managedFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
 	lockPath := filepath.Join(dir, "apparmor.lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
+
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	mgr = newApparmorManager(
 		mainProfile,
 		managedFragment,
 		lockPath,
+		parserPath,
 		runner,
-		func() error { return nil },
 	)
 
 	return dir, mgr
@@ -290,10 +311,6 @@ func TestApparmorRootAddFileNotDirectory(t *testing.T) {
 // --- Canonicalization of a symlinked input path ---
 
 func TestApparmorRootAddSymlinkedPath(t *testing.T) {
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = saved }()
-
 	dir := t.TempDir()
 	realDir := filepath.Join(dir, "real")
 	linkDir := filepath.Join(dir, "link")
@@ -310,8 +327,8 @@ func TestApparmorRootAddSymlinkedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
-	if result != "added" {
-		t.Errorf("expected added, got %s", result)
+	if result != realDir {
+		t.Errorf("expected canonical result %s, got %s", realDir, result)
 	}
 
 	roots, err := mgr.listRoots()
@@ -326,10 +343,6 @@ func TestApparmorRootAddSymlinkedPath(t *testing.T) {
 // --- Rejection of / and AppArmor-pattern input ---
 
 func TestApparmorRootAddRootDirectory(t *testing.T) {
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = saved }()
-
 	_, mgr, _ := setupApparmorTest(t)
 
 	_, err := mgr.addRoot("/")
@@ -425,9 +438,9 @@ func TestRenderFragmentSorted(t *testing.T) {
 	data := renderFragment(roots)
 
 	content := string(data)
-	aIdx := strings.Index(content, "# root: /a/workspace")
-	mIdx := strings.Index(content, "# root: /m/workspace")
-	zIdx := strings.Index(content, "# root: /z/workspace")
+	aIdx := strings.Index(content, `# root-json: "/a/workspace"`)
+	mIdx := strings.Index(content, `# root-json: "/m/workspace"`)
+	zIdx := strings.Index(content, `# root-json: "/z/workspace"`)
 
 	if aIdx >= mIdx || mIdx >= zIdx {
 		t.Errorf("roots not sorted: a=%d m=%d z=%d", aIdx, mIdx, zIdx)
@@ -450,7 +463,7 @@ func TestRenderFragmentEmpty(t *testing.T) {
 	if !strings.HasPrefix(content, fragmentHeader1) {
 		t.Error("empty fragment should start with header")
 	}
-	if strings.Contains(content, "# root:") {
+	if strings.Contains(content, "# root-json:") {
 		t.Error("empty fragment should not contain root entries")
 	}
 }
@@ -464,6 +477,7 @@ func TestEscapeAppArmorPath(t *testing.T) {
 	}{
 		{"/normal/path", "/normal/path"},
 		{"/path/with\\backslash", "/path/with\\\\backslash"},
+		{"/path/with\"quote", "/path/with\\\"quote"},
 		{"/path/with\\\\double", "/path/with\\\\\\\\double"},
 	}
 
@@ -491,6 +505,230 @@ func TestRenderFragmentEscapesBackslash(t *testing.T) {
 	}
 }
 
+// --- JSON quoting ---
+
+func TestJSONQuoteRoundTrip(t *testing.T) {
+	tests := []string{
+		"/normal",
+		"/with space",
+		`/with"quote`,
+		"/with\\backslash",
+		"/with#hash",
+		"/with,comma",
+	}
+	for _, s := range tests {
+		quoted := jsonQuote(s)
+		unquoted, err := jsonUnquote(quoted)
+		if err != nil {
+			t.Fatalf("jsonUnquote(%q) failed: %v", quoted, err)
+		}
+		if unquoted != s {
+			t.Errorf("round trip: %q -> %q -> %q", s, quoted, unquoted)
+		}
+	}
+}
+
+// --- Special characters in paths ---
+
+func TestRootWithPathWithSpace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with space")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupApparmorTest(t)
+
+	result, err := mgr.addRoot(path)
+	if err != nil {
+		t.Fatalf("addRoot failed: %v", err)
+	}
+	if result != path {
+		t.Errorf("expected %s, got %s", path, result)
+	}
+
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots failed: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != path {
+		t.Errorf("expected root %s, got %v", path, roots)
+	}
+}
+
+func TestRootWithPathWithQuote(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, `with"quote`)
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupApparmorTest(t)
+
+	result, err := mgr.addRoot(path)
+	if err != nil {
+		t.Fatalf("addRoot failed: %v", err)
+	}
+	if result != path {
+		t.Errorf("expected %s, got %s", path, result)
+	}
+
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots failed: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != path {
+		t.Errorf("expected root %s, got %v", path, roots)
+	}
+}
+
+func TestRootWithPathWithHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with#hash")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupApparmorTest(t)
+
+	result, err := mgr.addRoot(path)
+	if err != nil {
+		t.Fatalf("addRoot failed: %v", err)
+	}
+	if result != path {
+		t.Errorf("expected %s, got %s", path, result)
+	}
+
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots failed: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != path {
+		t.Errorf("expected root %s, got %v", path, roots)
+	}
+}
+
+func TestRootWithPathWithComma(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with,comma")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupApparmorTest(t)
+
+	result, err := mgr.addRoot(path)
+	if err != nil {
+		t.Fatalf("addRoot failed: %v", err)
+	}
+	if result != path {
+		t.Errorf("expected %s, got %s", path, result)
+	}
+
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots failed: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != path {
+		t.Errorf("expected root %s, got %v", path, roots)
+	}
+}
+
+func TestRootWithPathWithBackslash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with\\backslash")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupApparmorTest(t)
+
+	result, err := mgr.addRoot(path)
+	if err != nil {
+		t.Fatalf("addRoot failed: %v", err)
+	}
+	if result != path {
+		t.Errorf("expected %s, got %s", path, result)
+	}
+
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots failed: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != path {
+		t.Errorf("expected root %s, got %v", path, roots)
+	}
+}
+
+func TestRootWithControlCharacter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with\x01control")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupApparmorTest(t)
+	_, err := mgr.addRoot(path)
+	if err == nil {
+		t.Fatal("expected error for control character")
+	}
+}
+
+// --- Metadata round trip ---
+
+func TestMetadataRoundTrip(t *testing.T) {
+	paths := []string{
+		"/normal",
+		"/with space",
+		`/with"quote`,
+		"/with\\backslash",
+		"/with#hash",
+		"/with,comma",
+	}
+
+	for _, p := range paths {
+		t.Run(p, func(t *testing.T) {
+			quoted := jsonQuote(p)
+			line := "# root-json: " + quoted
+			unquoted, err := jsonUnquote(quoted)
+			if err != nil {
+				t.Fatalf("jsonUnquote failed: %v", err)
+			}
+			if unquoted != p {
+				t.Errorf("round trip failed: %q -> %q -> %q", p, quoted, unquoted)
+			}
+			if !strings.HasPrefix(line, "# root-json: ") {
+				t.Error("metadata line should start with # root-json: ")
+			}
+		})
+	}
+}
+
+// --- Exact AppArmor rule text ---
+
+func TestRenderFragmentRuleText(t *testing.T) {
+	roots := []string{"/workspace"}
+	data := renderFragment(roots)
+	content := string(data)
+
+	if !strings.Contains(content, `"/workspace/" r,`) {
+		t.Errorf("expected quoted dir rule, got:\n%s", content)
+	}
+	if !strings.Contains(content, `"/workspace/**" r,`) {
+		t.Errorf("expected quoted glob rule, got:\n%s", content)
+	}
+}
+
+func TestRenderFragmentRuleEscaping(t *testing.T) {
+	roots := []string{`/path\with"special`}
+	data := renderFragment(roots)
+	content := string(data)
+
+	if !strings.Contains(content, `"/path\\with\"special/" r,`) {
+		t.Errorf("expected escaped rule, got:\n%s", content)
+	}
+}
+
 // --- Duplicate add ---
 
 func TestApparmorDuplicateAdd(t *testing.T) {
@@ -506,16 +744,16 @@ func TestApparmorDuplicateAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first addRoot failed: %v", err)
 	}
-	if result1 != "added" {
-		t.Errorf("first add expected added, got %s", result1)
+	if result1 != testDir {
+		t.Errorf("first add expected %s, got %s", testDir, result1)
 	}
 
 	result2, err := mgr.addRoot(testDir)
 	if err != nil {
 		t.Fatalf("second addRoot failed: %v", err)
 	}
-	if result2 != "already present" {
-		t.Errorf("second add expected already present, got %s", result2)
+	if result2 != testDir {
+		t.Errorf("second add expected %s, got %s", testDir, result2)
 	}
 
 	roots, err := mgr.listRoots()
@@ -542,8 +780,44 @@ func TestApparmorAbsentRemove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("removeRoot failed: %v", err)
 	}
-	if result != "was not present" {
-		t.Errorf("expected was not present, got %s", result)
+	if result != testDir {
+		t.Errorf("expected %s, got %s", testDir, result)
+	}
+}
+
+// --- Remove after directory deletion ---
+
+func TestApparmorRemoveAfterDeletion(t *testing.T) {
+	dir := t.TempDir()
+	testDir := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupApparmorTest(t)
+
+	if _, err := mgr.addRoot(testDir); err != nil {
+		t.Fatalf("addRoot failed: %v", err)
+	}
+
+	if err := os.RemoveAll(testDir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	result, err := mgr.removeRoot(testDir)
+	if err != nil {
+		t.Fatalf("removeRoot failed after deletion: %v", err)
+	}
+	if result != testDir {
+		t.Errorf("expected %s, got %s", testDir, result)
+	}
+
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots failed: %v", err)
+	}
+	if len(roots) != 0 {
+		t.Errorf("expected empty list after remove, got %v", roots)
 	}
 }
 
@@ -634,21 +908,36 @@ func TestApparmorFragmentExtraRules(t *testing.T) {
 	}
 }
 
-// --- Exact parser arguments without a shell ---
+// --- Exact parser executable and arguments ---
 
-func TestApparmorReloadParserArgs(t *testing.T) {
+func TestApparmorReloadParserExecutable(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "fragment")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "sbin", "apparmor_parser")
 
-	var captured []string
-	fakeRunner := func(args []string) error {
-		captured = args
+	if err := os.MkdirAll(filepath.Dir(parserPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured struct {
+		exe  string
+		args []string
+	}
+	fakeRunner := func(exe string, args []string) error {
+		captured.exe = exe
+		captured.args = args
 		return nil
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, fakeRunner, func() error { return nil })
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	testDir := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -660,24 +949,39 @@ func TestApparmorReloadParserArgs(t *testing.T) {
 		t.Fatalf("addRoot failed: %v", err)
 	}
 
-	if len(captured) != 2 || captured[0] != "-r" || captured[1] != mainProfile {
-		t.Errorf("expected parser args [-r %s], got %v", mainProfile, captured)
+	if captured.exe != parserPath {
+		t.Errorf("expected parser exe %s, got %s", parserPath, captured.exe)
+	}
+	if len(captured.args) != 3 || captured.args[0] != "--replace" || captured.args[1] != "--skip-read-cache" || captured.args[2] != mainProfile {
+		t.Errorf("expected parser args [--replace --skip-read-cache %s], got %v", mainProfile, captured.args)
 	}
 }
 
-func TestApparmorValidateParserArgs(t *testing.T) {
+func TestApparmorValidateParserExecutable(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "fragment")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "sbin", "apparmor_parser")
 
-	var captured []string
-	fakeRunner := func(args []string) error {
-		captured = args
+	if err := os.MkdirAll(filepath.Dir(parserPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured struct {
+		exe  string
+		args []string
+	}
+	fakeRunner := func(exe string, args []string) error {
+		captured.exe = exe
+		captured.args = args
 		return nil
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, fakeRunner, func() error { return nil })
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -687,8 +991,11 @@ func TestApparmorValidateParserArgs(t *testing.T) {
 		t.Fatalf("check failed: %v", err)
 	}
 
-	if len(captured) != 2 || captured[0] != "--validate" || captured[1] != mainProfile {
-		t.Errorf("expected parser args [--validate %s], got %v", mainProfile, captured)
+	if captured.exe != parserPath {
+		t.Errorf("expected parser exe %s, got %s", parserPath, captured.exe)
+	}
+	if len(captured.args) != 3 || captured.args[0] != "--skip-kernel-load" || captured.args[1] != "--skip-read-cache" || captured.args[2] != mainProfile {
+		t.Errorf("expected parser args [--skip-kernel-load --skip-read-cache %s], got %v", mainProfile, captured.args)
 	}
 }
 
@@ -697,18 +1004,30 @@ func TestApparmorNoShellInvocation(t *testing.T) {
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "fragment")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
+
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	shellUsed := false
-	fakeRunner := func(args []string) error {
+	fakeRunner := func(exe string, args []string) error {
+		base := filepath.Base(exe)
+		if base == "sh" || base == "bash" || exe == "/bin/sh" || exe == "/bin/bash" {
+			shellUsed = true
+		}
 		for _, arg := range args {
-			if arg == "-c" || arg == "-sh" || arg == "/bin/sh" || arg == "/bin/bash" {
+			if arg == "-c" || arg == "-sh" {
 				shellUsed = true
 			}
 		}
 		return nil
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, fakeRunner, func() error { return nil })
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	testDir := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -732,20 +1051,12 @@ func TestApparmorCheckDoesNotReload(t *testing.T) {
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
 	lockPath := filepath.Join(dir, "lock")
-
-	reloadCalled := false
-	validateCalled := false
-	fakeRunner := func(args []string) error {
-		if len(args) >= 1 && args[0] == "-r" {
-			reloadCalled = true
-		}
-		if len(args) >= 1 && args[0] == "--validate" {
-			validateCalled = true
-		}
-		return nil
-	}
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
 	if err := os.MkdirAll(filepath.Dir(fragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
@@ -755,7 +1066,19 @@ func TestApparmorCheckDoesNotReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, fakeRunner, func() error { return nil })
+	reloadCalled := false
+	validateCalled := false
+	fakeRunner := func(exe string, args []string) error {
+		if len(args) >= 1 && args[0] == "--replace" {
+			reloadCalled = true
+		}
+		if len(args) >= 1 && args[0] == "--skip-kernel-load" {
+			validateCalled = true
+		}
+		return nil
+	}
+
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	if err := mgr.check(); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -774,8 +1097,12 @@ func TestApparmorCheckDoesNotModifyFiles(t *testing.T) {
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
 	if err := os.MkdirAll(filepath.Dir(fragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	mainData := []byte("profile test { }\n")
@@ -787,7 +1114,7 @@ func TestApparmorCheckDoesNotModifyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, func(args []string) error { return nil }, func() error { return nil })
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, func(exe string, args []string) error { return nil })
 
 	if err := mgr.check(); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -825,8 +1152,8 @@ func TestApparmorSuccessfulAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
-	if result != "added" {
-		t.Errorf("expected added, got %s", result)
+	if result != testDir {
+		t.Errorf("expected %s, got %s", testDir, result)
 	}
 
 	roots, err := mgr.listRoots()
@@ -837,8 +1164,8 @@ func TestApparmorSuccessfulAdd(t *testing.T) {
 		t.Errorf("expected root %s, got %v", testDir, roots)
 	}
 
-	if len(*captured) != 2 || (*captured)[0] != "-r" {
-		t.Errorf("expected reload call, got args %v", *captured)
+	if len(captured.args) != 3 || captured.args[0] != "--replace" {
+		t.Errorf("expected reload call, got args %v", captured.args)
 	}
 }
 
@@ -854,14 +1181,14 @@ func TestApparmorSuccessfulRemove(t *testing.T) {
 	if _, err := mgr.addRoot(testDir); err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
-	*captured = nil
+	captured.args = nil
 
 	result, err := mgr.removeRoot(testDir)
 	if err != nil {
 		t.Fatalf("removeRoot failed: %v", err)
 	}
-	if result != "removed" {
-		t.Errorf("expected removed, got %s", result)
+	if result != testDir {
+		t.Errorf("expected %s, got %s", testDir, result)
 	}
 
 	roots, err := mgr.listRoots()
@@ -872,8 +1199,8 @@ func TestApparmorSuccessfulRemove(t *testing.T) {
 		t.Errorf("expected empty list after remove, got %v", roots)
 	}
 
-	if len(*captured) != 2 || (*captured)[0] != "-r" {
-		t.Errorf("expected reload call after remove, got args %v", *captured)
+	if len(captured.args) != 3 || captured.args[0] != "--replace" {
+		t.Errorf("expected reload call after remove, got args %v", captured.args)
 	}
 }
 
@@ -970,7 +1297,7 @@ func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
 	}
 
 	callCount := 0
-	fakeRunner := func(args []string) error {
+	fakeRunner := func(exe string, args []string) error {
 		callCount++
 		if callCount == 1 {
 			return nil
@@ -1022,9 +1349,7 @@ func TestApparmorParserFailureRemoveRestores(t *testing.T) {
 		}
 	}
 
-	callCount := 0
-	fakeRunner := func(args []string) error {
-		callCount++
+	fakeRunner := func(exe string, args []string) error {
 		return nil
 	}
 
@@ -1037,10 +1362,9 @@ func TestApparmorParserFailureRemoveRestores(t *testing.T) {
 		t.Fatalf("second addRoot failed: %v", err)
 	}
 
-	fakeRunner = func(args []string) error {
+	mgr.runParser = func(exe string, args []string) error {
 		return errors.New("parser failed on remove")
 	}
-	mgr.runParser = fakeRunner
 
 	prevData, err := os.ReadFile(mgr.managedFragmentPath)
 	if err != nil {
@@ -1074,7 +1398,7 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 		}
 	}
 
-	fakeRunner := func(args []string) error {
+	fakeRunner := func(exe string, args []string) error {
 		return nil
 	}
 
@@ -1085,7 +1409,7 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 	}
 
 	callCount := 0
-	mgr.runParser = func(args []string) error {
+	mgr.runParser = func(exe string, args []string) error {
 		callCount++
 		return fmt.Errorf("parser error %d", callCount)
 	}
@@ -1104,9 +1428,9 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 	}
 }
 
-// --- Concurrent writers are serialized by the lock ---
+// --- Rollback restores absence of fragment ---
 
-func TestApparmorConcurrentWriters(t *testing.T) {
+func TestApparmorRollbackRestoresAbsence(t *testing.T) {
 	dir := t.TempDir()
 	testDirA := filepath.Join(dir, "a")
 	testDirB := filepath.Join(dir, "b")
@@ -1116,52 +1440,36 @@ func TestApparmorConcurrentWriters(t *testing.T) {
 		}
 	}
 
-	_ = dir
-
-	fakeRunner := func(args []string) error {
-		time.Sleep(50 * time.Millisecond)
-		return nil
+	callCount := 0
+	fakeRunner := func(exe string, args []string) error {
+		callCount++
+		if callCount == 1 {
+			return nil
+		}
+		return errors.New("parser failed")
 	}
 
 	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
 
-	var wg sync.WaitGroup
-	var errs [2]error
-	var results [2]string
+	if _, err := mgr.addRoot(testDirA); err != nil {
+		t.Fatalf("first addRoot failed: %v", err)
+	}
 
-	doneFirst := make(chan struct{})
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		results[0], errs[0] = mgr.addRoot(testDirA)
-		close(doneFirst)
-	}()
-
-	go func() {
-		defer wg.Done()
-		<-doneFirst
-		results[1], errs[1] = mgr.addRoot(testDirB)
-	}()
-
-	wg.Wait()
-
-	for i, e := range errs {
-		if e != nil {
-			t.Fatalf("goroutine %d error: %v", i, e)
-		}
+	_, err := mgr.addRoot(testDirB)
+	if err == nil {
+		t.Fatal("expected error for second addRoot")
 	}
 
 	roots, err := mgr.listRoots()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listRoots failed after rollback: %v", err)
 	}
-	sort.Strings(roots)
-	expected := []string{testDirA, testDirB}
-	if !reflectSliceEqual(roots, expected) {
-		t.Errorf("expected %v, got %v", expected, roots)
+	if len(roots) != 1 || roots[0] != testDirA {
+		t.Errorf("expected only %s after rollback, got %v", testDirA, roots)
 	}
 }
+
+// --- Lock serialization ---
 
 func TestApparmorLockSerialization(t *testing.T) {
 	dir := t.TempDir()
@@ -1178,10 +1486,14 @@ func TestApparmorLockSerialization(t *testing.T) {
 
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "fragment")
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath,
-		func(args []string) error { return nil },
-		func() error { return nil },
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
 	)
 
 	_, err = mgr.acquireApparmorLock()
@@ -1196,40 +1508,175 @@ func TestApparmorLockSerialization(t *testing.T) {
 	f.Close()
 }
 
-// --- validateRootPath edge cases ---
+// --- Concurrent writers serialized by lock ---
 
-func TestValidateRootPathAbsolute(t *testing.T) {
-	_, err := validateRootPath("relative")
-	if err == nil {
-		t.Fatal("expected error for relative path")
+func TestApparmorConcurrentWritersSerialized(t *testing.T) {
+	dir := t.TempDir()
+	testDirA := filepath.Join(dir, "a")
+	testDirB := filepath.Join(dir, "b")
+	for _, d := range []string{testDirA, testDirB} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !isInputError(err) {
-		t.Error("expected inputError for relative path")
+
+	fakeRunner := func(exe string, args []string) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}
+
+	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
+
+	var wg sync.WaitGroup
+	var errA, errB error
+	var resultA, resultB string
+
+	startB := make(chan struct{})
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resultA, errA = mgr.addRoot(testDirA)
+		close(startB)
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-startB
+		resultB, errB = mgr.addRoot(testDirB)
+	}()
+
+	wg.Wait()
+
+	if errA != nil {
+		t.Fatalf("goroutine A error: %v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("goroutine B error: %v", errB)
+	}
+
+	if resultA != testDirA {
+		t.Errorf("expected %s, got %s", testDirA, resultA)
+	}
+	if resultB != testDirB {
+		t.Errorf("expected %s, got %s", testDirB, resultB)
+	}
+
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots failed: %v", err)
+	}
+	sort.Strings(roots)
+	expected := []string{testDirA, testDirB}
+	if !reflectSliceEqual(roots, expected) {
+		t.Errorf("expected %v, got %v", expected, roots)
 	}
 }
 
-func TestValidateRootPathNotDirectory(t *testing.T) {
-	tmpfile := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(tmpfile, []byte("data"), 0644); err != nil {
+// --- Parser unavailable preflight ---
+
+func TestApparmorParserUnavailableNoChanges(t *testing.T) {
+	dir := t.TempDir()
+	testDir := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := validateRootPath(tmpfile)
-	if err == nil {
-		t.Fatal("expected error for file path")
+	mainProfile := filepath.Join(dir, "main")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "nonexistent_parser")
+
+	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
-	if !isInputError(err) {
-		t.Error("expected inputError for file path")
+
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
+	)
+
+	_, err := mgr.addRoot(testDir)
+	if err == nil {
+		t.Fatal("expected error for missing parser")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not found error, got: %v", err)
+	}
+
+	if _, err := os.Stat(fragment); !os.IsNotExist(err) {
+		t.Error("fragment should not be created when parser is unavailable")
 	}
 }
 
-func TestValidateRootPathNotExists(t *testing.T) {
-	_, err := validateRootPath("/nonexistent/path/xyz")
-	if err == nil {
-		t.Fatal("expected error for non-existent path")
+// --- Main profile missing preflight ---
+
+func TestApparmorMainProfileMissingNoChanges(t *testing.T) {
+	dir := t.TempDir()
+	testDir := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
 	}
-	if !isInputError(err) {
-		t.Error("expected inputError for non-existent path")
+
+	mainProfile := filepath.Join(dir, "nonexistent_profile")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
+
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
+	)
+
+	_, err := mgr.addRoot(testDir)
+	if err == nil {
+		t.Fatal("expected error for missing main profile")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not found error, got: %v", err)
+	}
+
+	if _, err := os.Stat(fragment); !os.IsNotExist(err) {
+		t.Error("fragment should not be created when main profile is missing")
+	}
+}
+
+// --- Snapshot read failure ---
+
+func TestApparmorSnapshotReadFailure(t *testing.T) {
+	dir := t.TempDir()
+	testDir := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mainProfile := filepath.Join(dir, "main")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
+
+	if err := os.MkdirAll(filepath.Dir(fragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fragment, []byte("garbage"), 0000); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
+	)
+
+	_, err := mgr.addRoot(testDir)
+	if err == nil {
+		t.Fatal("expected error for unreadable fragment")
 	}
 }
 
@@ -1241,8 +1688,12 @@ func TestApparmorSymlinkFragmentRejected(t *testing.T) {
 	realFragment := filepath.Join(dir, "real-fragment")
 	linkFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
 	if err := os.MkdirAll(filepath.Dir(linkFragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(realFragment, renderFragment(nil), 0644); err != nil {
@@ -1252,9 +1703,8 @@ func TestApparmorSymlinkFragmentRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, linkFragment, lockPath,
-		func(args []string) error { return nil },
-		func() error { return nil },
+	mgr := newApparmorManager(mainProfile, linkFragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
 	)
 
 	_, err := mgr.listRoots()
@@ -1273,10 +1723,10 @@ func TestApparmorCheckParserNotAvailable(t *testing.T) {
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "fragment")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "nonexistent")
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath,
-		func(args []string) error { return nil },
-		func() error { return errors.New("apparmor_parser not found in PATH") },
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
 	)
 
 	err := mgr.check()
@@ -1293,10 +1743,14 @@ func TestApparmorCheckMainProfileNotFound(t *testing.T) {
 	mainProfile := filepath.Join(dir, "nonexistent")
 	fragment := filepath.Join(dir, "fragment")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath,
-		func(args []string) error { return nil },
-		func() error { return nil },
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
 	)
 
 	err := mgr.check()
@@ -1313,8 +1767,12 @@ func TestApparmorCheckValidationFailure(t *testing.T) {
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
 	if err := os.MkdirAll(filepath.Dir(fragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
@@ -1324,9 +1782,8 @@ func TestApparmorCheckValidationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath,
-		func(args []string) error { return errors.New("validation failed") },
-		func() error { return nil },
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return errors.New("validation failed") },
 	)
 
 	err := mgr.check()
@@ -1343,8 +1800,12 @@ func TestApparmorCheckSuccess(t *testing.T) {
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
 	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
 
 	if err := os.MkdirAll(filepath.Dir(fragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
@@ -1354,9 +1815,8 @@ func TestApparmorCheckSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath,
-		func(args []string) error { return nil },
-		func() error { return nil },
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+		func(exe string, args []string) error { return nil },
 	)
 
 	if err := mgr.check(); err != nil {
@@ -1421,6 +1881,21 @@ func TestFragmentEmptyRoundTrip(t *testing.T) {
 	}
 	if len(parsed) != 0 {
 		t.Errorf("expected empty, got %v", parsed)
+	}
+}
+
+func TestFragmentRoundTripSpecialChars(t *testing.T) {
+	roots := []string{"/with space", `/with"quote`, "/with\\backslash", "/with#hash", "/with,comma"}
+	data := renderFragment(roots)
+
+	parsed, err := parseFragment(data)
+	if err != nil {
+		t.Fatalf("parseFragment failed: %v", err)
+	}
+
+	expected := []string{"/with space", `/with"quote`, "/with#hash", "/with,comma", "/with\\backslash"}
+	if !reflectSliceEqual(parsed, expected) {
+		t.Errorf("expected %v, got %v", expected, parsed)
 	}
 }
 
@@ -1499,13 +1974,13 @@ func TestRenderFragmentFormat(t *testing.T) {
 	if lines[2] != "" {
 		t.Errorf("expected blank line after header, got: %s", lines[2])
 	}
-	if lines[3] != "# root: /workspace" {
+	if lines[3] != `# root-json: "/workspace"` {
 		t.Errorf("expected root metadata, got: %s", lines[3])
 	}
-	if lines[4] != "/workspace/ r," {
+	if lines[4] != `"/workspace/" r,` {
 		t.Errorf("expected dir rule, got: %s", lines[4])
 	}
-	if lines[5] != "/workspace/** r," {
+	if lines[5] != `"/workspace/**" r,` {
 		t.Errorf("expected glob rule, got: %s", lines[5])
 	}
 }
@@ -1515,16 +1990,158 @@ func TestRenderFragmentMultipleRoots(t *testing.T) {
 	data := renderFragment(roots)
 	content := string(data)
 
-	if !strings.Contains(content, "# root: /a") {
+	if !strings.Contains(content, `# root-json: "/a"`) {
 		t.Error("missing root /a")
 	}
-	if !strings.Contains(content, "# root: /b") {
+	if !strings.Contains(content, `# root-json: "/b"`) {
 		t.Error("missing root /b")
 	}
-	if !strings.Contains(content, "/a/ r,") {
+	if !strings.Contains(content, `"/a/" r,`) {
 		t.Error("missing rule for /a")
 	}
-	if !strings.Contains(content, "/b/ r,") {
+	if !strings.Contains(content, `"/b/" r,`) {
 		t.Error("missing rule for /b")
+	}
+}
+
+// --- validateRootPathForRemove ---
+
+func TestValidateRootPathForRemoveNonExistent(t *testing.T) {
+	canonical, err := validateRootPathForRemove("/nonexistent/path")
+	if err != nil {
+		t.Fatalf("expected success for non-existent path in remove, got: %v", err)
+	}
+	if canonical != "/nonexistent/path" {
+		t.Errorf("expected /nonexistent/path, got %s", canonical)
+	}
+}
+
+func TestValidateRootPathForRemoveRelative(t *testing.T) {
+	_, err := validateRootPathForRemove("relative")
+	if err == nil {
+		t.Fatal("expected error for relative path")
+	}
+}
+
+func TestValidateRootPathForRemoveRoot(t *testing.T) {
+	_, err := validateRootPathForRemove("/")
+	if err == nil {
+		t.Fatal("expected error for /")
+	}
+}
+
+// --- validateRootPathForAdd ---
+
+func TestValidateRootPathForAddAbsolute(t *testing.T) {
+	_, err := validateRootPathForAdd("relative")
+	if err == nil {
+		t.Fatal("expected error for relative path")
+	}
+}
+
+func TestValidateRootPathForAddNotDirectory(t *testing.T) {
+	tmpfile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(tmpfile, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := validateRootPathForAdd(tmpfile)
+	if err == nil {
+		t.Fatal("expected error for file path")
+	}
+}
+
+func TestValidateRootPathForAddNotExists(t *testing.T) {
+	_, err := validateRootPathForAdd("/nonexistent/path/xyz")
+	if err == nil {
+		t.Fatal("expected error for non-existent path")
+	}
+}
+
+// --- Rollback restores exact mode ---
+
+func TestApparmorRollbackRestoresMode(t *testing.T) {
+	dir := t.TempDir()
+	testDirA := filepath.Join(dir, "a")
+	testDirB := filepath.Join(dir, "b")
+	for _, d := range []string{testDirA, testDirB} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	callCount := 0
+	fakeRunner := func(exe string, args []string) error {
+		callCount++
+		if callCount == 1 {
+			return nil
+		}
+		return errors.New("parser failed")
+	}
+
+	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
+
+	if _, err := mgr.addRoot(testDirA); err != nil {
+		t.Fatalf("first addRoot failed: %v", err)
+	}
+
+	prevInfo, err := os.Stat(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("cannot stat fragment: %v", err)
+	}
+	prevMode := prevInfo.Mode().Perm()
+
+	_, err = mgr.addRoot(testDirB)
+	if err == nil {
+		t.Fatal("expected error for second addRoot")
+	}
+
+	afterInfo, err := os.Stat(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatalf("cannot stat fragment after rollback: %v", err)
+	}
+	afterMode := afterInfo.Mode().Perm()
+
+	if prevMode != afterMode {
+		t.Errorf("expected mode %o after rollback, got %o", prevMode, afterMode)
+	}
+}
+
+// --- Rollback when fragment previously absent ---
+
+func TestApparmorRollbackRestoresNoFragment(t *testing.T) {
+	dir := t.TempDir()
+	testDir := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mainProfile := filepath.Join(dir, "main")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	lockPath := filepath.Join(dir, "lock")
+	parserPath := filepath.Join(dir, "apparmor_parser")
+
+	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	callCount := 0
+	fakeRunner := func(exe string, args []string) error {
+		callCount++
+		return errors.New("parser always fails")
+	}
+
+	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+
+	_, err := mgr.addRoot(testDir)
+	if err == nil {
+		t.Fatal("expected error for addRoot")
+	}
+
+	if _, err := os.Stat(fragment); !os.IsNotExist(err) {
+		t.Error("fragment should not exist after rollback to absent state")
 	}
 }

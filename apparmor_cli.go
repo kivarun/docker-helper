@@ -94,8 +94,8 @@ func newProductionApparmorManager() *apparmorManager {
 		apparmorMainProfile,
 		apparmorManagedFragment,
 		apparmorLockPath,
+		apparmorParserPath,
 		newProductionParserRunner(),
-		newProductionParserCheck(),
 	)
 }
 
@@ -125,25 +125,19 @@ func runApparmorRootAdd(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	_, err := validateRootPath(path)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 2
-	}
-
 	mgr := newProductionApparmorManager()
 	result, err := mgr.addRoot(path)
 	if err != nil {
+		var ie *inputError
+		if errors.As(err, &ie) {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 2
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	if result == "already present" {
-		fmt.Fprintf(stdout, "%s already present\n", path)
-	} else {
-		fmt.Fprintf(stdout, "added %s\n", path)
-	}
-
+	fmt.Fprintf(stdout, "added %s\n", result)
 	return 0
 }
 
@@ -153,25 +147,19 @@ func runApparmorRootRemove(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	_, err := validateRootPath(path)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 2
-	}
-
 	mgr := newProductionApparmorManager()
 	result, err := mgr.removeRoot(path)
 	if err != nil {
+		var ie *inputError
+		if errors.As(err, &ie) {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 2
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	if result == "was not present" {
-		fmt.Fprintf(stdout, "%s was not present\n", path)
-	} else {
-		fmt.Fprintf(stdout, "removed %s\n", path)
-	}
-
+	fmt.Fprintf(stdout, "removed %s\n", result)
 	return 0
 }
 

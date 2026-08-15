@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ const (
 	apparmorMainProfile     = "/etc/apparmor.d/docker-helper-system"
 	apparmorManagedFragment = "/etc/apparmor.d/docker-helper.d/managed-roots"
 	apparmorLockPath        = "/run/lock/docker-helper-apparmor.lock"
+	apparmorParserPath      = "/usr/sbin/apparmor_parser"
 )
 
 const (
@@ -24,43 +26,33 @@ const (
 )
 
 type apparmorManager struct {
-	mainProfilePath      string
-	managedFragmentPath  string
-	lockPath             string
-	runParser            func(args []string) error
-	checkParserAvailable func() error
+	mainProfilePath     string
+	managedFragmentPath string
+	lockPath            string
+	parserPath          string
+	runParser           func(executable string, args []string) error
 }
 
 func newApparmorManager(
-	mainProfile, managedFragment, lockPath string,
-	runParser func(args []string) error,
-	checkParserAvailable func() error,
+	mainProfile, managedFragment, lockPath, parserPath string,
+	runParser func(executable string, args []string) error,
 ) *apparmorManager {
 	return &apparmorManager{
-		mainProfilePath:      mainProfile,
-		managedFragmentPath:  managedFragment,
-		lockPath:             lockPath,
-		runParser:            runParser,
-		checkParserAvailable: checkParserAvailable,
+		mainProfilePath:     mainProfile,
+		managedFragmentPath: managedFragment,
+		lockPath:            lockPath,
+		parserPath:          parserPath,
+		runParser:           runParser,
 	}
 }
 
-func newProductionParserRunner() func(args []string) error {
-	return func(args []string) error {
-		cmd := exec.Command("apparmor_parser", args...)
+func newProductionParserRunner() func(executable string, args []string) error {
+	return func(executable string, args []string) error {
+		cmd := exec.Command(executable, args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("apparmor_parser %v: %w: %s", args, err, strings.TrimSpace(stderr.String()))
-		}
-		return nil
-	}
-}
-
-func newProductionParserCheck() func() error {
-	return func() error {
-		if _, err := exec.LookPath("apparmor_parser"); err != nil {
-			return errors.New("apparmor_parser not found in PATH")
+			return fmt.Errorf("%s %v: %w: %s", filepath.Base(executable), args, err, strings.TrimSpace(stderr.String()))
 		}
 		return nil
 	}
@@ -72,12 +64,7 @@ type inputError struct {
 
 func (e *inputError) Error() string { return e.msg }
 
-func isInputError(err error) bool {
-	_, ok := err.(*inputError)
-	return ok
-}
-
-func validateRootPath(path string) (string, error) {
+func validateRootPathForAdd(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", &inputError{msg: "path must be absolute"}
 	}
@@ -102,18 +89,74 @@ func validateRootPath(path string) (string, error) {
 		return "", &inputError{msg: "cannot use root directory as workspace root"}
 	}
 
-	for _, c := range canonical {
-		switch c {
-		case '*', '?', '[', ']', '{', '}', '\n', '\r':
-			return "", &inputError{msg: fmt.Sprintf("path contains invalid character %q", string(c))}
-		}
+	if err := validatePathCharacters(canonical); err != nil {
+		return "", err
 	}
 
 	return canonical, nil
 }
 
+func validateRootPathForRemove(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", &inputError{msg: "path must be absolute"}
+	}
+
+	info, err := os.Stat(path)
+	if err == nil && info.IsDir() {
+		canonical, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", &inputError{msg: fmt.Sprintf("cannot resolve path: %v", err)}
+		}
+		if canonical == "/" {
+			return "", &inputError{msg: "cannot use root directory as workspace root"}
+		}
+		if err := validatePathCharacters(canonical); err != nil {
+			return "", err
+		}
+		return canonical, nil
+	}
+
+	cleaned := filepath.Clean(path)
+	if cleaned == "/" {
+		return "", &inputError{msg: "cannot use root directory as workspace root"}
+	}
+	if err := validatePathCharacters(cleaned); err != nil {
+		return "", err
+	}
+
+	return cleaned, nil
+}
+
+func validatePathCharacters(path string) error {
+	for _, c := range path {
+		switch c {
+		case '*', '?', '[', ']', '{', '}', '\n', '\r':
+			return &inputError{msg: fmt.Sprintf("path contains invalid character %q", string(c))}
+		}
+		if c < 0x20 && c != '\t' {
+			return &inputError{msg: fmt.Sprintf("path contains control character %q", string(c))}
+		}
+	}
+	return nil
+}
+
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func jsonUnquote(s string) (string, error) {
+	var result string
+	if err := json.Unmarshal([]byte(s), &result); err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
 func escapeAppArmorPath(path string) string {
-	return strings.ReplaceAll(path, `\`, `\\`)
+	path = strings.ReplaceAll(path, `\`, `\\`)
+	path = strings.ReplaceAll(path, `"`, `\"`)
+	return path
 }
 
 func renderFragment(roots []string) []byte {
@@ -130,9 +173,9 @@ func renderFragment(roots []string) []byte {
 	for _, root := range sorted {
 		escaped := escapeAppArmorPath(root)
 		buf.WriteString("\n")
-		buf.WriteString("# root: " + root + "\n")
-		buf.WriteString(escaped + "/ r,\n")
-		buf.WriteString(escaped + "/** r,\n")
+		buf.WriteString("# root-json: " + jsonQuote(root) + "\n")
+		buf.WriteString("\"" + escaped + "/\" r,\n")
+		buf.WriteString("\"" + escaped + "/**\" r,\n")
 	}
 
 	return buf.Bytes()
@@ -162,8 +205,12 @@ func parseFragment(data []byte) ([]string, error) {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "# root: ") {
-			root := strings.TrimPrefix(line, "# root: ")
+		if strings.HasPrefix(line, "# root-json: ") {
+			quoted := strings.TrimPrefix(line, "# root-json: ")
+			root, err := jsonUnquote(quoted)
+			if err != nil {
+				return nil, fmt.Errorf("malformed root-json metadata at line %d: %w", i+1, err)
+			}
 			roots = append(roots, root)
 		}
 	}
@@ -281,31 +328,83 @@ func (m *apparmorManager) writeFragment(roots []string) error {
 }
 
 func (m *apparmorManager) reloadProfile() error {
-	return m.runParser([]string{"-r", m.mainProfilePath})
+	return m.runParser(m.parserPath, []string{"--replace", "--skip-read-cache", m.mainProfilePath})
 }
 
 func (m *apparmorManager) validateProfile() error {
-	return m.runParser([]string{"--validate", m.mainProfilePath})
+	return m.runParser(m.parserPath, []string{"--skip-kernel-load", "--skip-read-cache", m.mainProfilePath})
 }
 
-func (m *apparmorManager) getFragmentState() ([]byte, os.FileMode, error) {
-	data, err := os.ReadFile(m.managedFragmentPath)
+type fragmentSnapshot struct {
+	exists bool
+	data   []byte
+	mode   os.FileMode
+	roots  []string
+}
+
+func (m *apparmorManager) snapshotFragment() (*fragmentSnapshot, error) {
+	info, err := os.Lstat(m.managedFragmentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, 0644, nil
+			return &fragmentSnapshot{exists: false}, nil
 		}
-		return nil, 0, err
+		return nil, fmt.Errorf("cannot lstat managed fragment: %w", err)
 	}
-	info, err := os.Stat(m.managedFragmentPath)
+
+	data, err := os.ReadFile(m.managedFragmentPath)
 	if err != nil {
-		return data, 0644, nil
+		return nil, fmt.Errorf("cannot read managed fragment: %w", err)
 	}
-	return data, info.Mode().Perm(), nil
+
+	roots, err := parseFragment(data)
+	if err != nil {
+		return nil, fmt.Errorf("fragment parse error: %w", err)
+	}
+
+	return &fragmentSnapshot{
+		exists: true,
+		data:   data,
+		mode:   info.Mode().Perm(),
+		roots:  roots,
+	}, nil
 }
 
-func (m *apparmorManager) restoreFragmentFile(prevData []byte, prevMode os.FileMode) error {
-	if prevData == nil {
-		return os.Remove(m.managedFragmentPath)
+func (m *apparmorManager) preflight() error {
+	info, err := os.Stat(m.parserPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("apparmor_parser not found: %s", m.parserPath)
+		}
+		return fmt.Errorf("cannot stat apparmor_parser: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("apparmor_parser is not a regular file: %s", m.parserPath)
+	}
+
+	pinfo, err := os.Stat(m.mainProfilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("main profile not found: %s", m.mainProfilePath)
+		}
+		return fmt.Errorf("cannot stat main profile: %w", err)
+	}
+	if !pinfo.Mode().IsRegular() {
+		return fmt.Errorf("main profile is not a regular file: %s", m.mainProfilePath)
+	}
+
+	return nil
+}
+
+func (m *apparmorManager) restoreFragmentFile(snap *fragmentSnapshot) error {
+	if !snap.exists {
+		err := os.Remove(m.managedFragmentPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("cannot remove fragment during rollback: %w", err)
+		}
+		return nil
 	}
 
 	dir := filepath.Dir(m.managedFragmentPath)
@@ -315,12 +414,12 @@ func (m *apparmorManager) restoreFragmentFile(prevData []byte, prevMode os.FileM
 	}
 	tmpName := tmp.Name()
 
-	if _, err := tmp.Write(prevData); err != nil {
+	if _, err := tmp.Write(snap.data); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
 		return fmt.Errorf("cannot write rollback temp file: %w", err)
 	}
-	if err := tmp.Chmod(prevMode); err != nil {
+	if err := tmp.Chmod(snap.mode); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
 		return fmt.Errorf("cannot set rollback temp file mode: %w", err)
@@ -337,8 +436,8 @@ func (m *apparmorManager) restoreFragmentFile(prevData []byte, prevMode os.FileM
 	return nil
 }
 
-func (m *apparmorManager) rollbackFragment(prevData []byte, prevMode os.FileMode) error {
-	if err := m.restoreFragmentFile(prevData, prevMode); err != nil {
+func (m *apparmorManager) rollbackFragment(snap *fragmentSnapshot) error {
+	if err := m.restoreFragmentFile(snap); err != nil {
 		return err
 	}
 	if err := m.reloadProfile(); err != nil {
@@ -352,7 +451,7 @@ func (m *apparmorManager) listRoots() ([]string, error) {
 }
 
 func (m *apparmorManager) addRoot(path string) (string, error) {
-	canonical, err := validateRootPath(path)
+	canonical, err := validateRootPathForAdd(path)
 	if err != nil {
 		return "", err
 	}
@@ -363,39 +462,43 @@ func (m *apparmorManager) addRoot(path string) (string, error) {
 	}
 	defer lockFile.Close()
 
-	roots, err := m.readFragment()
+	if err := m.preflight(); err != nil {
+		return "", err
+	}
+
+	snap, err := m.snapshotFragment()
 	if err != nil {
 		return "", err
 	}
 
-	for _, r := range roots {
+	for _, r := range snap.roots {
 		if r == canonical {
-			return "already present", nil
+			return canonical, nil
 		}
 	}
 
-	roots = append(roots, canonical)
-	sort.Strings(roots)
+	newRoots := make([]string, 0, len(snap.roots)+1)
+	newRoots = append(newRoots, snap.roots...)
+	newRoots = append(newRoots, canonical)
+	sort.Strings(newRoots)
 
-	prevData, prevMode, _ := m.getFragmentState()
-
-	if err := m.writeFragment(roots); err != nil {
+	if err := m.writeFragment(newRoots); err != nil {
 		return "", err
 	}
 
 	if err := m.reloadProfile(); err != nil {
-		rollbackErr := m.rollbackFragment(prevData, prevMode)
+		rollbackErr := m.rollbackFragment(snap)
 		if rollbackErr != nil {
 			return "", fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
 		}
 		return "", fmt.Errorf("reload failed: %w", err)
 	}
 
-	return "added", nil
+	return canonical, nil
 }
 
 func (m *apparmorManager) removeRoot(path string) (string, error) {
-	canonical, err := validateRootPath(path)
+	canonical, err := validateRootPathForRemove(path)
 	if err != nil {
 		return "", err
 	}
@@ -406,14 +509,18 @@ func (m *apparmorManager) removeRoot(path string) (string, error) {
 	}
 	defer lockFile.Close()
 
-	roots, err := m.readFragment()
+	if err := m.preflight(); err != nil {
+		return "", err
+	}
+
+	snap, err := m.snapshotFragment()
 	if err != nil {
 		return "", err
 	}
 
-	newRoots := make([]string, 0, len(roots))
+	newRoots := make([]string, 0, len(snap.roots))
 	found := false
-	for _, r := range roots {
+	for _, r := range snap.roots {
 		if r == canonical {
 			found = true
 		} else {
@@ -422,36 +529,27 @@ func (m *apparmorManager) removeRoot(path string) (string, error) {
 	}
 
 	if !found {
-		return "was not present", nil
+		return canonical, nil
 	}
-
-	prevData, prevMode, _ := m.getFragmentState()
 
 	if err := m.writeFragment(newRoots); err != nil {
 		return "", err
 	}
 
 	if err := m.reloadProfile(); err != nil {
-		rollbackErr := m.rollbackFragment(prevData, prevMode)
+		rollbackErr := m.rollbackFragment(snap)
 		if rollbackErr != nil {
 			return "", fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
 		}
 		return "", fmt.Errorf("reload failed: %w", err)
 	}
 
-	return "removed", nil
+	return canonical, nil
 }
 
 func (m *apparmorManager) check() error {
-	if err := m.checkParserAvailable(); err != nil {
+	if err := m.preflight(); err != nil {
 		return err
-	}
-
-	if _, err := os.Stat(m.mainProfilePath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("main profile not found: %s", m.mainProfilePath)
-		}
-		return fmt.Errorf("cannot stat main profile: %w", err)
 	}
 
 	if _, err := m.readFragment(); err != nil {
