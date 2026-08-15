@@ -525,36 +525,55 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 }
 
 // initSystemWithAppArmor performs system-mode initialization with AppArmor integration.
+// core is the file-based init function (injectable for testing).
 func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 	addRoot func(string) (rootResult, error),
 	removeRoot func(string) (rootResult, error),
+	core func(string, io.Writer, io.Writer) error,
 ) error {
-	// Read existing config if present to check for mismatch.
 	configPath := getConfigPath()
+	configDir := filepath.Dir(configPath)
+	adminTokenPath := filepath.Join(configDir, "admin.token")
+
+	// Preflight 1: check existing admin.token before any AppArmor changes.
+	if _, err := os.Stat(adminTokenPath); err == nil {
+		fmt.Fprintln(stderr, "admin.token already exists at:")
+		fmt.Fprintln(stderr, adminTokenPath)
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Will not overwrite. Use a future token rotation command to replace it.")
+		return errors.New("admin.token already exists")
+	}
+
+	// Preflight 2: read existing config if present to check for mismatch.
 	var existingAllowedRoot string
 	configExists := false
 
-	if _, err := os.Stat(configPath); err == nil {
-		configExists = true
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			return fmt.Errorf("cannot read existing configuration: %w", err)
-		}
+	if stat, err := os.Stat(configPath); err == nil {
+		if !stat.IsDir() {
+			configExists = true
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				return fmt.Errorf("cannot read existing configuration: %w", err)
+			}
 
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("cannot parse existing configuration: %w", err)
-		}
-		if err := validateRawConfig(raw); err != nil {
-			return fmt.Errorf("existing configuration is invalid: %w", err)
-		}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err != nil {
+				return fmt.Errorf("cannot parse existing configuration: %w", err)
+			}
+			if err := validateRawConfig(raw); err != nil {
+				return fmt.Errorf("existing configuration is invalid: %w", err)
+			}
 
-		var fc fileConfig
-		if err := json.Unmarshal(data, &fc); err != nil {
-			return fmt.Errorf("cannot decode existing configuration: %w", err)
-		}
+			var fc fileConfig
+			if err := json.Unmarshal(data, &fc); err != nil {
+				return fmt.Errorf("cannot decode existing configuration: %w", err)
+			}
 
-		existingAllowedRoot = fc.AllowedRoot
+			existingAllowedRoot = fc.AllowedRoot
+		}
+	} else if !os.IsNotExist(err) {
+		// Non-ENOENT error is operational failure.
+		return fmt.Errorf("cannot stat existing configuration: %w", err)
 	}
 
 	// Canonicalize the allowed root for comparison.
@@ -563,35 +582,31 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 		return err
 	}
 
-	// Check for mismatch with existing config.
+	// Preflight 3: check for mismatch with existing config.
 	if configExists && existingAllowedRoot != "" {
-		// Canonicalize existing for comparison.
 		existingCanonical, err := resolveAllowedRoot(existingAllowedRoot)
 		if err != nil {
 			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
 		}
 		if existingCanonical != effectiveAllowedRoot {
-			return &inputError{msg: fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", existingAllowedRoot, allowedRoot)}
+			return &inputError{msg: fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", existingCanonical, effectiveAllowedRoot)}
 		}
 	}
 
-	// Add to AppArmor before creating files.
+	// All preflight passed. Now modify AppArmor.
 	appArmorResult, err := addRoot(effectiveAllowedRoot)
 	if err != nil {
 		return err
 	}
 
 	// Run core init.
-	_, err = initCore(allowedRoot, stdout, stderr)
+	err = core(allowedRoot, stdout, stderr)
 	if err != nil {
 		// Rollback AppArmor if we added a new root.
 		if appArmorResult.Changed {
-			rollbackResult, rollbackErr := removeRoot(appArmorResult.Path)
+			_, rollbackErr := removeRoot(appArmorResult.Path)
 			if rollbackErr != nil {
 				return fmt.Errorf("init failed: %w; AppArmor rollback also failed: %v", err, rollbackErr)
-			}
-			if !rollbackResult.Changed {
-				return fmt.Errorf("init failed: %w; AppArmor rollback reported unchanged (unexpected)", err)
 			}
 		}
 		return err
@@ -634,6 +649,10 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		func(path string) (rootResult, error) {
 			mgr := newProductionApparmorManager()
 			return mgr.removeRoot(path)
+		},
+		func(ar string, so, se io.Writer) error {
+			_, err := initCore(ar, so, se)
+			return err
 		},
 	)
 }
