@@ -1589,6 +1589,30 @@ func TestSystemUnitExecStart(t *testing.T) {
 	}
 }
 
+func TestSystemUnitExecReload(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "ExecReload=/usr/bin/docker-helper reload --system") {
+		t.Error("system unit ExecReload must be /usr/bin/docker-helper reload --system")
+	}
+}
+
+func TestSystemUnitAppArmorProfile(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "AppArmorProfile=docker-helper-system") {
+		t.Error("system unit must contain AppArmorProfile=docker-helper-system")
+	}
+}
+
 func TestSystemUnitNoDedicatedUser(t *testing.T) {
 	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
 	if err != nil {
@@ -1659,6 +1683,71 @@ func TestSystemAppArmorProfileNoBroadHomeAccess(t *testing.T) {
 	}
 }
 
+func TestSystemAppArmorProfileNoDenySysAdmin(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if strings.Contains(content, "deny capability sys_admin") {
+		t.Error("system AppArmor profile must not deny sys_admin (required for mount-pin)")
+	}
+}
+
+func TestSystemAppArmorProfileHasDacReadSearch(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "capability dac_read_search") {
+		t.Error("system AppArmor profile must grant dac_read_search for private workspace traversal")
+	}
+}
+
+func TestSystemAppArmorProfileHasSysAdmin(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "capability sys_admin") {
+		t.Error("system AppArmor profile must grant sys_admin for mount-pin operations")
+	}
+}
+
+func TestSystemAppArmorProfileNamedProfile(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Profile must use named profile syntax, not path-attached
+	if !strings.Contains(content, "profile docker-helper-system") {
+		t.Error("system AppArmor profile must be named profile docker-helper-system")
+	}
+	// Must not use path-based attachment
+	if strings.Contains(content, "profile /usr/bin/docker-helper") {
+		t.Error("system AppArmor profile must not use path-based attachment")
+	}
+}
+
+func TestSystemAppArmorProfileNoTouchInInstructions(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if strings.Contains(content, "touch") {
+		t.Error("system AppArmor profile instructions must not use touch for managed-roots")
+	}
+}
+
 func TestSystemAppArmorProfileBinaryPath(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
@@ -1722,11 +1811,20 @@ func TestSystemUnitDirectoryDeclarations(t *testing.T) {
 	if !strings.Contains(content, "ConfigurationDirectory=docker-helper") {
 		t.Error("system unit must declare ConfigurationDirectory=docker-helper")
 	}
+	if !strings.Contains(content, "ConfigurationDirectoryMode=0755") {
+		t.Error("system unit must declare ConfigurationDirectoryMode=0755")
+	}
 	if !strings.Contains(content, "StateDirectory=docker-helper") {
 		t.Error("system unit must declare StateDirectory=docker-helper")
 	}
+	if !strings.Contains(content, "StateDirectoryMode=0700") {
+		t.Error("system unit must declare StateDirectoryMode=0700")
+	}
 	if !strings.Contains(content, "RuntimeDirectory=docker-helper") {
 		t.Error("system unit must declare RuntimeDirectory=docker-helper")
+	}
+	if !strings.Contains(content, "RuntimeDirectoryMode=0755") {
+		t.Error("system unit must declare RuntimeDirectoryMode=0755")
 	}
 }
 

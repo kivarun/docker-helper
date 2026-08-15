@@ -6,7 +6,8 @@
 # Installation:
 #   sudo cp docker-helper-system /etc/apparmor.d/
 #   sudo mkdir -p /etc/apparmor.d/docker-helper.d
-#   sudo touch /etc/apparmor.d/docker-helper.d/managed-roots
+#   sudo install -D -m 0644 docker-helper.d/managed-roots \
+#       /etc/apparmor.d/docker-helper.d/managed-roots
 #   sudo apparmor_parser -a /etc/apparmor.d/docker-helper-system
 #
 # Workspace access is managed dynamically via the managed-roots fragment.
@@ -88,9 +89,15 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	network inet6 tcp,
 	network inet6 udp,
 
-	# Deny privilege escalation.
+	# Capabilities for mount-pin operations (open_tree, move_mount, umount).
+	# sys_admin is required by these mount syscalls under AppArmor.
+	capability sys_admin,
+
+	# Capability for reading/traversing private principal workspaces.
+	capability dac_read_search,
+
+	# Deny privilege escalation (except what is required above).
 	deny /proc/sys/kernel/** w,
-	deny capability sys_admin,
 	deny capability sys_ptrace,
 	deny capability sys_rawio,
 	deny capability dac_override,

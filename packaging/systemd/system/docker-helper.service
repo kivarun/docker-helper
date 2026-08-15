@@ -9,15 +9,20 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/bin/docker-helper serve
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/usr/bin/docker-helper reload --system
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 UMask=0077
 
 ConfigurationDirectory=docker-helper
+ConfigurationDirectoryMode=0755
 StateDirectory=docker-helper
+StateDirectoryMode=0700
 RuntimeDirectory=docker-helper
+RuntimeDirectoryMode=0755
+
+AppArmorProfile=docker-helper-system
 
 StandardOutput=journal
 StandardError=journal
