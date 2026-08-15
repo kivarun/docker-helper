@@ -26,13 +26,18 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/var/lib/docker-helper/ r,
 	/var/lib/docker-helper/** rw,
 
-	# Runtime directory (socket, lock, CA injection).
+	# Runtime directory (socket, lock, CA injection, mount pins).
 	/run/docker-helper/ r,
 	/run/docker-helper/** rw,
 
-	# Docker socket — required to execute Docker commands.
+	# Docker socket — filesystem access.
 	/run/docker.sock rw,
 	/var/run/docker.sock rw,
+
+	# Docker socket — AF_UNIX connection mediation.
+	# Allow connecting to the Docker daemon Unix socket.
+	unix (connect,send,recv) type=stream peer=(label=unconfined),
+	unix (connect,send,recv) type=dgram peer=(label=unconfined),
 
 	# Docker CLI binary.
 	/usr/bin/docker rix,
@@ -88,6 +93,11 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	network inet udp,
 	network inet6 tcp,
 	network inet6 udp,
+
+	# Mount-pin operations: open_tree, move_mount, umount.
+	# Destination is restricted to helper-owned runtime mount directory.
+	mount options=(rw,bind,slave,rslave,private,rprivate,shared,rshared) -> /run/docker-helper/mounts/**,
+	umount -> /run/docker-helper/mounts/**,
 
 	# Capabilities for mount-pin operations (open_tree, move_mount, umount).
 	# sys_admin is required by these mount syscalls under AppArmor.

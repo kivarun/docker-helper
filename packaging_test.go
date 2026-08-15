@@ -1613,6 +1613,22 @@ func TestSystemUnitAppArmorProfile(t *testing.T) {
 	}
 }
 
+func TestSystemUnitAfterAppArmor(t *testing.T) {
+	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "apparmor.service") {
+		t.Error("system unit After= must include apparmor.service")
+	}
+	// Must not hard-require apparmor.service
+	if strings.Contains(content, "Requires=apparmor.service") {
+		t.Error("system unit must not hard-require apparmor.service")
+	}
+}
+
 func TestSystemUnitNoDedicatedUser(t *testing.T) {
 	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
 	if err != nil {
@@ -1745,6 +1761,51 @@ func TestSystemAppArmorProfileNoTouchInInstructions(t *testing.T) {
 	content := string(data)
 	if strings.Contains(content, "touch") {
 		t.Error("system AppArmor profile instructions must not use touch for managed-roots")
+	}
+}
+
+func TestSystemAppArmorProfileHasUnixSocketPolicy(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Must have separate unix socket policy for Docker connection
+	if !strings.Contains(content, "unix (connect") {
+		t.Error("system AppArmor profile must contain unix socket connect policy for Docker")
+	}
+	// Must still have filesystem socket rules
+	if !strings.Contains(content, "/run/docker.sock rw") {
+		t.Error("system AppArmor profile must retain filesystem Docker socket rule")
+	}
+}
+
+func TestSystemAppArmorProfileHasMountPolicy(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Must have mount rules, not just capability sys_admin
+	if !strings.Contains(content, "mount options=") {
+		t.Error("system AppArmor profile must contain mount policy for mount-pin")
+	}
+	// Mount rules must be scoped to helper-owned directory
+	if !strings.Contains(content, "/run/docker-helper/mounts") {
+		t.Error("system AppArmor profile mount rules must be scoped to /run/docker-helper/mounts")
+	}
+	// Must have umount rule
+	if !strings.Contains(content, "umount") {
+		t.Error("system AppArmor profile must contain umount policy for mount-pin detach")
+	}
+	// Must not have blanket unrestricted mount (line that is just "mount,")
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "mount," {
+			t.Error("system AppArmor profile must not contain blanket unrestricted mount rule")
+		}
 	}
 }
 
