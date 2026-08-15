@@ -150,8 +150,9 @@ unload_apparmor_profile() {
 	fi
 
 	info "Unloading AppArmor profile docker-helper-system"
-	if ! "$AA_PARSER" -R "$AA_PROFILE_DEST"; then
-		local parser_err="$?"
+	local parser_err=0
+	"$AA_PARSER" -R "$AA_PROFILE_DEST" || parser_err=$?
+	if [[ $parser_err -ne 0 ]]; then
 		warn "Failed to unload AppArmor profile (exit $parser_err, may not be loaded or already removed)"
 	fi
 }
