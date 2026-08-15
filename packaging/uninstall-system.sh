@@ -37,14 +37,6 @@ SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 # --- State ---
 interactive=true
 purge=false
-stop_service_called=false
-disable_service_called=false
-remove_unit_called=false
-reload_systemd_called=false
-unload_apparmor_called=false
-remove_apparmor_called=false
-remove_binary_called=false
-purge_called=false
 
 # --- Helpers ---
 
@@ -114,7 +106,7 @@ parse_args() {
 # --- Preflight ---
 
 check_root() {
-	if [[ "$(id -u)" -ne 0 ]]; then
+	if [[ "${CHECK_ROOT:-true}" == "true" ]] && [[ "$(id -u)" -ne 0 ]]; then
 		error "this script must be run as root (effective UID 0)"
 		exit 1
 	fi
@@ -123,7 +115,6 @@ check_root() {
 # --- Service management ---
 
 stop_service() {
-	stop_service_called=true
 	if ! "$SYSTEMCTL" is-active --quiet "$UNIT_NAME" 2>/dev/null; then
 		return
 	fi
@@ -137,18 +128,15 @@ stop_service() {
 }
 
 disable_service() {
-	disable_service_called=true
 	"$SYSTEMCTL" disable "$UNIT_NAME" 2>/dev/null || true
 }
 
 remove_unit() {
-	remove_unit_called=true
 	info "Removing systemd unit $UNIT_DEST"
 	rm -f "$UNIT_DEST"
 }
 
 reload_systemd() {
-	reload_systemd_called=true
 	info "Reloading systemd daemon"
 	"$SYSTEMCTL" daemon-reload || true
 }
@@ -156,20 +144,19 @@ reload_systemd() {
 # --- AppArmor ---
 
 unload_apparmor_profile() {
-	unload_apparmor_called=true
 	if [[ ! -x "$AA_PARSER" ]]; then
 		info "AppArmor parser not available, skipping profile unload"
 		return
 	fi
 
 	info "Unloading AppArmor profile docker-helper-system"
-	if ! "$AA_PARSER" -R "$AA_PROFILE_DEST" 2>&1; then
-		warn "Failed to unload AppArmor profile (may not be loaded or already removed)"
+	if ! "$AA_PARSER" -R "$AA_PROFILE_DEST"; then
+		local parser_err="$?"
+		warn "Failed to unload AppArmor profile (exit $parser_err, may not be loaded or already removed)"
 	fi
 }
 
 remove_apparmor_profile() {
-	remove_apparmor_called=true
 	info "Removing AppArmor profile $AA_PROFILE_DEST"
 	rm -f "$AA_PROFILE_DEST"
 }
@@ -177,7 +164,6 @@ remove_apparmor_profile() {
 # --- Binary ---
 
 remove_binary() {
-	remove_binary_called=true
 	info "Removing $BINARY_DEST"
 	rm -f "$BINARY_DEST"
 }
@@ -185,7 +171,6 @@ remove_binary() {
 # --- Purge ---
 
 purge_persistent_data() {
-	purge_called=true
 	info "Purging persistent data"
 	rm -rf "$CONFIG_DIR"
 	rm -rf "$STATE_DIR"

@@ -37,15 +37,6 @@ interactive=true
 allowed_root=""
 script_dir=""
 service_was_active=false
-install_binary_called=false
-install_unit_called=false
-install_apparmor_profile_called=false
-load_apparmor_profile_called=false
-run_init_called=false
-init_allowed_root=""
-reload_systemd_called=false
-enable_service_called=false
-start_service_called=false
 
 # --- Helpers ---
 
@@ -89,7 +80,7 @@ parse_args() {
 				shift
 				;;
 			--allowed-root)
-				if [[ $# -lt 2 ]]; then
+				if [[ $# -lt 2 ]] || [[ "$2" == --* ]]; then
 					error "--allowed-root requires a path argument"
 					exit 1
 				fi
@@ -107,7 +98,7 @@ parse_args() {
 # --- Preflight checks ---
 
 check_root() {
-	if [[ "$(id -u)" -ne 0 ]]; then
+	if [[ "${CHECK_ROOT:-true}" == "true" ]] && [[ "$(id -u)" -ne 0 ]]; then
 		error "this script must be run as root (effective UID 0)"
 		exit 1
 	fi
@@ -231,21 +222,18 @@ check_active_service() {
 
 install_binary() {
 	info "Installing $BINARY_NAME to $BINARY_DEST"
-	install_binary_called=true
 	cp "$script_dir/$BINARY_NAME" "$BINARY_DEST"
 	chmod 0755 "$BINARY_DEST"
 }
 
 install_unit() {
 	info "Installing systemd system unit to $UNIT_DEST"
-	install_unit_called=true
 	cp "$script_dir/$UNIT_SRC" "$UNIT_DEST"
 	chmod 0644 "$UNIT_DEST"
 }
 
 install_apparmor_profile() {
 	info "Installing AppArmor profile to $AA_PROFILE_DEST"
-	install_apparmor_profile_called=true
 	cp "$script_dir/$AA_PROFILE_SRC" "$AA_PROFILE_DEST"
 	chmod 0644 "$AA_PROFILE_DEST"
 }
@@ -266,8 +254,7 @@ install_apparmor_fragment() {
 
 load_apparmor_profile() {
 	info "Loading AppArmor profile $AA_PROFILE_DEST"
-	load_apparmor_profile_called=true
-	if ! "$AA_PARSER" --replace --skip-read-cache "$AA_PROFILE_DEST" 2>&1; then
+	if ! "$AA_PARSER" --replace --skip-read-cache "$AA_PROFILE_DEST"; then
 		error "Failed to load AppArmor profile"
 		error "Installation aborted. Service will not be started."
 		exit 1
@@ -280,8 +267,6 @@ run_init() {
 		return
 	fi
 
-	run_init_called=true
-	init_allowed_root="$allowed_root"
 	info "Running initial system init"
 	if [[ -n "$allowed_root" ]]; then
 		if ! "$BINARY_DEST" init --allowed-root "$allowed_root"; then
@@ -298,7 +283,6 @@ run_init() {
 
 reload_systemd() {
 	info "Reloading systemd daemon"
-	reload_systemd_called=true
 	if ! "$SYSTEMCTL" daemon-reload; then
 		error "daemon-reload failed"
 		exit 1
@@ -307,14 +291,12 @@ reload_systemd() {
 
 enable_and_start_service() {
 	info "Enabling $UNIT_NAME"
-	enable_service_called=true
 	if ! "$SYSTEMCTL" enable "$UNIT_NAME"; then
 		error "Failed to enable $UNIT_NAME"
 		exit 1
 	fi
 
 	info "Starting $UNIT_NAME"
-	start_service_called=true
 	if ! "$SYSTEMCTL" start "$UNIT_NAME"; then
 		error "Failed to start $UNIT_NAME"
 		info ""
@@ -327,7 +309,6 @@ enable_and_start_service() {
 
 start_service() {
 	info "Starting $UNIT_NAME"
-	start_service_called=true
 	if ! "$SYSTEMCTL" start "$UNIT_NAME"; then
 		error "Failed to start $UNIT_NAME"
 		info ""

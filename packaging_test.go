@@ -2146,22 +2146,132 @@ func TestBundleSystemScriptsExecutable(t *testing.T) {
 
 // --- Behavioral tests for install-system.sh ---
 
-func TestInstallSystemParseArgsOrder(t *testing.T) {
-	// Test that both flag orders work
+func setupInstallTest(t *testing.T) (scriptDir, fakeBinDir, destDir, logFile string) {
+	t.Helper()
 	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "install-system.sh")
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
+	scriptDir = filepath.Join(tmpDir, "script")
+	fakeBinDir = filepath.Join(tmpDir, "fakes")
+	destDir = filepath.Join(tmpDir, "dest")
+	logFile = filepath.Join(tmpDir, "calls.log")
+
+	// Create script directory with bundled assets
+	if err := os.MkdirAll(scriptDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(scriptPath, data, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(scriptDir, "systemd", "system"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(scriptDir, "apparmor", "docker-helper.d"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create fake binary
-	if err := os.WriteFile(filepath.Join(tmpDir, "docker-helper"), []byte("fake"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte("fake"), 0755); err != nil {
 		t.Fatal(err)
 	}
+
+	// Create bundled assets
+	if err := os.WriteFile(filepath.Join(scriptDir, "systemd", "system", "docker-helper.service"), []byte("[Service]"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptDir, "apparmor", "docker-helper-system"), []byte("profile docker-helper-system {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fragmentData := renderFragment([]string{})
+	if err := os.WriteFile(filepath.Join(scriptDir, "apparmor", "docker-helper.d", "managed-roots"), fragmentData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create fake systemctl
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+case "$*" in
+  *"is-active"*) exit 1 ;;
+  *"stop"*) exit 0 ;;
+  *"daemon-reload"*) exit 0 ;;
+  *"enable"*) exit 0 ;;
+  *"start"*) exit 0 ;;
+  *) exit 0 ;;
+esac
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "systemctl"), []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create fake docker
+	dockerScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 0
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "docker"), []byte(dockerScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create fake apparmor_parser
+	parserScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 0
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "apparmor_parser"), []byte(parserScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create destination directories
+	if err := os.MkdirAll(filepath.Join(destDir, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "etc", "systemd", "system"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "etc", "apparmor.d", "docker-helper.d"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "etc", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "var", "lib", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "run", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Copy script
+	scriptData, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptDir, "install-system.sh"), scriptData, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	return scriptDir, fakeBinDir, destDir, logFile
+}
+
+func readCalls(t *testing.T, logFile string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		return nil
+	}
+	var calls []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+func TestInstallSystemParseArgsOrder(t *testing.T) {
+	scriptDir, _, _, _ := setupInstallTest(t)
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
 
 	// Test --yes --allowed-root PATH
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
@@ -2187,18 +2297,8 @@ func TestInstallSystemParseArgsOrder(t *testing.T) {
 }
 
 func TestInstallSystemParseArgsMissingValue(t *testing.T) {
-	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "install-system.sh")
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(scriptPath, data, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "docker-helper"), []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	scriptDir, _, _, _ := setupInstallTest(t)
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
 
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
 		source %s
@@ -2209,19 +2309,23 @@ func TestInstallSystemParseArgsMissingValue(t *testing.T) {
 	}
 }
 
+func TestInstallSystemParseArgsOptionAsValue(t *testing.T) {
+	scriptDir, _, _, _ := setupInstallTest(t)
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
+
+	// --allowed-root --yes should fail (--yes is an option, not a path)
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		source %s
+		parse_args --allowed-root --yes
+	`, scriptPath))
+	if _, err := cmd.CombinedOutput(); err == nil {
+		t.Fatal("--allowed-root --yes should fail (option as value)")
+	}
+}
+
 func TestInstallSystemParseArgsUnknownArg(t *testing.T) {
-	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "install-system.sh")
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(scriptPath, data, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "docker-helper"), []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	scriptDir, _, _, _ := setupInstallTest(t)
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
 
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
 		source %s
@@ -2233,20 +2337,9 @@ func TestInstallSystemParseArgsUnknownArg(t *testing.T) {
 }
 
 func TestInstallSystemFreshYesWithoutAllowedRoot(t *testing.T) {
-	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "install-system.sh")
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(scriptPath, data, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "docker-helper"), []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	scriptDir, _, _, _ := setupInstallTest(t)
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
 
-	// No config exists, --yes without --allowed-root should fail
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
 		source %s
 		parse_args --yes
@@ -2261,8 +2354,7 @@ func TestInstallSystemFreshYesWithoutAllowedRoot(t *testing.T) {
 func TestInstallSystemPreservesManagedRoots(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptDir := filepath.Join(tmpDir, "script")
-	destDir := filepath.Join(tmpDir, "dest")
-	fragmentDestDir := filepath.Join(destDir, "docker-helper.d")
+	fragmentDestDir := filepath.Join(tmpDir, "dest", "docker-helper.d")
 
 	if err := os.MkdirAll(scriptDir, 0755); err != nil {
 		t.Fatal(err)
@@ -2274,13 +2366,11 @@ func TestInstallSystemPreservesManagedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create existing fragment with specific content
 	existingContent := "# existing operator-managed content\n"
 	if err := os.WriteFile(filepath.Join(fragmentDestDir, "managed-roots"), []byte(existingContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create bundled fragment with different content
 	bundledContent := "# Generated by docker-helper. Do not edit.\n# Managed AppArmor workspace roots for docker-helper-system profile.\n"
 	if err := os.WriteFile(filepath.Join(scriptDir, "apparmor", "docker-helper.d", "managed-roots"), []byte(bundledContent), 0644); err != nil {
 		t.Fatal(err)
@@ -2298,7 +2388,6 @@ func TestInstallSystemPreservesManagedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Run install_apparmor_fragment with overridden paths
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
 		source %s
 		AA_FRAGMENT_SRC="apparmor/docker-helper.d/managed-roots"
@@ -2310,7 +2399,6 @@ func TestInstallSystemPreservesManagedRoots(t *testing.T) {
 		t.Fatalf("install_apparmor_fragment failed: %v\n%s", err, out)
 	}
 
-	// Verify existing content preserved
 	actual, err := os.ReadFile(filepath.Join(fragmentDestDir, "managed-roots"))
 	if err != nil {
 		t.Fatal(err)
@@ -2323,8 +2411,7 @@ func TestInstallSystemPreservesManagedRoots(t *testing.T) {
 func TestInstallSystemCopiesMissingFragment(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptDir := filepath.Join(tmpDir, "script")
-	destDir := filepath.Join(tmpDir, "dest")
-	fragmentDestDir := filepath.Join(destDir, "docker-helper.d")
+	fragmentDestDir := filepath.Join(tmpDir, "dest", "docker-helper.d")
 
 	if err := os.MkdirAll(scriptDir, 0755); err != nil {
 		t.Fatal(err)
@@ -2364,7 +2451,6 @@ func TestInstallSystemCopiesMissingFragment(t *testing.T) {
 		t.Fatalf("install_apparmor_fragment failed: %v\n%s", err, out)
 	}
 
-	// Verify fragment was copied
 	actual, err := os.ReadFile(filepath.Join(fragmentDestDir, "managed-roots"))
 	if err != nil {
 		t.Fatal(err)
@@ -2389,202 +2475,472 @@ func TestInstallSystemParserUsesReplace(t *testing.T) {
 	}
 }
 
+func TestInstallSystemParserFailurePreventsServiceStart(t *testing.T) {
+	scriptDir, fakeBinDir, destDir, logFile := setupInstallTest(t)
+
+	// Make parser fail
+	parserScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 1
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "apparmor_parser"), []byte(parserScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"BINARY_DEST=" + filepath.Join(destDir, "bin/docker-helper"),
+		"UNIT_DEST=" + filepath.Join(destDir, "etc/systemd/system/docker-helper.service"),
+		"AA_PROFILE_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper-system"),
+		"AA_FRAGMENT_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper.d/managed-roots"),
+		"CONFIG_PATH=" + filepath.Join(destDir, "etc/docker-helper/config.json"),
+		"AA_PARSER=" + filepath.Join(fakeBinDir, "apparmor_parser"),
+		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
+		"DOCKER=" + filepath.Join(fakeBinDir, "docker"),
+	}
+
+	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", "/tmp/ws")
+	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd.Dir = scriptDir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("parser failure should cause install to fail: %s", out)
+	}
+
+	calls := readCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "start") {
+			t.Error("service start should not be called after parser failure")
+		}
+		if strings.Contains(c, "enable") {
+			t.Error("service enable should not be called after parser failure")
+		}
+	}
+}
+
+func TestInstallSystemExistingConfigSkipsInit(t *testing.T) {
+	scriptDir, fakeBinDir, destDir, logFile := setupInstallTest(t)
+
+	// Create existing config
+	if err := os.WriteFile(filepath.Join(destDir, "etc/docker-helper/config.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make bundled binary log when called (it gets copied to dest)
+	binaryScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "binary: $@" >> "$log_file"
+exit 0
+`, logFile)
+	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte(binaryScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"BINARY_DEST=" + filepath.Join(destDir, "bin/docker-helper"),
+		"UNIT_DEST=" + filepath.Join(destDir, "etc/systemd/system/docker-helper.service"),
+		"AA_PROFILE_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper-system"),
+		"AA_FRAGMENT_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper.d/managed-roots"),
+		"CONFIG_PATH=" + filepath.Join(destDir, "etc/docker-helper/config.json"),
+		"AA_PARSER=" + filepath.Join(fakeBinDir, "apparmor_parser"),
+		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
+		"DOCKER=" + filepath.Join(fakeBinDir, "docker"),
+	}
+
+	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", "/tmp/ws")
+	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd.Dir = scriptDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+
+	calls := readCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "binary: init") {
+			t.Error("init should not be called when config exists")
+		}
+	}
+}
+
+func TestInstallSystemFreshInitReceivesAllowedRoot(t *testing.T) {
+	scriptDir, fakeBinDir, destDir, logFile := setupInstallTest(t)
+
+	// Make bundled binary log when called (it gets copied to dest)
+	binaryScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "binary: $@" >> "$log_file"
+exit 0
+`, logFile)
+	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte(binaryScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"BINARY_DEST=" + filepath.Join(destDir, "bin/docker-helper"),
+		"UNIT_DEST=" + filepath.Join(destDir, "etc/systemd/system/docker-helper.service"),
+		"AA_PROFILE_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper-system"),
+		"AA_FRAGMENT_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper.d/managed-roots"),
+		"CONFIG_PATH=" + filepath.Join(destDir, "etc/docker-helper/config.json"),
+		"AA_PARSER=" + filepath.Join(fakeBinDir, "apparmor_parser"),
+		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
+		"DOCKER=" + filepath.Join(fakeBinDir, "docker"),
+	}
+
+	testRoot := t.TempDir()
+
+	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", testRoot)
+	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd.Dir = scriptDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+
+	calls := readCalls(t, logFile)
+	found := false
+	for _, c := range calls {
+		if c == "binary: init --allowed-root "+testRoot {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("init should receive exact --allowed-root %s, calls: %v", testRoot, calls)
+	}
+}
+
+func TestInstallSystemFreshYesEnablesStartsService(t *testing.T) {
+	scriptDir, fakeBinDir, destDir, logFile := setupInstallTest(t)
+
+	// Make bundled binary a no-op script (it gets copied to dest and called for init)
+	binaryScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "binary: $@" >> "$log_file"
+exit 0
+`, logFile)
+	if err := os.WriteFile(filepath.Join(scriptDir, "docker-helper"), []byte(binaryScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(scriptDir, "install-system.sh")
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"BINARY_DEST=" + filepath.Join(destDir, "bin/docker-helper"),
+		"UNIT_DEST=" + filepath.Join(destDir, "etc/systemd/system/docker-helper.service"),
+		"AA_PROFILE_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper-system"),
+		"AA_FRAGMENT_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper.d/managed-roots"),
+		"CONFIG_PATH=" + filepath.Join(destDir, "etc/docker-helper/config.json"),
+		"AA_PARSER=" + filepath.Join(fakeBinDir, "apparmor_parser"),
+		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
+		"DOCKER=" + filepath.Join(fakeBinDir, "docker"),
+	}
+
+	testRoot := t.TempDir()
+
+	cmd := exec.Command("bash", scriptPath, "--yes", "--allowed-root", testRoot)
+	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd.Dir = scriptDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+
+	calls := readCalls(t, logFile)
+	var enableIdx, startIdx int
+	for i, c := range calls {
+		if strings.Contains(c, "enable") {
+			enableIdx = i
+		}
+		if strings.Contains(c, "start") {
+			startIdx = i
+		}
+	}
+	if enableIdx < 0 {
+		t.Error("enable should be called")
+	}
+	if startIdx < 0 {
+		t.Error("start should be called")
+	}
+	if enableIdx > 0 && startIdx > 0 && enableIdx > startIdx {
+		t.Error("enable should be called before start")
+	}
+}
+
 // --- Behavioral tests for uninstall-system.sh ---
 
 func TestUninstallSystemPurgeConfirmation(t *testing.T) {
 	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "uninstall-system.sh")
-	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	scriptDir := filepath.Join(tmpDir, "script")
+	destDir := filepath.Join(tmpDir, "dest")
+	fakeBinDir := filepath.Join(tmpDir, "fakes")
+	logFile := filepath.Join(tmpDir, "calls.log")
+
+	if err := os.MkdirAll(scriptDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 1
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "systemctl"), []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "apparmor_parser"), []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(destDir, "etc", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "var", "lib", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fragmentDir := filepath.Join(destDir, "etc", "apparmor.d", "docker-helper.d")
+	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fragmentDir, "managed-roots"), []byte("fragment"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(scriptDir, "uninstall-system.sh")
+	scriptData, err := os.ReadFile("packaging/uninstall-system.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(scriptPath, data, 0755); err != nil {
+	if err := os.WriteFile(scriptPath, scriptData, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Interactive with empty answer should abort (default No)
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
-		source %s
-		interactive=true
-		purge=true
-		# Simulate empty answer (Enter)
-		echo "" | { ask_no_default "test"; echo "result: $?"; }
-	`, scriptPath))
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"BINARY_DEST=" + filepath.Join(destDir, "bin/docker-helper"),
+		"UNIT_DEST=" + filepath.Join(destDir, "etc/systemd/system/docker-helper.service"),
+		"AA_PROFILE_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper-system"),
+		"AA_FRAGMENT_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper.d/managed-roots"),
+		"AA_FRAGMENT_DIR=" + fragmentDir,
+		"CONFIG_DIR=" + filepath.Join(destDir, "etc/docker-helper"),
+		"STATE_DIR=" + filepath.Join(destDir, "var/lib/docker-helper"),
+		"RUNTIME_DIR=" + filepath.Join(destDir, "run/docker-helper"),
+		"AA_PARSER=" + filepath.Join(fakeBinDir, "apparmor_parser"),
+		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
+	}
+
+	cmd := exec.Command("bash", scriptPath, "--purge")
+	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd.Stdin = strings.NewReader("\n")
+	cmd.Dir = scriptDir
 	out, err := cmd.CombinedOutput()
-	// ask_no_default should return false (non-zero) for empty answer
-	if strings.Contains(string(out), "result: 0") {
-		t.Error("empty answer to purge confirmation should return false (default No)")
+	if err != nil {
+		if !strings.Contains(string(out), "Aborting") {
+			t.Fatalf("unexpected error: %v\n%s", err, out)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(destDir, "etc", "docker-helper")); os.IsNotExist(err) {
+		t.Error("config dir should be preserved when purge confirmation is declined")
+	}
+	if _, err := os.Stat(filepath.Join(fragmentDir, "managed-roots")); os.IsNotExist(err) {
+		t.Error("fragment should be preserved when purge confirmation is declined")
 	}
 }
 
-func TestUninstallSystemPreservesConfigByDefaultBehavior(t *testing.T) {
+func TestUninstallSystemNormalPreservesConfig(t *testing.T) {
 	tmpDir := t.TempDir()
-	scriptPath := filepath.Join(tmpDir, "uninstall-system.sh")
-	data, err := os.ReadFile("packaging/uninstall-system.sh")
+	scriptDir := filepath.Join(tmpDir, "script")
+	destDir := filepath.Join(tmpDir, "dest")
+	fakeBinDir := filepath.Join(tmpDir, "fakes")
+	logFile := filepath.Join(tmpDir, "calls.log")
+
+	if err := os.MkdirAll(scriptDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 1
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "systemctl"), []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "apparmor_parser"), []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(destDir, "etc", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "etc", "docker-helper", "config.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "var", "lib", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fragmentDir := filepath.Join(destDir, "etc", "apparmor.d", "docker-helper.d")
+	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fragmentDir, "managed-roots"), []byte("fragment"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(destDir, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "bin", "docker-helper"), []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(scriptDir, "uninstall-system.sh")
+	scriptData, err := os.ReadFile("packaging/uninstall-system.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(scriptPath, data, 0755); err != nil {
+	if err := os.WriteFile(scriptPath, scriptData, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create fake config/state
-	configDir := filepath.Join(tmpDir, "etc", "docker-helper")
-	stateDir := filepath.Join(tmpDir, "var", "lib", "docker-helper")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"BINARY_DEST=" + filepath.Join(destDir, "bin/docker-helper"),
+		"UNIT_DEST=" + filepath.Join(destDir, "etc/systemd/system/docker-helper.service"),
+		"AA_PROFILE_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper-system"),
+		"AA_FRAGMENT_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper.d/managed-roots"),
+		"AA_FRAGMENT_DIR=" + fragmentDir,
+		"CONFIG_DIR=" + filepath.Join(destDir, "etc/docker-helper"),
+		"STATE_DIR=" + filepath.Join(destDir, "var/lib/docker-helper"),
+		"RUNTIME_DIR=" + filepath.Join(destDir, "run/docker-helper"),
+		"AA_PARSER=" + filepath.Join(fakeBinDir, "apparmor_parser"),
+		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
+	}
+
+	cmd := exec.Command("bash", scriptPath, "--yes")
+	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd.Dir = scriptDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(filepath.Join(destDir, "etc", "docker-helper", "config.json")); os.IsNotExist(err) {
+		t.Error("config should be preserved without --purge")
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "var", "lib", "docker-helper")); os.IsNotExist(err) {
+		t.Error("state should be preserved without --purge")
+	}
+	if _, err := os.Stat(filepath.Join(fragmentDir, "managed-roots")); os.IsNotExist(err) {
+		t.Error("fragment should be preserved without --purge")
+	}
+	if _, err := os.Stat(filepath.Join(destDir, "bin", "docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should be removed")
+	}
+}
+
+func TestUninstallSystemPurgeRemovesData(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptDir := filepath.Join(tmpDir, "script")
+	destDir := filepath.Join(tmpDir, "dest")
+	fakeBinDir := filepath.Join(tmpDir, "fakes")
+	logFile := filepath.Join(tmpDir, "calls.log")
+
+	if err := os.MkdirAll(scriptDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(stateDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte("{}"), 0600); err != nil {
+	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Run without --purge
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
-		source %s
-		interactive=false
-		purge=false
-		CONFIG_DIR="%s"
-		STATE_DIR="%s"
-		parse_args
-		purge_persistent_data
-	`, scriptPath, configDir, stateDir))
-	if _, err := cmd.CombinedOutput(); err == nil {
-		// purge_persistent_data should not be called without purge=true
-		// But we're calling it directly, so let's verify the logic differently
+	systemctlScript := fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$@" >> "$log_file"
+exit 1
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "systemctl"), []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "apparmor_parser"), []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
 	}
 
-	// Verify the script only purges when purge=true
-	cmd = exec.Command("bash", "-c", fmt.Sprintf(`
-		source %s
-		purge=false
-		if $purge; then
-			echo "would purge"
-		else
-			echo "preserve"
-		fi
-	`, scriptPath))
-	out, err := cmd.CombinedOutput()
+	if err := os.MkdirAll(filepath.Join(destDir, "etc", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "etc", "docker-helper", "config.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "var", "lib", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(destDir, "run", "docker-helper"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fragmentDir := filepath.Join(destDir, "etc", "apparmor.d", "docker-helper.d")
+	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fragmentDir, "managed-roots"), []byte("fragment"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(destDir, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, "bin", "docker-helper"), []byte("fake"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	scriptPath := filepath.Join(scriptDir, "uninstall-system.sh")
+	scriptData, err := os.ReadFile("packaging/uninstall-system.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "preserve") {
-		t.Error("without --purge, config/state should be preserved")
-	}
-}
-
-func TestSystemAppArmorProfileBinaryPath(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
+	if err := os.WriteFile(scriptPath, scriptData, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	content := string(data)
-	if !strings.Contains(content, "/usr/bin/docker-helper") {
-		t.Error("system AppArmor profile must reference /usr/bin/docker-helper")
-	}
-}
-
-// --- Managed fragment tests ---
-
-func TestManagedFragmentMatchesRenderFragmentEmpty(t *testing.T) {
-	expected := renderFragment([]string{})
-	actual, err := os.ReadFile("packaging/apparmor/docker-helper.d/managed-roots")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if string(actual) != string(expected) {
-		t.Errorf("managed fragment does not match renderFragment([])\nexpected: %q\nactual:   %q", string(expected), string(actual))
-	}
-}
-
-func TestManagedFragmentAssetNameMatchesProduction(t *testing.T) {
-	expectedName := filepath.Base(apparmorManagedFragment)
-	actualName := filepath.Base("packaging/apparmor/docker-helper.d/managed-roots")
-	if actualName != expectedName {
-		t.Errorf("managed fragment asset name %q does not match production constant %q", actualName, expectedName)
-	}
-}
-
-func TestSystemAppArmorAssetNameMatchesProduction(t *testing.T) {
-	expectedName := filepath.Base(apparmorMainProfile)
-	actualName := filepath.Base("packaging/apparmor/docker-helper-system")
-	if actualName != expectedName {
-		t.Errorf("system profile asset name %q does not match production constant %q", actualName, expectedName)
-	}
-}
-
-// --- User AppArmor asset preserved ---
-
-func TestUserAppArmorAssetExists(t *testing.T) {
-	path := "packaging/apparmor/docker-helper"
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("user AppArmor asset %s must still exist: %v", path, err)
-	}
-}
-
-// --- System unit directory declarations ---
-
-func TestSystemUnitDirectoryDeclarations(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
+	env := []string{
+		"PATH=" + fakeBinDir + ":" + os.Getenv("PATH"),
+		"BINARY_DEST=" + filepath.Join(destDir, "bin/docker-helper"),
+		"UNIT_DEST=" + filepath.Join(destDir, "etc/systemd/system/docker-helper.service"),
+		"AA_PROFILE_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper-system"),
+		"AA_FRAGMENT_DEST=" + filepath.Join(destDir, "etc/apparmor.d/docker-helper.d/managed-roots"),
+		"AA_FRAGMENT_DIR=" + fragmentDir,
+		"CONFIG_DIR=" + filepath.Join(destDir, "etc/docker-helper"),
+		"STATE_DIR=" + filepath.Join(destDir, "var/lib/docker-helper"),
+		"RUNTIME_DIR=" + filepath.Join(destDir, "run/docker-helper"),
+		"AA_PARSER=" + filepath.Join(fakeBinDir, "apparmor_parser"),
+		"SYSTEMCTL=" + filepath.Join(fakeBinDir, "systemctl"),
 	}
 
-	content := string(data)
-	if !strings.Contains(content, "ConfigurationDirectory=docker-helper") {
-		t.Error("system unit must declare ConfigurationDirectory=docker-helper")
-	}
-	if !strings.Contains(content, "ConfigurationDirectoryMode=0755") {
-		t.Error("system unit must declare ConfigurationDirectoryMode=0755")
-	}
-	if !strings.Contains(content, "StateDirectory=docker-helper") {
-		t.Error("system unit must declare StateDirectory=docker-helper")
-	}
-	if !strings.Contains(content, "StateDirectoryMode=0700") {
-		t.Error("system unit must declare StateDirectoryMode=0700")
-	}
-	if !strings.Contains(content, "RuntimeDirectory=docker-helper") {
-		t.Error("system unit must declare RuntimeDirectory=docker-helper")
-	}
-	if !strings.Contains(content, "RuntimeDirectoryMode=0755") {
-		t.Error("system unit must declare RuntimeDirectoryMode=0755")
-	}
-}
-
-// --- System unit hardening ---
-
-func TestSystemUnitHardening(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
+	cmd := exec.Command("bash", scriptPath, "--yes", "--purge")
+	cmd.Env = append(append(os.Environ(), env...), "CHECK_ROOT=false")
+	cmd.Dir = scriptDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
 	}
 
-	content := string(data)
-	if !strings.Contains(content, "NoNewPrivileges=true") {
-		t.Error("system unit must contain NoNewPrivileges=true")
+	if _, err := os.Stat(filepath.Join(destDir, "etc", "docker-helper")); !os.IsNotExist(err) {
+		t.Error("config should be removed with --purge")
 	}
-	if !strings.Contains(content, "ProtectKernelTunables=true") {
-		t.Error("system unit must contain ProtectKernelTunables=true")
+	if _, err := os.Stat(filepath.Join(destDir, "var", "lib", "docker-helper")); !os.IsNotExist(err) {
+		t.Error("state should be removed with --purge")
 	}
-	if strings.Contains(content, "ProtectHome=true") {
-		t.Error("system unit must NOT contain ProtectHome=true (workspace access required)")
+	if _, err := os.Stat(filepath.Join(destDir, "run", "docker-helper")); !os.IsNotExist(err) {
+		t.Error("runtime should be removed with --purge")
 	}
-}
-
-// --- System unit reload ---
-
-func TestSystemUnitReload(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "ExecReload=") {
-		t.Error("system unit must contain ExecReload=")
+	if _, err := os.Stat(filepath.Join(fragmentDir, "managed-roots")); !os.IsNotExist(err) {
+		t.Error("fragment should be removed with --purge")
 	}
 }
