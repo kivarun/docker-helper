@@ -163,12 +163,6 @@ func cleanupCidfile(op *operation) {
 	}
 }
 
-// defaultExecCommand is the default Docker subprocess executor.
-func defaultExecCommand(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	return cmd.CombinedOutput()
-}
-
 type resolvedMount struct {
 	HostPath string
 	Target   string

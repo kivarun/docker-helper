@@ -2683,3 +2683,98 @@ func TestDeprecatedOperationLogMaxBytesWorks(t *testing.T) {
 		t.Errorf("expected '8192\\n', got %q", stdout.String())
 	}
 }
+
+func TestConfigShowEffectiveInvariant(t *testing.T) {
+	cfg := `{
+  "allowed_root": "/home/user/work",
+  "session_ttl": "12h"
+}`
+	setupConfigTestWithData(t, []byte(cfg))
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	checkField := func(key string, expected any) {
+		t.Helper()
+		if v, ok := result[key]; !ok {
+			t.Errorf("missing key %q", key)
+		} else if v != expected {
+			t.Errorf("%s = %v, want %v", key, v, expected)
+		}
+	}
+
+	checkField("log_level", "info")
+	checkField("audit_enabled", false)
+	checkField("audit_enabled_source", "log_level")
+	checkField("shutdown_timeout", "30s")
+	checkField("operation_retention_ttl", "10m")
+	checkField("operation_max_completed", float64(200))
+	checkField("trusted_ca_injection", "disabled")
+
+	// operation_log_max_bytes is int64, JSON encodes as number
+	if v, ok := result["operation_log_max_bytes"]; !ok {
+		t.Error("missing key operation_log_max_bytes")
+	} else {
+		switch val := v.(type) {
+		case float64:
+			if int64(val) != 4194304 {
+				t.Errorf("operation_log_max_bytes = %v, want 4194304", val)
+			}
+		case json.Number:
+			if val.String() != "4194304" {
+				t.Errorf("operation_log_max_bytes = %v, want 4194304", val)
+			}
+		default:
+			t.Errorf("operation_log_max_bytes = %v (%T), want 4194304", val, val)
+		}
+	}
+
+	fields := []string{
+		"log_level",
+		"audit_enabled",
+		"audit_enabled_source",
+		"shutdown_timeout",
+		"operation_retention_ttl",
+		"operation_max_completed",
+		"operation_log_max_bytes",
+		"trusted_ca_injection",
+	}
+
+	for _, field := range fields {
+		t.Run(field, func(t *testing.T) {
+			stdout.Reset()
+			stderr.Reset()
+			code := runCommandWithWriters([]string{"config", "show", field}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
+			}
+			fieldVal := strings.TrimSpace(stdout.String())
+
+			// For numeric fields, compare as strings since JSON encoding differs
+			switch field {
+			case "operation_max_completed":
+				if fieldVal != "200" {
+					t.Errorf("show %s = %q, want %q", field, fieldVal, "200")
+				}
+			case "operation_log_max_bytes":
+				if fieldVal != "4194304" {
+					t.Errorf("show %s = %q, want %q", field, fieldVal, "4194304")
+				}
+			default:
+				expectedVal := fmt.Sprintf("%v", result[field])
+				if fieldVal != expectedVal {
+					t.Errorf("show %s = %q, want %q", field, fieldVal, expectedVal)
+				}
+			}
+		})
+	}
+}

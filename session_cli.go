@@ -245,12 +245,18 @@ func runSessionCleanup(stdout, stderr io.Writer) int {
 	}
 
 	runtimeDir := getRuntimeDirSafe()
-	if runtimeDir != "" {
-		if err := cleanupStaleSessionRuntimeDirs(db, runtimeDir); err != nil {
-			fmt.Fprintf(stderr, "warning: failed to clean stale runtime dirs: %v\n", err)
-		}
+	if runtimeDir == "" {
+		fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+		fmt.Fprintf(stderr, "warning: cannot determine runtime directory; stale runtime dirs not cleaned\n")
+		return 1
 	}
 
-	fmt.Fprintf(stdout, "removed %d expired sessions and cleaned stale runtime dirs\n", n)
+	if err := cleanupStaleSessionRuntimeDirs(db, runtimeDir); err != nil {
+		fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+		fmt.Fprintf(stderr, "error: failed to clean stale runtime dirs: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
 	return 0
 }

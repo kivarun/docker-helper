@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -453,5 +454,99 @@ func TestPullDockerArgs(t *testing.T) {
 		if capturedArgs[i] != exp {
 			t.Errorf("arg[%d]: expected %q, got %q", i, exp, capturedArgs[i])
 		}
+	}
+}
+
+func TestPullRequestCancellation(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	// Pre-create the session Docker directory so ensureSessionDockerDir doesn't block.
+	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
+	if err := os.MkdirAll(dockerDir, 0700); err != nil {
+		t.Fatalf("cannot create docker dir: %v", err)
+	}
+
+	blockCh := make(chan struct{}, 1)
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		blockCh <- struct{}{}
+		cmd := exec.CommandContext(ctx, "sleep", "300")
+		return cmd
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	reqBody := map[string]string{"image": "alpine:3.24"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		app.handlePull(w, req)
+		close(done)
+	}()
+
+	select {
+	case <-blockCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handlePull did not reach ExecCommandContext")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handlePull did not return after context cancellation")
+	}
+}
+
+func TestPullShutdownRejection(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /pull", func(w http.ResponseWriter, r *http.Request) {
+		app.handlePull(w, r)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	server.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	reqBody := map[string]string{"image": "alpine:3.24"}
+	body, _ := json.Marshal(reqBody)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/pull", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("cannot create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		t.Fatal("expected error after server shutdown, got nil")
 	}
 }

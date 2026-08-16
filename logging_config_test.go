@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -451,8 +453,8 @@ func TestDebugRequestLogNoSessionIDLeak(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	req := newRunRequest(map[string]any{

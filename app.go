@@ -13,7 +13,6 @@ type App struct {
 	Config             *Config
 	DB                 *sql.DB
 	AdminTokenHash     [sha256.Size]byte
-	ExecCommand        func(string, ...string) ([]byte, error)
 	ExecCommandContext func(context.Context, string, ...string) *exec.Cmd
 	OperationRegistry  *operationRegistry
 	// PinMountFn is a test seam for the inode-pinning primitive.

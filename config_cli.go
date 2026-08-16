@@ -289,6 +289,8 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	ec := resolveEffectiveConfig(*fc)
+
 	configDir := filepath.Dir(configPath)
 	runtimeDir := getRuntimeDirSafe()
 	stateDir := getStateDir()
@@ -301,41 +303,12 @@ func configShowAll(stdout, stderr io.Writer) int {
 	databasePath := filepath.Join(stateDir, "docker-helper.db")
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
-	levelStr := fc.Level
-	if levelStr == "" {
-		levelStr = "info"
-	}
-
-	slogLevel, _ := parseLogLevel(levelStr)
-	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel)
-	auditSource := "log_level"
-	if fc.AuditEnabled != nil {
-		auditSource = "explicit"
-	}
-
-	shutdownTimeout := fc.ShutdownTimeout
-	if shutdownTimeout == "" {
-		shutdownTimeout = "30s"
-	}
-	operationRetentionTTL := fc.OperationRetentionTTL
-	if operationRetentionTTL == "" {
-		operationRetentionTTL = "10m"
-	}
-	operationMaxCompleted := fc.OperationMaxCompleted
-	if operationMaxCompleted == nil {
-		operationMaxCompleted = ptrOf(200)
-	}
-	operationLogMaxBytes := fc.OperationLogMaxBytes
-	if operationLogMaxBytes == nil {
-		operationLogMaxBytes = ptrOf(int64(4 * 1024 * 1024))
-	}
-
 	result := map[string]any{
 		"allowed_root":            fc.AllowedRoot,
 		"session_ttl":             fc.SessionTTL,
-		"log_level":               levelStr,
-		"audit_enabled":           auditEnabled,
-		"audit_enabled_source":    auditSource,
+		"log_level":               ec.LogLevel,
+		"audit_enabled":           ec.AuditEnabled,
+		"audit_enabled_source":    ec.AuditEnabledSource,
 		"config_path":             configPath,
 		"config_dir":              configDir,
 		"runtime_dir":             runtimeDir,
@@ -345,14 +318,14 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"database_path":           databasePath,
 		"admin_token_path":        adminTokenPath,
 		"admin_token":             "<redacted>",
-		"shutdown_timeout":        shutdownTimeout,
-		"operation_retention_ttl": operationRetentionTTL,
-		"operation_max_completed": *operationMaxCompleted,
-		"operation_log_max_bytes": *operationLogMaxBytes,
+		"shutdown_timeout":        ec.ShutdownTimeout,
+		"operation_retention_ttl": ec.OperationRetentionTTL,
+		"operation_max_completed": ec.OperationMaxCompleted,
+		"operation_log_max_bytes": ec.OperationLogMaxBytes,
 		"trusted_ca_path":         fc.TrustedCAPath,
-		"trusted_ca_injection":    resolveTrustedCAInjection(fc.TrustedCAInjection),
+		"trusted_ca_injection":    ec.TrustedCAInjection,
 		"mode":                    resolveDeploymentMode(),
-		"http_address":            resolveHTTPAddress(fc.HTTPAddress),
+		"http_address":            ec.HTTPAddress,
 	}
 
 	enc := json.NewEncoder(stdout)
@@ -472,6 +445,8 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	ec := resolveEffectiveConfig(*fc)
+
 	stateDir := getStateDir()
 
 	switch field {
@@ -480,57 +455,27 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	case "session_ttl":
 		fmt.Fprintln(stdout, fc.SessionTTL)
 	case "log_level":
-		level := fc.Level
-		if level == "" {
-			level = "info"
-		}
-		fmt.Fprintln(stdout, level)
+		fmt.Fprintln(stdout, ec.LogLevel)
 	case "audit_enabled":
-		levelStr := fc.Level
-		if levelStr == "" {
-			levelStr = "info"
-		}
-		slogLevel, _ := parseLogLevel(levelStr)
-		auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel)
-		fmt.Fprintln(stdout, auditEnabled)
+		fmt.Fprintln(stdout, ec.AuditEnabled)
 	case "audit_enabled_source":
-		if fc.AuditEnabled != nil {
-			fmt.Fprintln(stdout, "explicit")
-		} else {
-			fmt.Fprintln(stdout, "log_level")
-		}
+		fmt.Fprintln(stdout, ec.AuditEnabledSource)
 	case "state_dir":
 		fmt.Fprintln(stdout, stateDir)
 	case "database_path":
 		fmt.Fprintln(stdout, filepath.Join(stateDir, "docker-helper.db"))
 	case "shutdown_timeout":
-		st := fc.ShutdownTimeout
-		if st == "" {
-			st = "30s"
-		}
-		fmt.Fprintln(stdout, st)
+		fmt.Fprintln(stdout, ec.ShutdownTimeout)
 	case "operation_retention_ttl":
-		ort := fc.OperationRetentionTTL
-		if ort == "" {
-			ort = "10m"
-		}
-		fmt.Fprintln(stdout, ort)
+		fmt.Fprintln(stdout, ec.OperationRetentionTTL)
 	case "operation_max_completed":
-		omc := fc.OperationMaxCompleted
-		if omc == nil {
-			omc = ptrOf(200)
-		}
-		fmt.Fprintln(stdout, *omc)
+		fmt.Fprintln(stdout, ec.OperationMaxCompleted)
 	case "operation_log_max_bytes":
-		olmb := fc.OperationLogMaxBytes
-		if olmb == nil {
-			olmb = ptrOf(int64(4 * 1024 * 1024))
-		}
-		fmt.Fprintln(stdout, *olmb)
+		fmt.Fprintln(stdout, ec.OperationLogMaxBytes)
 	case "trusted_ca_path":
 		fmt.Fprintln(stdout, fc.TrustedCAPath)
 	case "trusted_ca_injection":
-		fmt.Fprintln(stdout, resolveTrustedCAInjection(fc.TrustedCAInjection))
+		fmt.Fprintln(stdout, ec.TrustedCAInjection)
 	default:
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2

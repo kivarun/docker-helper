@@ -626,6 +626,8 @@ func TestSessionCleanupCLINoneExpired(t *testing.T) {
 
 func TestSessionCleanupCLIDatabaseError(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/config.json")
+	t.Setenv("XDG_STATE_HOME", "/nonexistent/state/path")
+	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "cleanup"}, &stdout, &stderr)
@@ -634,5 +636,109 @@ func TestSessionCleanupCLIDatabaseError(t *testing.T) {
 	}
 	if stderr.Len() == 0 {
 		t.Error("expected error on stderr")
+	}
+}
+
+func TestSessionCleanupWithRuntimeDirs(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "docker-helper.db")
+	stateDir := filepath.Join(dir, "state", "docker-helper")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+	db.Close()
+
+	if err := os.Symlink(dbPath, filepath.Join(stateDir, "docker-helper.db")); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeDir := filepath.Join(dir, "runtime", "docker-helper")
+	sessionsDir := filepath.Join(runtimeDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(dir, "config.json")
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+
+	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}` + "\n")
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("cannot write config: %v", err)
+	}
+
+	db, err = openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now().Unix()
+
+	_, err = db.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhs_active", "hash_active", dir, now, now+3600,
+	)
+	if err != nil {
+		t.Fatalf("cannot insert active session: %v", err)
+	}
+
+	_, err = db.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhs_expired", "hash_expired", dir, now-7200, now-3600,
+	)
+	if err != nil {
+		t.Fatalf("cannot insert expired session: %v", err)
+	}
+
+	activeRuntimeDir := filepath.Join(sessionsDir, "dhs_active")
+	expiredRuntimeDir := filepath.Join(sessionsDir, "dhs_expired")
+	if err := os.MkdirAll(activeRuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(expiredRuntimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"session", "cleanup"}, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'dhs_expired'").Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot query expired: %v", err)
+	}
+	if count != 0 {
+		t.Error("expired session should be deleted from DB")
+	}
+
+	err = db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'dhs_active'").Scan(&count)
+	if err != nil {
+		t.Fatalf("cannot query active: %v", err)
+	}
+	if count != 1 {
+		t.Error("active session should remain in DB")
+	}
+
+	if _, err := os.Stat(expiredRuntimeDir); !os.IsNotExist(err) {
+		t.Error("expired session runtime dir should be removed")
+	}
+
+	if _, err := os.Stat(activeRuntimeDir); os.IsNotExist(err) {
+		t.Error("active session runtime dir should remain")
 	}
 }

@@ -24,6 +24,21 @@ const (
 	agentSocketPath = "/run/docker-helper/docker-helper.sock"
 )
 
+// resolveAgentSocketPath returns the Unix socket path for agent-facing CLI commands.
+// Precedence:
+//  1. DOCKER_HELPER_SOCKET_PATH if set
+//  2. $XDG_RUNTIME_DIR/docker-helper/docker-helper.sock if XDG_RUNTIME_DIR is set
+//  3. /run/docker-helper/docker-helper.sock (system/sandbox default)
+func resolveAgentSocketPath() string {
+	if socketPath := os.Getenv("DOCKER_HELPER_SOCKET_PATH"); socketPath != "" {
+		return socketPath
+	}
+	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+		return filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+	}
+	return agentSocketPath
+}
+
 // agentClient returns an apiClient configured for the current session.
 // It reads the session token from DOCKER_HELPER_SESSION_TOKEN and uses
 // the default Unix socket path (no config.json required).
@@ -33,16 +48,7 @@ func agentClient() (*apiClient, error) {
 		return nil, fmt.Errorf("DOCKER_HELPER_SESSION_TOKEN is not set")
 	}
 
-	socketPath := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
-	if socketPath == "" {
-		if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
-			socketPath = runtimeDir + "/docker-helper/docker-helper.sock"
-		} else {
-			socketPath = agentSocketPath
-		}
-	}
-
-	return newUnixAPIClient(socketPath, func() (string, error) {
+	return newUnixAPIClient(resolveAgentSocketPath(), func() (string, error) {
 		return token, nil
 	}, nil), nil
 }

@@ -1453,3 +1453,32 @@ func TestCancelOperationTimeout(t *testing.T) {
 		t.Errorf("cancelOperationTimeout %v is too short; should cover daemon worst case (5+3+4=12s)", cancelOperationTimeout)
 	}
 }
+
+func TestResolveAgentSocketPathExplicitWins(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "/explicit/path.sock")
+	t.Setenv("XDG_RUNTIME_DIR", "/xdg/runtime")
+	got := resolveAgentSocketPath()
+	if got != "/explicit/path.sock" {
+		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, "/explicit/path.sock")
+	}
+}
+
+func TestResolveAgentSocketPathXDG(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
+	t.Setenv("XDG_RUNTIME_DIR", "/my/runtime")
+	got := resolveAgentSocketPath()
+	want := "/my/runtime/docker-helper/docker-helper.sock"
+	if got != want {
+		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveAgentSocketPathFallback(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	got := resolveAgentSocketPath()
+	want := "/run/docker-helper/docker-helper.sock"
+	if got != want {
+		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, want)
+	}
+}

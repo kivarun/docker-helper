@@ -266,9 +266,9 @@ func TestPullEnsureSessionDockerDirFails(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	dockerCalled := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		dockerCalled = true
-		return nil, nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	req := newPullRequest(map[string]any{

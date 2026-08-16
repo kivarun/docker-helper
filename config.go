@@ -252,46 +252,27 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	level := slog.LevelInfo
-	if fc.Level != "" {
-		level, err = parseLogLevel(fc.Level)
-		if err != nil {
-			return nil, err
-		}
+	ec := resolveEffectiveConfig(fc)
+
+	level, err := parseLogLevel(ec.LogLevel)
+	if err != nil {
+		return nil, err
 	}
 
-	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, level)
-
-	shutdownTimeout := 30 * time.Second
-	if fc.ShutdownTimeout != "" {
-		st, err := parseDurationPositive(fc.ShutdownTimeout, "shutdown_timeout")
-		if err != nil {
-			return nil, err
-		}
-		shutdownTimeout = st
+	shutdownTimeout, err := parseDurationPositive(ec.ShutdownTimeout, "shutdown_timeout")
+	if err != nil {
+		return nil, err
 	}
 
-	opRetentionTTL := 10 * time.Minute
-	if fc.OperationRetentionTTL != "" {
-		ort, err := parseDurationPositive(fc.OperationRetentionTTL, "operation_retention_ttl")
-		if err != nil {
-			return nil, err
-		}
-		opRetentionTTL = ort
+	opRetentionTTL, err := parseDurationPositive(ec.OperationRetentionTTL, "operation_retention_ttl")
+	if err != nil {
+		return nil, err
 	}
 
-	opMaxCompleted := 200
-	if fc.OperationMaxCompleted != nil {
-		opMaxCompleted = *fc.OperationMaxCompleted
-	}
+	trustedCAInjection := ec.TrustedCAInjection
 
-	operationLogMaxBytes := int64(4 * 1024 * 1024)
-	if fc.OperationLogMaxBytes != nil {
-		operationLogMaxBytes = *fc.OperationLogMaxBytes
-	}
-
-	trustedCAInjection := resolveTrustedCAInjection(fc.TrustedCAInjection)
-
+	// HTTPAddress: loadConfig always defaults to DefaultHTTPAddress (mode-specific
+	// behavior is only for TCP listener creation, not for the Config value).
 	httpAddress := DefaultHTTPAddress
 	if fc.HTTPAddress != "" {
 		if err := validateHTTPAddress(fc.HTTPAddress); err != nil {
@@ -330,7 +311,7 @@ func loadConfig() (*Config, error) {
 		AllowedRoot:           fc.AllowedRoot,
 		SessionTTL:            ttl,
 		LogLevel:              level,
-		AuditEnabled:          auditEnabled,
+		AuditEnabled:          ec.AuditEnabled,
 		SocketPath:            socketPath,
 		LockPath:              socketPath + ".lock",
 		StateDir:              stateDir,
@@ -339,8 +320,8 @@ func loadConfig() (*Config, error) {
 		AdminTokenPath:        adminTokenPath,
 		ShutdownTimeout:       shutdownTimeout,
 		OperationRetentionTTL: opRetentionTTL,
-		OperationMaxCompleted: opMaxCompleted,
-		OperationLogMaxBytes:  operationLogMaxBytes,
+		OperationMaxCompleted: ec.OperationMaxCompleted,
+		OperationLogMaxBytes:  ec.OperationLogMaxBytes,
 		Mode:                  mode,
 		HTTPAddress:           httpAddress,
 		TrustedCAInjection:    trustedCAInjection,
@@ -376,6 +357,65 @@ func resolveTrustedCAInjection(s string) string {
 		return "disabled"
 	}
 	return s
+}
+
+// effectiveConfigValues holds the effective (default-applied) output values
+// for config-backed fields. It is the single source of truth for what
+// `docker-helper config show` and `docker-helper config show FIELD` display.
+type effectiveConfigValues struct {
+	LogLevel              string // default "info"
+	AuditEnabled          bool   // derived from effective log_level unless explicit
+	AuditEnabledSource    string // "explicit" or "log_level"
+	ShutdownTimeout       string // default "30s"
+	OperationRetentionTTL string // default "10m"
+	OperationMaxCompleted int    // default 200
+	OperationLogMaxBytes  int64  // default 4194304
+	TrustedCAInjection    string // default "disabled"
+	HTTPAddress           string // mode-specific (system: default 127.0.0.1:52375, user: "")
+}
+
+// resolveEffectiveConfig computes the effective config values from a fileConfig.
+// This is the single authoritative source for effective defaults.
+func resolveEffectiveConfig(fc fileConfig) effectiveConfigValues {
+	level := fc.Level
+	if level == "" {
+		level = "info"
+	}
+	slogLevel, _ := parseLogLevel(level)
+	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel)
+	auditSource := "log_level"
+	if fc.AuditEnabled != nil {
+		auditSource = "explicit"
+	}
+	shutdownTimeout := fc.ShutdownTimeout
+	if shutdownTimeout == "" {
+		shutdownTimeout = "30s"
+	}
+	operationRetentionTTL := fc.OperationRetentionTTL
+	if operationRetentionTTL == "" {
+		operationRetentionTTL = "10m"
+	}
+	operationMaxCompleted := 200
+	if fc.OperationMaxCompleted != nil {
+		operationMaxCompleted = *fc.OperationMaxCompleted
+	}
+	operationLogMaxBytes := int64(4 * 1024 * 1024)
+	if fc.OperationLogMaxBytes != nil {
+		operationLogMaxBytes = *fc.OperationLogMaxBytes
+	}
+	trustedCAInjection := resolveTrustedCAInjection(fc.TrustedCAInjection)
+	httpAddress := resolveHTTPAddress(fc.HTTPAddress)
+	return effectiveConfigValues{
+		LogLevel:              level,
+		AuditEnabled:          auditEnabled,
+		AuditEnabledSource:    auditSource,
+		ShutdownTimeout:       shutdownTimeout,
+		OperationRetentionTTL: operationRetentionTTL,
+		OperationMaxCompleted: operationMaxCompleted,
+		OperationLogMaxBytes:  operationLogMaxBytes,
+		TrustedCAInjection:    trustedCAInjection,
+		HTTPAddress:           httpAddress,
+	}
 }
 
 // parseDurationPositive parses a Go duration string and returns an error if
