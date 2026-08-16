@@ -374,8 +374,8 @@ func TestErrorContractDockerPullFailed(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("pull error output\n"), &mockExitError{code: 1, msg: "exit status 1"}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "echo 'pull error output'; exit 1")
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
@@ -877,23 +877,17 @@ func TestImageReferenceNotRejectedByHelper_RegistryPort(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 
-	var stdout bytes.Buffer
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if name != "docker" {
 			t.Fatalf("unexpected command: %s", name)
 		}
-		// Verify the image argument is passed through unchanged.
-		for i, arg := range args {
+		for _, arg := range args {
 			if arg == "registry.example.com:5000/team/image:tag" {
-				stdout.WriteString("Pulled registry.example.com:5000/team/image:tag\n")
-				return stdout.Bytes(), nil
-			}
-			if i == 0 && arg == "pull" {
-				continue
+				return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'Pulled registry.example.com:5000/team/image:tag\\n'")
 			}
 		}
 		t.Fatalf("image argument not found in args: %v", args)
-		return nil, nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	w := httptest.NewRecorder()
@@ -922,22 +916,17 @@ func TestImageReferenceNotRejectedByHelper_Digest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 
-	var stdout bytes.Buffer
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if name != "docker" {
 			t.Fatalf("unexpected command: %s", name)
 		}
-		for i, arg := range args {
+		for _, arg := range args {
 			if arg == "alpine@sha256:abc123def456" {
-				stdout.WriteString("Pulled alpine@sha256:abc123def456\n")
-				return stdout.Bytes(), nil
-			}
-			if i == 0 && arg == "pull" {
-				continue
+				return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'Pulled alpine@sha256:abc123def456\\n'")
 			}
 		}
 		t.Fatalf("image argument not found in args: %v", args)
-		return nil, nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	w := httptest.NewRecorder()
@@ -966,22 +955,17 @@ func TestImageReferenceNotRejectedByHelper_Untagged(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 
-	var stdout bytes.Buffer
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if name != "docker" {
 			t.Fatalf("unexpected command: %s", name)
 		}
-		for i, arg := range args {
+		for _, arg := range args {
 			if arg == "alpine" {
-				stdout.WriteString("Pulled alpine\n")
-				return stdout.Bytes(), nil
-			}
-			if i == 0 && arg == "pull" {
-				continue
+				return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'Pulled alpine\\n'")
 			}
 		}
 		t.Fatalf("image argument not found in args: %v", args)
-		return nil, nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	w := httptest.NewRecorder()
@@ -1010,22 +994,17 @@ func TestImageReferenceNotRejectedByHelper_LocalhostPort(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 
-	var stdout bytes.Buffer
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if name != "docker" {
 			t.Fatalf("unexpected command: %s", name)
 		}
-		for i, arg := range args {
+		for _, arg := range args {
 			if arg == "localhost:5000/image:tag" {
-				stdout.WriteString("Pulled localhost:5000/image:tag\n")
-				return stdout.Bytes(), nil
-			}
-			if i == 0 && arg == "pull" {
-				continue
+				return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'Pulled localhost:5000/image:tag\\n'")
 			}
 		}
 		t.Fatalf("image argument not found in args: %v", args)
-		return nil, nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	w := httptest.NewRecorder()
@@ -1151,10 +1130,9 @@ func TestDockerErrorLogPull(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	const errMarker = "test_pull_error_marker_def456"
 	const dockerOutput = "pull-output-secret-xyz"
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(dockerOutput + "\n"), &mockExitError{code: 1, msg: errMarker}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "echo '"+dockerOutput+"'; exit 1")
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
@@ -1165,9 +1143,9 @@ func TestDockerErrorLogPull(t *testing.T) {
 
 	raw := opBuf.String()
 
-	// Error marker is logged
-	if !strings.Contains(raw, errMarker) {
-		t.Errorf("expected error marker %q in log, got:\n%s", errMarker, raw)
+	// Error is logged
+	if !strings.Contains(raw, "exit status 1") {
+		t.Errorf("expected error in log, got:\n%s", raw)
 	}
 	// Docker output not logged
 	if strings.Contains(raw, dockerOutput) {

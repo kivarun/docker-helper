@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -19,8 +21,8 @@ func TestPullStartContainsFields(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	req := newPullRequest(map[string]any{
@@ -60,8 +62,8 @@ func TestPullFinishSuccess(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	req := newPullRequest(map[string]any{
@@ -101,8 +103,8 @@ func TestPullFinishErrorWithExitCode(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("pull failed"), &mockExitError{code: 1, msg: "exit status 1"}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'pull failed'; exit 1")
 	}
 
 	req := newPullRequest(map[string]any{
@@ -144,8 +146,8 @@ func TestPullAuditNoPullOutput(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(pullOutput), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+pullOutput+"'")
 	}
 
 	req := newPullRequest(map[string]any{
@@ -186,8 +188,8 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte(pullErrorOutput), &mockExitError{code: 1, msg: "exit status 1"}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+pullErrorOutput+"'; exit 1")
 	}
 
 	req := newPullRequest(map[string]any{
@@ -227,9 +229,9 @@ func TestPullDockerArgsUnchanged(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	req := newPullRequest(map[string]any{
@@ -267,9 +269,9 @@ func TestPullImageHyphenRejected(t *testing.T) {
 	}
 
 	execCalled := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		execCalled = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	req := newPullRequest(map[string]any{
@@ -291,7 +293,7 @@ func TestPullImageHyphenRejected(t *testing.T) {
 	}
 
 	if execCalled {
-		t.Error("ExecCommand must not be called when image starts with '-'")
+		t.Error("ExecCommandContext must not be called when image starts with '-'")
 	}
 
 	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)

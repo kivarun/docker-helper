@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -56,12 +57,16 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	args := []string{"--config", dockerDir, "pull", req.Image}
 
-	pullCmd := a.ExecCommand
-	if pullCmd == nil {
-		pullCmd = defaultExecCommand
-	}
+	cmd := a.newOperationCmd(ctx, "docker", args...)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
 
-	output, err := pullCmd("docker", args...)
+	err = cmd.Start()
+	if err == nil {
+		err = cmd.Wait()
+	}
+	outputBytes := output.Bytes()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	var result string
@@ -80,7 +85,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 			OK:       false,
 			Code:     "docker_pull_failed",
 			Message:  "docker pull failed",
-			Output:   string(output),
+			Output:   string(outputBytes),
 			Duration: duration,
 		})
 	} else {
@@ -89,7 +94,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		writeJSONRaw(ctx, w, http.StatusOK, pullResponse{
 			OK:       true,
 			Message:  "image pulled successfully",
-			Output:   string(output),
+			Output:   string(outputBytes),
 			Duration: duration,
 		})
 	}

@@ -215,6 +215,9 @@ Expired sessions are already rejected for authentication and excluded
 from session lists by their expires_at value. This command is useful
 for explicitly reclaiming storage during long daemon uptimes.
 
+Stale session runtime directories are also cleaned up. These directories
+may contain session-scoped Docker registry credentials.
+
 The daemon also removes expired sessions automatically at startup.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
@@ -241,6 +244,13 @@ func runSessionCleanup(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
+	runtimeDir := getRuntimeDirSafe()
+	if runtimeDir != "" {
+		if err := cleanupStaleSessionRuntimeDirs(db, runtimeDir); err != nil {
+			fmt.Fprintf(stderr, "warning: failed to clean stale runtime dirs: %v\n", err)
+		}
+	}
+
+	fmt.Fprintf(stdout, "removed %d expired sessions and cleaned stale runtime dirs\n", n)
 	return 0
 }

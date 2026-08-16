@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -17,8 +19,8 @@ func TestPullSessionAuthValidToken(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
@@ -115,8 +117,8 @@ func TestPullSessionAuthExpiredSession(t *testing.T) {
 		t.Fatalf("cannot update expires_at: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
@@ -149,8 +151,8 @@ func TestPullSessionAuthDeletedSession(t *testing.T) {
 		t.Fatal("expected session to be deleted")
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
@@ -208,9 +210,9 @@ func TestPullSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	called := false
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		called = true
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
@@ -227,15 +229,15 @@ func TestPullSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	}
 
 	if called {
-		t.Error("ExecCommand should not be called with invalid token")
+		t.Error("ExecCommandContext should not be called with invalid token")
 	}
 }
 
 func TestPullSessionAuthAdminTokenRejected(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
@@ -260,8 +262,8 @@ func TestPullImageRequired(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]string{}
@@ -314,8 +316,8 @@ func TestPullUnknownFieldsRejected(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("ok"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]any{"image": "alpine:3.24", "extra": "field"}
@@ -340,8 +342,8 @@ func TestPullSuccessResponse(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("pull output"), nil
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "echo", "pull output")
 	}
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
@@ -368,8 +370,8 @@ func TestPullSuccessResponse(t *testing.T) {
 	if resp.Message != "image pulled successfully" {
 		t.Errorf("expected 'image pulled successfully', got %q", resp.Message)
 	}
-	if resp.Output != "pull output" {
-		t.Errorf("expected output 'pull output', got %q", resp.Output)
+	if resp.Output != "pull output\n" {
+		t.Errorf("expected output 'pull output\\n', got %q", resp.Output)
 	}
 	if resp.Duration == "" {
 		t.Error("expected duration to be set")
@@ -384,8 +386,8 @@ func TestPullErrorResponse(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
-		return []byte("error output"), &mockExitError{code: 1, msg: "exit status 1"}
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'error output'; exit 1")
 	}
 
 	reqBody := map[string]string{"image": "nonexistent:latest"}
@@ -423,9 +425,9 @@ func TestPullDockerArgs(t *testing.T) {
 	}
 
 	var capturedArgs []string
-	app.ExecCommand = func(name string, args ...string) ([]byte, error) {
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		capturedArgs = args
-		return []byte("ok"), nil
+		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]string{"image": "alpine:3.24"}

@@ -18,8 +18,9 @@ const (
 	// operationPollInterval is the fixed interval between operation status polls.
 	operationPollInterval = 500 * time.Millisecond
 
-	// agentSocketPath is the default Unix socket path for agent-facing CLI commands.
-	// Agent containers receive this path via mount; no config.json required.
+	// agentSocketPath is the fallback Unix socket path for agent-facing CLI
+	// commands when neither DOCKER_HELPER_SOCKET_PATH nor XDG_RUNTIME_DIR
+	// are set (system/sandbox default).
 	agentSocketPath = "/run/docker-helper/docker-helper.sock"
 )
 
@@ -34,7 +35,11 @@ func agentClient() (*apiClient, error) {
 
 	socketPath := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	if socketPath == "" {
-		socketPath = agentSocketPath
+		if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
+			socketPath = runtimeDir + "/docker-helper/docker-helper.sock"
+		} else {
+			socketPath = agentSocketPath
+		}
 	}
 
 	return newUnixAPIClient(socketPath, func() (string, error) {

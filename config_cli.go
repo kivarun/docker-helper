@@ -313,6 +313,23 @@ func configShowAll(stdout, stderr io.Writer) int {
 		auditSource = "explicit"
 	}
 
+	shutdownTimeout := fc.ShutdownTimeout
+	if shutdownTimeout == "" {
+		shutdownTimeout = "30s"
+	}
+	operationRetentionTTL := fc.OperationRetentionTTL
+	if operationRetentionTTL == "" {
+		operationRetentionTTL = "10m"
+	}
+	operationMaxCompleted := fc.OperationMaxCompleted
+	if operationMaxCompleted == nil {
+		operationMaxCompleted = ptrOf(200)
+	}
+	operationLogMaxBytes := fc.OperationLogMaxBytes
+	if operationLogMaxBytes == nil {
+		operationLogMaxBytes = ptrOf(int64(4 * 1024 * 1024))
+	}
+
 	result := map[string]any{
 		"allowed_root":            fc.AllowedRoot,
 		"session_ttl":             fc.SessionTTL,
@@ -328,10 +345,10 @@ func configShowAll(stdout, stderr io.Writer) int {
 		"database_path":           databasePath,
 		"admin_token_path":        adminTokenPath,
 		"admin_token":             "<redacted>",
-		"shutdown_timeout":        fc.ShutdownTimeout,
-		"operation_retention_ttl": fc.OperationRetentionTTL,
-		"operation_max_completed": fc.OperationMaxCompleted,
-		"operation_log_max_bytes": fc.OperationLogMaxBytes,
+		"shutdown_timeout":        shutdownTimeout,
+		"operation_retention_ttl": operationRetentionTTL,
+		"operation_max_completed": *operationMaxCompleted,
+		"operation_log_max_bytes": *operationLogMaxBytes,
 		"trusted_ca_path":         fc.TrustedCAPath,
 		"trusted_ca_injection":    resolveTrustedCAInjection(fc.TrustedCAInjection),
 		"mode":                    resolveDeploymentMode(),
