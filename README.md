@@ -142,8 +142,11 @@ For a fully non-interactive installation:
 
 Native packages install docker-helper as a system service with AppArmor
 confinement. They install the binary, systemd unit, AppArmor profile, and
-man pages. They do NOT run `docker-helper init`, generate config/token/state,
-or automatically start/enable a previously inactive service.
+man pages. On a live system the package postinstall loads or replaces the
+`docker-helper-system` AppArmor profile and runs daemon-reload; it does
+not start an inactive service. They do NOT run `docker-helper init`,
+generate config/token/state, or automatically enable/start a previously
+inactive service.
 
 After package installation, run init then enable/start:
 

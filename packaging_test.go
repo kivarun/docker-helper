@@ -5915,3 +5915,29 @@ func TestReadmeDocContract(t *testing.T) {
 		t.Error("README.md must mention man docker-helper or docker-helper(1)")
 	}
 }
+
+func TestArchitectureDocContract(t *testing.T) {
+	data, err := os.ReadFile("docs/architecture.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must not contain unqualified XDG-only listener statement.
+	if strings.Contains(content, "listens on a Unix socket at\n`$XDG_RUNTIME_DIR") {
+		t.Error("architecture.md must not contain unqualified XDG-only listener statement")
+	}
+}
+
+func TestRoadmapDocContract(t *testing.T) {
+	data, err := os.ReadFile("docs/roadmap.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must not require selected repository/update channels as R2 deliverable.
+	if strings.Contains(content, "selected repository/update channels") {
+		t.Error("roadmap.md must not require selected repository/update channels for R2")
+	}
+}

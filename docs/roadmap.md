@@ -316,10 +316,12 @@ Accepted direction:
 - old Release 1 sessions are not migrated into system mode;
 - provide a systemd system unit and the operational hardening required by a
   root system daemon;
-- provide native DEB and RPM packages and selected repository/update channels;
+- provide native DEB and RPM packages as standalone artifacts;
 - keep openSUSE and Ubuntu as important targets and select the exact RHEL-family
   target when implementation reaches packaging; Fedora is not currently
   committed;
+- package repositories and update channels are deferred until after package
+  lifecycle acceptance or a later distribution workstream;
 - provide at least `docker-helper(1)` and `docker-helper-config(5)` manual pages.
 
 Explicitly outside Release 2:

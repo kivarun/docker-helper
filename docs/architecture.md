@@ -91,8 +91,13 @@ Loopback HTTP in Release 2 is local-only, no TLS, no non-loopback bind.
 The launcher creates a session and passes the client token to the agent.
 It is not a mandatory daemon or control plane component.
 
-docker-helper listens on a Unix socket at
-`$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock` with `0600` permissions.
+docker-helper listens on transports determined by deployment mode:
+
+- **User mode**: Unix socket at
+  `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock` with `0600` permissions.
+- **System mode**: Unix socket at
+  `/run/docker-helper/docker-helper.sock` with `0666` permissions, plus
+  loopback HTTP at `127.0.0.1:52375` by default.
 
 ## Trust model
 
