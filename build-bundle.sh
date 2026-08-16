@@ -31,6 +31,9 @@
 #     skills/
 #       docker-helper/
 #         SKILL.md
+#     man/
+#       docker-helper.1.gz
+#       docker-helper-config.5.gz
 #
 # If static linking cannot be confirmed, the build FAILS.
 # A release tarball must never contain an unconfirmed binary.
@@ -102,9 +105,10 @@ cp "$SCRIPT_DIR/.claude/skills/docker-helper/SKILL.md" \
    "$BUNDLE_DIR/skills/docker-helper/SKILL.md"
 
 # Man pages
+"$SCRIPT_DIR/build-manpages.sh"
 mkdir -p "$BUNDLE_DIR/man"
-cp "$SCRIPT_DIR/docs/man/docker-helper.1" "$BUNDLE_DIR/man/docker-helper.1"
-cp "$SCRIPT_DIR/docs/man/docker-helper-config.5" "$BUNDLE_DIR/man/docker-helper-config.5"
+cp "$OUT_DIR/man/docker-helper.1.gz" "$BUNDLE_DIR/man/docker-helper.1.gz"
+cp "$OUT_DIR/man/docker-helper-config.5.gz" "$BUNDLE_DIR/man/docker-helper-config.5.gz"
 
 # --- Step 3: Create tarball ---
 
@@ -168,8 +172,8 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-system"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper.d/managed-roots"
   "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
-  "docker-helper-${VERSION}-linux-amd64/man/docker-helper.1"
-  "docker-helper-${VERSION}-linux-amd64/man/docker-helper-config.5"
+  "docker-helper-${VERSION}-linux-amd64/man/docker-helper.1.gz"
+  "docker-helper-${VERSION}-linux-amd64/man/docker-helper-config.5.gz"
 )
 
 TARBALL_CONTENTS=$(tar tzf "$TARBALL")

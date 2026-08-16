@@ -16,8 +16,8 @@ accompanying installation artifacts.
 - `apparmor/docker-helper-system` — system-mode AppArmor profile
 - `apparmor/docker-helper.d/managed-roots` — managed workspace roots fragment
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
-- `man/docker-helper.1` — command reference man page
-- `man/docker-helper-config.5` — configuration file format man page
+- `man/docker-helper.1.gz` — command reference man page (compressed)
+- `man/docker-helper-config.5.gz` — configuration file format man page (compressed)
 
 ## Deployment
 

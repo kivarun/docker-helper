@@ -4,7 +4,6 @@ docker-helper \- Policy-enforcing Docker mediation daemon
 .SH SYNOPSIS
 .B docker-helper
 .RB [ \-h | \-\-help ]
-.RB [ \-v | \-\-version ]
 .BI "COMMAND"
 [\& ...]
 .SH DESCRIPTION
@@ -44,7 +43,7 @@ allowed_root is added to managed AppArmor roots. Subsequent changes to
 configuration or principal allowed roots do NOT automatically update AppArmor;
 use \fIdocker-helper apparmor root\fR to manage them.
 .TP
-.B docker-helper reload [\-\-system | \-\-endpoint URL | \-\-token-file FILE]
+.B docker-helper reload [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE]
 Reload configuration. Use \fB\-\-system\fR for system daemon, \fB\-\-endpoint\fR
 or \fB\-\-token-file\fR for user daemon.
 .TP
@@ -55,59 +54,97 @@ Print version information.
 Show help for a command.
 .SS Session Commands
 .TP
-.B docker-helper session create [\-\-workspace PATH]
-Create a session for a workspace.
+.B docker-helper session create [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] \-\-workspace PATH
+Create a new session for a workspace.
 .TP
-.B docker-helper session list
+.B docker-helper session list [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE]
 List active sessions.
 .TP
-.B docker-helper session remove SESSION
-Remove a session.
+.B docker-helper session delete [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] \-\-id SESSION_ID
+Delete a session by ID.
+.TP
+.B docker-helper session cleanup
+Remove expired sessions from the local state database.
 .SS Config Commands
 .TP
-.B docker-helper config show
-Show current configuration.
+.B docker-helper config show [FIELD]
+Show configuration values. Without FIELD, prints complete effective config as JSON.
 .TP
-.B docker-helper config edit
-Edit configuration interactively.
+.B docker-helper config set FIELD VALUE
+Set a configuration value. Writable fields: allowed_root, session_ttl, log_level,
+audit_enabled, shutdown_timeout, operation_retention_ttl, operation_max_completed,
+operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
+.TP
+.B docker-helper config unset FIELD
+Unset a configuration value. Unsettable fields: log_level, audit_enabled,
+shutdown_timeout, operation_retention_ttl, operation_max_completed,
+operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .SS Principal Commands
 .TP
-.B docker-helper principal allowed-root add PATH
+.B docker-helper principal create [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER
+Create a new principal.
+.TP
+.B docker-helper principal show [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER [FIELD]
+Show principal details.
+.TP
+.B docker-helper principal set [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER FIELD VALUE
+Modify principal settings.
+.TP
+.B docker-helper principal allowed-root add [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER PATH
 Add an allowed root for a principal.
 .TP
-.B docker-helper principal allowed-root remove PATH
-Remove an allowed root.
-.TP
-.B docker-helper principal allowed-root list
-List allowed roots.
+.B docker-helper principal allowed-root remove [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER PATH
+Remove an allowed root from a principal.
 .SS Credential Commands
 .TP
-.B docker-helper credential issue SESSION
-Issue a session credential.
+.B docker-helper credential create [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] \-\-name NAME USER
+Create a new credential for a principal.
 .TP
-.B docker-helper credential validate TOKEN
-Validate a session token.
+.B docker-helper credential list [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER
+List credentials for a principal.
+.TP
+.B docker-helper credential revoke [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] CREDENTIAL_ID
+Revoke a credential.
 .SS AppArmor Commands (System Mode)
 .TP
+.B docker-helper apparmor root list
+List managed workspace roots in the AppArmor profile.
+.TP
 .B docker-helper apparmor root add PATH
-Add a workspace root to managed AppArmor policy.
+Add a workspace root to the AppArmor profile.
 .TP
 .B docker-helper apparmor root remove PATH
-Remove a workspace root.
+Remove a workspace root from the AppArmor profile.
 .TP
-.B docker-helper apparmor root list
-List managed workspace roots.
+.B docker-helper apparmor check
+Validate the AppArmor profile.
+.SS Agent Commands
 .TP
-.B docker-helper apparmor reload
-Reload AppArmor profile.
+.B docker-helper pull IMAGE
+Pull a Docker image.
+.TP
+.B docker-helper build \-\-context PATH \-\-dockerfile FILE \-\-image NAME
+Build a Docker image.
+.TP
+.B docker-helper run \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] \-\& [command]
+Run a Docker container.
+.TP
+.B docker-helper registry login \-\-registry REGISTRY \-\-username USER
+Log in to a container registry for the current session.
 .SH OPERATOR ENDPOINT SELECTION
-For reload and credential commands, select the target daemon via:
+For reload, session, principal, and credential commands, select the target daemon via:
 .IP \(bu 4
-\fB\-\-system\fR: System daemon (requires root)
+\fB\-\-system\fR: Use system daemon (default for system mode)
 .IP \(bu 4
-\fB\-\-endpoint URL\fR: HTTP endpoint URL
+\fB\-\-endpoint URL\fR: Use specified HTTP endpoint (requires \fB\-\-token-file\fR)
 .IP \(bu 4
-\fB\-\-token-file FILE\fR: Token file for authentication
+\fB\-\-token-file FILE\fR: Read admin token from file
+.PP
+\fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
+\fB\-\-endpoint\fR requires \fB\-\-token-file\fR.
+\fB\-\-system\fR may use \fB\-\-token-file\fR for authentication.
+Without explicit endpoint selection, a deterministic default is used.
+No fallback occurs after connection failure.
 .PP
 Local system mode uses Unix socket + loopback HTTP (127.0.0.1:52375 default).
 No remote or TLS support in Release 2.
@@ -140,6 +177,9 @@ User mode configuration
 .TP
 .B $XDG_STATE_HOME/docker-helper
 User mode state directory
+.TP
+.B dirname(config_path)/admin.token
+Admin token (same directory as config)
 .SH SECURITY
 .IP \(bu 4
 .B docker-helper
@@ -152,4 +192,6 @@ AppArmor confinement restricts filesystem and capability access
 No remote or non-loopback network access in Release 2
 .SH SEE ALSO
 .BR docker-helper-config (5),
-.BR apparmor (7)
+.BR apparmor (7),
+.BR docker-helper help COMMAND,
+.BR docker-helper COMMAND \-\-help

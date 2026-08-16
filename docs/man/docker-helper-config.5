@@ -29,46 +29,51 @@ System mode state database
 .B /run/docker-helper/docker-helper.sock
 System mode Unix socket (created at runtime)
 .SH FORMAT
-JSON object with the following fields:
+JSON object with the following fields. Two fields are required; all others are optional.
 .SH FIELDS
 .TP
 .B allowed_root (string, required)
-Allowed root directory for agent workspaces in system mode. The initial value
-is added to managed AppArmor roots during \fBdocker-helper init\fR.
-Subsequent changes require manual AppArmor updates via \fBdocker-helper apparmor root\fR.
+Absolute path for agent workspace root. Must be a non-empty absolute path.
+In system mode, the initial value is added to managed AppArmor roots during
+\fBdocker-helper init\fR. Subsequent changes require manual AppArmor updates
+via \fBdocker-helper apparmor root\fR.
 .TP
-.B session_ttl (string, optional, default="30m")
-Session time-to-live using Go duration syntax (e.g., "30m", "1h").
+.B session_ttl (string, required)
+Session time-to-live using Go duration syntax (e.g., "30m", "1h", "12h").
+Must be a positive duration. An absent or empty field is invalid.
+\fBdocker-helper init\fR creates this field with the value "12h".
 .TP
 .B log_level (string, optional, default="info")
 Logging level: \fBdebug\fR, \fBinfo\fR, \fBwarn\fR, or \fBerror\fR.
 .TP
-.B audit_enabled (boolean, optional, default=true)
-Enable audit logging for Docker operations.
+.B audit_enabled (boolean, optional)
+Enable audit logging for Docker operations. When absent, the effective value
+is derived from \fBlog_level\fR: \fBtrue\fR when effective log_level is \fBdebug\fR,
+\fBfalse\fR otherwise.
 .TP
 .B shutdown_timeout (string, optional, default="30s")
 Graceful shutdown timeout using Go duration syntax.
 .TP
-.B operation_retention_ttl (string, optional, default="24h")
-Operation log retention TTL using Go duration syntax.
+.B operation_retention_ttl (string, optional, default="10m")
+Completed operation retention period using Go duration syntax.
 .TP
-.B operation_max_completed (integer, optional, default=1000)
-Maximum completed operations to retain in memory.
+.B operation_max_completed (integer, optional, default=200)
+Maximum completed operations to retain in memory. Must be a positive integer.
 .TP
-.B operation_log_max_bytes (integer, optional, default=10485760)
-Maximum operation log size in bytes (default 10 MiB).
-.TP
-.B trusted_ca_path (string, conditional)
-Path to trusted CA certificate bundle. Required when \fBtrusted_ca_injection\fR
-is set to "auto".
+.B operation_log_max_bytes (integer, optional, default=4194304)
+Maximum operation log size in bytes (default 4 MiB). Must be a positive integer.
 .TP
 .B trusted_ca_injection (string, optional, default="disabled")
 CA injection mode: \fBdisabled\fR (no injection) or \fBauto\fR (automatic injection
-using trusted_ca_path).
+using \fBtrusted_ca_path\fR).
+.TP
+.B trusted_ca_path (string, conditional)
+Absolute path to trusted CA certificate bundle. Required when
+\fBtrusted_ca_injection\fR is set to "auto".
 .TP
 .B http_address (string, optional, default="127.0.0.1:52375")
-Loopback HTTP address for system mode. \fBOnly 127.0.0.1:PORT\fR is supported.
-.RE
+Loopback TCP listen address for system mode. The host must be exactly
+\fB127.0.0.1\fR; the port must be in the range 1..65535.
 Changes to \fBhttp_address\fR require daemon restart.
 .SH RELOAD BEHAVIOR
 Most configuration changes can be applied via \fBdocker-helper reload\fR without
@@ -100,12 +105,16 @@ Mount-pin runtime directory
 Configuration file
 .TP
 .B $XDG_STATE_HOME/docker-helper
-State directory (database, tokens)
+State directory (database)
 .TP
 .B $XDG_RUNTIME_DIR/docker-helper
 Runtime directory (socket)
 .PP
-Environment variable \fBDOCKER_HELPER_CONFIG\fR overrides config path.
+The admin token is always located at \fIdirname(config_path)/admin.token\fR.
+When \fBDOCKER_HELPER_CONFIG\fR overrides the config path, the admin token
+is also resolved relative to the overridden config directory.
+.PP
+Principal allowed_roots are stored in the state database, not in \fIconfig.json\fR.
 .SH APPARMOR
 System mode uses AppArmor confinement with profile \fBdocker-helper-system\fR.
 Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR
@@ -116,13 +125,14 @@ AppArmor roots. Subsequent changes to configuration or principal allowed roots
 do NOT automatically update AppArmor—use \fBdocker-helper apparmor root add PATH\fR
 to add new roots.
 .SH EXAMPLES
-.SS Minimal system mode configuration
+.SS Minimal configuration (both required fields)
 .nf
 {
-  "allowed_root": "/srv/workspaces"
+  "allowed_root": "/srv/workspaces",
+  "session_ttl": "12h"
 }
 .fi
-.SS Full configuration with custom settings
+.SS Full configuration with all fields
 .nf
 {
   "allowed_root": "/srv/workspaces",
