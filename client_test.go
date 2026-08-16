@@ -55,7 +55,8 @@ func setupCLITestEnv(t *testing.T) string {
 		t.Fatalf("write token: %v", err)
 	}
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}`)
 	if err := os.WriteFile(configPath, configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

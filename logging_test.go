@@ -870,7 +870,8 @@ func TestRunCommandWithWritersServeFailure(t *testing.T) {
 		t.Fatalf("mkdir config: %v", err)
 	}
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -989,7 +990,8 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 		t.Fatalf("mkdir config: %v", err)
 	}
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -1059,7 +1061,8 @@ func TestServeNoGlobalStderr(t *testing.T) {
 		t.Fatalf("mkdir config: %v", err)
 	}
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

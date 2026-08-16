@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -57,30 +56,9 @@ func resolveOSUser(username string) (uid int, gid int, home string, err error) {
 	return int(uid64), int(gid64), homeDir, nil
 }
 
-// canonicalizePath resolves a path to its canonical absolute form.
-// The path must already be absolute. Symlinks are resolved via EvalSymlinks.
-// The path must exist and be a directory.
-// All errors wrap ErrInvalidAllowedRoot.
-func canonicalizePath(path string) (string, error) {
-	cleaned, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("path does not exist: %s: %w", path, ErrInvalidAllowedRoot)
-		}
-		return "", fmt.Errorf("cannot resolve path: %w: %w", err, ErrInvalidAllowedRoot)
-	}
-	info, err := os.Stat(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("cannot stat path: %w: %w", err, ErrInvalidAllowedRoot)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("path is not a directory: %s: %w", cleaned, ErrInvalidAllowedRoot)
-	}
-	return cleaned, nil
-}
-
 // validateAllowedRootForAdd validates a path for ADD operations.
 // Requires: absolute, no tilde, exists, is directory.
+// Applies the unified workspace root security policy.
 // Returns the canonical path.
 func validateAllowedRootForAdd(path string) (string, error) {
 	if path == "" {
@@ -93,7 +71,12 @@ func validateAllowedRootForAdd(path string) (string, error) {
 	if len(path) > 1 && path[0] == '~' {
 		return "", fmt.Errorf("tilde expansion not supported; use absolute path: %w", ErrInvalidAllowedRoot)
 	}
-	return canonicalizePath(path)
+
+	cleaned, err := canonicalizeWorkspaceRootForAdd(path)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", err.Error(), ErrInvalidAllowedRoot)
+	}
+	return cleaned, nil
 }
 
 // findPrincipalByID looks up a principal by its internal ID.
@@ -149,10 +132,10 @@ func createPrincipal(db *sql.DB, username string) (*PrincipalWithRoots, error) {
 		return nil, fmt.Errorf("OS user %q has invalid home %q: must be an absolute path", username, home)
 	}
 
-	// Canonicalize the home directory for storage as default allowed_root.
-	canonicalHome, err := canonicalizePath(home)
+	// Canonicalize the home directory and apply the workspace root policy.
+	canonicalHome, err := canonicalizeWorkspaceRootForAdd(home)
 	if err != nil {
-		return nil, fmt.Errorf("cannot canonicalize home directory %q: %w", home, err)
+		return nil, fmt.Errorf("OS user %q home directory %q is not a valid workspace root: %s", username, home, err)
 	}
 
 	tx, err := db.Begin()

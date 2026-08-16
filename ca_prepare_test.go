@@ -14,7 +14,7 @@ func TestCAPrepareSuccess(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -80,7 +80,7 @@ func TestCAPrepareIdempotent(t *testing.T) {
 	configPath, caPath, runtimeDir, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -123,7 +123,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -177,7 +177,7 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -193,7 +193,7 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 	generateTestCAPEM(t, newCAPath)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      newCAPath,
 		"trusted_ca_injection": "auto",
@@ -216,7 +216,7 @@ func TestCAReloadChangesCA(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -232,7 +232,7 @@ func TestCAReloadChangesCA(t *testing.T) {
 	generateTestCAPEM(t, newCAPath)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      newCAPath,
 		"trusted_ca_injection": "auto",

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,10 +11,11 @@ import (
 )
 
 func TestCAInjectionDefaultDisabled(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -31,7 +33,7 @@ func TestCAConfigShowSetUnset(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	cfg := map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -89,11 +91,12 @@ func TestCAConfigShowSetUnset(t *testing.T) {
 }
 
 func TestCAConfigInvalidMode(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h",
   "trusted_ca_injection": "invalid"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -108,11 +111,12 @@ func TestCAConfigInvalidMode(t *testing.T) {
 }
 
 func TestCAConfigAutoWithoutPath(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h",
   "trusted_ca_injection": "auto"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -127,12 +131,13 @@ func TestCAConfigAutoWithoutPath(t *testing.T) {
 }
 
 func TestCAConfigRelativePath(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h",
   "trusted_ca_path": "relative/path.crt",
   "trusted_ca_injection": "disabled"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -210,7 +215,7 @@ func TestCAConfigInvalidCA(t *testing.T) {
 			caPath := tt.caSetup(t)
 
 			writeCAConfig(t, configPath, map[string]any{
-				"allowed_root":         "/tmp/work",
+				"allowed_root":         testAllowedRootDir(t),
 				"session_ttl":          "12h",
 				"trusted_ca_path":      caPath,
 				"trusted_ca_injection": "auto",
@@ -232,12 +237,13 @@ func TestCAConfigInvalidCA(t *testing.T) {
 }
 
 func TestCAConfigAutoEmptyPath(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h",
   "trusted_ca_path": "",
   "trusted_ca_injection": "auto"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -252,7 +258,7 @@ func TestCAConfigSetValidation(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root": "/tmp/work",
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "12h",
 	})
 
@@ -288,7 +294,7 @@ func TestCAUnsetPathWhenAutoActive(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -308,7 +314,7 @@ func TestCAInitNoInjectionDefault(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
-	allowedRoot := filepath.Join(dir, "workspaces")
+	allowedRoot := filepath.Join(testAllowedRootDir(t), "workspaces")
 	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +339,7 @@ func TestCAConfigShowAllIncludesNewFields(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -359,10 +365,11 @@ func TestCAConfigShowAllIncludesNewFields(t *testing.T) {
 }
 
 func TestCAConfigShowDefaults(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 

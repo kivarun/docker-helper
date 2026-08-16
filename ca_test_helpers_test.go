@@ -165,7 +165,7 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	}
 
 	cfg := map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_injection": "disabled",
 	}

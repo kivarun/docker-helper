@@ -14,7 +14,7 @@ import (
 func writeBrokenAutoCAConfig(t *testing.T, configPath string) {
 	t.Helper()
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      "/nonexistent/ca.pem",
 		"trusted_ca_injection": "auto",

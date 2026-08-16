@@ -1493,7 +1493,9 @@ func TestPrincipalIntegrationWithDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	home := filepath.Join(dir, "home", "intuser")
+	// Use a non-forbidden home directory. /tmp is forbidden by the workspace root security policy.
+	allowedRoot := testAllowedRootDir(t)
+	home := filepath.Join(allowedRoot, "home", "intuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1526,7 +1528,7 @@ func TestPrincipalIntegrationWithDaemon(t *testing.T) {
 	adminHash := sha256.Sum256([]byte(adminToken))
 
 	cfg := &Config{
-		AllowedRoot:           dir,
+		AllowedRoot:           allowedRoot,
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,

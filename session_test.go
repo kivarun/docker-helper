@@ -26,7 +26,13 @@ func newTestApp(t *testing.T) *App {
 		t.Fatalf("initializeDatabase() error: %v", err)
 	}
 
-	allowedRoot := dir
+	// Use a non-forbidden allowed_root. /tmp is forbidden by the workspace root security policy.
+	allowedRoot := filepath.Join(os.Getenv("HOME"), "docker-helper-test-work")
+	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
+		t.Fatalf("cannot create allowed root: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(allowedRoot) })
+
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
 		t.Fatalf("cannot create runtime dir: %v", err)
@@ -548,7 +554,8 @@ func TestSessionCleanupCLI(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}` + "\n")
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}` + "\n")
 	if err := os.WriteFile(configPath, configData, 0600); err != nil {
 		t.Fatalf("cannot write config: %v", err)
 	}
@@ -607,7 +614,8 @@ func TestSessionCleanupCLINoneExpired(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}` + "\n")
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}` + "\n")
 	if err := os.WriteFile(configPath, configData, 0600); err != nil {
 		t.Fatalf("cannot write config: %v", err)
 	}
@@ -671,7 +679,8 @@ func TestSessionCleanupWithRuntimeDirs(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}` + "\n")
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}` + "\n")
 	if err := os.WriteFile(configPath, configData, 0600); err != nil {
 		t.Fatalf("cannot write config: %v", err)
 	}
@@ -787,7 +796,8 @@ func TestSessionCleanupRuntimeError(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h"}` + "\n")
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}` + "\n")
 	if err := os.WriteFile(configPath, configData, 0600); err != nil {
 		t.Fatalf("cannot write config: %v", err)
 	}

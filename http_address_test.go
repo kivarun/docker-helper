@@ -33,7 +33,7 @@ func TestHTTPAddressCustomSystem(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 		"http_address": "127.0.0.1:54321",
 	}
@@ -59,7 +59,7 @@ func TestHTTPAddressUserModeEmpty(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 	}
 	writeConfig(t, configPath, data)
@@ -128,7 +128,7 @@ func TestLoadConfigRejectsInvalidHTTPAddress(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 		"http_address": "0.0.0.0:8080",
 	}
@@ -154,7 +154,7 @@ func TestLoadConfigRejectsInvalidPort(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 		"http_address": "127.0.0.1:99999",
 	}
@@ -179,7 +179,7 @@ func TestConfigSetHTTPAddressSystem(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 	}
 	writeConfig(t, configPath, data)
@@ -216,7 +216,7 @@ func TestConfigSetHTTPAddressUserModeRejected(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 	}
 	writeConfig(t, configPath, data)
@@ -242,7 +242,7 @@ func TestConfigSetHTTPAddressInvalidHost(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 	}
 	writeConfig(t, configPath, data)
@@ -265,7 +265,7 @@ func TestConfigSetHTTPAddressInvalidPort(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 	}
 	writeConfig(t, configPath, data)
@@ -290,7 +290,7 @@ func TestConfigUnsetHTTPAddress(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 		"http_address": "127.0.0.1:54321",
 	}
@@ -337,7 +337,7 @@ func TestConfigShowHTTPAddressDefault(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 	}
 	writeConfig(t, configPath, data)
@@ -363,7 +363,7 @@ func TestConfigShowHTTPAddressCustom(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 		"http_address": "127.0.0.1:54321",
 	}
@@ -390,7 +390,7 @@ func TestConfigShowHTTPAddressUserModeEmpty(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	data := map[string]any{
-		"allowed_root": dir,
+		"allowed_root": testAllowedRootDir(t),
 		"session_ttl":  "1h",
 	}
 	writeConfig(t, configPath, data)

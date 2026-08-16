@@ -17,6 +17,22 @@ import (
 	"time"
 )
 
+// testAllowedRoot returns a non-forbidden allowed_root path for tests.
+// /tmp is forbidden by the workspace root security policy.
+func testAllowedRoot(t *testing.T) string {
+	t.Helper()
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/home"
+	}
+	p := filepath.Join(home, "docker-helper-test-work")
+	if err := os.MkdirAll(p, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(p) })
+	return p
+}
+
 func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPath string, cleanup func()) {
 	t.Helper()
 	dir := t.TempDir()
@@ -30,8 +46,10 @@ func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPa
 	socketPath = filepath.Join(runtimeSubDir, "docker-helper.sock")
 	lockPath = socketPath + ".lock"
 
+	allowedRoot := testAllowedRoot(t)
+
 	cfg := map[string]any{
-		"allowed_root": "/tmp/work",
+		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
 		"log_level":    "info",
 	}
@@ -105,8 +123,9 @@ func TestConfigUnsetDaemonNotRunning(t *testing.T) {
 	configPath, _, _, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
+	allowedRoot := testAllowedRoot(t)
 	cfg := map[string]any{
-		"allowed_root":  "/tmp/work",
+		"allowed_root":  allowedRoot,
 		"session_ttl":   "12h",
 		"log_level":     "info",
 		"audit_enabled": true,
@@ -136,8 +155,9 @@ func TestConfigSetUnchangedNoReload(t *testing.T) {
 	configPath, _, _, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
+	allowedRoot := testAllowedRoot(t)
 	cfg := map[string]any{
-		"allowed_root": "/tmp/work",
+		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
 		"log_level":    "info",
 	}
@@ -559,8 +579,14 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	}
 
 	// Update config file
+	newAllowedRoot := filepath.Join(os.Getenv("HOME"), "docker-helper-test-new-work")
+	if err := os.MkdirAll(newAllowedRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(newAllowedRoot) })
+
 	newCfg := map[string]any{
-		"allowed_root": "/tmp/new-work",
+		"allowed_root": newAllowedRoot,
 		"session_ttl":  "6h",
 		"log_level":    "debug",
 	}
@@ -601,8 +627,8 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	if cfgAfter.LogLevel != -4 { // slog.LevelDebug = -4
 		t.Fatalf("expected log_level=debug after reload, got %s", cfgAfter.LogLevel.String())
 	}
-	if cfgAfter.AllowedRoot != "/tmp/new-work" {
-		t.Fatalf("expected allowed_root=/tmp/new-work, got %s", cfgAfter.AllowedRoot)
+	if cfgAfter.AllowedRoot != newAllowedRoot {
+		t.Fatalf("expected allowed_root=%s, got %s", newAllowedRoot, cfgAfter.AllowedRoot)
 	}
 }
 
@@ -749,8 +775,9 @@ func TestReloadRuntimeLogLevel(t *testing.T) {
 
 	// Update config to debug level
 	configPath := getConfigPath()
+	allowedRoot := testAllowedRoot(t)
 	newCfg := map[string]any{
-		"allowed_root": "/tmp/work",
+		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
 		"log_level":    "debug",
 	}
@@ -852,8 +879,9 @@ func TestReloadRuntimeAuditEnabled(t *testing.T) {
 
 	// Update config to enable audit
 	configPath := getConfigPath()
+	allowedRoot := testAllowedRoot(t)
 	newCfg := map[string]any{
-		"allowed_root":  "/tmp/work",
+		"allowed_root":  allowedRoot,
 		"session_ttl":   "12h",
 		"log_level":     "info",
 		"audit_enabled": true,
@@ -903,7 +931,13 @@ func TestTryReloadConfigNoRuntimeDir(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp/work","session_ttl":"12h"}`), 0600); err != nil {
+	allowedRoot := testAllowedRoot(t)
+	cfg := map[string]any{
+		"allowed_root": allowedRoot,
+		"session_ttl":  "12h",
+	}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(adminTokenPath, []byte("test-token\n"), 0600); err != nil {
@@ -931,7 +965,13 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp/work","session_ttl":"12h"}`), 0600); err != nil {
+	allowedRoot := testAllowedRoot(t)
+	cfg := map[string]any{
+		"allowed_root": allowedRoot,
+		"session_ttl":  "12h",
+	}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	// No admin.token file created
@@ -952,7 +992,7 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 // does not race. Run with -race flag.
 func TestConfigSnapshotRace(t *testing.T) {
 	cfg := &Config{
-		AllowedRoot:  "/tmp/work",
+		AllowedRoot:  "/workspace/test-work",
 		SessionTTL:   12 * time.Hour,
 		LogLevel:     slog.LevelInfo,
 		AuditEnabled: false,
@@ -977,7 +1017,7 @@ func TestConfigSnapshotRace(t *testing.T) {
 
 	for i := 0; i < 200; i++ {
 		newCfg := &Config{
-			AllowedRoot:  "/tmp/new-work",
+			AllowedRoot:  "/workspace/test-new-work",
 			SessionTTL:   6 * time.Hour,
 			LogLevel:     slog.LevelDebug,
 			AuditEnabled: true,
@@ -1110,8 +1150,9 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 			case <-stop:
 				return
 			default:
+				allowedRoot := testAllowedRoot(t)
 				newCfg := map[string]any{
-					"allowed_root":  "/tmp/work",
+					"allowed_root":  allowedRoot,
 					"session_ttl":   "12h",
 					"log_level":     "debug",
 					"audit_enabled": true,

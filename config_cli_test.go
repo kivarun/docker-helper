@@ -277,8 +277,10 @@ func TestConfigShowAdminToken(t *testing.T) {
 
 // Req 10: core writable field types are handled correctly
 func TestConfigSetCoreFieldTypes(t *testing.T) {
+	allowedRoot := testAllowedRootDir(t)
+	newAllowedRoot := testAllowedRootDir(t)
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_root": "` + allowedRoot + `",
   "session_ttl": "12h"
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
@@ -289,12 +291,12 @@ func TestConfigSetCoreFieldTypes(t *testing.T) {
 		check func(map[string]json.RawMessage)
 	}{
 		{
-			"allowed_root", "/new/path",
+			"allowed_root", newAllowedRoot,
 			func(raw map[string]json.RawMessage) {
 				var v string
 				json.Unmarshal(raw["allowed_root"], &v)
-				if v != "/new/path" {
-					t.Errorf("allowed_root = %q, want /new/path", v)
+				if v != newAllowedRoot {
+					t.Errorf("allowed_root = %q, want %s", v, newAllowedRoot)
 				}
 			},
 		},
@@ -1474,7 +1476,8 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
 	// 1) Run init - should create files at DOCKER_HELPER_CONFIG, not XDG_CONFIG_HOME
-	if err := runInit(dir, io.Discard, io.Discard); err != nil {
+	allowedRoot := testAllowedRootDir(t)
+	if err := runInit(allowedRoot, io.Discard, io.Discard); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 
@@ -2302,7 +2305,8 @@ func TestLoadConfigRejectsRelativeAllowedRoot(t *testing.T) {
 func TestLoadConfigRejectsMissingSessionTTL(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp"}`), 0600); err != nil {
+	allowedRoot := testAllowedRootDir(t)
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"`+allowedRoot+`"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
@@ -2362,8 +2366,9 @@ func TestLoadConfigRejectsNegativeSessionTTL(t *testing.T) {
 func TestLoadConfigAcceptsValidConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
+	allowedRoot := testAllowedRootDir(t)
 	cfg := map[string]any{
-		"allowed_root": "/tmp/work",
+		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -2384,8 +2389,8 @@ func TestLoadConfigAcceptsValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if c.AllowedRoot != "/tmp/work" {
-		t.Errorf("AllowedRoot = %q, want /tmp/work", c.AllowedRoot)
+	if c.AllowedRoot != allowedRoot {
+		t.Errorf("AllowedRoot = %q, want %q", c.AllowedRoot, allowedRoot)
 	}
 }
 
@@ -2505,7 +2510,7 @@ func TestReloadRejectsNegativeSessionTTL(t *testing.T) {
 
 	// Write invalid config with negative session_ttl
 	configPath := getConfigPath()
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp/work","session_ttl":"-1h"}`), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"allowed_root":testAllowedRootDir(t),"session_ttl":"-1h"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2540,7 +2545,7 @@ func TestDeprecatedBuildLogMaxBytesLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/tmp/work",
+  "allowed_root": "%s",
   "session_ttl": "12h",
   "build_log_max_bytes": 8192
 }`), 0600); err != nil {
@@ -2570,7 +2575,7 @@ func TestDeprecatedBuildLogMaxBytesBothKeys(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/tmp/work",
+  "allowed_root": "%s",
   "session_ttl": "12h",
   "build_log_max_bytes": 8192,
   "operation_log_max_bytes": 16384
@@ -2595,10 +2600,11 @@ func TestDeprecatedBuildLogMaxBytesBothKeys(t *testing.T) {
 
 // Deprecated 3: CLI config show with deprecated key
 func TestDeprecatedBuildLogMaxBytesShow(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 
 	var stdout, stderr bytes.Buffer
@@ -2619,10 +2625,11 @@ func TestDeprecatedBuildLogMaxBytesShow(t *testing.T) {
 
 // Deprecated 4: CLI config set with deprecated key
 func TestDeprecatedBuildLogMaxBytesSet(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 
 	var stdout, stderr bytes.Buffer
@@ -2643,10 +2650,11 @@ func TestDeprecatedBuildLogMaxBytesSet(t *testing.T) {
 
 // Deprecated 5: CLI config unset with deprecated key
 func TestDeprecatedBuildLogMaxBytesUnset(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/tmp/work",
+	allowedRoot := testAllowedRootDir(t)
+	cfg := fmt.Sprintf(`{
+  "allowed_root": "%s",
   "session_ttl": "12h"
-}`
+}`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
 
 	var stdout, stderr bytes.Buffer
@@ -2667,8 +2675,9 @@ func TestDeprecatedBuildLogMaxBytesUnset(t *testing.T) {
 
 // Deprecated 6: new operation_log_max_bytes still works
 func TestDeprecatedOperationLogMaxBytesWorks(t *testing.T) {
+	allowedRoot := testAllowedRootDir(t)
 	cfg := `{
-  "allowed_root": "/tmp/work",
+  "allowed_root": "` + allowedRoot + `",
   "session_ttl": "12h",
   "operation_log_max_bytes": 8192
 }`

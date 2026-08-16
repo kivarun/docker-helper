@@ -499,8 +499,16 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 
 	switch field {
 	case "allowed_root":
-		if value == "" || !filepath.IsAbs(value) {
+		if value == "" {
+			fmt.Fprintf(stderr, "error: allowed_root must be a non-empty path\n")
+			return 2
+		}
+		if !filepath.IsAbs(value) {
 			fmt.Fprintf(stderr, "error: allowed_root must be a non-empty absolute path\n")
+			return 2
+		}
+		if _, err := canonicalizeWorkspaceRootForAdd(value); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 2
 		}
 	case "session_ttl":

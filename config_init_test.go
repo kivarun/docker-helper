@@ -80,7 +80,7 @@ func TestInitSystemCallsAddRoot(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	var addCalledPath string
 	addRoot := func(path string) (rootResult, error) {
@@ -151,9 +151,9 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 	// Distinct path that addRoot returns to prove rollback uses result.Path
-	distinctPath := filepath.Join(dir, "distinct-apparmor-path")
+	distinctPath := filepath.Join(rootDir, "distinct-apparmor-path")
 
 	var rollbackCalled bool
 	var rollbackPath string
@@ -222,7 +222,7 @@ func TestInitSystemRollbackFailureReportsBothErrors(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	addRoot := func(path string) (rootResult, error) {
 		return rootResult{Path: path, Changed: true}, nil
@@ -254,8 +254,14 @@ func TestInitSystemExistingConfigMismatch(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
 	// Create two real directories for the mismatch
-	oldRoot := t.TempDir()
-	newRoot := t.TempDir()
+	baseDir := testAllowedRootDir(t)
+	oldRoot := filepath.Join(baseDir, "old")
+	newRoot := filepath.Join(baseDir, "new")
+	for _, d := range []string{oldRoot, newRoot} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// Create existing config with old root
 	configPath := filepath.Join(dir, "docker-helper", "config.json")
@@ -303,7 +309,7 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
 	// Create real directory for the matching root
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Create existing config with matching allowed_root
 	configPath := filepath.Join(dir, "docker-helper", "config.json")
@@ -389,7 +395,7 @@ func TestInitSystemAlreadyPresent(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	addRoot := func(path string) (rootResult, error) {
 		return rootResult{Path: path, Changed: false}, nil
@@ -468,7 +474,7 @@ func TestInitSystemInvalidAppArmorPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	addRoot := func(path string) (rootResult, error) {
 		// Simulate AppArmor rejecting the path with input error
@@ -501,7 +507,7 @@ func TestInitSystemOrderingAddRootBeforeCore(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	var order []string
 	addRoot := func(path string) (rootResult, error) {
@@ -619,7 +625,7 @@ func TestInitCLIAppArmorInputErrorExit2(t *testing.T) {
 func TestInitCLIAppArmorOperationalErrorExit1(t *testing.T) {
 	dir := t.TempDir()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Mock system mode, config path, and inject fake AppArmor that returns operational error
 	origUID := EffectiveUID
@@ -683,7 +689,7 @@ func TestInitSystemRollbackChangedFalseNotError(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	addRoot := func(path string) (rootResult, error) {
 		return rootResult{Path: path, Changed: true}, nil

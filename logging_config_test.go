@@ -60,7 +60,8 @@ func TestConfigLoadAuditEnabledAbsentInfo(t *testing.T) {
 	}
 
 	// Config with log_level=info, no audit_enabled
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h","log_level":"info"}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"info"}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -85,7 +86,8 @@ func TestConfigLoadAuditEnabledAbsentDebug(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h","log_level":"debug"}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"debug"}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -110,7 +112,8 @@ func TestConfigLoadAuditEnabledExplicitFalseDebug(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h","log_level":"debug","audit_enabled":false}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"debug","audit_enabled":false}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -135,7 +138,8 @@ func TestConfigLoadAuditEnabledExplicitTrueInfo(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	configData := []byte(`{"allowed_root":"` + dir + `","session_ttl":"12h","log_level":"info","audit_enabled":true}`)
+	allowedRoot := testAllowedRootDir(t)
+	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"info","audit_enabled":true}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}

@@ -16,7 +16,7 @@ func TestInitExplicitAllowedRoot(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 
-	allowedRoot := filepath.Join(dir, "workspaces")
+	allowedRoot := filepath.Join(testAllowedRootDir(t), "workspaces")
 	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestResolveAllowedRootEmptyRejected(t *testing.T) {
 }
 
 func TestResolveAllowedRootRelativePath(t *testing.T) {
-	dir := t.TempDir()
+	dir := testAllowedRootDir(t)
 	subdir := filepath.Join(dir, "sub")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
@@ -198,10 +198,15 @@ func TestResolveAllowedRootTildeSubdirExpansion(t *testing.T) {
 	}
 
 	resolved, err := resolveAllowedRoot("~/..")
-	if err != nil {
-		t.Fatalf("resolveAllowedRoot(\"~/..\") = error: %v", err)
-	}
 	expected, _ := filepath.EvalSymlinks(filepath.Join(home, ".."))
+	// The parent of home may be a forbidden wide namespace (e.g., /home).
+	// In that case, the policy check should reject it.
+	if err != nil {
+		if !strings.Contains(err.Error(), "forbidden") && !strings.Contains(err.Error(), "too broad") {
+			t.Fatalf("resolveAllowedRoot(\"~/..\") = unexpected error: %v", err)
+		}
+		return
+	}
 	if resolved != expected {
 		t.Errorf("resolveAllowedRoot(\"~/..\") = %q, want %q", resolved, expected)
 	}
@@ -263,8 +268,7 @@ func TestPromptOutputGoesToStderr(t *testing.T) {
 }
 
 func TestResolveAllowedRootForInitWithFlag(t *testing.T) {
-	dir := t.TempDir()
-	allowedRoot := filepath.Join(dir, "workspaces")
+	allowedRoot := filepath.Join(testAllowedRootDir(t), "workspaces")
 	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +293,7 @@ func TestResolveAllowedRootForInitNoFlagNonTerminal(t *testing.T) {
 }
 
 func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
-	dir := t.TempDir()
+	dir := testAllowedRootDir(t)
 	cwd, _ := os.Getwd()
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
@@ -308,8 +312,7 @@ func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
 }
 
 func TestResolveAllowedRootForInitTerminalCustomInput(t *testing.T) {
-	dir := t.TempDir()
-	allowedRoot := filepath.Join(dir, "custom-workspaces")
+	allowedRoot := filepath.Join(testAllowedRootDir(t), "custom-workspaces")
 	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
 		t.Fatal(err)
 	}

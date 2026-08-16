@@ -432,7 +432,9 @@ func parseDurationPositive(s, name string) (time.Duration, error) {
 }
 
 // validateAllowedRootValue validates that the parsed allowed_root value
-// is non-empty and an absolute path.
+// is non-empty, absolute, and passes the workspace root security policy.
+// Note: this is a lexical check only (no filesystem access); the full
+// canonicalization + policy is applied by canonicalizeWorkspaceRootForAdd.
 func validateAllowedRootValue(s string) error {
 	if s == "" {
 		return fmt.Errorf("allowed_root must be a non-empty absolute path")
@@ -440,7 +442,8 @@ func validateAllowedRootValue(s string) error {
 	if !filepath.IsAbs(s) {
 		return fmt.Errorf("allowed_root must be a non-empty absolute path")
 	}
-	return nil
+	// Apply the security policy to the canonical path.
+	return validateWorkspaceRootPolicy(filepath.Clean(s))
 }
 
 // validateHTTPAddress validates that the http_address value is a loopback
@@ -726,35 +729,7 @@ func getAppArmorRemoveRoot() func(string) (rootResult, error) {
 // and verifies that the path exists and is a directory.
 // The caller must provide a non-empty path.
 func resolveAllowedRoot(path string) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("allowed root must be a non-empty absolute path")
-	}
-
-	path = expandTilde(path)
-
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("allowed root must be an absolute path: %w", err)
-	}
-
-	info, err := os.Stat(abs)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("allowed root does not exist: %s", abs)
-		}
-		return "", fmt.Errorf("cannot stat allowed root: %w", err)
-	}
-
-	if !info.IsDir() {
-		return "", fmt.Errorf("allowed root is not a directory: %s", abs)
-	}
-
-	cleaned, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", fmt.Errorf("cannot resolve allowed root path: %w", err)
-	}
-
-	return cleaned, nil
+	return canonicalizeWorkspaceRootForAdd(path)
 }
 
 // expandTilde expands a path starting with ~/ to the user's home directory.

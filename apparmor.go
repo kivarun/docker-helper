@@ -107,22 +107,13 @@ func validateRootPathForAdd(path string) (string, error) {
 		return "", &inputError{msg: "path must be absolute"}
 	}
 
-	info, err := os.Stat(path)
+	// Use the unified workspace root policy for canonicalization and security checks.
+	canonical, err := canonicalizeWorkspaceRootForAdd(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "", &inputError{msg: fmt.Sprintf("path does not exist: %s", path)}
-		}
-		return "", &inputError{msg: fmt.Sprintf("cannot stat path: %v", err)}
-	}
-	if !info.IsDir() {
-		return "", &inputError{msg: "path is not a directory"}
+		return "", &inputError{msg: err.Error()}
 	}
 
-	canonical, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", &inputError{msg: fmt.Sprintf("cannot resolve path: %v", err)}
-	}
-
+	// AppArmor-specific lexical validation (format constraints for managed fragment).
 	if err := validateRootLexical(canonical); err != nil {
 		return "", err
 	}
@@ -583,8 +574,16 @@ func (m *apparmorManager) check() error {
 		return err
 	}
 
-	if _, err := m.readFragment(); err != nil {
+	roots, err := m.readFragment()
+	if err != nil {
 		return fmt.Errorf("managed fragment is malformed: %w", err)
+	}
+
+	// Diagnose managed roots that violate the workspace root security policy.
+	for _, root := range roots {
+		if err := validateWorkspaceRootPolicy(root); err != nil {
+			return fmt.Errorf("managed root %q violates workspace root policy: %s", root, err)
+		}
 	}
 
 	if err := m.validateProfile(); err != nil {

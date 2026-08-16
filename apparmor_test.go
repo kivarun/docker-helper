@@ -309,9 +309,9 @@ func TestApparmorRootAddFileNotDirectory(t *testing.T) {
 // --- Canonicalization of a symlinked input path ---
 
 func TestApparmorRootAddSymlinkedPath(t *testing.T) {
-	dir := t.TempDir()
-	realDir := filepath.Join(dir, "real")
-	linkDir := filepath.Join(dir, "link")
+	rootDir := testAllowedRootDir(t)
+	realDir := filepath.Join(rootDir, "real")
+	linkDir := filepath.Join(rootDir, "link")
 	if err := os.MkdirAll(realDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -350,8 +350,8 @@ func TestApparmorRootAddRootDirectory(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for /")
 	}
-	if !strings.Contains(err.Error(), "root directory") {
-		t.Errorf("expected root directory error, got: %v", err)
+	if !strings.Contains(err.Error(), "filesystem root") {
+		t.Errorf("expected filesystem root error, got: %v", err)
 	}
 }
 
@@ -515,8 +515,8 @@ func TestJSONQuoteRoundTrip(t *testing.T) {
 // --- Special characters in paths ---
 
 func TestRootWithPathWithSpace(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "with space")
+	rootDir := testAllowedRootDir(t)
+	path := filepath.Join(rootDir, "with space")
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -541,8 +541,8 @@ func TestRootWithPathWithSpace(t *testing.T) {
 }
 
 func TestRootWithPathWithQuote(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, `with"quote`)
+	rootDir := testAllowedRootDir(t)
+	path := filepath.Join(rootDir, `with"quote`)
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -567,8 +567,8 @@ func TestRootWithPathWithQuote(t *testing.T) {
 }
 
 func TestRootWithPathWithHash(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "with#hash")
+	rootDir := testAllowedRootDir(t)
+	path := filepath.Join(rootDir, "with#hash")
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -593,8 +593,8 @@ func TestRootWithPathWithHash(t *testing.T) {
 }
 
 func TestRootWithPathWithComma(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "with,comma")
+	rootDir := testAllowedRootDir(t)
+	path := filepath.Join(rootDir, "with,comma")
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -619,8 +619,8 @@ func TestRootWithPathWithComma(t *testing.T) {
 }
 
 func TestRootWithPathWithBackslash(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "with\\backslash")
+	rootDir := testAllowedRootDir(t)
+	path := filepath.Join(rootDir, "with\\backslash")
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -716,8 +716,8 @@ func TestRenderFragmentRuleEscaping(t *testing.T) {
 // --- Duplicate add ---
 
 func TestApparmorDuplicateAdd(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	rootDir := testAllowedRootDir(t)
+	testDir := filepath.Join(rootDir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -781,8 +781,8 @@ func TestApparmorAbsentRemove(t *testing.T) {
 // --- Remove after directory deletion ---
 
 func TestApparmorRemoveAfterDeletion(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	rootDir := testAllowedRootDir(t)
+	testDir := filepath.Join(rootDir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -935,7 +935,7 @@ func TestApparmorReloadParserExecutable(t *testing.T) {
 
 	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1025,7 +1025,7 @@ func TestApparmorNoShellInvocation(t *testing.T) {
 
 	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1136,8 +1136,7 @@ func TestApparmorCheckDoesNotModifyFiles(t *testing.T) {
 // --- Successful atomic add/remove ---
 
 func TestApparmorSuccessfulAdd(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1169,8 +1168,7 @@ func TestApparmorSuccessfulAdd(t *testing.T) {
 }
 
 func TestApparmorSuccessfulRemove(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1207,10 +1205,10 @@ func TestApparmorSuccessfulRemove(t *testing.T) {
 }
 
 func TestApparmorAddMultipleRoots(t *testing.T) {
-	dir := t.TempDir()
-	dirA := filepath.Join(dir, "a")
-	dirB := filepath.Join(dir, "b")
-	dirC := filepath.Join(dir, "c")
+	rootDir := testAllowedRootDir(t)
+	dirA := filepath.Join(rootDir, "a")
+	dirB := filepath.Join(rootDir, "b")
+	dirC := filepath.Join(rootDir, "c")
 	for _, d := range []string{dirA, dirB, dirC} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -1254,8 +1252,7 @@ func reflectSliceEqual(a, b []string) bool {
 // --- Fragment permissions ---
 
 func TestApparmorFragmentPermissions(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1289,9 +1286,9 @@ func TestApparmorFragmentPermissions(t *testing.T) {
 // --- Parser failure restores the exact previous bytes ---
 
 func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
-	dir := t.TempDir()
-	testDirA := filepath.Join(dir, "a")
-	testDirB := filepath.Join(dir, "b")
+	rootDir := testAllowedRootDir(t)
+	testDirA := filepath.Join(rootDir, "a")
+	testDirB := filepath.Join(rootDir, "b")
 	for _, d := range []string{testDirA, testDirB} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -1342,9 +1339,9 @@ func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
 }
 
 func TestApparmorParserFailureRemoveRestores(t *testing.T) {
-	dir := t.TempDir()
-	testDirA := filepath.Join(dir, "a")
-	testDirB := filepath.Join(dir, "b")
+	rootDir := testAllowedRootDir(t)
+	testDirA := filepath.Join(rootDir, "a")
+	testDirB := filepath.Join(rootDir, "b")
 	for _, d := range []string{testDirA, testDirB} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -1391,9 +1388,9 @@ func TestApparmorParserFailureRemoveRestores(t *testing.T) {
 // --- Rollback reload failure is reported ---
 
 func TestApparmorRollbackReloadFailure(t *testing.T) {
-	dir := t.TempDir()
-	testDirA := filepath.Join(dir, "a")
-	testDirB := filepath.Join(dir, "b")
+	rootDir := testAllowedRootDir(t)
+	testDirA := filepath.Join(rootDir, "a")
+	testDirB := filepath.Join(rootDir, "b")
 	for _, d := range []string{testDirA, testDirB} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -1433,9 +1430,9 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 // --- Rollback restores absence of fragment ---
 
 func TestApparmorRollbackRestoresAbsence(t *testing.T) {
-	dir := t.TempDir()
-	testDirA := filepath.Join(dir, "a")
-	testDirB := filepath.Join(dir, "b")
+	rootDir := testAllowedRootDir(t)
+	testDirA := filepath.Join(rootDir, "a")
+	testDirB := filepath.Join(rootDir, "b")
 	for _, d := range []string{testDirA, testDirB} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -1513,9 +1510,9 @@ func TestApparmorLockSerialization(t *testing.T) {
 // --- Real concurrency test ---
 
 func TestApparmorConcurrentLockBusy(t *testing.T) {
-	dir := t.TempDir()
-	testDirA := filepath.Join(dir, "a")
-	testDirB := filepath.Join(dir, "b")
+	rootDir := testAllowedRootDir(t)
+	testDirA := filepath.Join(rootDir, "a")
+	testDirB := filepath.Join(rootDir, "b")
 	for _, d := range []string{testDirA, testDirB} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -1584,7 +1581,7 @@ func TestApparmorConcurrentLockBusy(t *testing.T) {
 
 func TestApparmorParserNotExecutable(t *testing.T) {
 	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1663,7 +1660,7 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 
 func TestApparmorSymlinkFragmentAddRejected(t *testing.T) {
 	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1801,7 +1798,7 @@ func TestApparmorSymlinkFragmentRemoveRejected(t *testing.T) {
 
 func TestApparmorNonRegularFragmentDirectory(t *testing.T) {
 	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1842,7 +1839,7 @@ func TestApparmorNonRegularFragmentDirectory(t *testing.T) {
 
 func TestApparmorParserUnavailableNoChanges(t *testing.T) {
 	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1877,7 +1874,7 @@ func TestApparmorParserUnavailableNoChanges(t *testing.T) {
 
 func TestApparmorMainProfileMissingNoChanges(t *testing.T) {
 	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -2019,8 +2016,8 @@ func TestApparmorCheckSuccess(t *testing.T) {
 // --- Remove does not infer parent/child ---
 
 func TestApparmorRemoveNoInference(t *testing.T) {
-	dir := t.TempDir()
-	parentDir := filepath.Join(dir, "parent")
+	rootDir := testAllowedRootDir(t)
+	parentDir := filepath.Join(rootDir, "parent")
 	childDir := filepath.Join(parentDir, "child")
 	for _, d := range []string{parentDir, childDir} {
 		if err := os.MkdirAll(d, 0755); err != nil {
@@ -2253,9 +2250,9 @@ func TestValidateRootPathForAddNotExists(t *testing.T) {
 // --- Rollback restores exact mode ---
 
 func TestApparmorRollbackRestoresMode(t *testing.T) {
-	dir := t.TempDir()
-	testDirA := filepath.Join(dir, "a")
-	testDirB := filepath.Join(dir, "b")
+	rootDir := testAllowedRootDir(t)
+	testDirA := filepath.Join(rootDir, "a")
+	testDirB := filepath.Join(rootDir, "b")
 	for _, d := range []string{testDirA, testDirB} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -2417,8 +2414,7 @@ func TestParseFragmentRejectsInvalidRoots(t *testing.T) {
 // --- Idempotent operation result ---
 
 func TestApparmorIdempotentAddResult(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
+	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}

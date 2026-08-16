@@ -385,8 +385,9 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 	}
 
 	// Write initial config with disabled injection.
+	allowedRoot := testAllowedRootDir(t)
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         allowedRoot,
 		"session_ttl":          "12h",
 		"trusted_ca_injection": "disabled",
 	})
@@ -475,7 +476,7 @@ func TestCAPreflightSetUnchanged(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
@@ -495,7 +496,7 @@ func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
 	configPath, caPath, _, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         "/tmp/work",
+		"allowed_root":         testAllowedRootDir(t),
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",
