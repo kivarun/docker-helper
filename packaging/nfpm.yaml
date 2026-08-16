@@ -7,10 +7,13 @@ homepage: https://github.com/kivarun/docker-helper
 
 overrides:
   deb:
-    conffiles:
-      - path: /etc/apparmor.d/docker-helper.d/managed-roots
+    dependencies:
+      - systemd
+      - apparmor
   rpm:
-    config_noreplace: true
+    dependencies:
+      - systemd
+      - apparmor-parser
 
 contents:
   - src: dist/docker-helper
@@ -30,5 +33,6 @@ contents:
 
   - src: packaging/apparmor/docker-helper.d/managed-roots
     dst: /etc/apparmor.d/docker-helper.d/managed-roots
+    type: config|noreplace
     file_info:
       mode: 0644

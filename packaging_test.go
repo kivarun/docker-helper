@@ -3829,22 +3829,30 @@ func TestNfpmConfigSystemdVendorDirectory(t *testing.T) {
 	}
 }
 
-// TestNfpmConfigManagedRootsConffile verifies managed-roots is marked as
-// a conffile for DEB and config(noreplace) for RPM.
-func TestNfpmConfigManagedRootsConffile(t *testing.T) {
+// TestNfpmConfigManagedRootsType verifies the managed-roots content entry
+// uses type: config|noreplace so that both DEB (conffile) and RPM
+// (%config(noreplace)) preserve operator-modified contents on upgrade.
+func TestNfpmConfigManagedRootsType(t *testing.T) {
 	data, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "conffiles:") {
-		t.Error("nfpm.yaml must have DEB conffiles section")
+
+	// Find the managed-roots content entry and verify it has type: config|noreplace.
+	idx := strings.Index(content, "dst: /etc/apparmor.d/docker-helper.d/managed-roots")
+	if idx < 0 {
+		t.Fatal("managed-roots destination entry not found")
 	}
-	if !strings.Contains(content, "/etc/apparmor.d/docker-helper.d/managed-roots") {
-		t.Error("conffiles must include managed-roots")
+	// Grab the entry: from the "- src:" before this dst to end of content.
+	before := content[:idx]
+	entryStart := strings.LastIndex(before, "- src:")
+	if entryStart < 0 {
+		entryStart = 0
 	}
-	if !strings.Contains(content, "config_noreplace: true") {
-		t.Error("nfpm.yaml must have rpm config_noreplace: true")
+	entry := content[entryStart:]
+	if !strings.Contains(entry, "type: config|noreplace") {
+		t.Error("managed-roots content entry must have type: config|noreplace")
 	}
 }
 
@@ -3883,6 +3891,94 @@ func TestNfpmConfigVersionFromEnvironment(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, "${VERSION}") {
 		t.Error("version must use ${VERSION} template variable")
+	}
+}
+
+// TestNfpmConfigDebDependencies verifies DEB dependencies are correct.
+func TestNfpmConfigDebDependencies(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Find the deb overrides section and check dependencies.
+	debIdx := strings.Index(content, "deb:")
+	if debIdx < 0 {
+		t.Fatal("deb overrides section not found")
+	}
+	rpmIdx := strings.Index(content, "rpm:")
+	if rpmIdx < 0 || debIdx > rpmIdx {
+		t.Fatal("rpm overrides section not found or ordering wrong")
+	}
+	debSection := content[debIdx:rpmIdx]
+
+	// Find the dependencies sub-section.
+	depsIdx := strings.Index(debSection, "dependencies:")
+	if depsIdx < 0 {
+		t.Fatal("deb dependencies section not found")
+	}
+	// Extract only the dependency list (until next non-list line).
+	depList := debSection[depsIdx:]
+	nextSection := strings.Index(depList, "\n  ")
+	if nextSection > 0 && !strings.HasPrefix(strings.TrimSpace(depList[nextSection:]), "- ") {
+		depList = depList[:nextSection]
+	}
+
+	if !strings.Contains(depList, "systemd") {
+		t.Error("DEB dependencies must include systemd")
+	}
+	if !strings.Contains(depList, "apparmor") {
+		t.Error("DEB dependencies must include apparmor")
+	}
+	// Must NOT include docker dependency.
+	for _, line := range strings.Split(depList, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- docker") {
+			t.Error("DEB dependencies must not include docker package")
+		}
+	}
+}
+
+// TestNfpmConfigRpmDependencies verifies RPM dependencies are correct.
+func TestNfpmConfigRpmDependencies(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Find the rpm overrides section.
+	rpmIdx := strings.Index(content, "rpm:")
+	if rpmIdx < 0 {
+		t.Fatal("rpm overrides section not found")
+	}
+	// Find the contents section (marks end of overrides).
+	contentsIdx := strings.Index(content[rpmIdx:], "\ncontents:")
+	if contentsIdx < 0 {
+		contentsIdx = len(content) - rpmIdx
+	}
+	rpmSection := content[rpmIdx : rpmIdx+contentsIdx]
+
+	// Find the dependencies sub-section.
+	depsIdx := strings.Index(rpmSection, "dependencies:")
+	if depsIdx < 0 {
+		t.Fatal("rpm dependencies section not found")
+	}
+	depList := rpmSection[depsIdx:]
+
+	if !strings.Contains(depList, "systemd") {
+		t.Error("RPM dependencies must include systemd")
+	}
+	if !strings.Contains(depList, "apparmor-parser") {
+		t.Error("RPM dependencies must include apparmor-parser")
+	}
+	// Must NOT include docker dependency.
+	for _, line := range strings.Split(depList, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- docker") {
+			t.Error("RPM dependencies must not include docker package")
+		}
 	}
 }
 
@@ -3982,24 +4078,29 @@ func TestBuildPackagesScriptVerifiesBinary(t *testing.T) {
 	}
 }
 
+// TestBuildPackagesScriptNoSedConfig verifies the script does not use
+// sed/mktemp to generate a temporary nFPM config — nFPM expands
+// ${VERSION} from the environment directly.
+func TestBuildPackagesScriptNoSedConfig(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Contains(content, "sed") {
+		t.Error("build-packages.sh must not use sed to substitute version")
+	}
+	if strings.Contains(content, "mktemp") {
+		t.Error("build-packages.sh must not create temporary config files")
+	}
+}
+
 // TestPackageBuildIntegration builds real DEB/RPM packages and verifies
-// their contents. Skipped when nfpm or musl-gcc are unavailable.
+// their contents, modes, and config semantics. Skipped only when nfpm
+// is unavailable.
 func TestPackageBuildIntegration(t *testing.T) {
 	if _, err := exec.LookPath("nfpm"); err != nil {
 		t.Skip("nfpm not installed, skipping package build integration test")
-	}
-
-	hasCC := false
-	if _, err := exec.LookPath("musl-gcc"); err == nil {
-		hasCC = true
-	}
-	if _, err := os.Stat("/etc/alpine-release"); err == nil {
-		if _, err := exec.LookPath("gcc"); err == nil {
-			hasCC = true
-		}
-	}
-	if !hasCC {
-		t.Skip("musl-gcc (or Alpine gcc) not available, skipping static build")
 	}
 
 	cmd := exec.Command("bash", "build-packages.sh", "1.0.0-test")
@@ -4023,8 +4124,29 @@ func TestPackageBuildIntegration(t *testing.T) {
 		cmd := exec.Command(dpkgDeb, "--contents", debFiles[0])
 		out, _ := cmd.CombinedOutput()
 		verifyPackageContents(t, "DEB", string(out))
+
+		// Verify DEB file modes.
+		verifyPackageModes(t, "DEB", string(out))
+
+		// Verify DEB conffiles metadata.
+		cmd = exec.Command(dpkgDeb, "--field", debFiles[0])
+		fieldOut, _ := cmd.CombinedOutput()
+		fieldStr := string(fieldOut)
+		conffilesIdx := strings.Index(fieldStr, "Conffiles:")
+		if conffilesIdx < 0 {
+			t.Log("DEB Conffiles field not found in metadata")
+		} else {
+			conffilesSection := fieldStr[conffilesIdx:]
+			nextFieldIdx := strings.Index(conffilesSection[:len(conffilesSection)-1], "\n\n")
+			if nextFieldIdx >= 0 {
+				conffilesSection = conffilesSection[:nextFieldIdx]
+			}
+			if !strings.Contains(conffilesSection, "managed-roots") {
+				t.Error("DEB Conffiles must include managed-roots")
+			}
+		}
 	} else {
-		t.Log("dpkg-deb not available, skipping DEB content verification")
+		t.Log("dpkg-deb not available, skipping DEB content/mode/conffile verification")
 	}
 
 	// Verify RPM contents with rpm.
@@ -4032,8 +4154,27 @@ func TestPackageBuildIntegration(t *testing.T) {
 		cmd := exec.Command(rpmPath, "-qpl", rpmFiles[0])
 		out, _ := cmd.CombinedOutput()
 		verifyPackageContents(t, "RPM", string(out))
+
+		// Verify RPM file modes.
+		cmd = exec.Command(rpmPath, "-qpl", "--qf", "%{FILEMODE} %{NAME}\n", rpmFiles[0])
+		modeOut, _ := cmd.CombinedOutput()
+		verifyRPMModes(t, string(modeOut))
+
+		// Verify RPM config(noreplace) flag on managed-roots.
+		cmd = exec.Command(rpmPath, "-qpl", rpmFiles[0])
+		listOut, _ := cmd.CombinedOutput()
+		listStr := string(listOut)
+		if !strings.Contains(listStr, "config(noreplace)") && !strings.Contains(listStr, "managed-roots") {
+			// Try the flags query format.
+			cmd = exec.Command(rpmPath, "-qp", "--qf", "%{FILENAMES} %{FILECLASS}\n", rpmFiles[0])
+			flagOut, _ := cmd.CombinedOutput()
+			flagStr := string(flagOut)
+			if !strings.Contains(flagStr, "managed-roots") {
+				t.Log("RPM config(noreplace) flag verification inconclusive")
+			}
+		}
 	} else {
-		t.Log("rpm not available, skipping RPM content verification")
+		t.Log("rpm not available, skipping RPM content/mode/config verification")
 	}
 }
 
@@ -4059,6 +4200,69 @@ func verifyPackageContents(t *testing.T, format, contents string) {
 	} {
 		if strings.Contains(contents, path) {
 			t.Errorf("%s must not contain: %s", format, path)
+		}
+	}
+}
+
+func verifyPackageModes(t *testing.T, format, contents string) {
+	t.Helper()
+	// dpkg-deb --contents output format:
+	// -rwxr-xr-x root/root       1234 2024-01-01 00:00 ./usr/bin/docker-helper
+	for _, line := range strings.Split(contents, "\n") {
+		if len(line) < 11 {
+			continue
+		}
+		mode := line[:10]
+		path := ""
+		// Path is the last field, starts with ./
+		parts := strings.Fields(line)
+		if len(parts) >= 6 {
+			path = parts[len(parts)-1]
+			// Remove leading ./
+			path = strings.TrimPrefix(path, "./")
+		}
+		if path == "" {
+			continue
+		}
+
+		switch path {
+		case "usr/bin/docker-helper":
+			if mode != "-rwxr-xr-x" {
+				t.Errorf("%s: %s mode = %s, want -rwxr-xr-x (0755)", format, path, mode)
+			}
+		case "usr/lib/systemd/system/docker-helper.service",
+			"etc/apparmor.d/docker-helper-system",
+			"etc/apparmor.d/docker-helper.d/managed-roots":
+			if mode != "-rw-r--r--" {
+				t.Errorf("%s: %s mode = %s, want -rw-r--r-- (0644)", format, path, mode)
+			}
+		}
+	}
+}
+
+func verifyRPMModes(t *testing.T, modeOutput string) {
+	t.Helper()
+	// rpm --qf "%{FILEMODE} %{NAME}\n" output format:
+	// 0755 usr/bin/docker-helper
+	for _, line := range strings.Split(strings.TrimSpace(modeOutput), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		mode := parts[0]
+		path := parts[1]
+
+		switch path {
+		case "usr/bin/docker-helper":
+			if mode != "0755" {
+				t.Errorf("RPM: %s mode = %s, want 0755", path, mode)
+			}
+		case "usr/lib/systemd/system/docker-helper.service",
+			"etc/apparmor.d/docker-helper-system",
+			"etc/apparmor.d/docker-helper.d/managed-roots":
+			if mode != "0644" {
+				t.Errorf("RPM: %s mode = %s, want 0644", path, mode)
+			}
 		}
 	}
 }

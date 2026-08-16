@@ -38,21 +38,17 @@ if [[ ! -x "${SCRIPT_DIR}/dist/docker-helper" ]]; then
 	exit 1
 fi
 
-# Substitute ${VERSION} in the nFPM config.
-TMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TMP_DIR"' EXIT
-sed "s/\${VERSION}/${VERSION}/g" "${SCRIPT_DIR}/packaging/nfpm.yaml" > "${TMP_DIR}/nfpm.yaml"
-
 # Build from repo root so src paths in the config resolve correctly.
+# nFPM expands ${VERSION} from the environment.
 cd "${SCRIPT_DIR}"
 
-nfpm package \
-	--config "${TMP_DIR}/nfpm.yaml" \
+VERSION="$VERSION" nfpm package \
+	--config packaging/nfpm.yaml \
 	--packager deb \
 	--target dist
 
-nfpm package \
-	--config "${TMP_DIR}/nfpm.yaml" \
+VERSION="$VERSION" nfpm package \
+	--config packaging/nfpm.yaml \
 	--packager rpm \
 	--target dist
 
