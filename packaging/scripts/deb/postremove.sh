@@ -17,12 +17,18 @@ case "$1" in
     ;;
   purge)
     # Remove app-owned persistent/runtime state.
-    rm -rf /etc/docker-helper
-    rm -rf /var/lib/docker-helper
-    rm -rf /run/docker-helper
+    # TEST_SEAM: override paths for test-controlled execution.
+    purge_etc="${PURGE_ETC_DIR:-/etc/docker-helper}"
+    purge_lib="${PURGE_LIB_DIR:-/var/lib/docker-helper}"
+    purge_run="${PURGE_RUN_DIR:-/run/docker-helper}"
+    purge_aadir="${PURGE_AA_DIR:-/etc/apparmor.d/docker-helper.d}"
+
+    rm -rf "$purge_etc"
+    rm -rf "$purge_lib"
+    rm -rf "$purge_run"
 
     # Clean up the managed-roots directory if it's empty.
-    rmdir /etc/apparmor.d/docker-helper.d 2>/dev/null || true
+    rmdir "$purge_aadir" 2>/dev/null || true
 
     exit 0
     ;;

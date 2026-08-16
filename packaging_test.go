@@ -4568,12 +4568,12 @@ case "$*" in
     if [ "${STOP_FAIL:-false}" = "true" ]; then exit 1; fi
     exit 0
     ;;
-  *"start"*)
-    if [ "${START_FAIL:-false}" = "true" ]; then exit 1; fi
-    exit 0
-    ;;
   *"try-restart"*)
     if [ "${RESTART_FAIL:-false}" = "true" ]; then exit 1; fi
+    exit 0
+    ;;
+  *"start"*)
+    if [ "${START_FAIL:-false}" = "true" ]; then exit 1; fi
     exit 0
     ;;
   *"daemon-reload"*)
@@ -4827,6 +4827,65 @@ func TestDebPostinstallDaemonReloadFailure(t *testing.T) {
 	}
 }
 
+// TestDebPostinstallRestartFailure verifies postinst fails when try-restart fails.
+func TestDebPostinstallRestartFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{"RESTART_FAIL=true"})
+	if code == 0 {
+		t.Fatal("postinst should fail when try-restart fails")
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	// Verify replace and daemon-reload were called before the failed restart.
+	foundReplace, foundReload, foundRestart := false, false, false
+	for _, c := range calls {
+		if strings.Contains(c, "--replace") {
+			foundReplace = true
+		}
+		if strings.Contains(c, "daemon-reload") {
+			foundReload = true
+		}
+		if strings.Contains(c, "try-restart") {
+			foundRestart = true
+		}
+	}
+	if !foundReplace || !foundReload || !foundRestart {
+		t.Errorf("expected replace+reload+restart calls, got replace=%v reload=%v restart=%v", foundReplace, foundReload, foundRestart)
+	}
+}
+
+// TestRpmPostinstallRestartFailure verifies RPM postinstall fails when try-restart fails.
+func TestRpmPostinstallRestartFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{"RESTART_FAIL=true"})
+	if code == 0 {
+		t.Fatal("rpm postinstall should fail when try-restart fails")
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	foundReplace, foundReload, foundRestart := false, false, false
+	for _, c := range calls {
+		if strings.Contains(c, "--replace") {
+			foundReplace = true
+		}
+		if strings.Contains(c, "daemon-reload") {
+			foundReload = true
+		}
+		if strings.Contains(c, "try-restart") {
+			foundRestart = true
+		}
+	}
+	if !foundReplace || !foundReload || !foundRestart {
+		t.Errorf("expected replace+reload+restart calls, got replace=%v reload=%v restart=%v", foundReplace, foundReload, foundRestart)
+	}
+}
+
 // --- DEB preremove tests ---
 
 // TestDebPreremoveUpgrade verifies prerm on upgrade does nothing.
@@ -4914,10 +4973,35 @@ func TestDebPreremoveUnloadFailure(t *testing.T) {
 	writeFakeSystemctl(t, fakeDir, logFile, true, true)
 	writeFakeApparmorParser(t, fakeDir, logFile, false, true)
 
-	_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+	out, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
 		[]string{"remove"}, true, nil)
 	if code != 0 {
 		t.Fatalf("prerm should exit 0 when unload fails (best-effort), got %d", code)
+	}
+	if !strings.Contains(out, "AppArmor") {
+		t.Error("warning should mention AppArmor")
+	}
+	if !strings.Contains(out, "unload error") {
+		t.Error("warning should contain parser diagnostic")
+	}
+}
+
+// TestRpmPreremoveUnloadFailure verifies RPM preun continues when unload fails.
+func TestRpmPreremoveUnloadFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, true)
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm preun should exit 0 when unload fails (best-effort), got %d", code)
+	}
+	if !strings.Contains(out, "AppArmor") {
+		t.Error("warning should mention AppArmor")
+	}
+	if !strings.Contains(out, "unload error") {
+		t.Error("warning should contain parser diagnostic")
 	}
 }
 
@@ -4946,31 +5030,62 @@ func TestDebPostremoveRemovesReloads(t *testing.T) {
 	}
 }
 
-// TestDebPostremovePurgeRemovesState verifies postrm purge removes state.
+// TestDebPostremovePurgeRemovesState verifies postrm purge removes exact
+// state directories and preserves unrelated files.
 func TestDebPostremovePurgeRemovesState(t *testing.T) {
-	data, err := os.ReadFile("packaging/scripts/deb/postremove.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	for _, path := range []string{"/etc/docker-helper", "/var/lib/docker-helper", "/run/docker-helper"} {
-		if !strings.Contains(content, path) {
-			t.Errorf("postrm purge must remove: %s", path)
+	tmpDir := t.TempDir()
+
+	// Create test-controlled state directories.
+	purgeEtc := filepath.Join(tmpDir, "etc-dh")
+	purgeLib := filepath.Join(tmpDir, "lib-dh")
+	purgeRun := filepath.Join(tmpDir, "run-dh")
+	purgeAadir := filepath.Join(tmpDir, "aadir")
+	for _, d := range []string{purgeEtc, purgeLib, purgeRun, purgeAadir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	// Must NOT contain broad globs that would remove more than intended.
-	if strings.Contains(content, "rm -rf /etc\n") || strings.Contains(content, "rm -rf /etc ") {
-		t.Error("must not use broad rm -rf /etc")
+	// Create sentinel files inside.
+	for _, d := range []string{purgeEtc, purgeLib, purgeRun} {
+		if err := os.WriteFile(filepath.Join(d, "sentinel"), []byte("state"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Create unrelated sentinel outside.
+	unrelated := filepath.Join(tmpDir, "unrelated")
+	if err := os.WriteFile(unrelated, []byte("keep me"), 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	// Verify sentinel would be preserved (check script doesn't remove it)
-	if strings.Contains(content, "other-config") {
-		t.Error("must not remove unrelated files")
+	fakeDir, logFile := setupScriptTest(t)
+
+	// Run purge with test-controlled paths.
+	_, _, code := runScript(t, "packaging/scripts/deb/postremove.sh", fakeDir, logFile,
+		[]string{"purge"}, false, []string{
+			"PURGE_ETC_DIR=" + purgeEtc,
+			"PURGE_LIB_DIR=" + purgeLib,
+			"PURGE_RUN_DIR=" + purgeRun,
+			"PURGE_AA_DIR=" + purgeAadir,
+		})
+	if code != 0 {
+		t.Fatalf("postrm purge should exit 0, got %d", code)
 	}
-	// Must try to clean up managed-roots directory if empty.
-	if !strings.Contains(content, "rmdir") && !strings.Contains(content, "docker-helper.d") {
-		t.Error("postrm purge should attempt rmdir on docker-helper.d")
+
+	// Verify exact three dirs removed.
+	for _, d := range []string{purgeEtc, purgeLib, purgeRun} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("purge must remove: %s", d)
+		}
 	}
+	// Verify aa dir cleaned up.
+	if _, err := os.Stat(purgeAadir); !os.IsNotExist(err) {
+		t.Error("purge should rmdir empty docker-helper.d")
+	}
+	// Verify unrelated sentinel preserved.
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Error("purge must not remove unrelated files")
+	}
+	_ = logFile
 }
 
 // --- RPM postinstall tests ---
@@ -5271,8 +5386,13 @@ func TestPackageMetadataScripts(t *testing.T) {
 		}
 		for _, script := range []string{"postinst", "prerm", "postrm"} {
 			scriptPath := filepath.Join(controlDir, script)
-			if _, err := os.Stat(scriptPath); err != nil {
+			info, err := os.Stat(scriptPath)
+			if err != nil {
 				t.Errorf("DEB must contain script: %s", script)
+				continue
+			}
+			if info.Mode()&0111 == 0 {
+				t.Errorf("DEB script must be executable: %s (mode %o)", script, info.Mode())
 			}
 		}
 	} else {

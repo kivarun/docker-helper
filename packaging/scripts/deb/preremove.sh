@@ -32,8 +32,8 @@ if systemctl is-enabled --quiet docker-helper.service 2>/dev/null; then
 fi
 
 # Unload AppArmor profile (best-effort).
-if ! apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null; then
-  echo "warning: failed to unload AppArmor profile docker-helper-system" >&2
-fi
+unload_output=$(apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>&1) || {
+  echo "warning: failed to unload AppArmor profile docker-helper-system: $unload_output" >&2
+}
 
 exit 0
