@@ -4372,6 +4372,19 @@ func TestPackageBuildIntegration(t *testing.T) {
 		t.Skip("nfpm not installed, skipping package build integration test")
 	}
 
+	hasCC := false
+	if _, err := exec.LookPath("musl-gcc"); err == nil {
+		hasCC = true
+	}
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		if _, err := exec.LookPath("gcc"); err == nil {
+			hasCC = true
+		}
+	}
+	if !hasCC {
+		t.Skip("musl-gcc (or Alpine gcc) not available, skipping full package build pipeline")
+	}
+
 	testVersion := "1.0.0"
 
 	cmd := exec.Command("bash", "build-packages.sh", testVersion)
