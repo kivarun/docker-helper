@@ -414,6 +414,25 @@ func (c *apiClient) showPrincipal(username string) (*principalResponse, error) {
 	return &result, nil
 }
 
+func (c *apiClient) listPrincipals() (*listPrincipalsResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/principals", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result listPrincipalsResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
 func (c *apiClient) setPrincipalEnabled(username string, enabled bool) (*principalChangedResponse, error) {
 	body, err := json.Marshal(setPrincipalRequest{Enabled: &enabled})
 	if err != nil {

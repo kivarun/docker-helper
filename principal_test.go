@@ -1844,3 +1844,104 @@ func TestPrincipalErrorsAreWrapped(t *testing.T) {
 		t.Errorf("expected ErrOSUserNotFound, got: %v", err)
 	}
 }
+
+func TestListPrincipalsEmpty(t *testing.T) {
+	app := newTestApp(t)
+
+	principals, err := listPrincipals(app.DB)
+	if err != nil {
+		t.Fatalf("listPrincipals() error: %v", err)
+	}
+	if len(principals) != 0 {
+		t.Errorf("expected 0 principals, got %d", len(principals))
+	}
+}
+
+func TestListPrincipals(t *testing.T) {
+	app := newTestApp(t)
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		switch username {
+		case "alice":
+			return "1001", "1001", filepath.Join(app.Config.AllowedRoot, "home", "alice"), nil
+		case "bob":
+			return "1002", "1002", filepath.Join(app.Config.AllowedRoot, "home", "bob"), nil
+		default:
+			return "", "", "", os.ErrNotExist
+		}
+	}
+
+	for _, user := range []string{"alice", "bob"} {
+		home := filepath.Join(app.Config.AllowedRoot, "home", user)
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := createPrincipal(app.DB, user); err != nil {
+			t.Fatalf("createPrincipal(%q) error: %v", user, err)
+		}
+	}
+
+	principals, err := listPrincipals(app.DB)
+	if err != nil {
+		t.Fatalf("listPrincipals() error: %v", err)
+	}
+	if len(principals) != 2 {
+		t.Fatalf("expected 2 principals, got %d", len(principals))
+	}
+
+	// Verify sorted by username
+	if principals[0].Username != "alice" {
+		t.Errorf("first principal = %q, want %q", principals[0].Username, "alice")
+	}
+	if principals[1].Username != "bob" {
+		t.Errorf("second principal = %q, want %q", principals[1].Username, "bob")
+	}
+}
+
+func TestPrincipalHTTPList(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		switch username {
+		case "carol":
+			return "1003", "1003", filepath.Join(app.Config.AllowedRoot, "home", "carol"), nil
+		default:
+			return "", "", "", os.ErrNotExist
+		}
+	}
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "carol")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createPrincipal(app.DB, "carol"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/principals", nil)
+	withAuth(req)
+	w := httptest.NewRecorder()
+	app.handleListPrincipals(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp listPrincipalsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if !resp.OK {
+		t.Error("expected ok=true")
+	}
+	if len(resp.Principals) != 1 {
+		t.Fatalf("expected 1 principal, got %d", len(resp.Principals))
+	}
+	if resp.Principals[0].Username != "carol" {
+		t.Errorf("username = %q, want %q", resp.Principals[0].Username, "carol")
+	}
+}

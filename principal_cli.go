@@ -12,6 +12,7 @@ var principalCommand = &Command{
 	Summary: "Manage principals",
 	Subcommands: []*Command{
 		principalCreateCommand,
+		principalListCommand,
 		principalShowCommand,
 		principalSetCommand,
 		principalAllowedRootCommand,
@@ -114,6 +115,47 @@ var principalShowCommand = &Command{
 				if err := enc.Encode(result); err != nil {
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var principalListCommand = &Command{
+	Name:       "list",
+	Summary:    "List all principals",
+	Usage:      "docker-helper principal list [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				result, err := client.listPrincipals()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				// Print as a table
+				fmt.Fprintf(stdout, "%-20s %8s %8s %-30s %s\n", "USER", "UID", "GID", "HOME", "ENABLED")
+				for _, p := range result.Principals {
+					enabled := "no"
+					if p.Enabled {
+						enabled = "yes"
+					}
+					fmt.Fprintf(stdout, "%-20s %8d %8d %-30s %s\n", p.Username, p.UID, p.GID, p.Home, enabled)
 				}
 				return 0
 			},

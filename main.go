@@ -201,6 +201,7 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("GET /operations/{id}/logs", app.handleOperationLogs)
 	mux.HandleFunc("POST /operations/{id}/cancel", app.handleOperationCancel)
 	mux.HandleFunc("POST /principals", app.handleCreatePrincipal)
+	mux.HandleFunc("GET /principals", app.handleListPrincipals)
 	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
 	mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
 	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
