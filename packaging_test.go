@@ -5036,17 +5036,17 @@ func TestDebPostremovePurgeRemovesState(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create test-controlled state directories.
-	purgeEtc := filepath.Join(tmpDir, "etc-dh")
-	purgeLib := filepath.Join(tmpDir, "lib-dh")
-	purgeRun := filepath.Join(tmpDir, "run-dh")
-	purgeAadir := filepath.Join(tmpDir, "aadir")
-	for _, d := range []string{purgeEtc, purgeLib, purgeRun, purgeAadir} {
+	testEtc := filepath.Join(tmpDir, "etc-dh")
+	testLib := filepath.Join(tmpDir, "lib-dh")
+	testRun := filepath.Join(tmpDir, "run-dh")
+	testAadir := filepath.Join(tmpDir, "aadir")
+	for _, d := range []string{testEtc, testLib, testRun, testAadir} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Create sentinel files inside.
-	for _, d := range []string{purgeEtc, purgeLib, purgeRun} {
+	for _, d := range []string{testEtc, testLib, testRun} {
 		if err := os.WriteFile(filepath.Join(d, "sentinel"), []byte("state"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -5057,35 +5057,43 @@ func TestDebPostremovePurgeRemovesState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fakeDir, logFile := setupScriptTest(t)
+	// Read production script and create a test-only copy with replaced paths.
+	data, err := os.ReadFile("packaging/scripts/deb/postremove.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := string(data)
+	modified = strings.ReplaceAll(modified, "/etc/docker-helper", testEtc)
+	modified = strings.ReplaceAll(modified, "/var/lib/docker-helper", testLib)
+	modified = strings.ReplaceAll(modified, "/run/docker-helper", testRun)
+	modified = strings.ReplaceAll(modified, "/etc/apparmor.d/docker-helper.d", testAadir)
 
-	// Run purge with test-controlled paths.
-	_, _, code := runScript(t, "packaging/scripts/deb/postremove.sh", fakeDir, logFile,
-		[]string{"purge"}, false, []string{
-			"PURGE_ETC_DIR=" + purgeEtc,
-			"PURGE_LIB_DIR=" + purgeLib,
-			"PURGE_RUN_DIR=" + purgeRun,
-			"PURGE_AA_DIR=" + purgeAadir,
-		})
-	if code != 0 {
-		t.Fatalf("postrm purge should exit 0, got %d", code)
+	scriptFile := filepath.Join(tmpDir, "postremove.sh")
+	if err := os.WriteFile(scriptFile, []byte(modified), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Execute the modified copy.
+	cmd := exec.Command("sh", scriptFile, "purge")
+	cmd.Env = os.Environ()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("postrm purge failed: %v\n%s", err, out)
 	}
 
 	// Verify exact three dirs removed.
-	for _, d := range []string{purgeEtc, purgeLib, purgeRun} {
+	for _, d := range []string{testEtc, testLib, testRun} {
 		if _, err := os.Stat(d); !os.IsNotExist(err) {
 			t.Errorf("purge must remove: %s", d)
 		}
 	}
 	// Verify aa dir cleaned up.
-	if _, err := os.Stat(purgeAadir); !os.IsNotExist(err) {
+	if _, err := os.Stat(testAadir); !os.IsNotExist(err) {
 		t.Error("purge should rmdir empty docker-helper.d")
 	}
 	// Verify unrelated sentinel preserved.
 	if _, err := os.Stat(unrelated); err != nil {
 		t.Error("purge must not remove unrelated files")
 	}
-	_ = logFile
 }
 
 // --- RPM postinstall tests ---
