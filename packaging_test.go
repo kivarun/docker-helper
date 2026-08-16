@@ -5662,12 +5662,28 @@ func TestPackageMetadataManPages(t *testing.T) {
 		if !strings.Contains(outStr, "/usr/share/man/man5/docker-helper-config.5.gz") {
 			t.Error("RPM missing /usr/share/man/man5/docker-helper-config.5.gz")
 		}
-		// Verify exact FILEMODES for man pages.
-		cmd2 := exec.Command(rpmPath, "-qp", "--queryformat", "%{FILEMODES}\n", rpmFile)
+		// Verify exact FILEMODES for each man page path individually.
+		cmd2 := exec.Command(rpmPath, "-qp", "--queryformat", "%{FILENAMES}\t%{FILEMODES}\n", rpmFile)
 		out2, _ := cmd2.CombinedOutput()
-		out2Str := string(out2)
-		if !strings.Contains(out2Str, "0644") {
-			t.Errorf("RPM man page mode wrong: expected 0644, got:\n%s", out2Str)
+		expectedModes := map[string]string{
+			"/usr/share/man/man1/docker-helper.1.gz":        "0644",
+			"/usr/share/man/man5/docker-helper-config.5.gz": "0644",
+		}
+		foundModes := make(map[string]string)
+		for _, line := range strings.Split(strings.TrimSpace(string(out2)), "\n") {
+			parts := strings.Split(line, "\t")
+			if len(parts) == 2 {
+				foundModes[parts[0]] = parts[1]
+			}
+		}
+		for path, expected := range expectedModes {
+			actual, ok := foundModes[path]
+			if !ok {
+				continue
+			}
+			if actual != expected {
+				t.Errorf("RPM man page mode wrong for %s: expected %s, got %s", path, expected, actual)
+			}
 		}
 	} else {
 		t.Log("rpm not available, skipping RPM man page verification")
@@ -5799,5 +5815,59 @@ func TestManPageDocFacts(t *testing.T) {
 	}
 	if _, ok := cfg["session_ttl"]; !ok {
 		t.Error("minimal example must contain session_ttl")
+	}
+}
+
+// --- Release workflow static contract tests ---
+
+func TestReleaseWorkflow(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must use authoritative build scripts.
+	if !strings.Contains(content, "build-bundle.sh") {
+		t.Error("release.yml must call build-bundle.sh")
+	}
+	if !strings.Contains(content, "build-packages.sh") {
+		t.Error("release.yml must call build-packages.sh")
+	}
+
+	// Must pin nFPM version.
+	if !strings.Contains(content, "NFPM_VERSION=2.47.0") {
+		t.Error("release.yml must pin NFPM_VERSION=2.47.0")
+	}
+
+	// Must verify nFPM SHA256.
+	if !strings.Contains(content, "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783") {
+		t.Error("release.yml must contain pinned nFPM SHA256")
+	}
+
+	// Must NOT use @latest for nFPM.
+	if strings.Contains(content, "@latest") {
+		t.Error("release.yml must not use @latest for nFPM")
+	}
+
+	// Must generate and verify SHA256SUMS.
+	if !strings.Contains(content, "SHA256SUMS") {
+		t.Error("release.yml must generate SHA256SUMS")
+	}
+
+	// Must upload all artifact types.
+	if !strings.Contains(content, "tar.gz") {
+		t.Error("release.yml must upload .tar.gz")
+	}
+	if !strings.Contains(content, ".deb") {
+		t.Error("release.yml must upload .deb")
+	}
+	if !strings.Contains(content, ".rpm") {
+		t.Error("release.yml must upload .rpm")
+	}
+
+	// Prerelease handling must be preserved.
+	if !strings.Contains(content, "prerelease") {
+		t.Error("release.yml must handle prerelease")
 	}
 }

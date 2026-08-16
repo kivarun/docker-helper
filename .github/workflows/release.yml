@@ -42,6 +42,13 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Verify tag checkout
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "error: HEAD ($GITHUB_SHA) does not match tag commit" >&2
+            exit 1
+          fi
+
       - name: Formatting
         run: |
           unformatted="$(gofmt -l .)"
@@ -59,23 +66,109 @@ jobs:
       - name: Whitespace errors
         run: git diff --check
 
-      - name: Install musl-tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      - name: Clean dist
+        run: rm -rf dist
+
+      - name: Install nFPM
+        run: |
+          NFPM_VERSION=2.47.0
+          NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
+          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$NFPM_TARBALL" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
+          echo "${NFPM_SHA256}  ${NFPM_TARBALL}" | sha256sum --check -
+          tar xzf "$NFPM_TARBALL" nfpm
+          chmod +x nfpm
+          sudo mv nfpm /usr/local/bin/
+          nfpm --version
+
       - name: Build release bundle
         run: ./build-bundle.sh "${{ steps.version.outputs.version }}"
+
+      - name: Build native packages
+        run: ./build-packages.sh "${{ steps.version.outputs.version }}"
+
+      - name: Verify tarball
+        run: |
+          TARBALL="dist/docker-helper-${{ steps.version.outputs.version }}-linux-amd64.tar.gz"
+          if [ ! -f "$TARBALL" ]; then
+            echo "error: tarball not found: $TARBALL" >&2
+            exit 1
+          fi
+          tar tzf "$TARBALL" > /dev/null
+
+      - name: Verify binary version
+        run: |
+          if [ ! -f "dist/docker-helper" ]; then
+            echo "error: dist/docker-helper not found" >&2
+            exit 1
+          fi
+          ACTUAL_VERSION="$(dist/docker-helper version)"
+          EXPECTED_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "error: version mismatch: expected '$EXPECTED_VERSION', got '$ACTUAL_VERSION'" >&2
+            exit 1
+          fi
+
+      - name: Identify package files
+        id: packages
+        run: |
+          DEB=$(ls dist/*.deb 2>/dev/null | head -1)
+          RPM=$(ls dist/*.rpm 2>/dev/null | head -1)
+          if [ -z "$DEB" ]; then
+            echo "error: no .deb found in dist/" >&2
+            exit 1
+          fi
+          if [ -z "$RPM" ]; then
+            echo "error: no .rpm found in dist/" >&2
+            exit 1
+          fi
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+          echo "rpm=$RPM" >> "$GITHUB_OUTPUT"
+          echo "deb_basename=$(basename "$DEB")" >> "$GITHUB_OUTPUT"
+          echo "rpm_basename=$(basename "$RPM")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify DEB
+        run: |
+          DEB="${{ steps.packages.outputs.deb }}"
+          dpkg-deb --info "$DEB" | grep -q "Package: docker-helper"
+          dpkg-deb --info "$DEB" | grep -q "Architecture: amd64"
+          dpkg-deb --contents "$DEB" | grep -q "/usr/bin/docker-helper"
+          dpkg-deb --contents "$DEB" | grep -q "/usr/lib/systemd/system/docker-helper.service"
+          dpkg-deb --contents "$DEB" | grep -q "/etc/apparmor.d/docker-helper-system"
+          dpkg-deb --contents "$DEB" | grep -q "/usr/share/man/man1/docker-helper.1.gz"
+          dpkg-deb --contents "$DEB" | grep -q "/usr/share/man/man5/docker-helper-config.5.gz"
+
+      - name: Install rpm for verification
+        run: |
+          sudo apt-get install -y rpm
+
+      - name: Verify RPM
+        run: |
+          RPM="${{ steps.packages.outputs.rpm }}"
+          rpm -qpl "$RPM" | grep -q "/usr/bin/docker-helper"
+          rpm -qpl "$RPM" | grep -q "/usr/lib/systemd/system/docker-helper.service"
+          rpm -qpl "$RPM" | grep -q "/etc/apparmor.d/docker-helper-system"
+          rpm -qpl "$RPM" | grep -q "/usr/share/man/man1/docker-helper.1.gz"
+          rpm -qpl "$RPM" | grep -q "/usr/share/man/man5/docker-helper-config.5.gz"
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          TARBALL="docker-helper-${{ steps.version.outputs.version }}-linux-amd64.tar.gz"
+          DEB="${{ steps.packages.outputs.deb_basename }}"
+          RPM="${{ steps.packages.outputs.rpm_basename }}"
+          sha256sum "$TARBALL" "$DEB" "$RPM" > SHA256SUMS
+          sha256sum --check SHA256SUMS
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ARTIFACT="dist/docker-helper-${{ steps.version.outputs.version }}-linux-amd64.tar.gz"
-          if [ ! -f "$ARTIFACT" ]; then
-            echo "error: release artifact not found: $ARTIFACT" >&2
-            exit 1
-          fi
           ARGS=()
           if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
             ARGS+=(--prerelease)
@@ -84,4 +177,7 @@ jobs:
             --title "${{ steps.version.outputs.tag }}" \
             --generate-notes \
             "${ARGS[@]}" \
-            "$ARTIFACT"
+            "dist/docker-helper-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
+            "${{ steps.packages.outputs.deb }}" \
+            "${{ steps.packages.outputs.rpm }}" \
+            "dist/SHA256SUMS"
