@@ -5662,6 +5662,13 @@ func TestPackageMetadataManPages(t *testing.T) {
 		if !strings.Contains(outStr, "/usr/share/man/man5/docker-helper-config.5.gz") {
 			t.Error("RPM missing /usr/share/man/man5/docker-helper-config.5.gz")
 		}
+		// Verify exact FILEMODES for man pages.
+		cmd2 := exec.Command(rpmPath, "-qp", "--queryformat", "%{FILEMODES}\n", rpmFile)
+		out2, _ := cmd2.CombinedOutput()
+		out2Str := string(out2)
+		if !strings.Contains(out2Str, "0644") {
+			t.Errorf("RPM man page mode wrong: expected 0644, got:\n%s", out2Str)
+		}
 	} else {
 		t.Log("rpm not available, skipping RPM man page verification")
 	}
@@ -5763,28 +5770,34 @@ func TestManPageDocFacts(t *testing.T) {
 	}
 
 	// Minimal example must contain both required fields.
-	// Parse the minimal example JSON.
-	inExample := false
+	// Extract JSON between .nf and .fi in the minimal example section.
+	inNF := false
 	exampleJSON := ""
 	for _, line := range strings.Split(content5, "\n") {
 		if strings.Contains(line, "Minimal") {
-			inExample = true
 			continue
 		}
-		if inExample {
+		if inNF {
 			if strings.HasPrefix(line, ".fi") {
 				break
 			}
 			exampleJSON += line + "\n"
 		}
+		if strings.HasPrefix(line, ".nf") && exampleJSON == "" {
+			inNF = true
+		}
+	}
+	if exampleJSON == "" {
+		t.Fatal("could not find minimal example JSON in docker-helper-config.5")
 	}
 	var cfg map[string]interface{}
-	if err := json.Unmarshal([]byte(exampleJSON), &cfg); err == nil {
-		if _, ok := cfg["allowed_root"]; !ok {
-			t.Error("minimal example must contain allowed_root")
-		}
-		if _, ok := cfg["session_ttl"]; !ok {
-			t.Error("minimal example must contain session_ttl")
-		}
+	if err := json.Unmarshal([]byte(exampleJSON), &cfg); err != nil {
+		t.Fatalf("minimal example JSON failed to parse: %v\nJSON:\n%s", err, exampleJSON)
+	}
+	if _, ok := cfg["allowed_root"]; !ok {
+		t.Error("minimal example must contain allowed_root")
+	}
+	if _, ok := cfg["session_ttl"]; !ok {
+		t.Error("minimal example must contain session_ttl")
 	}
 }

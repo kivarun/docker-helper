@@ -68,7 +68,8 @@ CA injection mode: \fBdisabled\fR (no injection) or \fBauto\fR (automatic inject
 using \fBtrusted_ca_path\fR).
 .TP
 .B trusted_ca_path (string, conditional)
-Absolute path to trusted CA certificate bundle. Required when
+Absolute path to a regular file containing exactly one PEM-encoded
+X.509 CA certificate. No additional PEM blocks or content. Required when
 \fBtrusted_ca_injection\fR is set to "auto".
 .TP
 .B http_address (string, optional, default="127.0.0.1:52375")

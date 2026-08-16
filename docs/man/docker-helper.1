@@ -43,9 +43,8 @@ allowed_root is added to managed AppArmor roots. Subsequent changes to
 configuration or principal allowed roots do NOT automatically update AppArmor;
 use \fIdocker-helper apparmor root\fR to manage them.
 .TP
-.B docker-helper reload [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE]
-Reload configuration. Use \fB\-\-system\fR for system daemon, \fB\-\-endpoint\fR
-or \fB\-\-token-file\fR for user daemon.
+.B docker-helper reload [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Reload configuration.
 .TP
 .B docker-helper version
 Print version information.
@@ -54,13 +53,13 @@ Print version information.
 Show help for a command.
 .SS Session Commands
 .TP
-.B docker-helper session create [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] \-\-workspace PATH
+.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH
 Create a new session for a workspace.
 .TP
-.B docker-helper session list [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE]
+.B docker-helper session list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 List active sessions.
 .TP
-.B docker-helper session delete [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] \-\-id SESSION_ID
+.B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID
 Delete a session by ID.
 .TP
 .B docker-helper session cleanup
@@ -81,29 +80,29 @@ shutdown_timeout, operation_retention_ttl, operation_max_completed,
 operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .SS Principal Commands
 .TP
-.B docker-helper principal create [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER
+.B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
 Create a new principal.
 .TP
-.B docker-helper principal show [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER [FIELD]
+.B docker-helper principal show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER [FIELD]
 Show principal details.
 .TP
-.B docker-helper principal set [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER FIELD VALUE
+.B docker-helper principal set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER FIELD VALUE
 Modify principal settings.
 .TP
-.B docker-helper principal allowed-root add [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER PATH
+.B docker-helper principal allowed-root add [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Add an allowed root for a principal.
 .TP
-.B docker-helper principal allowed-root remove [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER PATH
+.B docker-helper principal allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Remove an allowed root from a principal.
 .SS Credential Commands
 .TP
-.B docker-helper credential create [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] \-\-name NAME USER
+.B docker-helper credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-name NAME USER
 Create a new credential for a principal.
 .TP
-.B docker-helper credential list [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] USER
+.B docker-helper credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
 List credentials for a principal.
 .TP
-.B docker-helper credential revoke [\-\-system | \-\-endpoint ENDPOINT | \-\-token-file FILE] CREDENTIAL_ID
+.B docker-helper credential revoke [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] CREDENTIAL_ID
 Revoke a credential.
 .SS AppArmor Commands (System Mode)
 .TP
@@ -132,13 +131,13 @@ Run a Docker container.
 .B docker-helper registry login \-\-registry REGISTRY \-\-username USER
 Log in to a container registry for the current session.
 .SH OPERATOR ENDPOINT SELECTION
-For reload, session, principal, and credential commands, select the target daemon via:
+For reload, session, principal, and credential commands, select the target daemon:
 .IP \(bu 4
-\fB\-\-system\fR: Use system daemon (default for system mode)
+\fB\-\-system\fR: Connect to system daemon (default for system mode)
 .IP \(bu 4
-\fB\-\-endpoint URL\fR: Use specified HTTP endpoint (requires \fB\-\-token-file\fR)
+\fB\-\-endpoint URL\fR: Explicit endpoint: \fIunix:///absolute/path\fR or \fIhttp://127.0.0.1:PORT\fR (HTTP is loopback only; requires \fB\-\-token-file\fR)
 .IP \(bu 4
-\fB\-\-token-file FILE\fR: Read admin token from file
+\fB\-\-token-file FILE\fR: Read authentication token from file
 .PP
 \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
 \fB\-\-endpoint\fR requires \fB\-\-token-file\fR.
@@ -154,10 +153,16 @@ No remote or TLS support in Release 2.
 Success
 .TP
 .B 1
-Operational or runtime failure
+Generic operational or runtime failure
 .TP
 .B 2
-Invalid CLI arguments or input
+Invalid CLI arguments or input (where applicable)
+.PP
+\fBdocker-helper run\fR returns the container exit code when the container
+exits with a non-zero status.
+.PP
+SIGINT for async build/run operations returns 130.
+SIGTERM for async build/run operations returns 143.
 .SH FILES
 .TP
 .B /etc/docker-helper/config.json
