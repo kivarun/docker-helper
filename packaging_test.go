@@ -3728,3 +3728,337 @@ exit 42
 		t.Errorf("warning should contain parser stderr diagnostic. Output: %s", output)
 	}
 }
+
+// --- nFPM config static tests ---
+
+// TestNfpmConfigExists verifies the nFPM config file is present.
+func TestNfpmConfigExists(t *testing.T) {
+	if _, err := os.Stat("packaging/nfpm.yaml"); err != nil {
+		t.Fatalf("packaging/nfpm.yaml not found: %v", err)
+	}
+}
+
+// TestNfpmConfigRequiredFields checks that the nFPM config contains
+// all required top-level fields.
+func TestNfpmConfigRequiredFields(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, field := range []string{"name:", "version:", "arch:", "platform:"} {
+		if !strings.Contains(content, field) {
+			t.Errorf("nfpm.yaml missing required field: %s", field)
+		}
+	}
+}
+
+// TestNfpmConfigRequiredDestinations verifies the config installs all
+// required system assets.
+func TestNfpmConfigRequiredDestinations(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, path := range []string{
+		"/usr/bin/docker-helper",
+		"/usr/lib/systemd/system/docker-helper.service",
+		"/etc/apparmor.d/docker-helper-system",
+		"/etc/apparmor.d/docker-helper.d/managed-roots",
+	} {
+		if !strings.Contains(content, path) {
+			t.Errorf("nfpm.yaml missing required destination: %s", path)
+		}
+	}
+}
+
+// TestNfpmConfigExcludesRuntimeState ensures the package does not ship
+// operator-managed runtime or state paths.
+func TestNfpmConfigExcludesRuntimeState(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, path := range []string{
+		"/etc/docker-helper/config.json",
+		"/etc/docker-helper/admin.token",
+		"/var/lib/docker-helper",
+		"/run/docker-helper",
+	} {
+		if strings.Contains(content, path) {
+			t.Errorf("nfpm.yaml must not include runtime path: %s", path)
+		}
+	}
+}
+
+// TestNfpmConfigExcludesUserAssets ensures the system package does not
+// ship user-mode or installer artifacts.
+func TestNfpmConfigExcludesUserAssets(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, s := range []string{
+		"systemd/user",
+		"install.sh",
+		"uninstall.sh",
+		"SKILL.md",
+	} {
+		if strings.Contains(content, s) {
+			t.Errorf("nfpm.yaml must not include: %s", s)
+		}
+	}
+}
+
+// TestNfpmConfigSystemdVendorDirectory verifies the systemd unit is
+// installed to the vendor directory, not /etc/systemd/system.
+func TestNfpmConfigSystemdVendorDirectory(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if strings.Contains(content, "/etc/systemd/system") {
+		t.Error("systemd unit must not be installed to /etc/systemd/system")
+	}
+	if !strings.Contains(content, "/usr/lib/systemd/system/docker-helper.service") {
+		t.Error("systemd unit must be installed to /usr/lib/systemd/system/")
+	}
+}
+
+// TestNfpmConfigManagedRootsConffile verifies managed-roots is marked as
+// a conffile for DEB and config(noreplace) for RPM.
+func TestNfpmConfigManagedRootsConffile(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "conffiles:") {
+		t.Error("nfpm.yaml must have DEB conffiles section")
+	}
+	if !strings.Contains(content, "/etc/apparmor.d/docker-helper.d/managed-roots") {
+		t.Error("conffiles must include managed-roots")
+	}
+	if !strings.Contains(content, "config_noreplace: true") {
+		t.Error("nfpm.yaml must have rpm config_noreplace: true")
+	}
+}
+
+// TestNfpmConfigBinaryMode verifies the binary destination mode is 0755.
+func TestNfpmConfigBinaryMode(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "0755") {
+		t.Error("nfpm.yaml must set binary mode 0755")
+	}
+}
+
+// TestNfpmConfigAssetModes verifies system asset modes are 0644.
+func TestNfpmConfigAssetModes(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	count := strings.Count(content, "0644")
+	if count < 3 {
+		t.Errorf("expected at least 3 assets with mode 0644, found %d", count)
+	}
+}
+
+// TestNfpmConfigVersionFromEnvironment verifies the version is sourced
+// from an environment variable, not hardcoded.
+func TestNfpmConfigVersionFromEnvironment(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "${VERSION}") {
+		t.Error("version must use ${VERSION} template variable")
+	}
+}
+
+// --- build-packages.sh tests ---
+
+// TestBuildPackagesScriptSyntax verifies build-packages.sh has valid bash syntax.
+func TestBuildPackagesScriptSyntax(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "build-packages.sh")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build-packages.sh syntax error: %v", err)
+	}
+}
+
+// TestBuildPackagesScriptRequiresVersion verifies the script fails when
+// VERSION is not provided.
+func TestBuildPackagesScriptRequiresVersion(t *testing.T) {
+	cmd := exec.Command("bash", "build-packages.sh")
+	cmd.Env = append(os.Environ(), "PATH=")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("build-packages.sh must fail without VERSION argument")
+	}
+}
+
+// TestBuildPackagesScriptNfpmMissing verifies the script fails with a
+// clear error when nfpm is not available.
+func TestBuildPackagesScriptNfpmMissing(t *testing.T) {
+	cmd := exec.Command("bash", "build-packages.sh", "1.0.0")
+	cmd.Env = append(os.Environ(), "PATH=")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("build-packages.sh must fail when nfpm is not found")
+	}
+	output := string(out)
+	if !strings.Contains(output, "nfpm") {
+		t.Errorf("error message must mention nfpm: %s", output)
+	}
+}
+
+// TestBuildPackagesScriptCallsStaticBuild verifies the script delegates
+// binary building to build-static.sh with the exact VERSION.
+func TestBuildPackagesScriptCallsStaticBuild(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "build-static.sh") {
+		t.Error("build-packages.sh must call build-static.sh")
+	}
+	if !strings.Contains(content, "$VERSION") {
+		t.Error("build-packages.sh must pass VERSION to build-static.sh")
+	}
+}
+
+// TestBuildPackagesScriptBuildsBothFormats verifies the script builds
+// both DEB and RPM packages.
+func TestBuildPackagesScriptBuildsBothFormats(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "deb") {
+		t.Error("build-packages.sh must build DEB packages")
+	}
+	if !strings.Contains(content, "rpm") {
+		t.Error("build-packages.sh must build RPM packages")
+	}
+}
+
+// TestBuildPackagesScriptOutputsToDist verifies package artifacts are
+// written to the dist/ directory.
+func TestBuildPackagesScriptOutputsToDist(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "dist") {
+		t.Error("build-packages.sh must output artifacts to dist/")
+	}
+}
+
+// TestBuildPackagesScriptVerifiesBinary verifies the script checks that
+// the static binary exists and is executable before packaging.
+func TestBuildPackagesScriptVerifiesBinary(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "dist/docker-helper") {
+		t.Error("build-packages.sh must verify dist/docker-helper exists")
+	}
+	if !strings.Contains(content, "-x") {
+		t.Error("build-packages.sh must check binary is executable")
+	}
+}
+
+// TestPackageBuildIntegration builds real DEB/RPM packages and verifies
+// their contents. Skipped when nfpm or musl-gcc are unavailable.
+func TestPackageBuildIntegration(t *testing.T) {
+	if _, err := exec.LookPath("nfpm"); err != nil {
+		t.Skip("nfpm not installed, skipping package build integration test")
+	}
+
+	hasCC := false
+	if _, err := exec.LookPath("musl-gcc"); err == nil {
+		hasCC = true
+	}
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		if _, err := exec.LookPath("gcc"); err == nil {
+			hasCC = true
+		}
+	}
+	if !hasCC {
+		t.Skip("musl-gcc (or Alpine gcc) not available, skipping static build")
+	}
+
+	cmd := exec.Command("bash", "build-packages.sh", "1.0.0-test")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build-packages.sh failed: %v\n%s", err, out)
+	}
+
+	debFiles, _ := filepath.Glob("dist/docker-helper_*.deb")
+	if len(debFiles) == 0 {
+		t.Fatal("no DEB package found in dist/")
+	}
+
+	rpmFiles, _ := filepath.Glob("dist/docker-helper-*.rpm")
+	if len(rpmFiles) == 0 {
+		t.Fatal("no RPM package found in dist/")
+	}
+
+	// Verify DEB contents with dpkg-deb.
+	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+		cmd := exec.Command(dpkgDeb, "--contents", debFiles[0])
+		out, _ := cmd.CombinedOutput()
+		verifyPackageContents(t, "DEB", string(out))
+	} else {
+		t.Log("dpkg-deb not available, skipping DEB content verification")
+	}
+
+	// Verify RPM contents with rpm.
+	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+		cmd := exec.Command(rpmPath, "-qpl", rpmFiles[0])
+		out, _ := cmd.CombinedOutput()
+		verifyPackageContents(t, "RPM", string(out))
+	} else {
+		t.Log("rpm not available, skipping RPM content verification")
+	}
+}
+
+func verifyPackageContents(t *testing.T, format, contents string) {
+	t.Helper()
+
+	for _, path := range []string{
+		"/usr/bin/docker-helper",
+		"/usr/lib/systemd/system/docker-helper.service",
+		"/etc/apparmor.d/docker-helper-system",
+		"/etc/apparmor.d/docker-helper.d/managed-roots",
+	} {
+		if !strings.Contains(contents, path) {
+			t.Errorf("%s missing required path: %s", format, path)
+		}
+	}
+
+	for _, path := range []string{
+		"/etc/docker-helper/config.json",
+		"/etc/docker-helper/admin.token",
+		"/var/lib/docker-helper",
+		"/run/docker-helper",
+	} {
+		if strings.Contains(contents, path) {
+			t.Errorf("%s must not contain: %s", format, path)
+		}
+	}
+}
