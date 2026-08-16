@@ -184,5 +184,10 @@ provides Docker operations through its own policy-enforced interface.
 
 ## Documentation
 
+Bundled man pages:
+
+- `man/docker-helper.1.gz` — command reference
+- `man/docker-helper-config.5.gz` — configuration file format
+
 For full API/CLI documentation, see the project README and
 `skills/docker-helper/SKILL.md` in this archive.

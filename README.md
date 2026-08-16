@@ -44,8 +44,9 @@ exposes both a system Unix socket and a loopback HTTP listener. The
 loopback HTTP address is configurable (`http_address`); changing it
 requires a daemon restart.
 
-System daemon mode is implemented; system service/package installation is
-not yet shipped.
+System daemon mode is implemented. Release 2 is available as a release
+candidate with native DEB/RPM packages, systemd system service, and
+mandatory AppArmor confinement.
 
 ## Authentication model
 
@@ -76,8 +77,12 @@ To build from source, you additionally need:
 
 ## Docker access
 
+Docker access requirements depend on deployment mode.
+
+### User mode
+
 The user running docker-helper must be able to access the Docker daemon.
-docker-helper runs as a **user service** and does not use sudo (except
+docker-helper runs as the current user and does not use sudo (except
 optionally for the AppArmor profile). Ensure the current user has Docker
 access before installing.
 
@@ -98,6 +103,14 @@ docker info
 Membership in the `docker` group is effectively root-level access to the
 host. For rootless Docker, use the already configured Docker environment
 instead of adding the user to the `docker` group.
+
+### System mode
+
+The system daemon runs as root and accesses rootful Docker directly.
+Rootful Docker is effectively root-equivalent host capability.
+
+Principals do NOT need direct docker.sock access or membership in the
+`docker` group. The daemon mediates all Docker operations on their behalf.
 
 ## Installation
 
@@ -124,6 +137,59 @@ For a fully non-interactive installation:
 ```bash
 ./install.sh --yes
 ```
+
+### Native packages — system mode
+
+Native packages install docker-helper as a system service with AppArmor
+confinement. They install the binary, systemd unit, AppArmor profile, and
+man pages. They do NOT run `docker-helper init`, generate config/token/state,
+or automatically start/enable a previously inactive service.
+
+After package installation, run init then enable/start:
+
+**Ubuntu / DEB:**
+
+```bash
+sudo apt install ./docker-helper_*.deb
+sudo docker-helper init --allowed-root /srv/workspaces
+sudo systemctl enable --now docker-helper
+```
+
+**openSUSE / RPM:**
+
+```bash
+sudo zypper install ./docker-helper-*.rpm
+sudo docker-helper init --allowed-root /srv/workspaces
+sudo systemctl enable --now docker-helper
+```
+
+Package installation paths:
+
+| Path | Description |
+|------|-------------|
+| `/usr/bin/docker-helper` | Binary |
+| `/etc/docker-helper/config.json` | Configuration (created by init) |
+| `/etc/docker-helper/admin.token` | Admin token (created by init) |
+| `/var/lib/docker-helper/docker-helper.db` | State database (created by init) |
+| `/run/docker-helper/docker-helper.sock` | Unix socket (created at runtime) |
+
+#### Native package removal
+
+**DEB:**
+
+- `apt remove docker-helper` stops/disables the service and removes packaged
+  assets; config and state are preserved.
+- `apt purge docker-helper` additionally removes docker-helper config, state,
+  and runtime data.
+
+**RPM:**
+
+- Final erase stops/disables the service and removes packaged assets;
+  persistent config and state are preserved.
+- Modified managed-roots follows native RPM `%config(noreplace)` semantics.
+
+Package repositories are not yet available; standalone native artifacts are
+published per release.
 
 ### Manual installation
 
@@ -715,9 +781,9 @@ Note: `docker-helper config show` (without a field) displays
 - **Container policy** — containers run with `--rm`, `--security-opt label=disable`,
   and `--user <uid>:<gid>` (principal UID:GID for principal-owned sessions,
   daemon UID:GID for legacy/admin sessions).
-- **AppArmor** — an optional AppArmor profile is included in the release
-  tarball and can be installed during `./install.sh` to further restrict
-  daemon access.
+- **AppArmor** — system mode uses mandatory AppArmor confinement with the
+  `docker-helper-system` profile. The release tarball also includes an optional
+  user-mode AppArmor profile template.
 
 **Known limitations:**
 
@@ -755,6 +821,54 @@ Agents using docker-helper need explicit operating instructions because the
 helper enforces policy that the agent must not bypass. A portable skill is
 available at
 [.claude/skills/docker-helper/SKILL.md](.claude/skills/docker-helper/SKILL.md).
+
+## AppArmor (system mode)
+
+System mode uses mandatory AppArmor confinement with the
+`docker-helper-system` profile. Managed workspace roots are stored in
+`/etc/apparmor.d/docker-helper.d/managed-roots`.
+
+During system-mode `docker-helper init`, the initial `allowed_root` is
+automatically added to managed AppArmor roots. Subsequent changes to
+configuration or principal allowed roots do NOT automatically update
+AppArmor. Manage them explicitly:
+
+```bash
+docker-helper apparmor root list
+docker-helper apparmor root add /path/to/workspace
+docker-helper apparmor root remove /path/to/workspace
+docker-helper apparmor check
+```
+
+User mode does not use AppArmor confinement by default. The release tarball
+includes an optional user-mode AppArmor profile template that can be
+installed manually.
+
+## Documentation
+
+Man pages are installed with native packages:
+
+```bash
+man docker-helper
+man docker-helper-config
+```
+
+The release tarball includes compressed man pages in the `man/` directory.
+
+## Release artifacts
+
+Each release publishes:
+
+- `docker-helper-<version>-linux-amd64.tar.gz` — static binary + install scripts
+- one `.deb` — native DEB package (system mode)
+- one `.rpm` — native RPM package (system mode)
+- `SHA256SUMS` — SHA-256 checksums for the three artifacts above
+
+Verify downloaded artifacts:
+
+```bash
+sha256sum --check SHA256SUMS
+```
 
 ## More information
 

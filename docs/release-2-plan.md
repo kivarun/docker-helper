@@ -85,11 +85,21 @@ preferences. No cleanup was performed merely for style.
 - No fallback semantics;
 - `reload` command uses operator client.
 
-## Phase 8: system service / packaging — next
+## Phase 8: system service / packaging — implementation completed, acceptance pending
 
+Implementation completed:
 - systemd system service unit;
-- RPM/DEB packaging;
-- Distribution installation.
+- system-mode AppArmor integration (mandatory);
+- DEB/RPM native packaging;
+- package lifecycle scriptlets;
+- manpages (docker-helper.1, docker-helper-config.5);
+- release workflow publishes tar.gz, DEB, RPM, SHA256SUMS.
+
+Acceptance pending:
+- privileged Ubuntu DEB lifecycle (install/upgrade/remove/purge);
+- privileged openSUSE RPM lifecycle (install/upgrade/erase);
+- coexistence with user-mode installation;
+- full Release 2 acceptance matrix.
 
 ### Completion criteria
 
@@ -367,9 +377,11 @@ operational experience justifies it.
 - Build native DEB and RPM packages.
 - Keep openSUSE and Ubuntu as important targets; select the exact RHEL-family
   target before final package acceptance. Fedora is not currently committed.
-- Publish packages through selected repository/update channels so normal package
-  manager install and upgrade workflows work.
-- Include both system and supported user deployment assets as appropriate.
+- Standalone native DEB/RPM artifacts are the Release 2 deliverable.
+  Package repositories and update channels are deferred until after package
+  format/lifecycle acceptance or a later distribution slice.
+- Native packages are system-mode packages. User mode remains supported via
+  tarball and user installer.
 - Provide at least:
   - `docker-helper(1)`;
   - `docker-helper-config(5)`.

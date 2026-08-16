@@ -5872,3 +5872,46 @@ func TestReleaseWorkflow(t *testing.T) {
 		t.Error("release.yml must handle prerelease")
 	}
 }
+
+// --- README documentation contract tests ---
+
+func TestReadmeDocContract(t *testing.T) {
+	data, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must not contain the dangerous stale statement.
+	if strings.Contains(content, "not yet shipped") {
+		t.Error("README.md must not contain stale 'not yet shipped' statement")
+	}
+
+	// Must mention native packages.
+	if !strings.Contains(content, ".deb") {
+		t.Error("README.md must mention native DEB")
+	}
+	if !strings.Contains(content, ".rpm") {
+		t.Error("README.md must mention native RPM")
+	}
+
+	// Must mention init with --allowed-root.
+	if !strings.Contains(content, "docker-helper init --allowed-root") {
+		t.Error("README.md must mention 'docker-helper init --allowed-root'")
+	}
+
+	// Must mention systemctl enable --now docker-helper.
+	if !strings.Contains(content, "systemctl enable --now docker-helper") {
+		t.Error("README.md must mention 'systemctl enable --now docker-helper'")
+	}
+
+	// Must mention SHA256SUMS.
+	if !strings.Contains(content, "SHA256SUMS") {
+		t.Error("README.md must mention SHA256SUMS")
+	}
+
+	// Must mention man pages.
+	if !strings.Contains(content, "man docker-helper") && !strings.Contains(content, "docker-helper(1)") {
+		t.Error("README.md must mention man docker-helper or docker-helper(1)")
+	}
+}
