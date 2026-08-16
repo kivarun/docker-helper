@@ -5663,11 +5663,11 @@ func TestPackageMetadataManPages(t *testing.T) {
 			t.Error("RPM missing /usr/share/man/man5/docker-helper-config.5.gz")
 		}
 		// Verify exact FILEMODES for each man page path individually.
-		cmd2 := exec.Command(rpmPath, "-qp", "--queryformat", "%{FILENAMES}\t%{FILEMODES}\n", rpmFile)
+		cmd2 := exec.Command(rpmPath, "-qp", "--queryformat", "[%{FILENAMES}\t%{FILEMODES:perms}\n]", rpmFile)
 		out2, _ := cmd2.CombinedOutput()
 		expectedModes := map[string]string{
-			"/usr/share/man/man1/docker-helper.1.gz":        "0644",
-			"/usr/share/man/man5/docker-helper-config.5.gz": "0644",
+			"/usr/share/man/man1/docker-helper.1.gz":        "-rw-r--r--",
+			"/usr/share/man/man5/docker-helper-config.5.gz": "-rw-r--r--",
 		}
 		foundModes := make(map[string]string)
 		for _, line := range strings.Split(strings.TrimSpace(string(out2)), "\n") {
@@ -5679,6 +5679,7 @@ func TestPackageMetadataManPages(t *testing.T) {
 		for path, expected := range expectedModes {
 			actual, ok := foundModes[path]
 			if !ok {
+				t.Errorf("RPM man page path not found in FILENAMES: %s", path)
 				continue
 			}
 			if actual != expected {

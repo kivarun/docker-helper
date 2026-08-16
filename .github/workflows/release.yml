@@ -44,8 +44,11 @@ jobs:
 
       - name: Verify tag checkout
         run: |
-          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
-            echo "error: HEAD ($GITHUB_SHA) does not match tag commit" >&2
+          ACTUAL_HEAD="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_HEAD" != "$GITHUB_SHA" ]; then
+            echo "error: HEAD mismatch" >&2
+            echo "  actual HEAD:   $ACTUAL_HEAD" >&2
+            echo "  expected SHA:  $GITHUB_SHA" >&2
             exit 1
           fi
 
@@ -84,7 +87,12 @@ jobs:
           tar xzf "$NFPM_TARBALL" nfpm
           chmod +x nfpm
           sudo mv nfpm /usr/local/bin/
-          nfpm --version
+          NFPM_VER="$(nfpm --version)"
+          if ! echo "$NFPM_VER" | grep -qF "2.47.0"; then
+            echo "error: nFPM version mismatch: expected 2.47.0, got: $NFPM_VER" >&2
+            exit 1
+          fi
+          echo "nFPM version verified: $NFPM_VER"
 
       - name: Build release bundle
         run: ./build-bundle.sh "${{ steps.version.outputs.version }}"
@@ -117,16 +125,21 @@ jobs:
       - name: Identify package files
         id: packages
         run: |
-          DEB=$(ls dist/*.deb 2>/dev/null | head -1)
-          RPM=$(ls dist/*.rpm 2>/dev/null | head -1)
-          if [ -z "$DEB" ]; then
-            echo "error: no .deb found in dist/" >&2
+          shopt -s nullglob
+          debs=(dist/*.deb)
+          rpms=(dist/*.rpm)
+          if [ "${#debs[@]}" -ne 1 ]; then
+            echo "error: expected exactly 1 .deb in dist/, found ${#debs[@]}" >&2
+            [ "${#debs[@]}" -gt 0 ] && echo "  found: ${debs[*]}" >&2
             exit 1
           fi
-          if [ -z "$RPM" ]; then
-            echo "error: no .rpm found in dist/" >&2
+          if [ "${#rpms[@]}" -ne 1 ]; then
+            echo "error: expected exactly 1 .rpm in dist/, found ${#rpms[@]}" >&2
+            [ "${#rpms[@]}" -gt 0 ] && echo "  found: ${rpms[*]}" >&2
             exit 1
           fi
+          DEB="${debs[0]}"
+          RPM="${rpms[0]}"
           echo "deb=$DEB" >> "$GITHUB_OUTPUT"
           echo "rpm=$RPM" >> "$GITHUB_OUTPUT"
           echo "deb_basename=$(basename "$DEB")" >> "$GITHUB_OUTPUT"
@@ -150,6 +163,16 @@ jobs:
       - name: Verify RPM
         run: |
           RPM="${{ steps.packages.outputs.rpm }}"
+          RPM_NAME="$(rpm -qp --queryformat '%{NAME}' "$RPM")"
+          RPM_ARCH="$(rpm -qp --queryformat '%{ARCH}' "$RPM")"
+          if [ "$RPM_NAME" != "docker-helper" ]; then
+            echo "error: RPM name mismatch: expected docker-helper, got $RPM_NAME" >&2
+            exit 1
+          fi
+          if [ "$RPM_ARCH" != "x86_64" ]; then
+            echo "error: RPM arch mismatch: expected x86_64, got $RPM_ARCH" >&2
+            exit 1
+          fi
           rpm -qpl "$RPM" | grep -q "/usr/bin/docker-helper"
           rpm -qpl "$RPM" | grep -q "/usr/lib/systemd/system/docker-helper.service"
           rpm -qpl "$RPM" | grep -q "/etc/apparmor.d/docker-helper-system"
