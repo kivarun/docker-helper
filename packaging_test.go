@@ -4085,7 +4085,7 @@ func TestPackageMetadataIntegration(t *testing.T) {
 		t.Skip("nfpm not installed, skipping package metadata integration test")
 	}
 
-	testVersion := "0.0.0-meta-test"
+	testVersion := "0.0.0"
 	tmpDir := t.TempDir()
 
 	// Create a dummy binary for packaging.
@@ -4237,28 +4237,45 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 		}
 	}
 
-	// Config(noreplace) flag on managed-roots — use FILEFLAGS:fflags.
+	// Config(noreplace) flags — use FILEFLAGS:fflags.
 	cmd = exec.Command(rpmPath, "-qp", "--qf", "[%{FILENAMES} %{FILEFLAGS:fflags}\\n]", rpmFile)
 	flagOut, _ := cmd.CombinedOutput()
 	flagStr := string(flagOut)
-	found := false
+	managedRootsFound := false
+	aaProfileFound := false
 	for _, line := range strings.Split(flagStr, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.Contains(line, "managed-roots") {
-			found = true
-			// config flag = 0x0001, noreplace = 0x0008
-			// fflags output: "config noreplace" or similar
-			if !strings.Contains(line, "config") {
-				t.Errorf("RPM managed-roots must have config flag: %s", line)
+		if strings.Contains(line, "/etc/apparmor.d/docker-helper.d/managed-roots") {
+			managedRootsFound = true
+			parts := strings.Fields(line)
+			if len(parts) < 2 {
+				t.Errorf("RPM managed-roots flags line has no flags field: %s", line)
+				continue
 			}
-			if !strings.Contains(line, "noreplace") {
-				t.Errorf("RPM managed-roots must have noreplace flag: %s", line)
+			flags := parts[len(parts)-1]
+			if !strings.Contains(flags, "c") {
+				t.Errorf("RPM managed-roots must have config flag (c): %s", line)
 			}
-			break
+			if !strings.Contains(flags, "n") {
+				t.Errorf("RPM managed-roots must have noreplace flag (n): %s", line)
+			}
+		}
+		if strings.Contains(line, "/etc/apparmor.d/docker-helper-system") {
+			aaProfileFound = true
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				flags := parts[len(parts)-1]
+				if strings.Contains(flags, "n") {
+					t.Errorf("RPM docker-helper-system must NOT have noreplace flag (n): %s", line)
+				}
+			}
 		}
 	}
-	if !found {
+	if !managedRootsFound {
 		t.Errorf("managed-roots not found in RPM file flags output:\n%s", flagStr)
+	}
+	if !aaProfileFound {
+		t.Errorf("docker-helper-system not found in RPM file flags output:\n%s", flagStr)
 	}
 }
 
@@ -4355,16 +4372,9 @@ func TestPackageBuildIntegration(t *testing.T) {
 		t.Skip("nfpm not installed, skipping package build integration test")
 	}
 
-	testVersion := "1.0.0-test"
-	tmpDir := t.TempDir()
+	testVersion := "1.0.0"
 
-	// Build to a controlled temp output to avoid stale artifacts.
-	cmd := exec.Command("bash", "-c",
-		fmt.Sprintf("cd '%s' && VERSION='%s' bash build-packages.sh '%s'",
-			filepath.Dir(filepath.Dir(tmpDir)), testVersion, testVersion))
-	// Actually, build-packages.sh writes to dist/. Use a temp dist instead.
-	// The simplest approach: run build-packages.sh and find exact filenames.
-	cmd = exec.Command("bash", "build-packages.sh", testVersion)
+	cmd := exec.Command("bash", "build-packages.sh", testVersion)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build-packages.sh failed: %v\n%s", err, out)
