@@ -566,3 +566,22 @@ func (c *apiClient) revokeCredential(id string) (*revokeCredentialResponse, erro
 	}
 	return &result, nil
 }
+
+func (c *apiClient) rotateAdminToken() (*rotateAdminTokenResponse, error) {
+	resp, err := c.doAuthenticatedRequest("POST", "/admin/token/rotate", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result rotateAdminTokenResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}

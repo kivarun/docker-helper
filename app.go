@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 )
 
@@ -65,4 +70,66 @@ func (a *App) setConfig(newCfg *Config) {
 	merged.DatabasePath = a.Config.DatabasePath
 	merged.AdminTokenPath = a.Config.AdminTokenPath
 	a.Config = &merged
+}
+
+// generateAdminToken generates a new random admin token (32 bytes, hex-encoded).
+func generateAdminToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("cannot generate random token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// rotateAdminToken generates a new admin token, writes it to the token file
+// atomically, and updates the in-memory hash. The old token is immediately
+// invalidated. Returns the new token (never logged).
+func (a *App) rotateAdminToken() (string, error) {
+	newToken, err := generateAdminToken()
+	if err != nil {
+		return "", err
+	}
+
+	newHash := sha256.Sum256([]byte(newToken))
+
+	// Write the new token to the file atomically (write to temp, rename).
+	dir := filepath.Dir(a.Config.AdminTokenPath)
+	tmpFile, err := os.CreateTemp(dir, ".admin-token-*")
+	if err != nil {
+		return "", fmt.Errorf("cannot create temp token file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.WriteString(newToken + "\n"); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("cannot write token file: %w", err)
+	}
+	if err := tmpFile.Chmod(0600); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("cannot set token file permissions: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("cannot close temp token file: %w", err)
+	}
+	if err := os.Rename(tmpPath, a.Config.AdminTokenPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("cannot replace token file: %w", err)
+	}
+
+	// Update the in-memory hash under the lock.
+	a.mu.Lock()
+	a.AdminTokenHash = newHash
+	a.mu.Unlock()
+
+	return newToken, nil
+}
+
+// getAdminTokenHash returns a copy of the current admin token hash.
+func (a *App) getAdminTokenHash() [sha256.Size]byte {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.AdminTokenHash
 }

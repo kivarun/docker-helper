@@ -209,6 +209,7 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
 	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
+	mux.HandleFunc("POST /admin/token/rotate", app.handleRotateAdminToken)
 }
 
 func runServe(stdout, stderr io.Writer) error {
