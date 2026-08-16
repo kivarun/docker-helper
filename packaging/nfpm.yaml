@@ -10,10 +10,18 @@ overrides:
     depends:
       - systemd
       - apparmor
+    scripts:
+      postinstall: packaging/scripts/deb/postinstall.sh
+      preremove: packaging/scripts/deb/preremove.sh
+      postremove: packaging/scripts/deb/postremove.sh
   rpm:
     depends:
       - systemd
       - apparmor-parser
+    scripts:
+      postinstall: packaging/scripts/rpm/postinstall.sh
+      preremove: packaging/scripts/rpm/preremove.sh
+      postremove: packaging/scripts/rpm/postremove.sh
 
 contents:
   - src: dist/docker-helper

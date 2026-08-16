@@ -2254,7 +2254,7 @@ exit 0
 	return scriptDir, fakeBinDir, destDir, logFile
 }
 
-func readCalls(t *testing.T, logFile string) []string {
+func readLifecycleCalls(t *testing.T, logFile string) []string {
 	t.Helper()
 	data, err := os.ReadFile(logFile)
 	if err != nil {
@@ -2513,7 +2513,7 @@ exit 1
 		t.Fatalf("parser failure should cause install to fail: %s", out)
 	}
 
-	calls := readCalls(t, logFile)
+	calls := readLifecycleCalls(t, logFile)
 	for _, c := range calls {
 		if strings.Contains(c, "start") {
 			t.Error("service start should not be called after parser failure")
@@ -2566,7 +2566,7 @@ exit 0
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
-	calls := readCalls(t, logFile)
+	calls := readLifecycleCalls(t, logFile)
 	for _, c := range calls {
 		if strings.Contains(c, "binary: init") {
 			t.Error("init should not be called when config exists")
@@ -2609,7 +2609,7 @@ exit 0
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
-	calls := readCalls(t, logFile)
+	calls := readLifecycleCalls(t, logFile)
 	found := false
 	for _, c := range calls {
 		if c == "binary: init --allowed-root "+testRoot {
@@ -2657,7 +2657,7 @@ exit 0
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
-	calls := readCalls(t, logFile)
+	calls := readLifecycleCalls(t, logFile)
 	var enableIdx, startIdx int
 	for i, c := range calls {
 		if strings.Contains(c, "enable") {
@@ -3199,7 +3199,7 @@ esac
 		t.Fatalf("install should succeed: %v\n%s", err, out)
 	}
 
-	calls := readCalls(t, logFile)
+	calls := readLifecycleCalls(t, logFile)
 	// For previously active service, start should be called, not enable
 	foundStart := false
 	foundEnable := false
@@ -3324,7 +3324,7 @@ esac
 		t.Fatal("install should fail when daemon-reload fails")
 	}
 
-	calls := readCalls(t, logFile)
+	calls := readLifecycleCalls(t, logFile)
 	for _, c := range calls {
 		if strings.Contains(c, "start") {
 			t.Error("start should not be called after daemon-reload failure")
@@ -3624,7 +3624,7 @@ exit 0
 		t.Fatalf("uninstall failed: %v\n%s", err, out)
 	}
 
-	calls := readCalls(t, logFile)
+	calls := readLifecycleCalls(t, logFile)
 	// Verify order: is-active, stop, ..., apparmor_parser -R
 	var isActiveIdx, stopIdx, unloadIdx int
 	for i, c := range calls {
@@ -3803,12 +3803,18 @@ func TestNfpmConfigExcludesUserAssets(t *testing.T) {
 	content := string(data)
 	for _, s := range []string{
 		"systemd/user",
-		"install.sh",
-		"uninstall.sh",
 		"SKILL.md",
 	} {
 		if strings.Contains(content, s) {
 			t.Errorf("nfpm.yaml must not include: %s", s)
+		}
+	}
+	// Check for standalone install.sh/uninstall.sh (not postinstall.sh etc.)
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "install.sh" || trimmed == "uninstall.sh" ||
+			strings.HasSuffix(trimmed, ": install.sh") || strings.HasSuffix(trimmed, ": uninstall.sh") {
+			t.Errorf("nfpm.yaml must not include: %s", trimmed)
 		}
 	}
 }
@@ -4431,5 +4437,859 @@ func TestPackageBuildIntegration(t *testing.T) {
 		verifyRPMPackage(t, rpmPath, rpmFile)
 	} else {
 		t.Log("rpm not available, skipping RPM verification")
+	}
+}
+
+// --- Lifecycle script syntax tests ---
+
+func TestDebPostinstallSyntax(t *testing.T) {
+	if err := exec.Command("sh", "-n", "packaging/scripts/deb/postinstall.sh").Run(); err != nil {
+		t.Fatalf("deb postinstall.sh syntax error: %v", err)
+	}
+}
+
+func TestDebPreremoveSyntax(t *testing.T) {
+	if err := exec.Command("sh", "-n", "packaging/scripts/deb/preremove.sh").Run(); err != nil {
+		t.Fatalf("deb preremove.sh syntax error: %v", err)
+	}
+}
+
+func TestDebPostremoveSyntax(t *testing.T) {
+	if err := exec.Command("sh", "-n", "packaging/scripts/deb/postremove.sh").Run(); err != nil {
+		t.Fatalf("deb postremove.sh syntax error: %v", err)
+	}
+}
+
+func TestRpmPostinstallSyntax(t *testing.T) {
+	if err := exec.Command("sh", "-n", "packaging/scripts/rpm/postinstall.sh").Run(); err != nil {
+		t.Fatalf("rpm postinstall.sh syntax error: %v", err)
+	}
+}
+
+func TestRpmPreremoveSyntax(t *testing.T) {
+	if err := exec.Command("sh", "-n", "packaging/scripts/rpm/preremove.sh").Run(); err != nil {
+		t.Fatalf("rpm preremove.sh syntax error: %v", err)
+	}
+}
+
+func TestRpmPostremoveSyntax(t *testing.T) {
+	if err := exec.Command("sh", "-n", "packaging/scripts/rpm/postremove.sh").Run(); err != nil {
+		t.Fatalf("rpm postremove.sh syntax error: %v", err)
+	}
+}
+
+// --- nFPM config: scripts wired up ---
+
+func TestNfpmConfigDebScripts(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	debIdx := strings.Index(content, "deb:")
+	if debIdx < 0 {
+		t.Fatal("deb section not found")
+	}
+	rpmIdx := strings.Index(content, "rpm:")
+	if rpmIdx < 0 || debIdx > rpmIdx {
+		t.Fatal("rpm section not found or ordering wrong")
+	}
+	debSection := content[debIdx:rpmIdx]
+	for _, script := range []string{"postinstall:", "preremove:", "postremove:"} {
+		if !strings.Contains(debSection, script) {
+			t.Errorf("DEB overrides must include script: %s", script)
+		}
+	}
+}
+
+func TestNfpmConfigRpmScripts(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	rpmIdx := strings.Index(content, "rpm:")
+	if rpmIdx < 0 {
+		t.Fatal("rpm section not found")
+	}
+	contentsIdx := strings.Index(content[rpmIdx:], "\ncontents:")
+	if contentsIdx < 0 {
+		contentsIdx = len(content) - rpmIdx
+	}
+	rpmSection := content[rpmIdx : rpmIdx+contentsIdx]
+	for _, script := range []string{"postinstall:", "preremove:", "postremove:"} {
+		if !strings.Contains(rpmSection, script) {
+			t.Errorf("RPM overrides must include script: %s", script)
+		}
+	}
+}
+
+// --- Lifecycle script behavioral tests ---
+
+// setupScriptTest creates a fake environment for testing lifecycle scripts.
+// Returns (fakeDir, logFile) where fakeDir contains fake systemctl/apparmor_parser
+// and logFile records all commands called.
+func setupScriptTest(t *testing.T) (fakeDir, logFile string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	fakeDir = filepath.Join(tmpDir, "fakes")
+	logFile = filepath.Join(tmpDir, "calls.log")
+	if err := os.MkdirAll(fakeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logFile, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+// writeFakeSystemctl creates a systemctl script that logs calls and
+// returns specific exit codes based on the action.
+func writeFakeSystemctl(t *testing.T, fakeDir, logFile string, active bool, enabled bool) {
+	t.Helper()
+	activeStr := "false"
+	if active {
+		activeStr = "true"
+	}
+	enabledStr := "false"
+	if enabled {
+		enabledStr = "true"
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+case "$*" in
+  *"is-active"*)
+    if [ "%s" = "true" ]; then exit 0; else exit 3; fi
+    ;;
+  *"is-enabled"*)
+    if [ "%s" = "true" ]; then exit 0; else exit 1; fi
+    ;;
+  *"stop"*)
+    if [ "${STOP_FAIL:-false}" = "true" ]; then exit 1; fi
+    exit 0
+    ;;
+  *"start"*)
+    if [ "${START_FAIL:-false}" = "true" ]; then exit 1; fi
+    exit 0
+    ;;
+  *"try-restart"*)
+    if [ "${RESTART_FAIL:-false}" = "true" ]; then exit 1; fi
+    exit 0
+    ;;
+  *"daemon-reload"*)
+    if [ "${RELOAD_FAIL:-false}" = "true" ]; then exit 1; fi
+    exit 0
+    ;;
+  *"disable"*)
+    if [ "${DISABLE_FAIL:-false}" = "true" ]; then exit 1; fi
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+`, logFile, activeStr, enabledStr)
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFakeApparmorParser creates an apparmor_parser script that logs calls.
+func writeFakeApparmorParser(t *testing.T, fakeDir, logFile string, failReplace bool, failUnload bool) {
+	t.Helper()
+	failReplaceStr := "false"
+	if failReplace {
+		failReplaceStr = "true"
+	}
+	failUnloadStr := "false"
+	if failUnload {
+		failUnloadStr = "true"
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+case "$*" in
+  *"--replace"*)
+    if [ "%s" = "true" ]; then
+      echo "apparmor_parser: parse error" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *"-R"*)
+    if [ "%s" = "true" ]; then
+      echo "apparmor_parser: unload error" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+`, logFile, failReplaceStr, failUnloadStr)
+	if err := os.WriteFile(filepath.Join(fakeDir, "apparmor_parser"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readCalls reads the command log.
+func readLifecycleScriptCalls(t *testing.T, logFile string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		return nil
+	}
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// runScript runs a lifecycle script with the fake environment.
+func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string, liveSystem bool, extraEnv []string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	scriptDir := filepath.Join(tmpDir, "script")
+	if err := os.MkdirAll(scriptDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace /run/systemd/system with a test-controlled path.
+	modified := strings.ReplaceAll(string(data), "/run/systemd/system", "$TEST_RUN_SYSTEMD")
+	modifiedFile := filepath.Join(scriptDir, "modified.sh")
+	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	testRunDir := filepath.Join(tmpDir, "run", "systemd", "system")
+	if liveSystem {
+		if err := os.MkdirAll(testRunDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	env := append(os.Environ(),
+		"PATH="+fakeDir+":"+os.Getenv("PATH"),
+		"STOP_FAIL=false",
+		"START_FAIL=false",
+		"RESTART_FAIL=false",
+		"RELOAD_FAIL=false",
+		"DISABLE_FAIL=false",
+		"TEST_RUN_SYSTEMD="+testRunDir,
+	)
+	env = append(env, extraEnv...)
+
+	if err := os.WriteFile(logFile, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", modifiedFile)
+	cmd.Env = env
+	for _, a := range args {
+		cmd.Args = append(cmd.Args, a)
+	}
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	} else {
+		exitCode = 0
+	}
+	return string(out), string(out), exitCode
+}
+
+// --- DEB postinstall tests ---
+
+// TestDebPostinstallInactive verifies postinst on fresh install (inactive):
+// is-active -> apparmor replace -> daemon-reload, no restart/start/enable.
+func TestDebPostinstallInactive(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, nil)
+	if code != 0 {
+		t.Fatalf("postinst should exit 0, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	// Must call is-active
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "is-active") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call systemctl is-active")
+	}
+	// Must call apparmor_parser --replace
+	found = false
+	for _, c := range calls {
+		if strings.Contains(c, "--replace") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call apparmor_parser --replace")
+	}
+	// Must call daemon-reload
+	found = false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call systemctl daemon-reload")
+	}
+	// Must NOT call try-restart, start, or enable
+	for _, c := range calls {
+		if strings.Contains(c, "try-restart") || strings.Contains(c, " start") || strings.Contains(c, "enable") {
+			t.Errorf("must not start/enable service when inactive: %s", c)
+		}
+	}
+}
+
+// TestDebPostinstallActive verifies postinst on upgrade (active):
+// is-active -> replace -> daemon-reload -> try-restart.
+func TestDebPostinstallActive(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, nil)
+	if code != 0 {
+		t.Fatalf("postinst should exit 0, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "try-restart") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call systemctl try-restart when service was active")
+	}
+}
+
+// TestDebPostinstallParserFailure verifies postinst fails when apparmor_parser fails.
+func TestDebPostinstallParserFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, true, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, nil)
+	if code == 0 {
+		t.Fatal("postinst should fail when parser fails")
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "try-restart") {
+			t.Error("must not proceed after parser failure")
+		}
+	}
+}
+
+// TestDebPostinstallDaemonReloadFailure verifies postinst fails when daemon-reload fails.
+func TestDebPostinstallDaemonReloadFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{"RELOAD_FAIL=true"})
+	if code == 0 {
+		t.Fatal("postinst should fail when daemon-reload fails")
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "try-restart") {
+			t.Error("must not restart after daemon-reload failure")
+		}
+	}
+}
+
+// --- DEB preremove tests ---
+
+// TestDebPreremoveUpgrade verifies prerm on upgrade does nothing.
+func TestDebPreremoveUpgrade(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+		[]string{"upgrade", "2.0.0"}, true, nil)
+	if code != 0 {
+		t.Fatalf("prerm upgrade should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "stop") || strings.Contains(c, "disable") || strings.Contains(c, "-R") {
+			t.Errorf("prerm upgrade must not stop/disable/unload: %s", c)
+		}
+	}
+}
+
+// TestDebPreremoveRemovesActive verifies prerm on remove stops+disables+unloads.
+func TestDebPreremoveRemovesActive(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+		[]string{"remove"}, true, nil)
+	if code != 0 {
+		t.Fatalf("prerm remove should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	// Must call stop
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "stop") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call systemctl stop")
+	}
+	// Must call disable
+	found = false
+	for _, c := range calls {
+		if strings.Contains(c, "disable") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call systemctl disable")
+	}
+	// Must call apparmor_parser -R
+	found = false
+	for _, c := range calls {
+		if strings.Contains(c, "-R") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call apparmor_parser -R")
+	}
+}
+
+// TestDebPreremoveStopFailure verifies prerm fails when stop fails.
+func TestDebPreremoveStopFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+		[]string{"remove"}, true, []string{"STOP_FAIL=true"})
+	if code == 0 {
+		t.Fatal("prerm should fail when stop fails")
+	}
+}
+
+// TestDebPreremoveUnloadFailure verifies prerm continues when unload fails.
+func TestDebPreremoveUnloadFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, true)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+		[]string{"remove"}, true, nil)
+	if code != 0 {
+		t.Fatalf("prerm should exit 0 when unload fails (best-effort), got %d", code)
+	}
+}
+
+// --- DEB postremove tests ---
+
+// TestDebPostremoveRemovesReloads verifies postrm remove does daemon-reload.
+func TestDebPostremoveRemovesReloads(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postremove.sh", fakeDir, logFile,
+		[]string{"remove"}, true, nil)
+	if code != 0 {
+		t.Fatalf("postrm remove should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call systemctl daemon-reload")
+	}
+}
+
+// TestDebPostremovePurgeRemovesState verifies postrm purge removes state.
+func TestDebPostremovePurgeRemovesState(t *testing.T) {
+	data, err := os.ReadFile("packaging/scripts/deb/postremove.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, path := range []string{"/etc/docker-helper", "/var/lib/docker-helper", "/run/docker-helper"} {
+		if !strings.Contains(content, path) {
+			t.Errorf("postrm purge must remove: %s", path)
+		}
+	}
+	// Must NOT contain broad globs that would remove more than intended.
+	if strings.Contains(content, "rm -rf /etc\n") || strings.Contains(content, "rm -rf /etc ") {
+		t.Error("must not use broad rm -rf /etc")
+	}
+
+	// Verify sentinel would be preserved (check script doesn't remove it)
+	if strings.Contains(content, "other-config") {
+		t.Error("must not remove unrelated files")
+	}
+	// Must try to clean up managed-roots directory if empty.
+	if !strings.Contains(content, "rmdir") && !strings.Contains(content, "docker-helper.d") {
+		t.Error("postrm purge should attempt rmdir on docker-helper.d")
+	}
+}
+
+// --- RPM postinstall tests ---
+
+// TestRpmPostinstallInactive verifies RPM postinstall on fresh install (inactive).
+func TestRpmPostinstallInactive(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm postinstall should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "try-restart") || strings.Contains(c, " start") {
+			t.Error("must not start service when inactive")
+		}
+	}
+}
+
+// TestRpmPostinstallActive verifies RPM postinstall on upgrade (active).
+func TestRpmPostinstallActive(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm postinstall should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "try-restart") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call try-restart when service was active")
+	}
+}
+
+// --- RPM preremove tests ---
+
+// TestRpmPreremoveUpgrade verifies RPM preun on upgrade ($1>0) is no-op.
+func TestRpmPreremoveUpgrade(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"1"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm preun upgrade should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "stop") || strings.Contains(c, "disable") || strings.Contains(c, "-R") {
+			t.Errorf("rpm preun upgrade must not stop/disable/unload: %s", c)
+		}
+	}
+}
+
+// TestRpmPreremoveFinalErase verifies RPM preun on final erase ($1=0).
+func TestRpmPreremoveFinalErase(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "stop") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call systemctl stop on final erase")
+	}
+}
+
+// --- RPM postremove tests ---
+
+// TestRpmPostremoveUpgrade verifies RPM postun on upgrade ($1>0) is no-op.
+func TestRpmPostremoveUpgrade(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postremove.sh", fakeDir, logFile,
+		[]string{"1"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm postun upgrade should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			t.Error("rpm postun upgrade must not call daemon-reload")
+		}
+	}
+}
+
+// TestRpmPostremoveFinalErase verifies RPM postun on final erase ($1=0).
+func TestRpmPostremoveFinalErase(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm postun final erase should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call daemon-reload on final erase")
+	}
+}
+
+// --- Offline (no live system) tests ---
+
+// TestDebPostinstallOffline verifies DEB postinst is no-op without live system.
+func TestDebPostinstallOffline(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, false, nil)
+	if code != 0 {
+		t.Fatalf("offline postinst should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	if len(calls) > 0 {
+		t.Errorf("offline postinst must not call any tools: %v", calls)
+	}
+}
+
+// TestDebPreremoveOffline verifies DEB prerm is no-op without live system.
+func TestDebPreremoveOffline(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+		[]string{"remove"}, false, nil)
+	if code != 0 {
+		t.Fatalf("offline prerm should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	if len(calls) > 0 {
+		t.Errorf("offline prerm must not call any tools: %v", calls)
+	}
+}
+
+// TestDebPostremoveOffline verifies DEB postrm remove is no-op without live system.
+func TestDebPostremoveOffline(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+
+	_, _, code := runScript(t, "packaging/scripts/deb/postremove.sh", fakeDir, logFile,
+		[]string{"remove"}, false, nil)
+	if code != 0 {
+		t.Fatalf("offline postrm should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	if len(calls) > 0 {
+		t.Errorf("offline postrm must not call any tools: %v", calls)
+	}
+}
+
+// TestRpmPostinstallOffline verifies RPM postinstall is no-op without live system.
+func TestRpmPostinstallOffline(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, false, nil)
+	if code != 0 {
+		t.Fatalf("offline rpm postinstall should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	if len(calls) > 0 {
+		t.Errorf("offline rpm postinstall must not call any tools: %v", calls)
+	}
+}
+
+// TestRpmPreremoveOffline verifies RPM preun is no-op without live system.
+func TestRpmPreremoveOffline(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, false, nil)
+	if code != 0 {
+		t.Fatalf("offline rpm preun should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	if len(calls) > 0 {
+		t.Errorf("offline rpm preun must not call any tools: %v", calls)
+	}
+}
+
+// TestRpmPostremoveOffline verifies RPM postun is no-op without live system.
+func TestRpmPostremoveOffline(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postremove.sh", fakeDir, logFile,
+		[]string{"0"}, false, nil)
+	if code != 0 {
+		t.Fatalf("offline rpm postun should exit 0, got %d", code)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	if len(calls) > 0 {
+		t.Errorf("offline rpm postun must not call any tools: %v", calls)
+	}
+}
+
+// --- RPM state preservation test ---
+
+// TestRpmPostremovePreservesState verifies RPM postun does not remove state dirs.
+func TestRpmPostremovePreservesState(t *testing.T) {
+	data, err := os.ReadFile("packaging/scripts/rpm/postremove.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, path := range []string{"/etc/docker-helper", "/var/lib/docker-helper", "/run/docker-helper"} {
+		if strings.Contains(content, path) {
+			t.Errorf("RPM postremove must not remove: %s", path)
+		}
+	}
+}
+
+// --- Package metadata: scripts embedded ---
+
+// TestPackageMetadataScripts verifies that the built packages contain the
+// lifecycle scripts. Skipped when nfpm is unavailable.
+func TestPackageMetadataScripts(t *testing.T) {
+	if _, err := exec.LookPath("nfpm"); err != nil {
+		t.Skip("nfpm not installed, skipping package metadata scripts test")
+	}
+
+	tmpDir := t.TempDir()
+
+	// Create a dummy binary.
+	dummyBin := filepath.Join(tmpDir, "docker-helper")
+	if err := os.WriteFile(dummyBin, []byte("dummy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a temporary nFPM config.
+	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")
+	configFile := filepath.Join(tmpDir, "nfpm.yaml")
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build DEB.
+	debCmd := exec.Command("nfpm", "package", "--config", configFile, "--packager", "deb", "--target", tmpDir)
+	debCmd.Env = append(os.Environ(), "VERSION=0.0.0")
+	if out, err := debCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm DEB build failed: %v\n%s", err, out)
+	}
+
+	// Build RPM.
+	rpmCmd := exec.Command("nfpm", "package", "--config", configFile, "--packager", "rpm", "--target", tmpDir)
+	rpmCmd.Env = append(os.Environ(), "VERSION=0.0.0")
+	if out, err := rpmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm RPM build failed: %v\n%s", err, out)
+	}
+
+	debFile := filepath.Join(tmpDir, "docker-helper_0.0.0_amd64.deb")
+	rpmFile := filepath.Join(tmpDir, "docker-helper-0.0.0-1.x86_64.rpm")
+
+	// Verify DEB scripts.
+	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+		controlDir := filepath.Join(tmpDir, "deb-control")
+		if err := os.MkdirAll(controlDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(dpkgDeb, "--control", debFile, controlDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("dpkg-deb --control failed: %v\n%s", err, out)
+		}
+		for _, script := range []string{"postinst", "prerm", "postrm"} {
+			scriptPath := filepath.Join(controlDir, script)
+			if _, err := os.Stat(scriptPath); err != nil {
+				t.Errorf("DEB must contain script: %s", script)
+			}
+		}
+	} else {
+		t.Log("dpkg-deb not available, skipping DEB script verification")
+	}
+
+	// Verify RPM scripts.
+	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+		cmd := exec.Command(rpmPath, "-qp", "--scripts", rpmFile)
+		out, _ := cmd.CombinedOutput()
+		scriptStr := string(out)
+		for _, section := range []string{"postinstall", "preuninstall", "postuninstall"} {
+			if !strings.Contains(scriptStr, section) {
+				t.Errorf("RPM must contain scriptlet: %s", section)
+			}
+		}
+	} else {
+		t.Log("rpm not available, skipping RPM script verification")
 	}
 }
