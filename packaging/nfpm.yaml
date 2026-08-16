@@ -7,11 +7,11 @@ homepage: https://github.com/kivarun/docker-helper
 
 overrides:
   deb:
-    dependencies:
+    depends:
       - systemd
       - apparmor
   rpm:
-    dependencies:
+    depends:
       - systemd
       - apparmor-parser
 

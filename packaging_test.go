@@ -3839,12 +3839,10 @@ func TestNfpmConfigManagedRootsType(t *testing.T) {
 	}
 	content := string(data)
 
-	// Find the managed-roots content entry and verify it has type: config|noreplace.
 	idx := strings.Index(content, "dst: /etc/apparmor.d/docker-helper.d/managed-roots")
 	if idx < 0 {
 		t.Fatal("managed-roots destination entry not found")
 	}
-	// Grab the entry: from the "- src:" before this dst to end of content.
 	before := content[:idx]
 	entryStart := strings.LastIndex(before, "- src:")
 	if entryStart < 0 {
@@ -3894,15 +3892,14 @@ func TestNfpmConfigVersionFromEnvironment(t *testing.T) {
 	}
 }
 
-// TestNfpmConfigDebDependencies verifies DEB dependencies are correct.
-func TestNfpmConfigDebDependencies(t *testing.T) {
+// TestNfpmConfigDebDepends verifies DEB depends are correct.
+func TestNfpmConfigDebDepends(t *testing.T) {
 	data, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 
-	// Find the deb overrides section and check dependencies.
 	debIdx := strings.Index(content, "deb:")
 	if debIdx < 0 {
 		t.Fatal("deb overrides section not found")
@@ -3913,71 +3910,54 @@ func TestNfpmConfigDebDependencies(t *testing.T) {
 	}
 	debSection := content[debIdx:rpmIdx]
 
-	// Find the dependencies sub-section.
-	depsIdx := strings.Index(debSection, "dependencies:")
-	if depsIdx < 0 {
-		t.Fatal("deb dependencies section not found")
+	if !strings.Contains(debSection, "depends:") {
+		t.Fatal("deb depends: section not found")
 	}
-	// Extract only the dependency list (until next non-list line).
-	depList := debSection[depsIdx:]
-	nextSection := strings.Index(depList, "\n  ")
-	if nextSection > 0 && !strings.HasPrefix(strings.TrimSpace(depList[nextSection:]), "- ") {
-		depList = depList[:nextSection]
+	if !strings.Contains(debSection, "systemd") {
+		t.Error("DEB depends must include systemd")
 	}
-
-	if !strings.Contains(depList, "systemd") {
-		t.Error("DEB dependencies must include systemd")
+	if !strings.Contains(debSection, "apparmor") {
+		t.Error("DEB depends must include apparmor")
 	}
-	if !strings.Contains(depList, "apparmor") {
-		t.Error("DEB dependencies must include apparmor")
-	}
-	// Must NOT include docker dependency.
-	for _, line := range strings.Split(depList, "\n") {
+	for _, line := range strings.Split(debSection, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- docker") {
-			t.Error("DEB dependencies must not include docker package")
+			t.Error("DEB depends must not include docker package")
 		}
 	}
 }
 
-// TestNfpmConfigRpmDependencies verifies RPM dependencies are correct.
-func TestNfpmConfigRpmDependencies(t *testing.T) {
+// TestNfpmConfigRpmDepends verifies RPM depends are correct.
+func TestNfpmConfigRpmDepends(t *testing.T) {
 	data, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 
-	// Find the rpm overrides section.
 	rpmIdx := strings.Index(content, "rpm:")
 	if rpmIdx < 0 {
 		t.Fatal("rpm overrides section not found")
 	}
-	// Find the contents section (marks end of overrides).
 	contentsIdx := strings.Index(content[rpmIdx:], "\ncontents:")
 	if contentsIdx < 0 {
 		contentsIdx = len(content) - rpmIdx
 	}
 	rpmSection := content[rpmIdx : rpmIdx+contentsIdx]
 
-	// Find the dependencies sub-section.
-	depsIdx := strings.Index(rpmSection, "dependencies:")
-	if depsIdx < 0 {
-		t.Fatal("rpm dependencies section not found")
+	if !strings.Contains(rpmSection, "depends:") {
+		t.Fatal("rpm depends: section not found")
 	}
-	depList := rpmSection[depsIdx:]
-
-	if !strings.Contains(depList, "systemd") {
-		t.Error("RPM dependencies must include systemd")
+	if !strings.Contains(rpmSection, "systemd") {
+		t.Error("RPM depends must include systemd")
 	}
-	if !strings.Contains(depList, "apparmor-parser") {
-		t.Error("RPM dependencies must include apparmor-parser")
+	if !strings.Contains(rpmSection, "apparmor-parser") {
+		t.Error("RPM depends must include apparmor-parser")
 	}
-	// Must NOT include docker dependency.
-	for _, line := range strings.Split(depList, "\n") {
+	for _, line := range strings.Split(rpmSection, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- docker") {
-			t.Error("RPM dependencies must not include docker package")
+			t.Error("RPM depends must not include docker package")
 		}
 	}
 }
@@ -4095,86 +4075,190 @@ func TestBuildPackagesScriptNoSedConfig(t *testing.T) {
 	}
 }
 
-// TestPackageBuildIntegration builds real DEB/RPM packages and verifies
-// their contents, modes, and config semantics. Skipped only when nfpm
-// is unavailable.
-func TestPackageBuildIntegration(t *testing.T) {
+// --- Package metadata integration tests (nfpm only, no musl-gcc required) ---
+
+// TestPackageMetadataIntegration builds packages with a dummy binary and
+// verifies metadata: contents, modes, dependencies, conffiles/config flags.
+// Skipped only when nfpm is unavailable.
+func TestPackageMetadataIntegration(t *testing.T) {
 	if _, err := exec.LookPath("nfpm"); err != nil {
-		t.Skip("nfpm not installed, skipping package build integration test")
+		t.Skip("nfpm not installed, skipping package metadata integration test")
 	}
 
-	cmd := exec.Command("bash", "build-packages.sh", "1.0.0-test")
-	out, err := cmd.CombinedOutput()
+	testVersion := "0.0.0-meta-test"
+	tmpDir := t.TempDir()
+
+	// Create a dummy binary for packaging.
+	dummyBin := filepath.Join(tmpDir, "docker-helper")
+	if err := os.WriteFile(dummyBin, []byte("dummy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a temporary nFPM config that uses the dummy binary and tmp output.
+	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
-		t.Fatalf("build-packages.sh failed: %v\n%s", err, out)
+		t.Fatal(err)
+	}
+	// Replace dist/docker-helper with the dummy binary path.
+	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	// Replace ${VERSION} with test version.
+	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
+
+	configFile := filepath.Join(tmpDir, "nfpm.yaml")
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
 	}
 
-	debFiles, _ := filepath.Glob("dist/docker-helper_*.deb")
-	if len(debFiles) == 0 {
-		t.Fatal("no DEB package found in dist/")
+	// Build DEB.
+	debCmd := exec.Command("nfpm", "package",
+		"--config", configFile,
+		"--packager", "deb",
+		"--target", tmpDir,
+	)
+	debCmd.Env = append(os.Environ(), "VERSION="+testVersion)
+	if out, err := debCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm DEB build failed: %v\n%s", err, out)
 	}
 
-	rpmFiles, _ := filepath.Glob("dist/docker-helper-*.rpm")
-	if len(rpmFiles) == 0 {
-		t.Fatal("no RPM package found in dist/")
+	// Build RPM.
+	rpmCmd := exec.Command("nfpm", "package",
+		"--config", configFile,
+		"--packager", "rpm",
+		"--target", tmpDir,
+	)
+	rpmCmd.Env = append(os.Environ(), "VERSION="+testVersion)
+	if out, err := rpmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm RPM build failed: %v\n%s", err, out)
 	}
 
-	// Verify DEB contents with dpkg-deb.
+	// Find exact package files in tmpDir (no stale artifacts).
+	debFile := filepath.Join(tmpDir, "docker-helper_"+testVersion+"_amd64.deb")
+	if _, err := os.Stat(debFile); err != nil {
+		t.Fatalf("DEB package not found at %s: %v", debFile, err)
+	}
+	rpmFile := filepath.Join(tmpDir, "docker-helper-"+testVersion+"-1.x86_64.rpm")
+	if _, err := os.Stat(rpmFile); err != nil {
+		// Try without release number.
+		rpmFile = filepath.Join(tmpDir, "docker-helper-"+testVersion+".x86_64.rpm")
+		if _, err := os.Stat(rpmFile); err != nil {
+			// List what's in tmpDir to help diagnose.
+			entries, _ := os.ReadDir(tmpDir)
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Fatalf("RPM package not found, tmpDir contains: %v", names)
+		}
+	}
+
+	// Verify DEB with dpkg-deb.
 	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
-		cmd := exec.Command(dpkgDeb, "--contents", debFiles[0])
-		out, _ := cmd.CombinedOutput()
-		verifyPackageContents(t, "DEB", string(out))
-
-		// Verify DEB file modes.
-		verifyPackageModes(t, "DEB", string(out))
-
-		// Verify DEB conffiles metadata.
-		cmd = exec.Command(dpkgDeb, "--field", debFiles[0])
-		fieldOut, _ := cmd.CombinedOutput()
-		fieldStr := string(fieldOut)
-		conffilesIdx := strings.Index(fieldStr, "Conffiles:")
-		if conffilesIdx < 0 {
-			t.Log("DEB Conffiles field not found in metadata")
-		} else {
-			conffilesSection := fieldStr[conffilesIdx:]
-			nextFieldIdx := strings.Index(conffilesSection[:len(conffilesSection)-1], "\n\n")
-			if nextFieldIdx >= 0 {
-				conffilesSection = conffilesSection[:nextFieldIdx]
-			}
-			if !strings.Contains(conffilesSection, "managed-roots") {
-				t.Error("DEB Conffiles must include managed-roots")
-			}
-		}
+		verifyDEBPackage(t, dpkgDeb, debFile)
 	} else {
-		t.Log("dpkg-deb not available, skipping DEB content/mode/conffile verification")
+		t.Log("dpkg-deb not available, skipping DEB verification")
 	}
 
-	// Verify RPM contents with rpm.
+	// Verify RPM with rpm.
 	if rpmPath, err := exec.LookPath("rpm"); err == nil {
-		cmd := exec.Command(rpmPath, "-qpl", rpmFiles[0])
-		out, _ := cmd.CombinedOutput()
-		verifyPackageContents(t, "RPM", string(out))
-
-		// Verify RPM file modes.
-		cmd = exec.Command(rpmPath, "-qpl", "--qf", "%{FILEMODE} %{NAME}\n", rpmFiles[0])
-		modeOut, _ := cmd.CombinedOutput()
-		verifyRPMModes(t, string(modeOut))
-
-		// Verify RPM config(noreplace) flag on managed-roots.
-		cmd = exec.Command(rpmPath, "-qpl", rpmFiles[0])
-		listOut, _ := cmd.CombinedOutput()
-		listStr := string(listOut)
-		if !strings.Contains(listStr, "config(noreplace)") && !strings.Contains(listStr, "managed-roots") {
-			// Try the flags query format.
-			cmd = exec.Command(rpmPath, "-qp", "--qf", "%{FILENAMES} %{FILECLASS}\n", rpmFiles[0])
-			flagOut, _ := cmd.CombinedOutput()
-			flagStr := string(flagOut)
-			if !strings.Contains(flagStr, "managed-roots") {
-				t.Log("RPM config(noreplace) flag verification inconclusive")
-			}
-		}
+		verifyRPMPackage(t, rpmPath, rpmFile)
 	} else {
-		t.Log("rpm not available, skipping RPM content/mode/config verification")
+		t.Log("rpm not available, skipping RPM verification")
+	}
+}
+
+func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
+	t.Helper()
+
+	// Contents.
+	cmd := exec.Command(dpkgDeb, "--contents", debFile)
+	out, _ := cmd.CombinedOutput()
+	verifyPackageContents(t, "DEB", string(out))
+
+	// Modes.
+	verifyPackageModes(t, "DEB", string(out))
+
+	// Dependencies.
+	cmd = exec.Command(dpkgDeb, "--field", debFile, "Depends")
+	out, _ = cmd.CombinedOutput()
+	depends := string(out)
+	if !strings.Contains(depends, "systemd") {
+		t.Error("DEB Depends must include systemd")
+	}
+	if !strings.Contains(depends, "apparmor") {
+		t.Error("DEB Depends must include apparmor")
+	}
+	if strings.Contains(depends, "docker") {
+		t.Error("DEB Depends must not include docker package")
+	}
+
+	// Conffiles — extract control tarball and read conffiles.
+	controlDir := t.TempDir()
+	cmd = exec.Command(dpkgDeb, "--control", debFile, controlDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dpkg-deb --control failed: %v\n%s", err, out)
+	}
+	conffilesData, err := os.ReadFile(filepath.Join(controlDir, "conffiles"))
+	if err != nil {
+		t.Fatalf("DEB conffiles not found in control tarball: %v", err)
+	}
+	conffilesStr := string(conffilesData)
+	if !strings.Contains(conffilesStr, "/etc/apparmor.d/docker-helper.d/managed-roots") {
+		t.Errorf("DEB conffiles must contain managed-roots, got:\n%s", conffilesStr)
+	}
+}
+
+func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
+	t.Helper()
+
+	// Contents.
+	cmd := exec.Command(rpmPath, "-qpl", rpmFile)
+	out, _ := cmd.CombinedOutput()
+	verifyPackageContents(t, "RPM", string(out))
+
+	// Modes — use FILEMODES:perms array format.
+	cmd = exec.Command(rpmPath, "-qp", "--qf", "[%{FILEMODES:perms} %{FILENAMES}\\n]", rpmFile)
+	modeOut, _ := cmd.CombinedOutput()
+	verifyRPMModesPerms(t, string(modeOut))
+
+	// Dependencies.
+	cmd = exec.Command(rpmPath, "-qp", "--requires", rpmFile)
+	out, _ = cmd.CombinedOutput()
+	requires := string(out)
+	if !strings.Contains(requires, "systemd") {
+		t.Error("RPM Requires must include systemd")
+	}
+	if !strings.Contains(requires, "apparmor-parser") {
+		t.Error("RPM Requires must include apparmor-parser")
+	}
+	// Check for docker dependency (various package names).
+	for _, dep := range []string{"docker.io", "docker-ce", "docker-" + "community"} {
+		if strings.Contains(requires, dep) {
+			t.Errorf("RPM Requires must not include %s", dep)
+		}
+	}
+
+	// Config(noreplace) flag on managed-roots — use FILEFLAGS:fflags.
+	cmd = exec.Command(rpmPath, "-qp", "--qf", "[%{FILENAMES} %{FILEFLAGS:fflags}\\n]", rpmFile)
+	flagOut, _ := cmd.CombinedOutput()
+	flagStr := string(flagOut)
+	found := false
+	for _, line := range strings.Split(flagStr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "managed-roots") {
+			found = true
+			// config flag = 0x0001, noreplace = 0x0008
+			// fflags output: "config noreplace" or similar
+			if !strings.Contains(line, "config") {
+				t.Errorf("RPM managed-roots must have config flag: %s", line)
+			}
+			if !strings.Contains(line, "noreplace") {
+				t.Errorf("RPM managed-roots must have noreplace flag: %s", line)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("managed-roots not found in RPM file flags output:\n%s", flagStr)
 	}
 }
 
@@ -4213,18 +4297,14 @@ func verifyPackageModes(t *testing.T, format, contents string) {
 			continue
 		}
 		mode := line[:10]
-		path := ""
-		// Path is the last field, starts with ./
 		parts := strings.Fields(line)
-		if len(parts) >= 6 {
-			path = parts[len(parts)-1]
-			// Remove leading ./
-			path = strings.TrimPrefix(path, "./")
+		if len(parts) < 6 {
+			continue
 		}
+		path := strings.TrimPrefix(parts[len(parts)-1], "./")
 		if path == "" {
 			continue
 		}
-
 		switch path {
 		case "usr/bin/docker-helper":
 			if mode != "-rwxr-xr-x" {
@@ -4240,29 +4320,93 @@ func verifyPackageModes(t *testing.T, format, contents string) {
 	}
 }
 
-func verifyRPMModes(t *testing.T, modeOutput string) {
+func verifyRPMModesPerms(t *testing.T, modeOutput string) {
 	t.Helper()
-	// rpm --qf "%{FILEMODE} %{NAME}\n" output format:
-	// 0755 usr/bin/docker-helper
+	// rpm --qf "[%{FILEMODES:perms} %{FILENAMES}\n]" output:
+	// -rwxr-xr-x /usr/bin/docker-helper
 	for _, line := range strings.Split(strings.TrimSpace(modeOutput), "\n") {
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			continue
 		}
 		mode := parts[0]
-		path := parts[1]
-
+		path := strings.TrimPrefix(parts[1], "/")
 		switch path {
 		case "usr/bin/docker-helper":
-			if mode != "0755" {
-				t.Errorf("RPM: %s mode = %s, want 0755", path, mode)
+			if mode != "-rwxr-xr-x" {
+				t.Errorf("RPM: %s mode = %s, want -rwxr-xr-x", path, mode)
 			}
 		case "usr/lib/systemd/system/docker-helper.service",
 			"etc/apparmor.d/docker-helper-system",
 			"etc/apparmor.d/docker-helper.d/managed-roots":
-			if mode != "0644" {
-				t.Errorf("RPM: %s mode = %s, want 0644", path, mode)
+			if mode != "-rw-r--r--" {
+				t.Errorf("RPM: %s mode = %s, want -rw-r--r--", path, mode)
 			}
 		}
+	}
+}
+
+// --- Full pipeline integration test (requires nfpm + musl-gcc) ---
+
+// TestPackageBuildIntegration runs the full build-packages.sh pipeline
+// and verifies the resulting packages. Skipped when nfpm is unavailable.
+func TestPackageBuildIntegration(t *testing.T) {
+	if _, err := exec.LookPath("nfpm"); err != nil {
+		t.Skip("nfpm not installed, skipping package build integration test")
+	}
+
+	testVersion := "1.0.0-test"
+	tmpDir := t.TempDir()
+
+	// Build to a controlled temp output to avoid stale artifacts.
+	cmd := exec.Command("bash", "-c",
+		fmt.Sprintf("cd '%s' && VERSION='%s' bash build-packages.sh '%s'",
+			filepath.Dir(filepath.Dir(tmpDir)), testVersion, testVersion))
+	// Actually, build-packages.sh writes to dist/. Use a temp dist instead.
+	// The simplest approach: run build-packages.sh and find exact filenames.
+	cmd = exec.Command("bash", "build-packages.sh", testVersion)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build-packages.sh failed: %v\n%s", err, out)
+	}
+
+	// Exact filenames for the test version.
+	debFile := "dist/docker-helper_" + testVersion + "_amd64.deb"
+	if _, err := os.Stat(debFile); err != nil {
+		// List dist/ to diagnose.
+		entries, _ := os.ReadDir("dist")
+		var names []string
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".deb") {
+				names = append(names, e.Name())
+			}
+		}
+		t.Fatalf("DEB not found at %s; .deb files in dist/: %v", debFile, names)
+	}
+
+	rpmFile := "dist/docker-helper-" + testVersion + "-1.x86_64.rpm"
+	if _, err := os.Stat(rpmFile); err != nil {
+		entries, _ := os.ReadDir("dist")
+		var names []string
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".rpm") {
+				names = append(names, e.Name())
+			}
+		}
+		t.Fatalf("RPM not found at %s; .rpm files in dist/: %v", rpmFile, names)
+	}
+
+	// Verify DEB.
+	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+		verifyDEBPackage(t, dpkgDeb, debFile)
+	} else {
+		t.Log("dpkg-deb not available, skipping DEB verification")
+	}
+
+	// Verify RPM.
+	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+		verifyRPMPackage(t, rpmPath, rpmFile)
+	} else {
+		t.Log("rpm not available, skipping RPM verification")
 	}
 }
