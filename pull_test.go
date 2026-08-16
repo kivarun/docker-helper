@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -473,23 +475,14 @@ func TestPullRequestCancellation(t *testing.T) {
 	}
 
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	started := make(chan struct{})
-	var child *exec.Cmd
+	var childPid int
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, "sleep", "300")
-		cmd.Stdout = &bytes.Buffer{}
-		cmd.Stderr = &bytes.Buffer{}
-		if err := cmd.Start(); err != nil {
-			t.Errorf("cmd.Start: %v", err)
-			return cmd
-		}
-		// Write PID file to prove the child is running.
-		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0644); err != nil {
-			t.Errorf("write PID file: %v", err)
-		}
-		close(started)
-		child = cmd
+		// Return an UNSTARTED command that writes PID on start.
+		cmd := exec.CommandContext(ctx, "sh", "-c",
+			`echo $$ > "$1"; exec sleep 300`,
+			"sh", pidFile,
+		)
 		return cmd
 	}
 
@@ -503,48 +496,68 @@ func TestPullRequestCancellation(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+result.Token)
 	w := httptest.NewRecorder()
 
-	done := make(chan struct{})
+	handlerDone := make(chan struct{})
 	go func() {
 		app.handlePull(w, req)
-		close(done)
+		close(handlerDone)
 	}()
 
-	// Wait for the child process to actually start.
+	// Wait for the child process to actually start (PID file appears).
+	pidReady := make(chan struct{})
+	go func() {
+		for i := 0; i < 50; i++ {
+			if _, err := os.Stat(pidFile); err == nil {
+				close(pidReady)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
 	select {
-	case <-started:
+	case <-pidReady:
 	case <-time.After(5 * time.Second):
-		t.Fatal("child process did not start")
+		t.Fatal("child process did not start (no PID file)")
 	}
 
-	// Verify PID file exists (process is running).
-	if _, err := os.Stat(pidFile); os.IsNotExist(err) {
-		t.Fatal("PID file not found, child process did not write PID")
+	// Read the PID.
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("cannot read PID file: %v", err)
+	}
+	fmt.Sscanf(string(pidData), "%d", &childPid)
+	if childPid <= 0 {
+		t.Fatalf("invalid PID: %d", childPid)
 	}
 
-	// Now cancel the context.
+	// Verify the process exists.
+	if err := syscall.Kill(childPid, 0); err != nil {
+		t.Fatalf("child process does not exist: %v", err)
+	}
+
+	// Cleanup: kill child if test fails.
+	t.Cleanup(func() {
+		_ = syscall.Kill(childPid, syscall.SIGKILL)
+		_, _ = syscall.Wait4(childPid, nil, syscall.WNOHANG, nil)
+	})
+
+	// Now cancel the request context.
 	cancel()
 
 	select {
-	case <-done:
+	case <-handlerDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("handlePull did not return after context cancellation")
 	}
 
 	// Verify the child process is gone.
-	if child == nil || child.Process == nil {
-		t.Fatal("child process is nil")
-	}
-	// Process should be terminated.
-	status := child.ProcessState
-	if status == nil {
-		// Process may still be in zombie state, try to signal it.
-		if err := child.Process.Signal(os.Kill); err == nil {
-			time.Sleep(100 * time.Millisecond)
-		}
+	if err := syscall.Kill(childPid, 0); err == nil {
+		t.Error("child process still exists after cancellation")
+		// Don't SIGKILL here — that would mask the failure.
 	}
 }
 
-func TestPullShutdownRejection(t *testing.T) {
+func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -558,22 +571,14 @@ func TestPullShutdownRejection(t *testing.T) {
 	}
 
 	pidFile := filepath.Join(t.TempDir(), "pid")
-	started := make(chan struct{})
-	var child *exec.Cmd
+	var childPid int
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, "sleep", "300")
-		cmd.Stdout = &bytes.Buffer{}
-		cmd.Stderr = &bytes.Buffer{}
-		if err := cmd.Start(); err != nil {
-			t.Errorf("cmd.Start: %v", err)
-			return cmd
-		}
-		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0644); err != nil {
-			t.Errorf("write PID file: %v", err)
-		}
-		close(started)
-		child = cmd
+		// Return an UNSTARTED command that writes PID on start.
+		cmd := exec.CommandContext(ctx, "sh", "-c",
+			`echo $$ > "$1"; exec sleep 300`,
+			"sh", pidFile,
+		)
 		return cmd
 	}
 
@@ -582,14 +587,31 @@ func TestPullShutdownRejection(t *testing.T) {
 		app.handlePull(w, r)
 	})
 
-	server := httptest.NewServer(mux)
+	// Use a real listener for production-like shutdown.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("cannot create listener: %v", err)
+	}
+
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// Start serving.
+	go func() {
+		_ = server.Serve(listener)
+	}()
 	defer server.Close()
+
+	// Wait for server to be ready.
+	time.Sleep(50 * time.Millisecond)
 
 	// Start the pull request.
 	reqBody := map[string]string{"image": "alpine:3.24"}
 	body, _ := json.Marshal(reqBody)
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/pull", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/pull", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("cannot create request: %v", err)
 	}
@@ -607,50 +629,82 @@ func TestPullShutdownRejection(t *testing.T) {
 		reqDone <- nil
 	}()
 
-	// Wait for the child process to actually start.
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("child process did not start")
-	}
-
-	if _, err := os.Stat(pidFile); os.IsNotExist(err) {
-		t.Fatal("PID file not found, child process did not write PID")
-	}
-
-	// Now initiate shutdown.
-	shutdownDone := make(chan struct{})
+	// Wait for the child process to actually start (PID file appears).
+	pidReady := make(chan struct{})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Config.Shutdown(ctx)
-		close(shutdownDone)
+		for i := 0; i < 50; i++ {
+			if _, err := os.Stat(pidFile); err == nil {
+				close(pidReady)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	}()
 
 	select {
-	case <-shutdownDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("server shutdown did not complete")
+	case <-pidReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child process did not start (no PID file)")
 	}
 
-	// The HTTP request should have failed or returned.
-	select {
-	case err := <-reqDone:
-		if err == nil {
-			// Request completed normally (response was sent before shutdown took effect).
-			// This is acceptable — the key invariant is that the child was terminated.
+	// Read the PID.
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("cannot read PID file: %v", err)
+	}
+	fmt.Sscanf(string(pidData), "%d", &childPid)
+	if childPid <= 0 {
+		t.Fatalf("invalid PID: %d", childPid)
+	}
+
+	// Verify the process exists.
+	if err := syscall.Kill(childPid, 0); err != nil {
+		t.Fatalf("child process does not exist: %v", err)
+	}
+
+	// Cleanup: kill child if test fails.
+	t.Cleanup(func() {
+		_ = syscall.Kill(childPid, syscall.SIGKILL)
+		_, _ = syscall.Wait4(childPid, nil, syscall.WNOHANG, nil)
+	})
+
+	// Now trigger production-like shutdown using serveWithShutdownMulti semantics.
+	// We simulate: signal -> startShutdown -> server.Shutdown(deadline) -> server.Close() -> context cancel
+	shutdownTimeout := 2 * time.Second
+
+	drainDone := make(chan error, 1)
+	go func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer shutdownCancel()
+
+		shutdownErr := server.Shutdown(shutdownCtx)
+		var drainErr error
+		if shutdownErr == context.DeadlineExceeded {
+			server.Close()
+			drainErr = fmt.Errorf("graceful shutdown timeout after %v", shutdownTimeout)
+		} else if shutdownErr != nil {
+			drainErr = shutdownErr
 		}
-		// Connection error is also acceptable.
+		drainDone <- drainErr
+	}()
+
+	select {
+	case <-drainDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("shutdown did not complete")
+	}
+
+	// The HTTP request should have completed (success or error).
+	select {
+	case <-reqDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("HTTP request did not complete after shutdown")
 	}
 
-	// Verify the child process is gone.
-	if child == nil || child.Process == nil {
-		t.Fatal("child process is nil")
-	}
-	// The process should be terminated by now (context cancelled by shutdown).
-	if err := child.Process.Signal(os.Kill); err != nil {
-		// Process already terminated — this is expected.
+	// Verify the child process is gone (with small delay for process cleanup).
+	time.Sleep(500 * time.Millisecond)
+	if err := syscall.Kill(childPid, 0); err == nil {
+		t.Error("child process still exists after daemon shutdown")
+		// Don't SIGKILL here — that would mask the failure.
 	}
 }
