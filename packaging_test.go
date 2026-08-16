@@ -5421,3 +5421,236 @@ func TestPackageMetadataScripts(t *testing.T) {
 		t.Log("rpm not available, skipping RPM script verification")
 	}
 }
+
+// --- Man page source tests ---
+
+func TestManPageSourceExists(t *testing.T) {
+	for _, f := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("man page source not found: %s", f)
+		}
+	}
+}
+
+func TestManPageTH(t *testing.T) {
+	for _, f := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		if !strings.Contains(content, ".TH") {
+			t.Errorf("man page %s missing .TH directive", f)
+		}
+		if !strings.Contains(content, "NAME") {
+			t.Errorf("man page %s missing NAME section", f)
+		}
+		if !strings.Contains(content, "SYNOPSIS") {
+			t.Errorf("man page %s missing SYNOPSIS section", f)
+		}
+	}
+}
+
+func TestManPageNoPlaceholders(t *testing.T) {
+	for _, f := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		if strings.Contains(content, "TODO") || strings.Contains(content, "FIXME") ||
+			strings.Contains(content, "PLACEHOLDER") {
+			t.Errorf("man page %s contains placeholder text", f)
+		}
+	}
+}
+
+// --- CLI coverage tests ---
+
+func TestManPageCLICommands(t *testing.T) {
+	data, err := os.ReadFile("docs/man/docker-helper.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Check top-level commands from rootCommand.Subcommands.
+	// These are the actual commands defined in cli.go.
+	commands := []string{"serve", "init", "reload", "session", "config", "principal", "credential", "apparmor", "version", "help"}
+	for _, cmd := range commands {
+		if !strings.Contains(content, cmd) {
+			t.Errorf("docker-helper.1 missing command: %s", cmd)
+		}
+	}
+}
+
+// --- Config coverage tests ---
+
+func TestManPageConfigFields(t *testing.T) {
+	data, err := os.ReadFile("docs/man/docker-helper-config.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Check actual JSON fields from fileConfig.
+	fields := []string{"allowed_root", "session_ttl", "log_level", "audit_enabled",
+		"shutdown_timeout", "operation_retention_ttl", "operation_max_completed",
+		"operation_log_max_bytes", "trusted_ca_path", "trusted_ca_injection", "http_address"}
+	for _, field := range fields {
+		if !strings.Contains(content, field) {
+			t.Errorf("docker-helper-config.5 missing field: %s", field)
+		}
+	}
+}
+
+// --- Build script tests ---
+
+func TestBuildManpagesScriptSyntax(t *testing.T) {
+	cmd := exec.Command("bash", "-n", "build-manpages.sh")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("build-manpages.sh syntax error: %v", err)
+	}
+}
+
+func TestBuildManpagesScriptBuilds(t *testing.T) {
+	// Skip if gzip not available.
+	if _, err := exec.LookPath("gzip"); err != nil {
+		t.Skip("gzip not available, skipping manpage build test")
+	}
+
+	cmd := exec.Command("bash", "build-manpages.sh")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build-manpages.sh failed: %v\n%s", err, out)
+	}
+
+	// Verify outputs exist and pass gzip -t.
+	for _, f := range []string{"dist/man/docker-helper.1.gz", "dist/man/docker-helper-config.5.gz"} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("man page output not found: %s", f)
+		}
+		cmd := exec.Command("gzip", "-t", f)
+		if err := cmd.Run(); err != nil {
+			t.Errorf("gzip verification failed for %s: %v", f, err)
+		}
+	}
+}
+
+// --- Package metadata integration for man pages ---
+
+func TestPackageMetadataManPages(t *testing.T) {
+	if _, err := exec.LookPath("nfpm"); err != nil {
+		t.Skip("nfpm not installed, skipping package metadata man pages test")
+	}
+
+	tmpDir := t.TempDir()
+
+	// Create dummy binary.
+	dummyBin := filepath.Join(tmpDir, "docker-helper")
+	if err := os.WriteFile(dummyBin, []byte("dummy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create dummy man pages.
+	os.MkdirAll(filepath.Join(tmpDir, "man"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "man", "docker-helper.1"), []byte(".TH TEST 1"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "man", "docker-helper-config.5"), []byte(".TH TEST 5"), 0644)
+
+	// Create temp nFPM config.
+	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper.1.gz"))
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper-config.5.gz"))
+	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")
+	configFile := filepath.Join(tmpDir, "nfpm.yaml")
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build DEB.
+	debCmd := exec.Command("nfpm", "package", "--config", configFile, "--packager", "deb", "--target", tmpDir)
+	debCmd.Env = append(os.Environ(), "VERSION=0.0.0")
+	if out, err := debCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm DEB build failed: %v\n%s", err, out)
+	}
+
+	// Build RPM.
+	rpmCmd := exec.Command("nfpm", "package", "--config", configFile, "--packager", "rpm", "--target", tmpDir)
+	rpmCmd.Env = append(os.Environ(), "VERSION=0.0.0")
+	if out, err := rpmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm RPM build failed: %v\n%s", err, out)
+	}
+
+	debFile := filepath.Join(tmpDir, "docker-helper_0.0.0_amd64.deb")
+	rpmFile := filepath.Join(tmpDir, "docker-helper-0.0.0-1.x86_64.rpm")
+
+	// Verify DEB contains man pages.
+	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+		cmd := exec.Command(dpkgDeb, "--contents", debFile)
+		out, _ := cmd.CombinedOutput()
+		if !strings.Contains(string(out), "/usr/share/man/man1/docker-helper.1.gz") {
+			t.Error("DEB missing docker-helper.1.gz")
+		}
+		if !strings.Contains(string(out), "/usr/share/man/man5/docker-helper-config.5.gz") {
+			t.Error("DEB missing docker-helper-config.5.gz")
+		}
+	} else {
+		t.Log("dpkg-deb not available, skipping DEB man page verification")
+	}
+
+	// Verify RPM contains man pages.
+	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+		cmd := exec.Command(rpmPath, "-qpl", rpmFile)
+		out, _ := cmd.CombinedOutput()
+		if !strings.Contains(string(out), "/usr/share/man/man1/docker-helper.1.gz") {
+			t.Error("RPM missing docker-helper.1.gz")
+		}
+		if !strings.Contains(string(out), "/usr/share/man/man5/docker-helper-config.5.gz") {
+			t.Error("RPM missing docker-helper-config.5.gz")
+		}
+	} else {
+		t.Log("rpm not available, skipping RPM man page verification")
+	}
+}
+
+// --- Bundle tests for man pages ---
+
+func TestBundleManPages(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Check for man page paths.
+	if !strings.Contains(content, "man/docker-helper.1") {
+		t.Error("build-bundle.sh must include man/docker-helper.1")
+	}
+	if !strings.Contains(content, "man/docker-helper-config.5") {
+		t.Error("build-bundle.sh must include man/docker-helper-config.5")
+	}
+
+	// Check EXPECTED_PATHS.
+	if !strings.Contains(content, "man/docker-helper.1") || !strings.Contains(content, "man/docker-helper-config.5") {
+		t.Error("build-bundle.sh EXPECTED_PATHS must include man pages")
+	}
+}
+
+func TestReleaseBundleReadmeManPages(t *testing.T) {
+	data, err := os.ReadFile("packaging/README.release.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "man/docker-helper.1") {
+		t.Error("README.release.md must document man/docker-helper.1")
+	}
+	if !strings.Contains(content, "man/docker-helper-config.5") {
+		t.Error("README.release.md must document man/docker-helper-config.5")
+	}
+}

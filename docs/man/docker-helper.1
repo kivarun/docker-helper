@@ -1,0 +1,155 @@
+.TH DOCKER-HELPER 1
+.SH NAME
+docker-helper \- Policy-enforcing Docker mediation daemon
+.SH SYNOPSIS
+.B docker-helper
+.RB [ \-h | \-\-help ]
+.RB [ \-v | \-\-version ]
+.BI "COMMAND"
+[\& ...]
+.SH DESCRIPTION
+.B docker-helper
+is a policy-enforcing daemon that provides a restricted interface to Docker.
+It mediates Docker operations for coding agents running on the same machine,
+restricting host path access to session workspaces and enforcing policy on
+build, pull, and run operations.
+.PP
+Deployment mode is determined by effective UID:
+.IP \(bu 4
+\fIUser mode\fR (non-root): Private Unix socket, per-user configuration
+.IP \(bu 4
+\fISystem mode\fR (root): System Unix socket + loopback HTTP, system-wide configuration
+.SH DEPLOYMENT MODES
+.SS User Mode
+Runs as the current user. Configuration at
+.IR ~/.config/docker-helper/config.json ,
+state at
+.IR ~/.local/state/docker-helper .
+No AppArmor integration.
+.SS System Mode
+Runs as root. Configuration at
+.IR /etc/docker-helper/config.json ,
+state at
+.IR /var/lib/docker-helper .
+AppArmor confinement with managed workspace roots.
+.SH COMMANDS
+.SS General Commands
+.TP
+.B docker-helper serve
+Start the HTTP server (daemon mode).
+.TP
+.B docker-helper init [\-\-allowed-root PATH]
+Initialize configuration and admin token. In system mode, the initial
+allowed_root is added to managed AppArmor roots. Subsequent changes to
+configuration or principal allowed roots do NOT automatically update AppArmor;
+use \fIdocker-helper apparmor root\fR to manage them.
+.TP
+.B docker-helper reload [\-\-system | \-\-endpoint URL | \-\-token-file FILE]
+Reload configuration. Use \fB\-\-system\fR for system daemon, \fB\-\-endpoint\fR
+or \fB\-\-token-file\fR for user daemon.
+.TP
+.B docker-helper version
+Print version information.
+.TP
+.B docker-helper help [COMMAND]
+Show help for a command.
+.SS Session Commands
+.TP
+.B docker-helper session create [\-\-workspace PATH]
+Create a session for a workspace.
+.TP
+.B docker-helper session list
+List active sessions.
+.TP
+.B docker-helper session remove SESSION
+Remove a session.
+.SS Config Commands
+.TP
+.B docker-helper config show
+Show current configuration.
+.TP
+.B docker-helper config edit
+Edit configuration interactively.
+.SS Principal Commands
+.TP
+.B docker-helper principal allowed-root add PATH
+Add an allowed root for a principal.
+.TP
+.B docker-helper principal allowed-root remove PATH
+Remove an allowed root.
+.TP
+.B docker-helper principal allowed-root list
+List allowed roots.
+.SS Credential Commands
+.TP
+.B docker-helper credential issue SESSION
+Issue a session credential.
+.TP
+.B docker-helper credential validate TOKEN
+Validate a session token.
+.SS AppArmor Commands (System Mode)
+.TP
+.B docker-helper apparmor root add PATH
+Add a workspace root to managed AppArmor policy.
+.TP
+.B docker-helper apparmor root remove PATH
+Remove a workspace root.
+.TP
+.B docker-helper apparmor root list
+List managed workspace roots.
+.TP
+.B docker-helper apparmor reload
+Reload AppArmor profile.
+.SH OPERATOR ENDPOINT SELECTION
+For reload and credential commands, select the target daemon via:
+.IP \(bu 4
+\fB\-\-system\fR: System daemon (requires root)
+.IP \(bu 4
+\fB\-\-endpoint URL\fR: HTTP endpoint URL
+.IP \(bu 4
+\fB\-\-token-file FILE\fR: Token file for authentication
+.PP
+Local system mode uses Unix socket + loopback HTTP (127.0.0.1:52375 default).
+No remote or TLS support in Release 2.
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+Operational or runtime failure
+.TP
+.B 2
+Invalid CLI arguments or input
+.SH FILES
+.TP
+.B /etc/docker-helper/config.json
+System mode configuration
+.TP
+.B /etc/docker-helper/admin.token
+System mode admin token
+.TP
+.B /var/lib/docker-helper/docker-helper.db
+System mode state database
+.TP
+.B /run/docker-helper/docker-helper.sock
+System mode Unix socket
+.TP
+.B $XDG_CONFIG_HOME/docker-helper/config.json
+User mode configuration
+.TP
+.B $XDG_STATE_HOME/docker-helper
+User mode state directory
+.SH SECURITY
+.IP \(bu 4
+.B docker-helper
+mediates Docker access; rootful Docker access is root-equivalent host capability
+.IP \(bu 4
+Credentials and session tokens are capabilities—protect them accordingly
+.IP \(bu 4
+AppArmor confinement restricts filesystem and capability access
+.IP \(bu 4
+No remote or non-loopback network access in Release 2
+.SH SEE ALSO
+.BR docker-helper-config (5),
+.BR apparmor (7)

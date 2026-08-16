@@ -38,6 +38,9 @@ if [[ ! -x "${SCRIPT_DIR}/dist/docker-helper" ]]; then
 	exit 1
 fi
 
+# Build man pages.
+"${SCRIPT_DIR}/build-manpages.sh"
+
 # Build from repo root so src paths in the config resolve correctly.
 # nFPM expands ${VERSION} from the environment.
 cd "${SCRIPT_DIR}"

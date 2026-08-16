@@ -1,0 +1,143 @@
+.TH DOCKER-HELPER-CONFIG 5
+.SH NAME
+docker-helper-config \- docker-helper configuration file format
+.SH SYNOPSIS
+.B /etc/docker-helper/config.json
+.br
+.B $XDG_CONFIG_HOME/docker-helper/config.json
+.SH DESCRIPTION
+.B docker-helper
+uses a JSON configuration file to control daemon behavior. The file location
+depends on deployment mode:
+.IP \(bu 4
+\fISystem mode\fR: \fI/etc/docker-helper/config.json\fR
+.IP \(bu 4
+\fIUser mode\fR: \fI$XDG_CONFIG_HOME/docker-helper/config.json\fR (defaults to ~/.config/docker-helper/config.json)
+.PP
+The environment variable \fBDOCKER_HELPER_CONFIG\fR can override the config path.
+.SH CONFIGURATION FILES
+.TP
+.B /etc/docker-helper/config.json
+System mode configuration (root-owned)
+.TP
+.B /etc/docker-helper/admin.token
+System mode admin token (root-owned, mode 0600)
+.TP
+.B /var/lib/docker-helper/docker-helper.db
+System mode state database
+.TP
+.B /run/docker-helper/docker-helper.sock
+System mode Unix socket (created at runtime)
+.SH FORMAT
+JSON object with the following fields:
+.SH FIELDS
+.TP
+.B allowed_root (string, required)
+Allowed root directory for agent workspaces in system mode. The initial value
+is added to managed AppArmor roots during \fBdocker-helper init\fR.
+Subsequent changes require manual AppArmor updates via \fBdocker-helper apparmor root\fR.
+.TP
+.B session_ttl (string, optional, default="30m")
+Session time-to-live using Go duration syntax (e.g., "30m", "1h").
+.TP
+.B log_level (string, optional, default="info")
+Logging level: \fBdebug\fR, \fBinfo\fR, \fBwarn\fR, or \fBerror\fR.
+.TP
+.B audit_enabled (boolean, optional, default=true)
+Enable audit logging for Docker operations.
+.TP
+.B shutdown_timeout (string, optional, default="30s")
+Graceful shutdown timeout using Go duration syntax.
+.TP
+.B operation_retention_ttl (string, optional, default="24h")
+Operation log retention TTL using Go duration syntax.
+.TP
+.B operation_max_completed (integer, optional, default=1000)
+Maximum completed operations to retain in memory.
+.TP
+.B operation_log_max_bytes (integer, optional, default=10485760)
+Maximum operation log size in bytes (default 10 MiB).
+.TP
+.B trusted_ca_path (string, conditional)
+Path to trusted CA certificate bundle. Required when \fBtrusted_ca_injection\fR
+is set to "auto".
+.TP
+.B trusted_ca_injection (string, optional, default="disabled")
+CA injection mode: \fBdisabled\fR (no injection) or \fBauto\fR (automatic injection
+using trusted_ca_path).
+.TP
+.B http_address (string, optional, default="127.0.0.1:52375")
+Loopback HTTP address for system mode. \fBOnly 127.0.0.1:PORT\fR is supported.
+.RE
+Changes to \fBhttp_address\fR require daemon restart.
+.SH RELOAD BEHAVIOR
+Most configuration changes can be applied via \fBdocker-helper reload\fR without
+restart. Exceptions:
+.IP \(bu 4
+\fBhttp_address\fR: Requires daemon restart
+.IP \(bu 4
+\fBallowed_root\fR: Does NOT automatically update AppArmor; use \fBdocker-helper apparmor root\fR
+.SH DERIVED PATHS
+.SS System Mode
+.TP
+.B /etc/docker-helper/config.json
+Configuration file
+.TP
+.B /etc/docker-helper/admin.token
+Admin token
+.TP
+.B /var/lib/docker-helper/docker-helper.db
+SQLite database
+.TP
+.B /run/docker-helper/docker-helper.sock
+Unix socket
+.TP
+.B /run/docker-helper/mounts/*
+Mount-pin runtime directory
+.SS User Mode
+.TP
+.B $XDG_CONFIG_HOME/docker-helper/config.json
+Configuration file
+.TP
+.B $XDG_STATE_HOME/docker-helper
+State directory (database, tokens)
+.TP
+.B $XDG_RUNTIME_DIR/docker-helper
+Runtime directory (socket)
+.PP
+Environment variable \fBDOCKER_HELPER_CONFIG\fR overrides config path.
+.SH APPARMOR
+System mode uses AppArmor confinement with profile \fBdocker-helper-system\fR.
+Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR
+and can be modified via \fBdocker-helper apparmor root\fR.
+.PP
+The initial \fBallowed_root\fR from \fBdocker-helper init\fR is added to managed
+AppArmor roots. Subsequent changes to configuration or principal allowed roots
+do NOT automatically update AppArmor—use \fBdocker-helper apparmor root add PATH\fR
+to add new roots.
+.SH EXAMPLES
+.SS Minimal system mode configuration
+.nf
+{
+  "allowed_root": "/srv/workspaces"
+}
+.fi
+.SS Full configuration with custom settings
+.nf
+{
+  "allowed_root": "/srv/workspaces",
+  "session_ttl": "1h",
+  "log_level": "debug",
+  "audit_enabled": true,
+  "shutdown_timeout": "60s",
+  "operation_retention_ttl": "72h",
+  "operation_max_completed": 5000,
+  "operation_log_max_bytes": 52428800,
+  "trusted_ca_injection": "auto",
+  "trusted_ca_path": "/etc/docker-helper/ca-bundle.crt",
+  "http_address": "127.0.0.1:52376"
+}
+.fi
+.SH SEE ALSO
+.BR docker-helper (1),
+.BR apparmor (7)
