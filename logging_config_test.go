@@ -26,132 +26,136 @@ func TestResolveAuditEnabled(t *testing.T) {
 		name     string
 		cfg      *bool
 		level    string
+		mode     DeploymentMode
 		expected bool
+		source   string
 	}{
-		{"explicit true with info", &trueVal, "info", true},
-		{"explicit false with debug", &falseVal, "debug", false},
-		{"absent with debug", nil, "debug", true},
-		{"absent with info", nil, "info", false},
-		{"absent with warn", nil, "warn", false},
-		{"absent with error", nil, "error", false},
-		{"explicit true with debug", &trueVal, "debug", true},
-		{"explicit false with info", &falseVal, "info", false},
+		// System mode: absent always yields true regardless of log level.
+		{"system + absent + info", nil, "info", ModeSystem, true, "system_default"},
+		{"system + absent + error", nil, "error", ModeSystem, true, "system_default"},
+		{"system + absent + debug", nil, "debug", ModeSystem, true, "system_default"},
+		// System mode: explicit always wins.
+		{"system + explicit false", &falseVal, "info", ModeSystem, false, "explicit"},
+		{"system + explicit true", &trueVal, "info", ModeSystem, true, "explicit"},
+		// User mode: absent yields true only at debug.
+		{"user + absent + info", nil, "info", ModeUser, false, "log_level"},
+		{"user + absent + debug", nil, "debug", ModeUser, true, "log_level"},
+		{"user + absent + warn", nil, "warn", ModeUser, false, "log_level"},
+		{"user + absent + error", nil, "error", ModeUser, false, "log_level"},
+		// User mode: explicit always wins.
+		{"user + explicit false + debug", &falseVal, "debug", ModeUser, false, "explicit"},
+		{"user + explicit true + info", &trueVal, "info", ModeUser, true, "explicit"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			level, _ := parseLogLevel(tt.level)
-			got := resolveAuditEnabled(tt.cfg, level)
+			got := resolveAuditEnabled(tt.cfg, level, tt.mode)
 			if got != tt.expected {
-				t.Errorf("resolveAuditEnabled(%v, %s) = %v, want %v", tt.cfg, tt.level, got, tt.expected)
+				t.Errorf("resolveAuditEnabled(%v, %s, %s) = %v, want %v", tt.cfg, tt.level, tt.mode, got, tt.expected)
+			}
+			src := resolveAuditSource(tt.cfg, tt.mode)
+			if src != tt.source {
+				t.Errorf("resolveAuditSource(%v, %s) = %q, want %q", tt.cfg, tt.mode, src, tt.source)
 			}
 		})
 	}
 }
 
-func TestConfigLoadAuditEnabledAbsentInfo(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-
-	configDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("mkdir: %v", err)
+func TestConfigLoadAuditEnabled(t *testing.T) {
+	tests := []struct {
+		name          string
+		logLevel      string
+		auditEnabled  *bool
+		expectedAudit bool
+		expectedSrc   string
+	}{
+		{
+			name:          "absent + info -> false (user mode)",
+			logLevel:      "info",
+			auditEnabled:  nil,
+			expectedAudit: false,
+			expectedSrc:   "log_level",
+		},
+		{
+			name:          "absent + debug -> true (user mode)",
+			logLevel:      "debug",
+			auditEnabled:  nil,
+			expectedAudit: true,
+			expectedSrc:   "log_level",
+		},
+		{
+			name:          "explicit false + debug -> false",
+			logLevel:      "debug",
+			auditEnabled:  ptrOf(false),
+			expectedAudit: false,
+			expectedSrc:   "explicit",
+		},
+		{
+			name:          "explicit true + info -> true",
+			logLevel:      "info",
+			auditEnabled:  ptrOf(true),
+			expectedAudit: true,
+			expectedSrc:   "explicit",
+		},
 	}
 
-	// Config with log_level=info, no audit_enabled
-	allowedRoot := testAllowedRootDir(t)
-	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"info"}`)
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("XDG_CONFIG_HOME", dir)
+			t.Setenv("XDG_RUNTIME_DIR", dir)
 
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
+			configDir := filepath.Join(dir, "docker-helper")
+			if err := os.MkdirAll(configDir, 0700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
 
-	if cfg.AuditEnabled {
-		t.Error("audit should be disabled when audit_enabled absent and log_level=info")
+			allowedRoot := testAllowedRootDir(t)
+			cfg := map[string]any{
+				"allowed_root": allowedRoot,
+				"session_ttl":  "12h",
+				"log_level":    tt.logLevel,
+			}
+			if tt.auditEnabled != nil {
+				cfg["audit_enabled"] = *tt.auditEnabled
+			}
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(configDir, "config.json"), data, 0600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			loaded, err := loadConfig()
+			if err != nil {
+				t.Fatalf("loadConfig: %v", err)
+			}
+			if loaded.AuditEnabled != tt.expectedAudit {
+				t.Errorf("audit_enabled = %v, want %v", loaded.AuditEnabled, tt.expectedAudit)
+			}
+
+			// Verify effective config source matches.
+			ec := resolveEffectiveConfig(*loadFileConfigSafe(t, filepath.Join(configDir, "config.json")))
+			if ec.AuditEnabledSource != tt.expectedSrc {
+				t.Errorf("audit_enabled_source = %q, want %q", ec.AuditEnabledSource, tt.expectedSrc)
+			}
+		})
 	}
 }
 
-func TestConfigLoadAuditEnabledAbsentDebug(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-
-	configDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	allowedRoot := testAllowedRootDir(t)
-	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"debug"}`)
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := loadConfig()
+func loadFileConfigSafe(t *testing.T, path string) *fileConfig {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatal(err)
 	}
-
-	if !cfg.AuditEnabled {
-		t.Error("audit should be enabled when audit_enabled absent and log_level=debug")
+	var fc fileConfig
+	if err := json.Unmarshal(data, &fc); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestConfigLoadAuditEnabledExplicitFalseDebug(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-
-	configDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	allowedRoot := testAllowedRootDir(t)
-	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"debug","audit_enabled":false}`)
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-
-	if cfg.AuditEnabled {
-		t.Error("audit should be disabled when audit_enabled=false even with log_level=debug")
-	}
-}
-
-func TestConfigLoadAuditEnabledExplicitTrueInfo(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-
-	configDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	allowedRoot := testAllowedRootDir(t)
-	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h","log_level":"info","audit_enabled":true}`)
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-
-	if !cfg.AuditEnabled {
-		t.Error("audit should be enabled when audit_enabled=true with log_level=info")
-	}
+	return &fc
 }
 
 // --- Disabled audit behavior tests ---

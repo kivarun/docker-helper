@@ -352,11 +352,33 @@ func loadConfig() (*Config, error) {
 	return cfg, nil
 }
 
-func resolveAuditEnabled(cfg *bool, level slog.Level) bool {
+// resolveAuditEnabled returns the effective audit_enabled value.
+// When cfg is non-nil, the explicit value always wins.
+// When cfg is nil (absent from config file):
+//   - system mode: audit is always enabled regardless of log_level;
+//   - user mode: audit is enabled only when log_level is debug.
+func resolveAuditEnabled(cfg *bool, level slog.Level, mode DeploymentMode) bool {
 	if cfg != nil {
 		return *cfg
 	}
+	if mode == ModeSystem {
+		return true
+	}
 	return level == slog.LevelDebug
+}
+
+// resolveAuditSource returns the source description for audit_enabled.
+// "explicit" — the operator set audit_enabled in config.
+// "system_default" — audit_enabled absent, system mode defaults to enabled.
+// "log_level" — audit_enabled absent, user mode derived from log_level.
+func resolveAuditSource(cfg *bool, mode DeploymentMode) string {
+	if cfg != nil {
+		return "explicit"
+	}
+	if mode == ModeSystem {
+		return "system_default"
+	}
+	return "log_level"
 }
 
 // resolveTrustedCAInjection returns the effective injection mode.
@@ -373,8 +395,8 @@ func resolveTrustedCAInjection(s string) string {
 // `docker-helper config show` and `docker-helper config show FIELD` display.
 type effectiveConfigValues struct {
 	LogLevel              string // default "info"
-	AuditEnabled          bool   // derived from effective log_level unless explicit
-	AuditEnabledSource    string // "explicit" or "log_level"
+	AuditEnabled          bool   // derived from mode/log_level unless explicit
+	AuditEnabledSource    string // "explicit", "system_default", or "log_level"
 	ShutdownTimeout       string // default "30s"
 	OperationRetentionTTL string // default "10m"
 	OperationMaxCompleted int    // default 200
@@ -391,11 +413,9 @@ func resolveEffectiveConfig(fc fileConfig) effectiveConfigValues {
 		level = "info"
 	}
 	slogLevel, _ := parseLogLevel(level)
-	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel)
-	auditSource := "log_level"
-	if fc.AuditEnabled != nil {
-		auditSource = "explicit"
-	}
+	mode := resolveDeploymentMode()
+	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel, mode)
+	auditSource := resolveAuditSource(fc.AuditEnabled, mode)
 	shutdownTimeout := fc.ShutdownTimeout
 	if shutdownTimeout == "" {
 		shutdownTimeout = "30s"

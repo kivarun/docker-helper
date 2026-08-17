@@ -413,7 +413,7 @@ config.json. If present, configuration validation and daemon startup fail:
 
 | Field | Description |
 |-------|-------------|
-| `audit_enabled_source` | `"explicit"` or `"log_level"` |
+| `audit_enabled_source` | `"explicit"`, `"system_default"`, or `"log_level"` |
 | `config_path` | Path to `config.json` |
 | `config_dir` | Configuration directory |
 | `runtime_dir` | Runtime directory under `XDG_RUNTIME_DIR` |

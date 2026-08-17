@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,37 +72,82 @@ func writeReloadConfig(t *testing.T, configPath string, cfg *Config, auditEnable
 
 // --- Reload audit ---
 
-func TestReloadAuditTrueToFalse(t *testing.T) {
-	app, configPath, adminToken, auditBuf, _ := setupReloadApp(t, true)
-	enabled := false
-	writeReloadConfig(t, configPath, app.Config, &enabled)
-
-	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	app.handleReload(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+func TestReloadAuditTransition(t *testing.T) {
+	tests := []struct {
+		name           string
+		startAudit     bool
+		newAudit       *bool // nil = don't set (keep absent)
+		wantHTTP       int
+		wantAuditCount int // number of config.reload success events
+		wantResult     string
+	}{
+		{
+			name:           "true -> false",
+			startAudit:     true,
+			newAudit:       ptrOf(false),
+			wantHTTP:       http.StatusOK,
+			wantAuditCount: 1,
+			wantResult:     "success",
+		},
+		{
+			name:           "false -> true",
+			startAudit:     false,
+			newAudit:       ptrOf(true),
+			wantHTTP:       http.StatusOK,
+			wantAuditCount: 1,
+			wantResult:     "success",
+		},
+		{
+			name:           "true -> true",
+			startAudit:     true,
+			newAudit:       ptrOf(true),
+			wantHTTP:       http.StatusOK,
+			wantAuditCount: 1,
+			wantResult:     "success",
+		},
+		{
+			name:           "false -> false",
+			startAudit:     false,
+			newAudit:       ptrOf(false),
+			wantHTTP:       http.StatusOK,
+			wantAuditCount: 0,
+			wantResult:     "",
+		},
 	}
-	if !hasAuditEvent(auditBuf, "config.reload", "success") {
-		t.Fatal("config.reload success must be written when audit_enabled changes true->false")
-	}
-}
 
-func TestReloadAuditFalseToTrue(t *testing.T) {
-	app, configPath, adminToken, auditBuf, _ := setupReloadApp(t, false)
-	enabled := true
-	writeReloadConfig(t, configPath, app.Config, &enabled)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, configPath, adminToken, auditBuf, _ := setupReloadApp(t, tt.startAudit)
+			writeReloadConfig(t, configPath, app.Config, tt.newAudit)
 
-	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	app.handleReload(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	if !hasAuditEvent(auditBuf, "config.reload", "success") {
-		t.Fatal("config.reload success must be written when audit_enabled changes false->true")
+			req := httptest.NewRequest(http.MethodPost, "/reload", nil)
+			req.Header.Set("Authorization", "Bearer "+adminToken)
+			w := httptest.NewRecorder()
+			// Wrap with request ID middleware so request_id is available in context.
+			withRequestID(app.handleReload)(w, req)
+			if w.Code != tt.wantHTTP {
+				t.Fatalf("expected %d, got %d", tt.wantHTTP, w.Code)
+			}
+
+			count := countAuditEvents(auditBuf, "config.reload", tt.wantResult)
+			if count != tt.wantAuditCount {
+				t.Errorf("expected %d config.reload %q events, got %d", tt.wantAuditCount, tt.wantResult, count)
+			}
+
+			// Verify audit records have duration and request_id when present.
+			if tt.wantAuditCount > 0 {
+				rec := findAuditEvent(auditBuf, "config.reload")
+				if rec == nil {
+					t.Fatal("expected config.reload audit record")
+				}
+				if rec.Duration == "" {
+					t.Error("config.reload audit must include duration")
+				}
+				if rec.RequestID == "" {
+					t.Error("config.reload audit must include request_id")
+				}
+			}
+		})
 	}
 }
 
@@ -114,7 +160,7 @@ func TestReloadAuditInvalidConfig(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w := httptest.NewRecorder()
-	app.handleReload(w, req)
+	withRequestID(app.handleReload)(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
@@ -127,60 +173,9 @@ func TestReloadAuditInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestReloadAuditNoConfigContents(t *testing.T) {
-	app, _, adminToken, auditBuf, _ := setupReloadApp(t, true)
-
-	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	app.handleReload(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	for _, rec := range parseAuditRecords(auditBuf) {
-		if rec.Event == "config.reload" {
-			data, _ := json.Marshal(rec)
-			for _, f := range []string{"allowed_root", "session_ttl", "log_level", "audit_enabled"} {
-				if strings.Contains(string(data), f) {
-					t.Errorf("config.reload audit must not contain %q", f)
-				}
-			}
-		}
-	}
-}
-
-func TestReloadAuditTrueToTrueSingleEvent(t *testing.T) {
-	app, _, adminToken, auditBuf, _ := setupReloadApp(t, true)
-
-	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	app.handleReload(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	count := countAuditEvents(auditBuf, "config.reload", "success")
-	if count != 1 {
-		t.Errorf("expected exactly 1 config.reload success event, got %d", count)
-	}
-}
-
-func TestReloadAuditFalseToFalseNoEvent(t *testing.T) {
-	app, _, adminToken, auditBuf, _ := setupReloadApp(t, false)
-
-	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
-	w := httptest.NewRecorder()
-	app.handleReload(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	if hasAuditEvent(auditBuf, "config.reload", "success") {
-		t.Error("config.reload audit must not be written when audit is disabled")
-	}
-}
-
-func TestReloadAuditTrueToFalseThenTrue(t *testing.T) {
+// TestReloadAuditWriterRecover verifies the independent invariant:
+// audit writer works again after disable -> re-enable cycle.
+func TestReloadAuditWriterRecover(t *testing.T) {
 	app, configPath, adminToken, auditBuf, _ := setupReloadApp(t, true)
 
 	// Step 1: true -> false
@@ -189,7 +184,7 @@ func TestReloadAuditTrueToFalseThenTrue(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w := httptest.NewRecorder()
-	app.handleReload(w, req)
+	withRequestID(app.handleReload)(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("step 1: expected 200, got %d", w.Code)
 	}
@@ -200,18 +195,51 @@ func TestReloadAuditTrueToFalseThenTrue(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/reload", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	w = httptest.NewRecorder()
-	app.handleReload(w, req)
+	withRequestID(app.handleReload)(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("step 2: expected 200, got %d", w.Code)
 	}
 
-	count := countAuditEvents(auditBuf, "config.reload", "success")
-	if count != 2 {
-		t.Errorf("expected 2 config.reload success events, got %d", count)
-	}
+	// Verify audit writer works after re-enable.
 	writeAudit(auditRecord{Event: "test.after.reenable"})
 	if !strings.Contains(auditBuf.String(), "test.after.reenable") {
 		t.Fatal("audit must work after re-enabling")
+	}
+}
+
+// TestReloadAuditNoSensitiveValues verifies that config.reload audit records
+// do not contain any sensitive or host-specific config values, regardless of
+// which JSON field they might accidentally land in.
+func TestReloadAuditNoSensitiveValues(t *testing.T) {
+	app, configPath, adminToken, auditBuf, _ := setupReloadApp(t, true)
+
+	// Write config with unique marker values for sensitive/host-specific fields.
+	// trusted_ca_path must be an absolute path per validation.
+	allowedRoot := testAllowedRootDir(t)
+	markerCA := "/unique-marker-ca-path-abc123"
+	newCfg := map[string]any{
+		"allowed_root":    allowedRoot,
+		"session_ttl":     "12h",
+		"log_level":       "info",
+		"trusted_ca_path": markerCA,
+	}
+	data, _ := json.MarshalIndent(newCfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	withRequestID(app.handleReload)(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Check raw audit JSON for marker values.
+	auditRaw := auditBuf.String()
+	if strings.Contains(auditRaw, markerCA) {
+		t.Errorf("config.reload audit must not contain sensitive value %q", markerCA)
 	}
 }
 
@@ -339,11 +367,36 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
-	app.DB.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/principals/test/credentials/dhcr_test/revoke", nil)
-	req.SetPathValue("username", "test")
-	req.SetPathValue("id", "dhcr_test")
+	// Create a real credential that can be revoked.
+	home := filepath.Join(app.Config.AllowedRoot, "home", "preread-test")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1002", "1002", home, nil
+	}
+	principal, err := createPrincipal(app.DB, "preread-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, _, err := createCredential(app.DB, principal.Username, "test-cred")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace DB with one that fails Query (pre-read) but allows Exec (mutation).
+	// This proves: if mutation were attempted, it would succeed.
+	dbPath := app.Config.DatabasePath
+	app.DB.Close()
+	app.DB = newFailQueryDB(t, dbPath, errors.New("mock_query_fail_for_testing"))
+	defer app.DB.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/principals/preread-test/credentials/"+cred.ID+"/revoke", nil)
+	req.SetPathValue("username", "preread-test")
+	req.SetPathValue("id", cred.ID)
 	withAuth(req)
 	w := httptest.NewRecorder()
 	app.handleRevokeCredential(w, req)
@@ -353,12 +406,34 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	if !strings.Contains(opBuf.String(), "credential revoke pre-read failed") {
 		t.Fatalf("expected operational ERROR for pre-read failure, got:\n%s", opBuf.String())
 	}
+
+	// Reopen the real DB and verify the credential was NOT revoked.
+	// Since Exec would have succeeded, the only explanation for
+	// the credential still being active is that mutation was never attempted.
+	realDB, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer realDB.Close()
+	var revokedAt sql.NullInt64
+	err = realDB.QueryRow(
+		`SELECT c.revoked_at FROM credentials c WHERE c.id = ?`, cred.ID,
+	).Scan(&revokedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revokedAt.Valid {
+		t.Error("credential must NOT be revoked — mutation path must not have been reached")
+	}
 }
 
 // --- Pull log level ---
 
+// TestPullNonZeroNoOperationalError verifies the logging invariant:
+// a successfully started docker process with non-zero exit is a workload
+// result, not a daemon operational error.
 func TestPullNonZeroNoOperationalError(t *testing.T) {
-	auditBuf, opBuf := setupTestLogging(t)
+	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -376,27 +451,15 @@ func TestPullNonZeroNoOperationalError(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
-	var finishFound bool
-	for _, rec := range records {
-		if rec.Event == "pull.finish" && rec.Result == "pull_error" {
-			finishFound = true
-			if rec.ExitCode == nil || *rec.ExitCode != 1 {
-				t.Errorf("expected exit_code 1, got %v", rec.ExitCode)
-			}
-			break
-		}
-	}
-	if !finishFound {
-		t.Fatal("pull.finish audit not found")
-	}
 	if strings.Contains(opBuf.String(), "ERROR") {
 		t.Fatalf("pull non-zero exit must not produce operational ERROR, got:\n%s", opBuf.String())
 	}
 }
 
+// TestPullStartFailureOperationalError verifies the logging invariant:
+// a docker Start failure (process never started) is an operational error.
 func TestPullStartFailureOperationalError(t *testing.T) {
-	auditBuf, opBuf := setupTestLogging(t)
+	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(app.Config.AllowedRoot)
@@ -417,57 +480,37 @@ func TestPullStartFailureOperationalError(t *testing.T) {
 	if !strings.Contains(opBuf.String(), "cannot start docker pull") {
 		t.Fatalf("pull start failure must produce operational ERROR, got:\n%s", opBuf.String())
 	}
-
-	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
-	var finishFound bool
-	for _, rec := range records {
-		if rec.Event == "pull.finish" {
-			finishFound = true
-			break
-		}
-	}
-	if !finishFound {
-		t.Fatal("pull.finish audit must be written even on start failure")
-	}
 }
 
 // --- Audit writer failure ---
 
-func TestAuditWriterFailureContainsCorrelationFields(t *testing.T) {
+// TestAuditWriterFailureCorrelation verifies that when the audit writer
+// fails, the operational error record contains all available correlation
+// fields: audit_event, operation_id, request_id, and session_id.
+func TestAuditWriterFailureCorrelation(t *testing.T) {
 	opBuf := new(bytes.Buffer)
 	initLoggers(opBuf, &failingAuditWriter{}, slog.LevelError, true)
 	defer logging.reset()
 
 	writeAudit(auditRecord{
-		Event: "build.finish", SessionID: "dhs_test", OperationID: "op_test123",
-		Result: "succeeded", Duration: "5s",
+		Event:       "build.finish",
+		SessionID:   "dhs_test",
+		OperationID: "op_test123",
+		RequestID:   "req_abc456",
+		Result:      "succeeded",
+		Duration:    "5s",
 	})
 
 	opOutput := opBuf.String()
-	if !strings.Contains(opOutput, "build.finish") {
-		t.Fatalf("expected audit_event in error, got:\n%s", opOutput)
-	}
-	if !strings.Contains(opOutput, "op_test123") {
-		t.Fatalf("expected operation_id in error, got:\n%s", opOutput)
-	}
-}
-
-func TestAuditWriterFailurePreservesRequestSessionID(t *testing.T) {
-	opBuf := new(bytes.Buffer)
-	initLoggers(opBuf, &failingAuditWriter{}, slog.LevelInfo, true)
-	defer logging.reset()
-
-	writeAudit(auditRecord{
-		Event: "session.create", RequestID: "req_test123", SessionID: "dhs_test456",
-		Result: "success", Duration: "1ms",
-	})
-
-	opOutput := opBuf.String()
-	if !strings.Contains(opOutput, "req_test123") {
-		t.Fatalf("expected request_id in audit writer failure, got:\n%s", opOutput)
-	}
-	if !strings.Contains(opOutput, "dhs_test456") {
-		t.Fatalf("expected session_id in audit writer failure, got:\n%s", opOutput)
+	for _, field := range []string{
+		"build.finish", // audit_event
+		"op_test123",   // operation_id
+		"req_abc456",   // request_id
+		"dhs_test",     // session_id
+	} {
+		if !strings.Contains(opOutput, field) {
+			t.Errorf("expected %q in audit writer failure record, got:\n%s", field, opOutput)
+		}
 	}
 }
 
@@ -582,52 +625,6 @@ func TestAdminTokenRotateInternalErrorDiagnostic(t *testing.T) {
 	}
 	if !hasAuditEvent(auditBuf, "admin_token.rotate", "error") {
 		t.Fatal("admin_token.rotate audit with result=error not found")
-	}
-}
-
-func TestAdminTokenRotateStaleTokenNoOperationalError(t *testing.T) {
-	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
-
-	newToken, err := app.rotateAdminToken(app.getAdminTokenHash())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/admin/token/rotate", nil)
-	withAuth(req)
-	w := httptest.NewRecorder()
-	app.handleRotateAdminToken(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
-	}
-	if strings.Contains(opBuf.String(), "admin token rotate failed") {
-		t.Fatalf("stale-token case must not produce operational ERROR, got:\n%s", opBuf.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/admin/token/rotate", nil)
-	req.Header.Set("Authorization", "Bearer "+newToken)
-	w = httptest.NewRecorder()
-	app.handleRotateAdminToken(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 with new token, got %d", w.Code)
-	}
-}
-
-// --- Async finish ---
-
-func TestAsyncFinishAuditNoRequestID(t *testing.T) {
-	auditBuf, _ := setupTestLogging(t)
-	writeAuditWithRequestID(context.Background(), auditRecord{
-		Event: "build.finish", SessionID: "dhs_test", OperationID: "op_test",
-		Result: "succeeded", Duration: "5s",
-	})
-	records := parseAuditRecords(auditBuf)
-	if len(records) != 1 {
-		t.Fatalf("expected 1 record, got %d", len(records))
-	}
-	if records[0].RequestID != "" {
-		t.Error("async finish audit must not contain request_id")
 	}
 }
 

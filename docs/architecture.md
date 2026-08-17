@@ -1116,13 +1116,23 @@ Audit output is controlled by the optional `audit_enabled` field in
 2. Explicit `audit_enabled: false` disables audit, including when
    `log_level` is `debug`.
 3. When `audit_enabled` is absent:
-   - `log_level=debug` enables audit;
-   - every other `log_level` disables audit.
+   - **system mode** (running as UID 0): audit is always enabled,
+     regardless of `log_level`;
+   - **user mode** (running as non-root):
+     `log_level=debug` enables audit; every other `log_level` disables it.
 
 `docker-helper init` omits `audit_enabled` from the generated config.
-Since the default `log_level` is `info`, audit is disabled by default.
-If the user later changes `log_level` to `debug`, audit becomes enabled
-unless explicitly overridden with `audit_enabled: false`.
+In user mode, since the default `log_level` is `info`, audit is disabled
+by default.  In system mode, audit is enabled by default.
+
+The `audit_enabled_source` field in `docker-helper config show` indicates
+how the effective value was derived:
+
+| Value | Meaning |
+|-------|---------|
+| `"explicit"` | `audit_enabled` was set in `config.json` |
+| `"system_default"` | `audit_enabled` absent, system mode defaults to enabled |
+| `"log_level"` | `audit_enabled` absent, user mode derived from `log_level` |
 
 When audit is disabled:
 
