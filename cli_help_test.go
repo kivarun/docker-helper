@@ -565,7 +565,7 @@ func TestReloadSystemFlagAccepted(t *testing.T) {
 func TestReloadEndpointTokenFileAccepted(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"reload", "--endpoint", "http://127.0.0.1:52375", "--token-file", tokenPath}, &stdout, &stderr)
@@ -580,7 +580,7 @@ func TestReloadEndpointTokenFileAccepted(t *testing.T) {
 func TestReloadSystemEndpointMutuallyExclusive(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"reload", "--system", "--endpoint", "http://127.0.0.1:52375", "--token-file", tokenPath}, &stdout, &stderr)

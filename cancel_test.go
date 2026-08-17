@@ -1293,7 +1293,8 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	// Create a long-running process that survives SIGTERM so the graceful
 	// phase expires and both termination paths reach force cleanup.
 	// Use a busy-loop approach that explicitly ignores SIGTERM.
-	cmd := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")
+	readyFile := filepath.Join(t.TempDir(), "proc.ready")
+	cmd := exec.Command("sh", "-c", "trap ':' TERM; touch "+readyFile+"; while :; do :; done")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cannot start test process: %v", err)
 	}
@@ -1305,8 +1306,8 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	}
 	t.Logf("test process PID: %d", cmd.Process.Pid)
 
-	// Wait a moment for the process to stabilize.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the process to install its SIGTERM trap.
+	waitProcessReady(t, readyFile)
 
 	// Start a completion goroutine that waits for the process and transitions
 	// the operation to terminal (mimics the real run handler behavior).
@@ -1423,14 +1424,15 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 
 	// Start a long-running process that survives SIGTERM so the follower
 	// reaches the force phase. The owner is simulated (already claimed).
-	cmd := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")
+	readyFile := filepath.Join(t.TempDir(), "proc.ready")
+	cmd := exec.Command("sh", "-c", "trap ':' TERM; touch "+readyFile+"; while :; do :; done")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("cannot start test process: %v", err)
 	}
 	op.cmd = cmd
 
-	// Wait for the process to stabilize.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the process to install its SIGTERM trap.
+	waitProcessReady(t, readyFile)
 
 	// Completion goroutine (mimics real handler).
 	go func() {
@@ -1492,7 +1494,9 @@ func TestCancelResponseNoTimestampFields(t *testing.T) {
 	opID := runResp["operation_id"].(string)
 
 	// Wait for the operation to complete.
-	time.Sleep(500 * time.Millisecond)
+	if op := app.OperationRegistry.get(opID); op != nil {
+		op.Wait()
+	}
 
 	// Cancel the already-completed operation.
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)

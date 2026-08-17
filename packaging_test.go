@@ -28,169 +28,17 @@ func TestUninstallScriptSyntax(t *testing.T) {
 	}
 }
 
-// TestInstallBinaryCopied verifies install.sh copies the binary to ~/.local/bin.
-func TestInstallBinaryCopied(t *testing.T) {
-	tempHome := t.TempDir()
-	fakeBin := filepath.Join(tempHome, "fake-docker-helper")
-	if err := os.WriteFile(fakeBin, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	scriptDir := t.TempDir()
-	binPath := filepath.Join(scriptDir, "docker-helper")
-	if err := os.Rename(fakeBin, binPath); err != nil {
-		t.Fatal(err)
-	}
-
-	testScript := `#!/usr/bin/env bash
-set -euo pipefail
-INSTALL_DIR="` + tempHome + `/.local/bin"
-BINARY_NAME="docker-helper"
-script_dir="` + scriptDir + `"
-install_binary() {
-	mkdir -p "$INSTALL_DIR"
-	cp "$script_dir/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-	chmod 755 "$INSTALL_DIR/$BINARY_NAME"
-}
-install_binary
-`
-	tmpScript := filepath.Join(t.TempDir(), "test_install.sh")
-	if err := os.WriteFile(tmpScript, []byte(testScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("bash", tmpScript)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install_binary failed: %v", err)
-	}
-
-	installed := filepath.Join(tempHome, ".local", "bin", "docker-helper")
-	if _, err := os.Stat(installed); err != nil {
-		t.Fatalf("binary not installed to %s: %v", installed, err)
-	}
-
-	info, err := os.Stat(installed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mode := info.Mode().Perm()
-	if mode != 0755 {
-		t.Errorf("expected mode 0755, got %o", mode)
-	}
-}
-
-// TestInstallUnitCopied verifies install.sh copies the systemd unit.
-func TestInstallUnitCopied(t *testing.T) {
-	tempHome := t.TempDir()
-	scriptDir := t.TempDir()
-
-	unitDir := filepath.Join(scriptDir, "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	unitContent := []byte("[Unit]\nDescription=Test\n")
-	if err := os.WriteFile(filepath.Join(unitDir, "docker-helper.service"), unitContent, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	testScript := `#!/usr/bin/env bash
-set -euo pipefail
-UNIT_DIR="` + tempHome + `/.config/systemd/user"
-UNIT_NAME="docker-helper.service"
-script_dir="` + scriptDir + `"
-install_unit() {
-	local unit_path="$script_dir/systemd/user/$UNIT_NAME"
-	if [[ ! -f "$unit_path" ]]; then
-		return
-	fi
-	mkdir -p "$UNIT_DIR"
-	cp "$unit_path" "$UNIT_DIR/$UNIT_NAME"
-	chmod 644 "$UNIT_DIR/$UNIT_NAME"
-}
-install_unit
-`
-	tmpScript := filepath.Join(t.TempDir(), "test_install_unit.sh")
-	if err := os.WriteFile(tmpScript, []byte(testScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("bash", tmpScript)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install_unit failed: %v", err)
-	}
-
-	installed := filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")
-	if _, err := os.Stat(installed); err != nil {
-		t.Fatalf("unit not installed to %s: %v", installed, err)
-	}
-}
-
-// TestInstallIdempotent verifies that running install again does not fail.
-func TestInstallIdempotent(t *testing.T) {
-	tempHome := t.TempDir()
-	scriptDir := t.TempDir()
-
-	// Create a fake binary
-	binPath := filepath.Join(scriptDir, "docker-helper")
-	if err := os.WriteFile(binPath, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	unitDir := filepath.Join(scriptDir, "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "docker-helper.service"), []byte("[Unit]\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	testScript := `#!/usr/bin/env bash
-set -euo pipefail
-INSTALL_DIR="` + tempHome + `/.local/bin"
-UNIT_DIR="` + tempHome + `/.config/systemd/user"
-BINARY_NAME="docker-helper"
-UNIT_NAME="docker-helper.service"
-script_dir="` + scriptDir + `"
-install_binary() {
-	mkdir -p "$INSTALL_DIR"
-	cp "$script_dir/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-	chmod 755 "$INSTALL_DIR/$BINARY_NAME"
-}
-install_unit() {
-	local unit_path="$script_dir/systemd/user/$UNIT_NAME"
-	if [[ ! -f "$unit_path" ]]; then
-		return
-	fi
-	mkdir -p "$UNIT_DIR"
-	cp "$unit_path" "$UNIT_DIR/$UNIT_NAME"
-	chmod 644 "$UNIT_DIR/$UNIT_NAME"
-}
-# Run twice
-install_binary
-install_unit
-install_binary
-install_unit
-`
-	tmpScript := filepath.Join(t.TempDir(), "test_idempotent.sh")
-	if err := os.WriteFile(tmpScript, []byte(testScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("bash", tmpScript)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("idempotent install failed: %v", err)
-	}
-}
-
-// TestUninstallRemovesBinary verifies uninstall.sh removes the installed binary.
-func TestUninstallRemovesBinary(t *testing.T) {
+// setupInstalledHome creates a temp home with an installed docker-helper
+// (binary, unit, config, state) for running the production uninstall.sh.
+func setupInstalledHome(t *testing.T) string {
+	t.Helper()
 	tempHome := t.TempDir()
 
 	installDir := filepath.Join(tempHome, ".local", "bin")
 	if err := os.MkdirAll(installDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(installDir, "docker-helper"), []byte("fake"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(installDir, "docker-helper"), []byte("#!/bin/bash\necho 1.0.0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -202,47 +50,6 @@ func TestUninstallRemovesBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	testScript := `#!/usr/bin/env bash
-set -euo pipefail
-INSTALL_DIR="` + tempHome + `/.local/bin"
-UNIT_DIR="` + tempHome + `/.config/systemd/user"
-BINARY_NAME="docker-helper"
-UNIT_NAME="docker-helper.service"
-remove_binary() {
-	if [[ -f "$INSTALL_DIR/$BINARY_NAME" ]]; then
-		rm -f "$INSTALL_DIR/$BINARY_NAME"
-	fi
-}
-remove_unit() {
-	if [[ -f "$UNIT_DIR/$UNIT_NAME" ]]; then
-		rm -f "$UNIT_DIR/$UNIT_NAME"
-	fi
-}
-remove_binary
-remove_unit
-`
-	tmpScript := filepath.Join(t.TempDir(), "test_uninstall.sh")
-	if err := os.WriteFile(tmpScript, []byte(testScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("bash", tmpScript)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("uninstall failed: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(installDir, "docker-helper")); !os.IsNotExist(err) {
-		t.Error("binary should be removed")
-	}
-	if _, err := os.Stat(filepath.Join(unitDir, "docker-helper.service")); !os.IsNotExist(err) {
-		t.Error("unit should be removed")
-	}
-}
-
-// TestUninstallPreservesConfig verifies that soft uninstall preserves config.
-func TestUninstallPreservesConfig(t *testing.T) {
-	tempHome := t.TempDir()
-
 	configDir := filepath.Join(tempHome, ".config", "docker-helper")
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		t.Fatal(err)
@@ -250,9 +57,7 @@ func TestUninstallPreservesConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "admin.token"), []byte("test-token"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeTestTokenFile(t, filepath.Join(configDir, "admin.token"), "test-admin-token\n")
 
 	stateDir := filepath.Join(tempHome, ".local", "state", "docker-helper")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
@@ -262,61 +67,97 @@ func TestUninstallPreservesConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Soft uninstall should NOT remove config or state
-	// (purge=false means config/state are preserved)
+	return tempHome
+}
 
-	if _, err := os.Stat(filepath.Join(configDir, "config.json")); err != nil {
+// runUninstall runs the production packaging/uninstall.sh against a temp home.
+func runUninstall(t *testing.T, tempHome string, args []string) ([]byte, error) {
+	t.Helper()
+	script, err := filepath.Abs("packaging/uninstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", append([]string{script}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"HOME="+tempHome,
+		"XDG_CONFIG_HOME="+filepath.Join(tempHome, ".config"),
+		"XDG_STATE_HOME="+filepath.Join(tempHome, ".local", "state"),
+	)
+	return cmd.CombinedOutput()
+}
+
+// TestInstallIdempotent verifies that running the production install.sh twice
+// does not fail and installs the binary and unit.
+func TestInstallIdempotent(t *testing.T) {
+	tempHome, scriptDir, fakeDir, _ := setupInstallEnv(t, "", "1.0.0")
+
+	if err := os.WriteFile(filepath.Join(fakeDir, "systemctl"), []byte("#!/bin/bash\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		out, err := runInstall(t, scriptDir, tempHome, fakeDir, []string{"--yes"}, "")
+		if err != nil {
+			t.Fatalf("install run %d failed: %v\n%s", i+1, err, out)
+		}
+	}
+
+	installedBin := filepath.Join(tempHome, ".local", "bin", "docker-helper")
+	info, err := os.Stat(installedBin)
+	if err != nil {
+		t.Fatalf("binary not installed to %s: %v", installedBin, err)
+	}
+	if mode := info.Mode().Perm(); mode != 0755 {
+		t.Errorf("binary mode = %o, want 0755", mode)
+	}
+
+	installedUnit := filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")
+	if _, err := os.Stat(installedUnit); err != nil {
+		t.Fatalf("unit not installed to %s: %v", installedUnit, err)
+	}
+}
+
+// TestUninstallRemovesBinary verifies that the production uninstall.sh removes
+// the installed binary and unit while a soft uninstall preserves config/state.
+func TestUninstallRemovesBinary(t *testing.T) {
+	tempHome := setupInstalledHome(t)
+
+	out, err := runUninstall(t, tempHome, []string{"--yes"})
+	if err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(filepath.Join(tempHome, ".local", "bin", "docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(tempHome, ".config", "systemd", "user", "docker-helper.service")); !os.IsNotExist(err) {
+		t.Error("unit should be removed")
+	}
+
+	// Soft uninstall preserves config and state.
+	if _, err := os.Stat(filepath.Join(tempHome, ".config", "docker-helper", "config.json")); err != nil {
 		t.Error("config.json should be preserved")
 	}
-	if _, err := os.Stat(filepath.Join(configDir, "admin.token")); err != nil {
+	if _, err := os.Stat(filepath.Join(tempHome, ".config", "docker-helper", "admin.token")); err != nil {
 		t.Error("admin.token should be preserved")
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "docker-helper.db")); err != nil {
+	if _, err := os.Stat(filepath.Join(tempHome, ".local", "state", "docker-helper", "docker-helper.db")); err != nil {
 		t.Error("database should be preserved")
 	}
 }
 
-// TestUninstallPurgeRemovesConfig verifies that --purge removes config and state.
+// TestUninstallPurgeRemovesConfig verifies that uninstall.sh --purge removes
+// config and state.
 func TestUninstallPurgeRemovesConfig(t *testing.T) {
-	tempHome := t.TempDir()
+	tempHome := setupInstalledHome(t)
+
+	out, err := runUninstall(t, tempHome, []string{"--yes", "--purge"})
+	if err != nil {
+		t.Fatalf("uninstall --purge failed: %v\n%s", err, out)
+	}
 
 	configDir := filepath.Join(tempHome, ".config", "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte("{}"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
 	stateDir := filepath.Join(tempHome, ".local", "state", "docker-helper")
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	testScript := `#!/usr/bin/env bash
-set -euo pipefail
-CONFIG_DIR="` + configDir + `"
-STATE_DIR="` + stateDir + `"
-purge_config_and_state() {
-	if [[ -d "$CONFIG_DIR" ]]; then
-		rm -rf "$CONFIG_DIR"
-	fi
-	if [[ -d "$STATE_DIR" ]]; then
-		rm -rf "$STATE_DIR"
-	fi
-}
-purge_config_and_state
-`
-	tmpScript := filepath.Join(t.TempDir(), "test_purge.sh")
-	if err := os.WriteFile(tmpScript, []byte(testScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("bash", tmpScript)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("purge failed: %v", err)
-	}
-
 	if _, err := os.Stat(configDir); !os.IsNotExist(err) {
 		t.Error("config dir should be removed on purge")
 	}
@@ -325,57 +166,25 @@ purge_config_and_state
 	}
 }
 
-// TestUninstallPurgeDoesNotRemoveParent verifies purge doesn't remove
-// parent directories like ~/.config or ~/.local/state.
+// TestUninstallPurgeDoesNotRemoveParent verifies purge removes only
+// docker-helper's config/state dirs, not their parents or siblings.
 func TestUninstallPurgeDoesNotRemoveParent(t *testing.T) {
-	tempHome := t.TempDir()
+	tempHome := setupInstalledHome(t)
 
-	configDir := filepath.Join(tempHome, ".config", "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a sibling directory that should NOT be removed
 	siblingDir := filepath.Join(tempHome, ".config", "other-app")
 	if err := os.MkdirAll(siblingDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-
-	stateDir := filepath.Join(tempHome, ".local", "state", "docker-helper")
-	if err := os.MkdirAll(stateDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
 	siblingState := filepath.Join(tempHome, ".local", "state", "other-app")
 	if err := os.MkdirAll(siblingState, 0700); err != nil {
 		t.Fatal(err)
 	}
 
-	testScript := `#!/usr/bin/env bash
-set -euo pipefail
-CONFIG_DIR="` + configDir + `"
-STATE_DIR="` + stateDir + `"
-purge_config_and_state() {
-	if [[ -d "$CONFIG_DIR" ]]; then
-		rm -rf "$CONFIG_DIR"
-	fi
-	if [[ -d "$STATE_DIR" ]]; then
-		rm -rf "$STATE_DIR"
-	fi
-}
-purge_config_and_state
-`
-	tmpScript := filepath.Join(t.TempDir(), "test_purge_parent.sh")
-	if err := os.WriteFile(tmpScript, []byte(testScript), 0755); err != nil {
-		t.Fatal(err)
+	out, err := runUninstall(t, tempHome, []string{"--yes", "--purge"})
+	if err != nil {
+		t.Fatalf("uninstall --purge failed: %v\n%s", err, out)
 	}
 
-	cmd := exec.Command("bash", tmpScript)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("purge failed: %v", err)
-	}
-
-	// Parent dirs should still exist
 	if _, err := os.Stat(filepath.Join(tempHome, ".config")); err != nil {
 		t.Error("~/.config should not be removed")
 	}

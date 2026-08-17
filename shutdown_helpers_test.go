@@ -30,30 +30,7 @@ func setupBuildTest(t *testing.T) (*App, *operationRegistry, string) {
 	}
 
 	// Default staging seam: create a minimal staging directory with the Dockerfile.
-	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
-		stagingDir := t.TempDir()
-		opDir := filepath.Join(stagingDir, opID)
-		if err := os.MkdirAll(opDir, 0o700); err != nil {
-			return nil, err
-		}
-		ctxDir := filepath.Join(opDir, "context")
-		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
-			return nil, err
-		}
-		srcDockerfile := filepath.Join(cpath, dfrel)
-		data, err := os.ReadFile(srcDockerfile)
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), data, 0o644); err != nil {
-			return nil, err
-		}
-		return &stagedBuildContext{
-			ContextPath:    ctxDir,
-			DockerfilePath: filepath.Join(ctxDir, dfrel),
-			cleanupPath:    opDir,
-		}, nil
-	}
+	setupStagingSeam(t, app)
 
 	return app, reg, result.Token
 }

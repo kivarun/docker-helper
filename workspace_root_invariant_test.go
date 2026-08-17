@@ -152,7 +152,7 @@ func TestReloadSymlinkBypassKeepsOldConfig(t *testing.T) {
 
 	go server.Serve(listener)
 	defer server.Close()
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Hand-edit the config: allowed-looking symlink into a forbidden tree.
 	base := testAllowedRootDir(t)

@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestRegistryLoginCLIInteractive(t *testing.T) {
@@ -96,7 +95,7 @@ func TestRegistryLoginNoConfigFile(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")

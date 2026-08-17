@@ -21,6 +21,7 @@ func newTestApp(t *testing.T) *App {
 	if err != nil {
 		t.Fatalf("openDatabase() error: %v", err)
 	}
+	t.Cleanup(func() { db.Close() })
 
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase() error: %v", err)

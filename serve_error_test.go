@@ -69,8 +69,8 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 		resultCh <- result{sc, scancel, dd, e}
 	}()
 
-	// Wait a moment for Serve to start accepting connections.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for Serve to start accepting connections.
+	waitForDialReady(t, "unix", socketPath)
 
 	// Connect a client that enters the blocking handler.
 	conn, err := net.Dial("unix", socketPath)

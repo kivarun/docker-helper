@@ -17,23 +17,6 @@ import (
 	"time"
 )
 
-// testAllowedRoot returns a unique non-forbidden allowed_root path for
-// tests, in canonical form (matching Config.AllowedRoot). /tmp is forbidden
-// by the workspace root security policy.
-func testAllowedRoot(t *testing.T) string {
-	t.Helper()
-	p, err := os.MkdirTemp(safeTestBaseDir(t), ".docker-helper-test-*")
-	if err != nil {
-		t.Fatalf("cannot create allowed root test dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(p) })
-	canonical, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		t.Fatalf("cannot canonicalize allowed root test dir: %v", err)
-	}
-	return canonical
-}
-
 func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPath string, cleanup func()) {
 	t.Helper()
 	dir := t.TempDir()
@@ -47,7 +30,7 @@ func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPa
 	socketPath = filepath.Join(runtimeSubDir, "docker-helper.sock")
 	lockPath = socketPath + ".lock"
 
-	allowedRoot := testAllowedRoot(t)
+	allowedRoot := testAllowedRootDir(t)
 
 	cfg := map[string]any{
 		"allowed_root": allowedRoot,
@@ -124,7 +107,7 @@ func TestConfigUnsetDaemonNotRunning(t *testing.T) {
 	configPath, _, _, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	allowedRoot := testAllowedRoot(t)
+	allowedRoot := testAllowedRootDir(t)
 	cfg := map[string]any{
 		"allowed_root":  allowedRoot,
 		"session_ttl":   "12h",
@@ -156,7 +139,7 @@ func TestConfigSetUnchangedNoReload(t *testing.T) {
 	configPath, _, _, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	allowedRoot := testAllowedRoot(t)
+	allowedRoot := testAllowedRootDir(t)
 	cfg := map[string]any{
 		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
@@ -339,7 +322,7 @@ func TestReloadEndpoint(t *testing.T) {
 	defer server.Close()
 
 	// Wait for server to start
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Test reload with valid admin token
 	transport := &http.Transport{
@@ -421,7 +404,7 @@ func TestReloadEndpointInvalidAdmin(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -489,7 +472,7 @@ func TestReloadEndpointInvalidConfig(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Write invalid config
 	if err := os.WriteFile(configPath, []byte(`{"allowed_root": "not-absolute"}`), 0600); err != nil {
@@ -572,7 +555,7 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Verify initial config
 	if app.Config.LogLevel != 0 { // slog.LevelInfo = 0
@@ -580,7 +563,7 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	}
 
 	// Update config file
-	newAllowedRoot := testAllowedRoot(t)
+	newAllowedRoot := testAllowedRootDir(t)
 
 	newCfg := map[string]any{
 		"allowed_root": newAllowedRoot,
@@ -681,7 +664,7 @@ func TestReloadSuccessLogContainsRequestID(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -764,7 +747,7 @@ func TestReloadRuntimeLogLevel(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// At info level, debug logs should NOT appear
 	logBuf.Reset()
@@ -777,7 +760,7 @@ func TestReloadRuntimeLogLevel(t *testing.T) {
 
 	// Update config to debug level
 	configPath := getConfigPath()
-	allowedRoot := testAllowedRoot(t)
+	allowedRoot := testAllowedRootDir(t)
 	newCfg := map[string]any{
 		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
@@ -870,7 +853,7 @@ func TestReloadRuntimeAuditEnabled(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Audit disabled - no audit records should be written
 	auditBuf.Reset()
@@ -881,7 +864,7 @@ func TestReloadRuntimeAuditEnabled(t *testing.T) {
 
 	// Update config to enable audit
 	configPath := getConfigPath()
-	allowedRoot := testAllowedRoot(t)
+	allowedRoot := testAllowedRootDir(t)
 	newCfg := map[string]any{
 		"allowed_root":  allowedRoot,
 		"session_ttl":   "12h",
@@ -933,7 +916,7 @@ func TestTryReloadConfigNoRuntimeDir(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
-	allowedRoot := testAllowedRoot(t)
+	allowedRoot := testAllowedRootDir(t)
 	cfg := map[string]any{
 		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
@@ -967,7 +950,7 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	allowedRoot := testAllowedRoot(t)
+	allowedRoot := testAllowedRootDir(t)
 	cfg := map[string]any{
 		"allowed_root": allowedRoot,
 		"session_ttl":  "12h",
@@ -1097,7 +1080,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 
 	go server.Serve(listener)
 	defer server.Close()
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -1107,6 +1090,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 
 	configPath := getConfigPath()
+	reloadRoot := testAllowedRootDir(t)
 
 	// Concurrently do logging, audit writes, and reloads
 	stop := make(chan struct{})
@@ -1152,9 +1136,8 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				allowedRoot := testAllowedRoot(t)
 				newCfg := map[string]any{
-					"allowed_root":  allowedRoot,
+					"allowed_root":  reloadRoot,
 					"session_ttl":   "12h",
 					"log_level":     "debug",
 					"audit_enabled": true,
@@ -1227,7 +1210,7 @@ func TestReloadInvalidConfigNoLeak(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Write invalid config that will produce a descriptive internal error
 	if err := os.WriteFile(configPath, []byte(`{"allowed_root": "not-absolute"}`), 0600); err != nil {

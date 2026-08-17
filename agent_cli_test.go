@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -16,16 +15,7 @@ import (
 )
 
 type agentCLITestServer struct {
-	mux    *http.ServeMux
-	server *httptest.Server
-}
-
-func newAgentCLITestServer(t *testing.T) *agentCLITestServer {
-	t.Helper()
-	mux := http.NewServeMux()
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	return &agentCLITestServer{mux: mux, server: server}
+	mux *http.ServeMux
 }
 
 func (s *agentCLITestServer) handlePull(handler func(http.ResponseWriter, *http.Request)) {
@@ -77,7 +67,7 @@ func runAgentCLITestWithServer(t *testing.T, args []string, token string, setupS
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
 	defer server.Close()
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
@@ -436,7 +426,7 @@ func TestPullNoConfigFile(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
@@ -514,7 +504,7 @@ func TestWaitForOperationFinalLogsRace(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
@@ -877,7 +867,7 @@ func TestTruncatedLogWarning(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
@@ -961,7 +951,7 @@ func TestTruncatedOnlyInFinalLogs(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
@@ -1046,7 +1036,7 @@ func TestTruncatedMultiplePollsSingleWarning(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
 	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
@@ -1144,7 +1134,7 @@ func TestSignalCancel(t *testing.T) {
 
 			server := &http.Server{Handler: mux}
 			go server.Serve(listener)
-			time.Sleep(50 * time.Millisecond)
+			waitForDialReady(t, "unix", socketPath)
 
 			c := &apiClient{
 				httpClient: &http.Client{
@@ -1233,7 +1223,7 @@ func TestSignalCancelErrorDiagnostic(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	c := &apiClient{
 		httpClient: &http.Client{
@@ -1291,6 +1281,7 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 	opID := "op_no_orphan"
 	requestAfterCancel := int32(0)
 	cancelDone := int32(0)
+	statusCalls := int32(0)
 
 	tempDir := t.TempDir()
 	socketPath := tempDir + "/docker-helper.sock"
@@ -1303,6 +1294,7 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&statusCalls, 1)
 		// After cancel completes, any further request means orphan goroutine.
 		if atomic.LoadInt32(&cancelDone) == 1 {
 			atomic.AddInt32(&requestAfterCancel, 1)
@@ -1341,7 +1333,7 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 
 	server := &http.Server{Handler: mux}
 	go server.Serve(listener)
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	c := &apiClient{
 		httpClient: &http.Client{
@@ -1365,8 +1357,14 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 		close(done)
 	}()
 
-	// Let one poll iteration complete.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the first poll request to be observed, then interrupt.
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadInt32(&statusCalls) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("poll goroutine did not send a status request")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	sigCh <- syscall.SIGINT
 
 	<-done

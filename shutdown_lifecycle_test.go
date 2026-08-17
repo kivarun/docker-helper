@@ -204,7 +204,8 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "")
 	op1.cidfile = cidfile1
 	op1.started = true
-	cmd1 := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")
+	ready1 := filepath.Join(t.TempDir(), "op1.ready")
+	cmd1 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready1+"; while :; do :; done")
 	if err := cmd1.Start(); err != nil {
 		t.Fatalf("start cmd1: %v", err)
 	}
@@ -216,7 +217,8 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "")
 	op2.cidfile = cidfile2
 	op2.started = true
-	cmd2 := exec.Command("sh", "-c", "trap ':' TERM; while :; do :; done")
+	ready2 := filepath.Join(t.TempDir(), "op2.ready")
+	cmd2 := exec.Command("sh", "-c", "trap ':' TERM; touch "+ready2+"; while :; do :; done")
 	if err := cmd2.Start(); err != nil {
 		t.Fatalf("start cmd2: %v", err)
 	}
@@ -224,6 +226,11 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	reg.mu.Lock()
 	reg.ops[op2.ID] = op2
 	reg.mu.Unlock()
+
+	// Wait for both processes to install their SIGTERM trap, so the
+	// graceful phase reliably finds them alive and force cleanup runs.
+	waitProcessReady(t, ready1)
+	waitProcessReady(t, ready2)
 
 	// Completion goroutines.
 	go func() {
@@ -236,9 +243,6 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 		exitCode := 137
 		op2.fail("docker_run_failed", "docker run failed", &exitCode, nil)
 	}()
-
-	// Wait for processes to stabilize.
-	time.Sleep(100 * time.Millisecond)
 
 	reg.setShuttingDown()
 

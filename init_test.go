@@ -181,6 +181,11 @@ func TestResolveAllowedRootTildeExpansion(t *testing.T) {
 	if err != nil {
 		t.Skip("cannot determine home directory")
 	}
+	// The test premise ("~" resolves to a policy-legal root) only holds
+	// for a normal user; root's home is a forbidden system tree.
+	if canonicalHome, err := filepath.EvalSymlinks(home); err == nil && isForbiddenWorkspaceRoot(canonicalHome) != nil {
+		t.Skipf("home %s is not a valid workspace root", home)
+	}
 
 	resolved, err := resolveAllowedRoot("~")
 	if err != nil {
@@ -195,6 +200,11 @@ func TestResolveAllowedRootTildeSubdirExpansion(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("cannot determine home directory")
+	}
+	// The scenario (home's parent is a wide namespace like /home) only
+	// holds for a normal user; root's home is a forbidden system tree.
+	if canonicalHome, err := filepath.EvalSymlinks(home); err == nil && isForbiddenWorkspaceRoot(canonicalHome) != nil {
+		t.Skipf("home %s is not a valid workspace root", home)
 	}
 
 	resolved, err := resolveAllowedRoot("~/..")

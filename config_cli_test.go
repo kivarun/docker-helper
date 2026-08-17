@@ -21,7 +21,7 @@ func setupConfigTest(t *testing.T) string {
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
 	os.WriteFile(configPath, []byte(""), 0600)
-	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	return configPath
@@ -33,7 +33,7 @@ func setupConfigTestWithData(t *testing.T, data []byte) string {
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
 	os.WriteFile(configPath, data, 0600)
-	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	return configPath
 }
@@ -742,7 +742,7 @@ func TestConfigSetUnsetNoDirCreation(t *testing.T) {
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
 }`), 0600)
-	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
@@ -978,7 +978,7 @@ func TestRegressionCustomConfigRelocatesPaths(t *testing.T) {
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
 }`), 0600)
-	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -1030,7 +1030,7 @@ func TestRegressionAdminTokenWithCustomConfig(t *testing.T) {
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
 }`), 0600)
-	os.WriteFile(adminTokenPath, []byte("dht_custom_token_here\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_custom_token_here\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
 	var stdout, stderr bytes.Buffer
@@ -1111,7 +1111,7 @@ func TestRegressionNullAndNonObjectJSON(t *testing.T) {
 			configPath := filepath.Join(dir, "config.json")
 			adminTokenPath := filepath.Join(dir, "admin.token")
 			os.WriteFile(configPath, []byte(tt.data), 0600)
-			os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+			writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
 			var stdout, stderr bytes.Buffer
@@ -1219,7 +1219,7 @@ func TestRegressionLazyComputedFieldShow(t *testing.T) {
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
 	// Do NOT create config.json
-	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -1279,7 +1279,7 @@ func TestRegressionConfigNoDirCreation(t *testing.T) {
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
 }`), 0600)
-	os.WriteFile(adminTokenPath, []byte("dht_testtoken123\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
@@ -1408,7 +1408,7 @@ func TestRegressionBootstrapQueriesLazy(t *testing.T) {
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
 	// Write token but NOT config.json
-	os.WriteFile(adminTokenPath, []byte("dht_lazy_token\n"), 0600)
+	writeTestTokenFile(t, adminTokenPath, "dht_lazy_token\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -1639,7 +1639,7 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
   "session_ttl": "12h",
   "database_path": "/should/not/be/here"
 }`), 0600)
-			os.WriteFile(adminTokenPath, []byte("dht_bootstrap_token\n"), 0600)
+			writeTestTokenFile(t, adminTokenPath, "dht_bootstrap_token\n")
 			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 			t.Setenv("XDG_RUNTIME_DIR", "")
 
@@ -2434,7 +2434,7 @@ func TestReloadRejectsInvalidAllowedRoot(t *testing.T) {
 
 	go server.Serve(listener)
 	defer server.Close()
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Write invalid config with empty allowed_root
 	configPath := getConfigPath()
@@ -2506,7 +2506,7 @@ func TestReloadRejectsNegativeSessionTTL(t *testing.T) {
 
 	go server.Serve(listener)
 	defer server.Close()
-	time.Sleep(100 * time.Millisecond)
+	waitForDialReady(t, "unix", socketPath)
 
 	// Write invalid config with negative session_ttl
 	configPath := getConfigPath()

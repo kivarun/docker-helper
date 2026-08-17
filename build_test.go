@@ -9,29 +9,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 // testBuildCmd creates a test command that writes output and exits with the given code.
-func testBuildCmd(ctx context.Context, output string, exitCode int) func(context.Context, string, ...string) *exec.Cmd {
+func testBuildCmd(output string, exitCode int) func(context.Context, string, ...string) *exec.Cmd {
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		script := "/bin/sh"
 		var cmdArgs []string
 		if exitCode == 0 {
 			cmdArgs = []string{"-c", "printf '%s' '" + output + "'"}
 		} else {
-			cmdArgs = []string{"-c", "printf '%s' '" + output + "' >&2; exit " + itoa(exitCode)}
+			cmdArgs = []string{"-c", "printf '%s' '" + output + "' >&2; exit " + strconv.Itoa(exitCode)}
 		}
 		return exec.CommandContext(ctx, script, cmdArgs...)
 	}
-}
-
-func itoa(n int) string {
-	if n < 10 {
-		return string(rune('0' + n))
-	}
-	return string(rune('0'+n/10)) + string(rune('0'+n%10))
 }
 
 func TestBuildSessionAuthValidToken(t *testing.T) {
@@ -48,7 +42,7 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	app.ExecCommandContext = testBuildCmd(context.Background(), "ok", 0)
+	app.ExecCommandContext = testBuildCmd("ok", 0)
 
 	reqBody := map[string]string{
 		"context":    ".",

@@ -26,7 +26,7 @@ func TestResolveDefaultEndpointNonRoot(t *testing.T) {
 	os.MkdirAll(runtimeDir, 0755)
 
 	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
 	listener, err := net.Listen("unix", socketPath)
@@ -73,7 +73,7 @@ func TestResolveDefaultEndpointRoot(t *testing.T) {
 	// We can't easily create /run/docker-helper, so use --token-file override.
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	// Verify that the default endpoint for root uses system socket path.
 	client, err := resolveOperatorClient(operatorClientOptions{
@@ -97,7 +97,7 @@ func TestResolveDefaultNeverChoosesTCP(t *testing.T) {
 
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		TokenFile: tokenPath,
@@ -122,7 +122,7 @@ func TestResolveSystemEndpointNonRoot(t *testing.T) {
 
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		System:    true,
@@ -286,7 +286,7 @@ func TestHTTPClientMakesRequest(t *testing.T) {
 
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint:  "http://" + addr,
@@ -332,7 +332,7 @@ func TestUnixEndpointMakesRequest(t *testing.T) {
 	defer server.Close()
 
 	tokenPath := filepath.Join(dir, "token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint:  "unix:///" + socketPath,
@@ -381,7 +381,7 @@ func TestLauncherCredentialSessionManagement(t *testing.T) {
 	defer server.Close()
 
 	tokenPath := filepath.Join(dir, "launcher.token")
-	os.WriteFile(tokenPath, []byte("launcher-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "launcher-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint:  "unix:///" + socketPath,
@@ -423,7 +423,7 @@ func TestLauncherCredentialPrincipalAdminReturns401(t *testing.T) {
 	defer server.Close()
 
 	tokenPath := filepath.Join(dir, "launcher.token")
-	os.WriteFile(tokenPath, []byte("launcher-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "launcher-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint:  "unix:///" + socketPath,
@@ -501,7 +501,7 @@ func TestNoFallbackChosenEndpointFails(t *testing.T) {
 
 	// Choose a different (non-existent) endpoint.
 	tokenPath := filepath.Join(dir, "token")
-	os.WriteFile(tokenPath, []byte("test-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "test-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint:  "unix:///nonexistent/socket.sock",
@@ -524,7 +524,7 @@ func TestNoFallbackChosenEndpointFails(t *testing.T) {
 func TestReadTokenFileEmpty(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token")
-	os.WriteFile(tokenPath, []byte("  \n"), 0600)
+	writeTestTokenFile(t, tokenPath, "  \n")
 
 	_, err := readTokenFile(tokenPath)
 	if err == nil {
@@ -538,7 +538,7 @@ func TestReadTokenFileEmpty(t *testing.T) {
 func TestReadTokenFileTrimsWhitespace(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token")
-	os.WriteFile(tokenPath, []byte("  my-token  \n"), 0600)
+	writeTestTokenFile(t, tokenPath, "  my-token  \n")
 
 	token, err := readTokenFile(tokenPath)
 	if err != nil {
@@ -644,7 +644,7 @@ func TestSystemTokenFileOverride(t *testing.T) {
 
 	dir := t.TempDir()
 	customToken := filepath.Join(dir, "custom.token")
-	os.WriteFile(customToken, []byte("custom-token"), 0600)
+	writeTestTokenFile(t, customToken, "custom-token")
 
 	listener, err := net.Listen("unix", filepath.Join(dir, "daemon.sock"))
 	if err != nil {
@@ -814,7 +814,7 @@ func TestFullHTTPCycle(t *testing.T) {
 
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("admin-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "admin-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint:  "http://" + addr,
@@ -861,7 +861,7 @@ func TestFullUnixCycle(t *testing.T) {
 	defer server.Close()
 
 	tokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(tokenPath, []byte("admin-token"), 0600)
+	writeTestTokenFile(t, tokenPath, "admin-token")
 
 	client, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint:  "unix:///" + socketPath,

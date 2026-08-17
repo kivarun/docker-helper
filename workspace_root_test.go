@@ -160,17 +160,30 @@ func TestCanonicalizeWorkspaceRootSymlinkEscape(t *testing.T) {
 }
 
 func TestCanonicalizeWorkspaceRootTildeExpansion(t *testing.T) {
-	home := safeTestBaseDir(t)
+	// Tilde expansion uses the real user home, so this test needs the home
+	// itself to be a policy-legal workspace root. For root, the home is a
+	// forbidden system tree and ~ expansion is rejected by the policy.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot determine home directory: %v", err)
+	}
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Skipf("cannot canonicalize home: %v", err)
+	}
+	if err := isForbiddenWorkspaceRoot(canonicalHome); err != nil {
+		t.Skipf("home %s is not a valid workspace root: %v", canonicalHome, err)
+	}
 
 	// Create a valid workspace root directly under home so it is addressable
 	// with a ~/ spelling.
-	testDir, err := os.MkdirTemp(home, ".docker-helper-test-*")
+	testDir, err := os.MkdirTemp(canonicalHome, ".docker-helper-test-*")
 	if err != nil {
 		t.Fatalf("cannot create workspace root test dir: %v", err)
 	}
 	defer os.RemoveAll(testDir)
 
-	rel, err := filepath.Rel(home, testDir)
+	rel, err := filepath.Rel(canonicalHome, testDir)
 	if err != nil {
 		t.Fatal(err)
 	}

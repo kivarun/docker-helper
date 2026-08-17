@@ -118,7 +118,7 @@ func TestRotateAdminTokenRenameFailure(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	tokenPath := app.getConfig().AdminTokenPath
-	os.WriteFile(tokenPath, []byte(testAdminToken+"\n"), 0600)
+	writeTestTokenFile(t, tokenPath, testAdminToken+"\n")
 	oldFile, err := os.ReadFile(tokenPath)
 	if err != nil {
 		t.Fatalf("cannot read token file: %v", err)

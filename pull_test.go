@@ -505,12 +505,12 @@ func TestPullRequestCancellation(t *testing.T) {
 	// Wait for the child process to actually start (PID file appears).
 	pidReady := make(chan struct{})
 	go func() {
-		for i := 0; i < 50; i++ {
+		for i := 0; i < 500; i++ {
 			if _, err := os.Stat(pidFile); err == nil {
 				close(pidReady)
 				return
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 
@@ -605,7 +605,7 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	defer server.Close()
 
 	// Wait for server to be ready.
-	time.Sleep(50 * time.Millisecond)
+	waitForDialReady(t, "tcp", listener.Addr().String())
 
 	// Start the pull request.
 	reqBody := map[string]string{"image": "alpine:3.24"}
@@ -632,12 +632,12 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	// Wait for the child process to actually start (PID file appears).
 	pidReady := make(chan struct{})
 	go func() {
-		for i := 0; i < 50; i++ {
+		for i := 0; i < 500; i++ {
 			if _, err := os.Stat(pidFile); err == nil {
 				close(pidReady)
 				return
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 
@@ -701,9 +701,18 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 		t.Fatal("HTTP request did not complete after shutdown")
 	}
 
-	// Verify the child process is gone (with small delay for process cleanup).
-	time.Sleep(500 * time.Millisecond)
-	if err := syscall.Kill(childPid, 0); err == nil {
+	// Verify the child process is gone, giving the process table a short
+	// bounded window to reap it.
+	childGone := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(childPid, 0); err != nil {
+			childGone = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !childGone {
 		t.Error("child process still exists after daemon shutdown")
 		// Don't SIGKILL here — that would mask the failure.
 	}
