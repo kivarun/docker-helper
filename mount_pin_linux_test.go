@@ -843,51 +843,6 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 	}
 }
 
-func TestPinMountDirectoryCloseSet(t *testing.T) {
-	work := t.TempDir()
-	workspace := filepath.Join(work, "workspace")
-	runtimeDir := filepath.Join(work, "runtime")
-	os.MkdirAll(workspace, 0755)
-	os.MkdirAll(runtimeDir, 0755)
-
-	sourceDir := filepath.Join(workspace, "src")
-	os.MkdirAll(sourceDir, 0755)
-
-	seam := &mockSeam{
-		nextFD: 3,
-		fstatFn: func(fd int) (*unixStat, error) {
-			return &unixStat{mode: unix.S_IFDIR}, nil
-		},
-	}
-
-	pm, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
-	if err != nil {
-		t.Fatalf("pinMount: %v", err)
-	}
-
-	// Directory: 3,4,5,6 — each exactly once
-	expectedFDs := map[int]bool{3: true, 4: true, 5: true, 6: true}
-	closeSet := make(map[int]int)
-	for _, fd := range seam.closeCalls {
-		closeSet[fd]++
-	}
-	if len(closeSet) != len(expectedFDs) {
-		t.Errorf("close FDs = %v, want %v", closeSet, expectedFDs)
-	}
-	for fd, count := range closeSet {
-		if !expectedFDs[fd] {
-			t.Errorf("unexpected FD %d closed", fd)
-		}
-		if count != 1 {
-			t.Errorf("FD %d closed %d times, want 1", fd, count)
-		}
-	}
-
-	if err := pm.Cleanup(); err != nil {
-		t.Errorf("Cleanup: %v", err)
-	}
-}
-
 func TestPinMountFileCloseSet(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")

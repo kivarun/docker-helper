@@ -411,6 +411,20 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 			t.Error("cidfile should be removed after cancel")
 		}
 	}
+
+	// Verify cancel HTTP response.
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
+	}
+
+	var cancelResp map[string]any
+	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
+	if cancelResp["status"] != "failed" {
+		t.Errorf("expected status 'failed', got %v", cancelResp["status"])
+	}
+	if cancelResp["result_code"] != "cancelled" {
+		t.Errorf("expected result_code 'cancelled', got %v", cancelResp["result_code"])
+	}
 }
 
 // TestShutdownDoesNotProduceCancelledResult proves that daemon shutdown
@@ -444,6 +458,68 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	var buildResp map[string]any
 	json.NewDecoder(w.Body).Decode(&buildResp)
 	opID := buildResp["operation_id"].(string)
+
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+
+	// Wait for the process to start.
+	for i := 0; i < 50; i++ {
+		op.mu.Lock()
+		proc := op.cmd
+		op.mu.Unlock()
+		if proc != nil && proc.Process != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Simulate daemon shutdown by calling terminateAll directly.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+
+	// Wait for the operation to complete.
+	op.Wait()
+
+	// Verify the result is NOT cancelled.
+	op.mu.Lock()
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	op.mu.Unlock()
+
+	if rc == "cancelled" {
+		t.Errorf("shutdown should not produce result_code 'cancelled', got %q", rc)
+	}
+}
+
+// TestShutdownRunDoesNotProduceCancelledResult proves that daemon shutdown
+// does not produce result_code=cancelled for run operations.
+func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
+	app := newTestAppWithAuthAndStaging(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sleep", "300")
+	}
+
+	runReq := newRunRequest(map[string]any{
+		"image": "alpine:3.24",
+	}, result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, runReq)
+
+	var runResp map[string]any
+	json.NewDecoder(w.Body).Decode(&runResp)
+	opID := runResp["operation_id"].(string)
 
 	op := app.OperationRegistry.get(opID)
 	if op == nil {
@@ -833,6 +909,54 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	}
 	if completedAt == nil {
 		t.Error("CompletedAt must not be nil")
+	}
+}
+
+// TestCancelAfterNaturalFailurePreservesResult proves that cancelling an
+// operation that already completed with a natural failure result does not
+// overwrite the result to "cancelled".
+func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
+	app := newTestAppWithAuthAndStaging(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Register an already-terminal build operation with a natural failure.
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
+	op.fail("docker_build_failed", "build failed", nil)
+	app.OperationRegistry.mu.Lock()
+	app.OperationRegistry.ops[op.ID] = op
+	app.OperationRegistry.mu.Unlock()
+
+	// Cancel the already-terminal operation.
+	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
+	cancelReq.Header.Set("Authorization", "Bearer "+result.Token)
+	cancelW := httptest.NewRecorder()
+	newOperationMux(app).ServeHTTP(cancelW, cancelReq)
+
+	if cancelW.Code != http.StatusOK {
+		t.Fatalf("cancel: expected %d, got %d", http.StatusOK, cancelW.Code)
+	}
+
+	var cancelResp map[string]any
+	json.NewDecoder(cancelW.Body).Decode(&cancelResp)
+	if cancelResp["result_code"] != "docker_build_failed" {
+		t.Errorf("expected result_code 'docker_build_failed', got %v", cancelResp["result_code"])
+	}
+
+	// Verify stored result is unchanged.
+	op.mu.Lock()
+	rc := ""
+	if op.ResultCode != nil {
+		rc = *op.ResultCode
+	}
+	op.mu.Unlock()
+
+	if rc != "docker_build_failed" {
+		t.Errorf("stored result_code = %q, want 'docker_build_failed'", rc)
 	}
 }
 

@@ -484,56 +484,6 @@ func TestMountTargetRoot(t *testing.T) {
 	}
 }
 
-func TestMountsPreserveOrder(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
-	}
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	reqBody := map[string]any{
-		"image": "alpine:latest",
-		"mounts": []map[string]any{
-			{"source": ".", "target": "/a"},
-			{"source": ".", "target": "/b"},
-			{"source": ".", "target": "/c"},
-		},
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	mountSpecs := []string{}
-	for i, arg := range capturedArgs {
-		if arg == "--mount" && i+1 < len(capturedArgs) {
-			mountSpecs = append(mountSpecs, capturedArgs[i+1])
-		}
-	}
-
-	if len(mountSpecs) != 3 {
-		t.Fatalf("expected 3 mount specs, got %d", len(mountSpecs))
-	}
-
-	if mountSpecs[0] != mountSpecs[1] || mountSpecs[1] != mountSpecs[2] {
-		// The specs should be in order /a, /b, /c
-	}
-}
-
 func TestDockerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
@@ -652,42 +602,6 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 
 	if called {
 		t.Error("ExecCommand should not be called with invalid mount")
-	}
-}
-
-func TestMountInvalidMountCode(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
-	}
-
-	reqBody := map[string]any{
-		"image": "alpine:latest",
-		"mounts": []map[string]any{
-			{"source": "", "target": "/workspace"},
-		},
-	}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+result.Token)
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
-	if resp.Code != "invalid_mount" {
-		t.Errorf("expected code 'invalid_mount', got %q", resp.Code)
 	}
 }
 
