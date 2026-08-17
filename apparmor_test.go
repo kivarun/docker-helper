@@ -2116,8 +2116,15 @@ func TestApparmorUserProfileParserValidation(t *testing.T) {
 	}
 
 	// Render the template: replace placeholders with valid values.
-	content := strings.ReplaceAll(string(data), "@@BINARY_PATH@", "/usr/bin/docker-helper-test")
+	content := strings.ReplaceAll(string(data), "@@BINARY_PATH@@", "/usr/bin/docker-helper-test")
 	content = strings.ReplaceAll(content, "# @@WORKSPACE_RULE@@", "")
+
+	if strings.Contains(content, "@@BINARY_PATH@@") {
+		t.Fatal("rendered profile still contains @@BINARY_PATH@@")
+	}
+	if strings.Contains(content, "@@WORKSPACE_RULE@@") {
+		t.Fatal("rendered profile still contains @@WORKSPACE_RULE@@")
+	}
 
 	dir := t.TempDir()
 	profilePath := filepath.Join(dir, "docker-helper")
