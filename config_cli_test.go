@@ -15,31 +15,41 @@ import (
 	"time"
 )
 
-func setupConfigTest(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	adminTokenPath := filepath.Join(dir, "admin.token")
-	if err := os.WriteFile(configPath, []byte(""), 0600); err != nil {
-		t.Fatalf("cannot write config file: %v", err)
-	}
-	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	return configPath
-}
-
+// setupConfigTestWithData creates a temp config environment: a config file
+// with the given JSON data (nil = empty), an admin token beside it, and
+// DOCKER_HELPER_CONFIG pointed at the config file. It returns the config
+// path.
 func setupConfigTestWithData(t *testing.T, data []byte) string {
 	t.Helper()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	adminTokenPath := filepath.Join(dir, "admin.token")
+	if data == nil {
+		data = []byte("")
+	}
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		t.Fatalf("cannot write config file: %v", err)
 	}
-	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
+	writeTestTokenFile(t, filepath.Join(dir, "admin.token"), "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	return configPath
+}
+
+func setupConfigTest(t *testing.T) string {
+	t.Helper()
+	configPath := setupConfigTestWithData(t, nil)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	return configPath
+}
+
+// runConfigCLI runs docker-helper with the given args, capturing stdout and
+// stderr, and fails the test unless the exit code is wantCode.
+func runConfigCLI(t *testing.T, wantCode int, args ...string) (string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := runCommandWithWriters(args, &stdout, &stderr); code != wantCode {
+		t.Fatalf("expected exit code %d, got %d, stderr: %s", wantCode, code, stderr.String())
+	}
+	return stdout.String(), stderr.String()
 }
 
 func readConfigJSON(t *testing.T, path string) map[string]json.RawMessage {
@@ -85,55 +95,43 @@ func TestConfigSubcommandDispatch(t *testing.T) {
 func TestConfigSubcommandsArgCount(t *testing.T) {
 	setupConfigTest(t)
 
-	// show with extra args
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "a", "b"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("show extra args: expected exit code 2, got %d", code)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"show extra args", []string{"config", "show", "a", "b"}},
+		{"set missing args", []string{"config", "set", "field"}},
+		{"set extra args", []string{"config", "set", "a", "b", "c"}},
+		{"unset no args", []string{"config", "unset"}},
+		{"unset extra args", []string{"config", "unset", "a", "b"}},
 	}
-	if !strings.Contains(stderr.String(), "expected") {
-		t.Errorf("expected arg count error, got: %s", stderr.String())
-	}
-
-	// set with missing args
-	code = runCommandWithWriters([]string{"config", "set", "field"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("set missing args: expected exit code 2, got %d", code)
-	}
-
-	// set with extra args
-	code = runCommandWithWriters([]string{"config", "set", "a", "b", "c"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("set extra args: expected exit code 2, got %d", code)
-	}
-
-	// unset with no args
-	code = runCommandWithWriters([]string{"config", "unset"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("unset no args: expected exit code 2, got %d", code)
-	}
-
-	// unset with extra args
-	code = runCommandWithWriters([]string{"config", "unset", "a", "b"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("unset extra args: expected exit code 2, got %d", code)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tt.args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("expected exit code 2, got %d", code)
+			}
+			if !strings.Contains(stderr.String(), "expected") {
+				t.Errorf("expected arg count error, got: %s", stderr.String())
+			}
+		})
 	}
 }
 
 // Req 4: existing no-positional-arg commands still reject positionals
 func TestExistingCommandsRejectPositionals(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"serve", "extra"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("serve positional: expected exit code 2, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "unexpected argument") {
-		t.Errorf("expected unexpected argument error, got: %s", stderr.String())
-	}
-
-	code = runCommandWithWriters([]string{"version", "extra"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("version positional: expected exit code 2, got %d", code)
+	for _, cmd := range []string{"serve", "version"} {
+		t.Run(cmd, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters([]string{cmd, "extra"}, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("expected exit code 2, got %d", code)
+			}
+			if !strings.Contains(stderr.String(), "unexpected argument") {
+				t.Errorf("expected unexpected argument error, got: %s", stderr.String())
+			}
+		})
 	}
 }
 
@@ -146,15 +144,11 @@ func TestConfigShowAllJSON(t *testing.T) {
   "audit_enabled": false
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
+	stdout, _ := runConfigCLI(t, 0, "config", "show")
 
 	var result map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("invalid JSON: %v, output: %s", err, stdout.String())
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("invalid JSON: %v, output: %s", err, stdout)
 	}
 
 	if result["allowed_root"] != "/home/user/work" {
@@ -184,15 +178,11 @@ func TestConfigShowAllRedactedToken(t *testing.T) {
   "session_ttl": "24h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if strings.Contains(stdout.String(), "dht_testtoken123") {
+	stdout, _ := runConfigCLI(t, 0, "config", "show")
+	if strings.Contains(stdout, "dht_testtoken123") {
 		t.Error("real token must not appear in general show output")
 	}
-	if !strings.Contains(stdout.String(), "<redacted>") {
+	if !strings.Contains(stdout, "<redacted>") {
 		t.Error("expected <redacted> in output")
 	}
 }
@@ -205,33 +195,22 @@ func TestConfigShowSingleField(t *testing.T) {
   "log_level": "warn"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "allowed_root"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "/home/user/work\n" {
-		t.Errorf("expected '/home/user/work\\n', got %q", stdout.String())
-	}
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "session_ttl"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
+	tests := []struct {
+		field string
+		want  string
+	}{
+		{"allowed_root", "/home/user/work\n"},
+		{"session_ttl", "12h\n"},
+		{"log_level", "warn\n"},
 	}
-	if stdout.String() != "12h\n" {
-		t.Errorf("expected '12h\\n', got %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stdout.String() != "warn\n" {
-		t.Errorf("expected 'warn\\n', got %q", stdout.String())
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			stdout, _ := runConfigCLI(t, 0, "config", "show", tt.field)
+			if stdout != tt.want {
+				t.Errorf("expected %q, got %q", tt.want, stdout)
+			}
+		})
 	}
 }
 
@@ -242,13 +221,9 @@ func TestConfigShowAdminToken(t *testing.T) {
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "admin_token"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "dht_testtoken123\n" {
-		t.Errorf("expected 'dht_testtoken123\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "admin_token")
+	if stdout != "dht_testtoken123\n" {
+		t.Errorf("expected 'dht_testtoken123\\n', got %q", stdout)
 	}
 }
 
@@ -311,11 +286,7 @@ func TestConfigSetCoreFieldTypes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.field, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters([]string{"config", "set", tt.field, tt.value}, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("set %s: expected exit code 0, got %d, stderr: %s", tt.field, code, stderr.String())
-			}
+			runConfigCLI(t, 0, "config", "set", tt.field, tt.value)
 			raw := readConfigJSON(t, configPath)
 			tt.check(raw)
 		})
@@ -388,11 +359,7 @@ func TestConfigUnsetRemovesMember(t *testing.T) {
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
+	runConfigCLI(t, 0, "config", "unset", "log_level")
 	raw := readConfigJSON(t, configPath)
 	if _, ok := raw["log_level"]; ok {
 		t.Error("log_level should be removed, not present")
@@ -409,31 +376,17 @@ func TestConfigUnsetAuditEnabledRestoresLogLevel(t *testing.T) {
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "audit_enabled"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
+	runConfigCLI(t, 0, "config", "unset", "audit_enabled")
 
 	// Now show audit_enabled - should be derived from log_level=debug
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "audit_enabled"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("show audit_enabled: expected exit code 0, got %d", code)
-	}
-	if stdout.String() != "true\n" {
-		t.Errorf("expected 'true\\n' (debug enables audit), got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "audit_enabled")
+	if stdout != "true\n" {
+		t.Errorf("expected 'true\\n' (debug enables audit), got %q", stdout)
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "audit_enabled_source"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("show audit_enabled_source: expected exit code 0, got %d", code)
-	}
-	if stdout.String() != "log_level\n" {
-		t.Errorf("expected 'log_level\\n', got %q", stdout.String())
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "audit_enabled_source")
+	if stdout != "log_level\n" {
+		t.Errorf("expected 'log_level\\n', got %q", stdout)
 	}
 }
 
@@ -446,20 +399,11 @@ func TestConfigUnsetLogLevelRestoresInfo(t *testing.T) {
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
+	runConfigCLI(t, 0, "config", "unset", "log_level")
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stdout.String() != "info\n" {
-		t.Errorf("expected 'info\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "log_level")
+	if stdout != "info\n" {
+		t.Errorf("expected 'info\\n', got %q", stdout)
 	}
 }
 
@@ -473,11 +417,7 @@ func TestConfigPreservesUnknownMembers(t *testing.T) {
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
+	runConfigCLI(t, 0, "config", "set", "log_level", "debug")
 	raw := readConfigJSON(t, configPath)
 	if _, ok := raw["custom_field"]; !ok {
 		t.Error("custom_field should be preserved after set")
@@ -487,12 +427,7 @@ func TestConfigPreservesUnknownMembers(t *testing.T) {
 	}
 
 	// Now unset log_level and check preservation
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
+	runConfigCLI(t, 0, "config", "unset", "log_level")
 	raw = readConfigJSON(t, configPath)
 	if _, ok := raw["custom_field"]; !ok {
 		t.Error("custom_field should be preserved after unset")
@@ -510,11 +445,7 @@ func TestConfigFileMode0600(t *testing.T) {
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
+	runConfigCLI(t, 0, "config", "set", "log_level", "debug")
 	info, err := os.Stat(configPath)
 	if err != nil {
 		t.Fatalf("cannot stat config: %v", err)
@@ -533,29 +464,20 @@ func TestConfigSetUnsetFeedback(t *testing.T) {
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "warn"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
+	stdout, stderr := runConfigCLI(t, 0, "config", "set", "log_level", "warn")
+	if !strings.HasPrefix(stdout, "updated log_level=warn\n") {
+		t.Errorf("set stdout = %q, want output starting with 'updated log_level=warn\\n'", stdout)
 	}
-	if !strings.HasPrefix(stdout.String(), "updated log_level=warn\n") {
-		t.Errorf("set stdout = %q, want output starting with 'updated log_level=warn\\n'", stdout.String())
-	}
-	if stderr.Len() > 0 {
-		t.Errorf("set should not write to stderr, got: %s", stderr.String())
+	if stderr != "" {
+		t.Errorf("set should not write to stderr, got: %s", stderr)
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
+	stdout, stderr = runConfigCLI(t, 0, "config", "unset", "log_level")
+	if !strings.HasPrefix(stdout, "unset log_level\n") {
+		t.Errorf("unset stdout = %q, want output starting with 'unset log_level\\n'", stdout)
 	}
-	if !strings.HasPrefix(stdout.String(), "unset log_level\n") {
-		t.Errorf("unset stdout = %q, want output starting with 'unset log_level\\n'", stdout.String())
-	}
-	if stderr.Len() > 0 {
-		t.Errorf("unset should not write to stderr, got: %s", stderr.String())
+	if stderr != "" {
+		t.Errorf("unset should not write to stderr, got: %s", stderr)
 	}
 }
 
@@ -581,17 +503,12 @@ func TestConfigStdoutStderrSeparation(t *testing.T) {
 	}
 
 	// Success goes to stdout, nothing to stderr
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "allowed_root"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
+	successOut, successErr := runConfigCLI(t, 0, "config", "show", "allowed_root")
+	if successErr != "" {
+		t.Errorf("success should not write to stderr, got: %s", successErr)
 	}
-	if stderr.Len() > 0 {
-		t.Errorf("success should not write to stderr, got: %s", stderr.String())
-	}
-	if stdout.String() != "/home/user/work\n" {
-		t.Errorf("expected '/home/user/work\\n', got %q", stdout.String())
+	if successOut != "/home/user/work\n" {
+		t.Errorf("expected '/home/user/work\\n', got %q", successOut)
 	}
 }
 
@@ -727,11 +644,7 @@ func TestConfigSetUnsetNoDirCreation(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", stateDir)
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
+	runConfigCLI(t, 0, "config", "set", "log_level", "debug")
 
 	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
 		t.Error("config set should not create runtime directory")
@@ -741,12 +654,7 @@ func TestConfigSetUnsetNoDirCreation(t *testing.T) {
 	}
 
 	// Also test unset
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
+	runConfigCLI(t, 0, "config", "unset", "log_level")
 	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
 		t.Error("config unset should not create runtime directory")
 	}
@@ -840,23 +748,14 @@ func TestConfigShowRuntimeDependentWithRuntimeDir(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "runtime_dir"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != filepath.Join(runtimeDir, "docker-helper")+"\n" {
-		t.Errorf("expected runtime dir, got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "runtime_dir")
+	if stdout != filepath.Join(runtimeDir, "docker-helper")+"\n" {
+		t.Errorf("expected runtime dir, got %q", stdout)
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "socket_path"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stdout.String() != filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")+"\n" {
-		t.Errorf("expected socket path, got %q", stdout.String())
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "socket_path")
+	if stdout != filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")+"\n" {
+		t.Errorf("expected socket path, got %q", stdout)
 	}
 }
 
@@ -868,13 +767,9 @@ func TestConfigShowAllNoRuntimeDir(t *testing.T) {
 }`
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	setupConfigTestWithData(t, []byte(cfg))
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
+	stdout, _ := runConfigCLI(t, 0, "config", "show")
 	var result map[string]any
-	json.Unmarshal(stdout.Bytes(), &result)
+	json.Unmarshal([]byte(stdout), &result)
 	if result["runtime_dir"] != "" {
 		t.Errorf("runtime_dir should be empty, got %v", result["runtime_dir"])
 	}
@@ -895,13 +790,9 @@ func TestConfigShowAllWithRuntimeDir(t *testing.T) {
 	runtimeDir := "/tmp/test-runtime"
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	setupConfigTestWithData(t, []byte(cfg))
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
+	stdout, _ := runConfigCLI(t, 0, "config", "show")
 	var result map[string]any
-	json.Unmarshal(stdout.Bytes(), &result)
+	json.Unmarshal([]byte(stdout), &result)
 	if result["runtime_dir"] != filepath.Join(runtimeDir, "docker-helper") {
 		t.Errorf("runtime_dir = %v", result["runtime_dir"])
 	}
@@ -930,13 +821,9 @@ func TestRegressionCustomConfigRelocatesPaths(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
+	stdout, _ := runConfigCLI(t, 0, "config", "show")
 	var result map[string]any
-	json.Unmarshal(stdout.Bytes(), &result)
+	json.Unmarshal([]byte(stdout), &result)
 	if result["config_dir"] != filepath.Join(dir, "custom") {
 		t.Errorf("config_dir = %v, want %s", result["config_dir"], filepath.Join(dir, "custom"))
 	}
@@ -960,12 +847,8 @@ func TestRegressionConsistentTokenPath(t *testing.T) {
 	}
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "admin_token_path"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	gotPath := strings.TrimSpace(stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "admin_token_path")
+	gotPath := strings.TrimSpace(stdout)
 	wantPath := filepath.Join(dir, "myconfig", "admin.token")
 	if gotPath != wantPath {
 		t.Errorf("admin_token_path = %q, want %q", gotPath, wantPath)
@@ -989,13 +872,9 @@ func TestRegressionAdminTokenWithCustomConfig(t *testing.T) {
 	writeTestTokenFile(t, adminTokenPath, "dht_custom_token_here\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "admin_token"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "dht_custom_token_here\n" {
-		t.Errorf("admin_token = %q, want 'dht_custom_token_here\\n'", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "admin_token")
+	if stdout != "dht_custom_token_here\n" {
+		t.Errorf("admin_token = %q, want 'dht_custom_token_here\\n'", stdout)
 	}
 }
 
@@ -1109,46 +988,27 @@ func TestRegressionLazyComputedFieldShow(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	// config_path should work without config.json
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "config_path"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config_path: expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != configPath+"\n" {
-		t.Errorf("config_path = %q, want %q", stdout.String(), configPath+"\n")
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "config_path")
+	if stdout != configPath+"\n" {
+		t.Errorf("config_path = %q, want %q", stdout, configPath+"\n")
 	}
 
 	// config_dir should work without config.json
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "config_dir"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config_dir: expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != dir+"\n" {
-		t.Errorf("config_dir = %q, want %q", stdout.String(), dir+"\n")
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "config_dir")
+	if stdout != dir+"\n" {
+		t.Errorf("config_dir = %q, want %q", stdout, dir+"\n")
 	}
 
 	// admin_token_path should work without config.json
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "admin_token_path"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("admin_token_path: expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != adminTokenPath+"\n" {
-		t.Errorf("admin_token_path = %q, want %q", stdout.String(), adminTokenPath+"\n")
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "admin_token_path")
+	if stdout != adminTokenPath+"\n" {
+		t.Errorf("admin_token_path = %q, want %q", stdout, adminTokenPath+"\n")
 	}
 
 	// admin_token should work without config.json
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "admin_token"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("admin_token: expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "dht_testtoken123\n" {
-		t.Errorf("admin_token = %q, want 'dht_testtoken123\\n'", stdout.String())
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "admin_token")
+	if stdout != "dht_testtoken123\n" {
+		t.Errorf("admin_token = %q, want 'dht_testtoken123\\n'", stdout)
 	}
 }
 
@@ -1249,13 +1109,9 @@ func TestRegressionBootstrapQueriesLazy(t *testing.T) {
 	}
 	for _, q := range queries {
 		t.Run(q.field+"_malformed", func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters([]string{"config", "show", q.field}, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
-			}
-			if stdout.String() != q.expect {
-				t.Errorf("got %q, want %q", stdout.String(), q.expect)
+			stdout, _ := runConfigCLI(t, 0, "config", "show", q.field)
+			if stdout != q.expect {
+				t.Errorf("got %q, want %q", stdout, q.expect)
 			}
 		})
 	}
@@ -1323,46 +1179,27 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 	}
 
 	// 4) Verify config show reports the same paths
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "config_path"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config show config_path: exit %d, stderr: %s", code, stderr.String())
-	}
-	if strings.TrimSpace(stdout.String()) != configPath {
-		t.Errorf("config show config_path = %q, want %q", stdout.String(), configPath)
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "config_path")
+	if strings.TrimSpace(stdout) != configPath {
+		t.Errorf("config show config_path = %q, want %q", stdout, configPath)
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "config_dir"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config show config_dir: exit %d, stderr: %s", code, stderr.String())
-	}
-	if strings.TrimSpace(stdout.String()) != filepath.Join(dir, "myconfig") {
-		t.Errorf("config show config_dir = %q, want %q", stdout.String(), filepath.Join(dir, "myconfig"))
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "config_dir")
+	if strings.TrimSpace(stdout) != filepath.Join(dir, "myconfig") {
+		t.Errorf("config show config_dir = %q, want %q", stdout, filepath.Join(dir, "myconfig"))
 	}
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "admin_token_path"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config show admin_token_path: exit %d, stderr: %s", code, stderr.String())
-	}
-	if strings.TrimSpace(stdout.String()) != adminTokenPath {
-		t.Errorf("config show admin_token_path = %q, want %q", stdout.String(), adminTokenPath)
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "admin_token_path")
+	if strings.TrimSpace(stdout) != adminTokenPath {
+		t.Errorf("config show admin_token_path = %q, want %q", stdout, adminTokenPath)
 	}
 
 	// 5) Verify config show admin_token reads the real token
 	tokenData, _ := os.ReadFile(adminTokenPath)
 	realToken := strings.TrimSpace(string(tokenData))
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "admin_token"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config show admin_token: exit %d, stderr: %s", code, stderr.String())
-	}
-	if strings.TrimSpace(stdout.String()) != realToken {
-		t.Errorf("config show admin_token = %q, want %q", stdout.String(), realToken)
+	stdout, _ = runConfigCLI(t, 0, "config", "show", "admin_token")
+	if strings.TrimSpace(stdout) != realToken {
+		t.Errorf("config show admin_token = %q, want %q", stdout, realToken)
 	}
 }
 
@@ -1497,13 +1334,9 @@ func TestRegressionSetPrintsUpdated(t *testing.T) {
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.HasPrefix(stdout.String(), "updated log_level=debug\n") {
-		t.Errorf("expected 'updated log_level=debug\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "set", "log_level", "debug")
+	if !strings.HasPrefix(stdout, "updated log_level=debug\n") {
+		t.Errorf("expected 'updated log_level=debug\\n', got %q", stdout)
 	}
 }
 
@@ -1516,13 +1349,9 @@ func TestRegressionSetPrintsUnchanged(t *testing.T) {
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "unchanged log_level=debug\n" {
-		t.Errorf("expected 'unchanged log_level=debug\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "set", "log_level", "debug")
+	if stdout != "unchanged log_level=debug\n" {
+		t.Errorf("expected 'unchanged log_level=debug\\n', got %q", stdout)
 	}
 
 	// Verify file was not rewritten (mtime unchanged)
@@ -1545,13 +1374,9 @@ func TestRegressionSetEffectiveValueCountsAsUpdate(t *testing.T) {
 	setupConfigTestWithData(t, []byte(cfg))
 
 	// audit_enabled resolves to true via log_level=debug, but is not explicit
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "audit_enabled", "true"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.HasPrefix(stdout.String(), "updated audit_enabled=true\n") {
-		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "set", "audit_enabled", "true")
+	if !strings.HasPrefix(stdout, "updated audit_enabled=true\n") {
+		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout)
 	}
 }
 
@@ -1563,13 +1388,9 @@ func TestRegressionUnsetPrintsUnchanged(t *testing.T) {
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "unchanged log_level is already unset\n" {
-		t.Errorf("expected 'unchanged log_level is already unset\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "unset", "log_level")
+	if stdout != "unchanged log_level is already unset\n" {
+		t.Errorf("expected 'unchanged log_level is already unset\\n', got %q", stdout)
 	}
 
 	// Verify file was not rewritten
@@ -1614,8 +1435,8 @@ func TestRegressionFailurePathsEmptyStdout(t *testing.T) {
 	}
 }
 
-// Regression: unchanged set with another invalid known field
-func TestRegressionUnchangedSetWithInvalidField(t *testing.T) {
+// Regression: unchanged set/unset with another invalid known field
+func TestRegressionUnchangedMutationWithInvalidField(t *testing.T) {
 	cfg := `{
   "allowed_root": "/home/user/work",
   "session_ttl": "12h",
@@ -1624,39 +1445,23 @@ func TestRegressionUnchangedSetWithInvalidField(t *testing.T) {
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.Len() > 0 {
-		t.Errorf("stdout must be empty on failure, got: %s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "audit_enabled") {
-		t.Errorf("error must identify offending field, got: %s", stderr.String())
-	}
-}
-
-// Regression: unchanged unset with another invalid known field
-func TestRegressionUnchangedUnsetWithInvalidField(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "log_level": "debug",
-  "audit_enabled": "not_a_boolean"
-}`
-	setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.Len() > 0 {
-		t.Errorf("stdout must be empty on failure, got: %s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "audit_enabled") {
-		t.Errorf("error must identify offending field, got: %s", stderr.String())
+	for _, args := range [][]string{
+		{"config", "set", "log_level", "debug"},
+		{"config", "unset", "log_level"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(args, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("expected exit code 1, got %d, stderr: %s", code, stderr.String())
+			}
+			if stdout.Len() > 0 {
+				t.Errorf("stdout must be empty on failure, got: %s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "audit_enabled") {
+				t.Errorf("error must identify offending field, got: %s", stderr.String())
+			}
+		})
 	}
 }
 
@@ -1676,13 +1481,9 @@ func TestRegressionValidUnchangedAvoidsFileReplace(t *testing.T) {
 	}
 
 	// unchanged set
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "unchanged log_level=debug\n" {
-		t.Errorf("expected 'unchanged log_level=debug\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "set", "log_level", "debug")
+	if stdout != "unchanged log_level=debug\n" {
+		t.Errorf("expected 'unchanged log_level=debug\\n', got %q", stdout)
 	}
 
 	// Verify file was not rewritten
@@ -1695,14 +1496,9 @@ func TestRegressionValidUnchangedAvoidsFileReplace(t *testing.T) {
 	}
 
 	// unchanged unset
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "unset", "audit_enabled"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "unchanged audit_enabled is already unset\n" {
-		t.Errorf("expected 'unchanged audit_enabled is already unset\\n', got %q", stdout.String())
+	stdout, _ = runConfigCLI(t, 0, "config", "unset", "audit_enabled")
+	if stdout != "unchanged audit_enabled is already unset\n" {
+		t.Errorf("expected 'unchanged audit_enabled is already unset\\n', got %q", stdout)
 	}
 
 	// Verify file was not rewritten
@@ -1726,13 +1522,9 @@ func TestRegressionRepairInvalidField(t *testing.T) {
 	setupConfigTestWithData(t, []byte(cfg))
 
 	// Repair by setting audit_enabled to a valid value
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "audit_enabled", "true"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.HasPrefix(stdout.String(), "updated audit_enabled=true\n") {
-		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "set", "audit_enabled", "true")
+	if !strings.HasPrefix(stdout, "updated audit_enabled=true\n") {
+		t.Errorf("expected 'updated audit_enabled=true\\n', got %q", stdout)
 	}
 
 	// Repair by unsetting the invalid field
@@ -1744,14 +1536,9 @@ func TestRegressionRepairInvalidField(t *testing.T) {
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg2))
 
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "unset", "audit_enabled"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.HasPrefix(stdout.String(), "unset audit_enabled\n") {
-		t.Errorf("expected 'unset audit_enabled\\n', got %q", stdout.String())
+	stdout, _ = runConfigCLI(t, 0, "config", "unset", "audit_enabled")
+	if !strings.HasPrefix(stdout, "unset audit_enabled\n") {
+		t.Errorf("expected 'unset audit_enabled\\n', got %q", stdout)
 	}
 
 	// Verify the file is now valid
@@ -1764,16 +1551,12 @@ func TestRegressionRepairInvalidField(t *testing.T) {
 // --- Help tests ---
 
 func TestConfigShowHelp(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stderr.Len() > 0 {
-		t.Errorf("stderr should be empty, got: %s", stderr.String())
+	stdout, stderr := runConfigCLI(t, 0, "config", "show", "--help")
+	if stderr != "" {
+		t.Errorf("stderr should be empty, got: %s", stderr)
 	}
 
-	out := stdout.String()
+	out := stdout
 	if !strings.Contains(out, "Without FIELD") {
 		t.Error("help should explain general behavior")
 	}
@@ -1796,16 +1579,12 @@ func TestConfigShowHelp(t *testing.T) {
 }
 
 func TestConfigSetHelp(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stderr.Len() > 0 {
-		t.Errorf("stderr should be empty, got: %s", stderr.String())
+	stdout, stderr := runConfigCLI(t, 0, "config", "set", "--help")
+	if stderr != "" {
+		t.Errorf("stderr should be empty, got: %s", stderr)
 	}
 
-	out := stdout.String()
+	out := stdout
 	for _, f := range configFields {
 		if f.writable && !strings.Contains(out, f.name) {
 			t.Errorf("help should list writable field %q", f.name)
@@ -1829,16 +1608,12 @@ func TestConfigSetHelp(t *testing.T) {
 }
 
 func TestConfigUnsetHelp(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stderr.Len() > 0 {
-		t.Errorf("stderr should be empty, got: %s", stderr.String())
+	stdout, stderr := runConfigCLI(t, 0, "config", "unset", "--help")
+	if stderr != "" {
+		t.Errorf("stderr should be empty, got: %s", stderr)
 	}
 
-	out := stdout.String()
+	out := stdout
 	if !strings.Contains(out, "log_level") {
 		t.Error("help should list log_level")
 	}
@@ -1879,12 +1654,8 @@ func TestConfigHelpNoConfigNeeded(t *testing.T) {
 		{"config", "unset", "--help"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters(args, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-			}
-			if !strings.Contains(stdout.String(), "Usage:") {
+			stdout, _ := runConfigCLI(t, 0, args...)
+			if !strings.Contains(stdout, "Usage:") {
 				t.Error("expected help output")
 			}
 		})
@@ -1929,15 +1700,11 @@ func TestConfigHelpStdoutStderrSeparation(t *testing.T) {
 		{"config", "unset", "--help"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters(args, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("expected exit code 0, got %d", code)
+			stdout, stderr := runConfigCLI(t, 0, args...)
+			if stderr != "" {
+				t.Errorf("help should not write to stderr, got: %s", stderr)
 			}
-			if stderr.Len() > 0 {
-				t.Errorf("help should not write to stderr, got: %s", stderr.String())
-			}
-			if !strings.Contains(stdout.String(), "Usage:") {
+			if !strings.Contains(stdout, "Usage:") {
 				t.Error("help should write to stdout")
 			}
 		})
@@ -2206,13 +1973,9 @@ func TestDeprecatedOperationLogMaxBytesWorks(t *testing.T) {
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "operation_log_max_bytes"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if stdout.String() != "8192\n" {
-		t.Errorf("expected '8192\\n', got %q", stdout.String())
+	stdout, _ := runConfigCLI(t, 0, "config", "show", "operation_log_max_bytes")
+	if stdout != "8192\n" {
+		t.Errorf("expected '8192\\n', got %q", stdout)
 	}
 }
 
@@ -2224,14 +1987,10 @@ func TestConfigShowEffectiveInvariant(t *testing.T) {
 	setupConfigTestWithData(t, []byte(cfg))
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
+	stdout, _ := runConfigCLI(t, 0, "config", "show")
 
 	var result map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
 
@@ -2283,13 +2042,8 @@ func TestConfigShowEffectiveInvariant(t *testing.T) {
 
 	for _, field := range fields {
 		t.Run(field, func(t *testing.T) {
-			stdout.Reset()
-			stderr.Reset()
-			code := runCommandWithWriters([]string{"config", "show", field}, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-			}
-			fieldVal := strings.TrimSpace(stdout.String())
+			fieldOut, _ := runConfigCLI(t, 0, "config", "show", field)
+			fieldVal := strings.TrimSpace(fieldOut)
 
 			// For numeric fields, compare as strings since JSON encoding differs
 			switch field {
