@@ -28,19 +28,6 @@ type principalResponse struct {
 	AllowedRoots []string `json:"allowed_roots"`
 }
 
-type listPrincipalsResponse struct {
-	OK         bool               `json:"ok"`
-	Principals []principalSummary `json:"principals"`
-}
-
-type principalSummary struct {
-	Username string `json:"username"`
-	UID      int    `json:"uid"`
-	GID      int    `json:"gid"`
-	Home     string `json:"home"`
-	Enabled  bool   `json:"enabled"`
-}
-
 type principalChangedResponse struct {
 	OK       bool   `json:"ok"`
 	Username string `json:"username"`
@@ -159,27 +146,16 @@ func (a *App) handleListPrincipals(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	principals, err := listPrincipals(a.DB)
+	summaries, err := listPrincipalSummaries(a.DB)
 	if err != nil {
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
-	resp := listPrincipalsResponse{
+	writeJSONRaw(ctx, w, http.StatusOK, listPrincipalsResponse{
 		OK:         true,
-		Principals: make([]principalSummary, 0, len(principals)),
-	}
-	for _, p := range principals {
-		resp.Principals = append(resp.Principals, principalSummary{
-			Username: p.Username,
-			UID:      p.UID,
-			GID:      p.GID,
-			Home:     p.Home,
-			Enabled:  p.Enabled,
-		})
-	}
-
-	writeJSONRaw(ctx, w, http.StatusOK, resp)
+		Principals: summaries,
+	})
 }
 
 func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {

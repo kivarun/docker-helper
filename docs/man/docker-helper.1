@@ -83,6 +83,9 @@ operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
 Create a new principal.
 .TP
+.B docker-helper principal list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+List all principals (username, UID, GID, home, enabled).
+.TP
 .B docker-helper principal show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER [FIELD]
 Show principal details.
 .TP

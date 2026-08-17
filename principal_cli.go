@@ -125,11 +125,12 @@ var principalShowCommand = &Command{
 var principalListCommand = &Command{
 	Name:       "list",
 	Summary:    "List all principals",
-	Usage:      "docker-helper principal list [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper principal list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				client, err := resolveOperatorClient(operatorClientOptions{
@@ -146,6 +147,16 @@ var principalListCommand = &Command{
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
+				}
+
+				if *jsonOut {
+					enc := json.NewEncoder(stdout)
+					enc.SetIndent("", "  ")
+					if err := enc.Encode(result); err != nil {
+						fmt.Fprintf(stderr, "error: cannot encode JSON: %v\n", err)
+						return 1
+					}
+					return 0
 				}
 
 				// Print as a table

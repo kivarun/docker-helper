@@ -244,6 +244,7 @@ func TestBlackBoxExactUsageStrings(t *testing.T) {
 		{"session create help", []string{"session", "create", "--help"}, "Usage: docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--json]"},
 		{"session delete help", []string{"session", "delete", "--help"}, "Usage: docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]"},
 		{"session cleanup help", []string{"session", "cleanup", "--help"}, "Usage: docker-helper session cleanup"},
+		{"principal list help", []string{"principal", "list", "--help"}, "Usage: docker-helper principal list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,6 +270,7 @@ func TestBlackBoxHelpContainsFlags(t *testing.T) {
 		{"session list help", []string{"session", "list", "--help"}, "--json"},
 		{"session create help", []string{"session", "create", "--help"}, "--workspace"},
 		{"session delete help", []string{"session", "delete", "--help"}, "--id"},
+		{"principal list help", []string{"principal", "list", "--help"}, "--json"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

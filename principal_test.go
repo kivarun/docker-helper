@@ -1845,19 +1845,19 @@ func TestPrincipalErrorsAreWrapped(t *testing.T) {
 	}
 }
 
-func TestListPrincipalsEmpty(t *testing.T) {
+func TestListPrincipalSummariesEmpty(t *testing.T) {
 	app := newTestApp(t)
 
-	principals, err := listPrincipals(app.DB)
+	summaries, err := listPrincipalSummaries(app.DB)
 	if err != nil {
-		t.Fatalf("listPrincipals() error: %v", err)
+		t.Fatalf("listPrincipalSummaries() error: %v", err)
 	}
-	if len(principals) != 0 {
-		t.Errorf("expected 0 principals, got %d", len(principals))
+	if len(summaries) != 0 {
+		t.Errorf("expected 0 principals, got %d", len(summaries))
 	}
 }
 
-func TestListPrincipals(t *testing.T) {
+func TestListPrincipalSummaries(t *testing.T) {
 	app := newTestApp(t)
 
 	orig := OSUserLookup
@@ -1883,20 +1883,80 @@ func TestListPrincipals(t *testing.T) {
 		}
 	}
 
-	principals, err := listPrincipals(app.DB)
+	summaries, err := listPrincipalSummaries(app.DB)
 	if err != nil {
-		t.Fatalf("listPrincipals() error: %v", err)
+		t.Fatalf("listPrincipalSummaries() error: %v", err)
 	}
-	if len(principals) != 2 {
-		t.Fatalf("expected 2 principals, got %d", len(principals))
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 principals, got %d", len(summaries))
 	}
 
 	// Verify sorted by username
-	if principals[0].Username != "alice" {
-		t.Errorf("first principal = %q, want %q", principals[0].Username, "alice")
+	if summaries[0].Username != "alice" {
+		t.Errorf("first principal = %q, want %q", summaries[0].Username, "alice")
 	}
-	if principals[1].Username != "bob" {
-		t.Errorf("second principal = %q, want %q", principals[1].Username, "bob")
+	if summaries[1].Username != "bob" {
+		t.Errorf("second principal = %q, want %q", summaries[1].Username, "bob")
+	}
+
+	// Summary fields carry the stored identity
+	wantAlice := principalSummary{
+		Username: "alice",
+		UID:      1001,
+		GID:      1001,
+		Home:     filepath.Join(app.Config.AllowedRoot, "home", "alice"),
+		Enabled:  true,
+	}
+	if summaries[0] != wantAlice {
+		t.Errorf("alice summary = %+v, want %+v", summaries[0], wantAlice)
+	}
+}
+
+func TestListPrincipalSummariesDisabledIncluded(t *testing.T) {
+	app := newTestApp(t)
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		switch username {
+		case "alice":
+			return "1001", "1001", filepath.Join(app.Config.AllowedRoot, "home", "alice"), nil
+		case "bob":
+			return "1002", "1002", filepath.Join(app.Config.AllowedRoot, "home", "bob"), nil
+		default:
+			return "", "", "", os.ErrNotExist
+		}
+	}
+
+	for _, user := range []string{"alice", "bob"} {
+		home := filepath.Join(app.Config.AllowedRoot, "home", user)
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := createPrincipal(app.DB, user); err != nil {
+			t.Fatalf("createPrincipal(%q) error: %v", user, err)
+		}
+	}
+
+	if _, err := updatePrincipalEnabled(app.DB, "bob", false); err != nil {
+		t.Fatalf("updatePrincipalEnabled(bob, false) error: %v", err)
+	}
+
+	summaries, err := listPrincipalSummaries(app.DB)
+	if err != nil {
+		t.Fatalf("listPrincipalSummaries() error: %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("expected 2 principals, got %d", len(summaries))
+	}
+	if !summaries[0].Enabled {
+		t.Error("alice expected enabled=true")
+	}
+	if summaries[1].Username != "bob" {
+		t.Fatalf("second principal = %q, want bob", summaries[1].Username)
+	}
+	if summaries[1].Enabled {
+		t.Error("bob expected enabled=false")
 	}
 }
 
@@ -1931,6 +1991,11 @@ func TestPrincipalHTTPList(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
+	body := w.Body.String()
+	if strings.Contains(body, "allowed_roots") {
+		t.Errorf("list response must not include allowed_roots: %s", body)
+	}
+
 	var resp listPrincipalsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
@@ -1941,7 +2006,138 @@ func TestPrincipalHTTPList(t *testing.T) {
 	if len(resp.Principals) != 1 {
 		t.Fatalf("expected 1 principal, got %d", len(resp.Principals))
 	}
-	if resp.Principals[0].Username != "carol" {
-		t.Errorf("username = %q, want %q", resp.Principals[0].Username, "carol")
+	want := principalSummary{
+		Username: "carol",
+		UID:      1003,
+		GID:      1003,
+		Home:     home,
+		Enabled:  true,
+	}
+	if resp.Principals[0] != want {
+		t.Errorf("summary = %+v, want %+v", resp.Principals[0], want)
+	}
+}
+
+func TestPrincipalHTTPListEmpty(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	req := httptest.NewRequest("GET", "/principals", nil)
+	withAuth(req)
+	w := httptest.NewRecorder()
+	app.handleListPrincipals(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != `{"ok":true,"principals":[]}` {
+		t.Errorf("empty list body = %q, want %q", got, `{"ok":true,"principals":[]}`)
+	}
+}
+
+func TestPrincipalHTTPListDisabledIncluded(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		switch username {
+		case "dave":
+			return "1004", "1004", filepath.Join(app.Config.AllowedRoot, "home", "dave"), nil
+		default:
+			return "", "", "", os.ErrNotExist
+		}
+	}
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "dave")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createPrincipal(app.DB, "dave"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+	if _, err := updatePrincipalEnabled(app.DB, "dave", false); err != nil {
+		t.Fatalf("updatePrincipalEnabled() error: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/principals", nil)
+	withAuth(req)
+	w := httptest.NewRecorder()
+	app.handleListPrincipals(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp listPrincipalsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if len(resp.Principals) != 1 {
+		t.Fatalf("expected 1 principal, got %d", len(resp.Principals))
+	}
+	if resp.Principals[0].Username != "dave" {
+		t.Fatalf("username = %q, want dave", resp.Principals[0].Username)
+	}
+	if resp.Principals[0].Enabled {
+		t.Error("disabled principal must be listed with enabled=false")
+	}
+}
+
+func TestPrincipalListAuth(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	// Session token (legacy admin session).
+	sessionResult, err := app.createSession(app.Config.AllowedRoot)
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+	sessionToken := sessionResult.Token
+
+	// Launcher credential token (principal-scoped).
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		if username == "launchuser" {
+			return "1005", "1005", filepath.Join(app.Config.AllowedRoot, "home", "launchuser"), nil
+		}
+		return "", "", "", os.ErrNotExist
+	}
+	home := filepath.Join(app.Config.AllowedRoot, "home", "launchuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createPrincipal(app.DB, "launchuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+	_, credentialToken, err := createCredential(app.DB, "launchuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		token    string
+		noAuth   bool
+		wantCode int
+	}{
+		{name: "admin", token: testAdminToken, wantCode: http.StatusOK},
+		{name: "missing", noAuth: true, wantCode: http.StatusUnauthorized},
+		{name: "wrong_admin", token: "dht_wrong_token", wantCode: http.StatusUnauthorized},
+		{name: "session_token", token: sessionToken, wantCode: http.StatusUnauthorized},
+		{name: "launcher_credential", token: credentialToken, wantCode: http.StatusUnauthorized},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/principals", nil)
+			if !tt.noAuth {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+			w := httptest.NewRecorder()
+			app.handleListPrincipals(w, req)
+			if w.Code != tt.wantCode {
+				t.Errorf("expected %d, got %d: %s", tt.wantCode, w.Code, w.Body.String())
+			}
+		})
 	}
 }

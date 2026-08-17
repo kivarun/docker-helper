@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -356,6 +357,169 @@ func TestSessionListNoFlags(t *testing.T) {
 
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+}
+
+// ---------- principal list CLI ----------
+
+// startPrincipalListTestServer starts an HTTP test server answering
+// GET /principals with the given principals. It requires the request to
+// carry the token from tokenPath as a Bearer token.
+func startPrincipalListTestServer(t *testing.T, principals []principalSummary) (endpoint string, tokenPath string) {
+	t.Helper()
+
+	const token = "test-token"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /principals", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "code": "unauthorized"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(listPrincipalsResponse{OK: true, Principals: principals})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	tokenPath = filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	return server.URL, tokenPath
+}
+
+func TestPrincipalListHumanOutput(t *testing.T) {
+	endpoint, tokenPath := startPrincipalListTestServer(t, []principalSummary{
+		{Username: "alice", UID: 1001, GID: 1001, Home: "/home/alice", Enabled: true},
+		{Username: "bob", UID: 1002, GID: 1002, Home: "/home/bob", Enabled: false},
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"principal", "list", "--endpoint", endpoint, "--token-file", tokenPath}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("expected empty stderr, got: %s", stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %s", len(lines), stdout.String())
+	}
+	header := strings.Fields(lines[0])
+	if !slices.Equal(header, []string{"USER", "UID", "GID", "HOME", "ENABLED"}) {
+		t.Errorf("header = %v, want [USER UID GID HOME ENABLED]", header)
+	}
+	first := strings.Fields(lines[1])
+	if !slices.Equal(first, []string{"alice", "1001", "1001", "/home/alice", "yes"}) {
+		t.Errorf("first row = %v, want [alice 1001 1001 /home/alice yes]", first)
+	}
+	second := strings.Fields(lines[2])
+	if !slices.Equal(second, []string{"bob", "1002", "1002", "/home/bob", "no"}) {
+		t.Errorf("second row = %v, want [bob 1002 1002 /home/bob no] (disabled principal must be listed)", second)
+	}
+}
+
+func TestPrincipalListJSONOutput(t *testing.T) {
+	endpoint, tokenPath := startPrincipalListTestServer(t, []principalSummary{
+		{Username: "alice", UID: 1001, GID: 1001, Home: "/home/alice", Enabled: true},
+		{Username: "bob", UID: 1002, GID: 1002, Home: "/home/bob", Enabled: false},
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"principal", "list", "--endpoint", endpoint, "--token-file", tokenPath, "--json"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("expected empty stderr, got: %s", stderr.String())
+	}
+
+	var decoded listPrincipalsResponse
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (output: %s)", err, stdout.String())
+	}
+	if !decoded.OK {
+		t.Fatal("expected ok=true")
+	}
+	if len(decoded.Principals) != 2 {
+		t.Fatalf("expected 2 principals, got %d", len(decoded.Principals))
+	}
+	want := []principalSummary{
+		{Username: "alice", UID: 1001, GID: 1001, Home: "/home/alice", Enabled: true},
+		{Username: "bob", UID: 1002, GID: 1002, Home: "/home/bob", Enabled: false},
+	}
+	if !slices.Equal(decoded.Principals, want) {
+		t.Errorf("principals = %+v, want %+v (order and enabled must be preserved)", decoded.Principals, want)
+	}
+}
+
+func TestPrincipalListEmptyHuman(t *testing.T) {
+	endpoint, tokenPath := startPrincipalListTestServer(t, []principalSummary{})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"principal", "list", "--endpoint", endpoint, "--token-file", tokenPath}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("expected empty stderr, got: %s", stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected header row only, got %d lines: %q", len(lines), stdout.String())
+	}
+	header := strings.Fields(lines[0])
+	if !slices.Equal(header, []string{"USER", "UID", "GID", "HOME", "ENABLED"}) {
+		t.Errorf("header = %v, want [USER UID GID HOME ENABLED]", header)
+	}
+}
+
+func TestPrincipalListEmptyJSON(t *testing.T) {
+	endpoint, tokenPath := startPrincipalListTestServer(t, []principalSummary{})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"principal", "list", "--endpoint", endpoint, "--token-file", tokenPath, "--json"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("expected empty stderr, got: %s", stderr.String())
+	}
+
+	var decoded listPrincipalsResponse
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (output: %s)", err, stdout.String())
+	}
+	if !decoded.OK {
+		t.Fatal("expected ok=true")
+	}
+	if len(decoded.Principals) != 0 {
+		t.Errorf("expected 0 principals, got %d", len(decoded.Principals))
+	}
+}
+
+func TestPrincipalListSystemFlagAccepted(t *testing.T) {
+	// --system should be accepted by the flag parser.
+	// It will fail at connection time because there's no daemon,
+	// but the flag itself should not be "unknown".
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"principal", "list", "--system"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit (no daemon running)")
+	}
+	if strings.Contains(stderr.String(), "unknown flag") {
+		t.Fatalf("--system should not be unknown: %s", stderr.String())
 	}
 }
 
@@ -1193,6 +1357,12 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 			wantMethod: "POST",
 			wantURI:    "/principals",
 			wantBody:   `{"username":"bob"}`,
+		},
+		{
+			name:       "listPrincipals",
+			call:       func(c *apiClient) error { _, err := c.listPrincipals(); return err },
+			wantMethod: "GET",
+			wantURI:    "/principals",
 		},
 		{
 			name:       "showPrincipal",

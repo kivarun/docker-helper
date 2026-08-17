@@ -332,57 +332,31 @@ func isSQLiteUniqueError(err error) bool {
 		strings.Contains(err.Error(), "unique constraint failed")
 }
 
-// listPrincipals returns all principals ordered by username.
-func listPrincipals(db *sql.DB) ([]PrincipalWithRoots, error) {
+// listPrincipalSummaries returns all principals ordered by username,
+// with only the fields exposed by GET /principals. Allowed roots are
+// intentionally not loaded; use findPrincipalByUserName for full details.
+func listPrincipalSummaries(db *sql.DB) ([]principalSummary, error) {
 	rows, err := db.Query(
-		`SELECT id, username, uid, gid, home, enabled FROM principals ORDER BY username`,
+		`SELECT username, uid, gid, home, enabled FROM principals ORDER BY username`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot list principals: %w", err)
 	}
 	defer rows.Close()
 
-	var principals []PrincipalWithRoots
+	summaries := make([]principalSummary, 0)
 	for rows.Next() {
-		var p Principal
+		var s principalSummary
 		var enabled int
-		if err := rows.Scan(&p.ID, &p.Username, &p.UID, &p.GID, &p.Home, &enabled); err != nil {
+		if err := rows.Scan(&s.Username, &s.UID, &s.GID, &s.Home, &enabled); err != nil {
 			return nil, fmt.Errorf("cannot scan principal: %w", err)
 		}
-		p.Enabled = enabled != 0
-
-		// Fetch allowed roots for this principal
-		rootRows, err := db.Query(
-			`SELECT root_path FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
-			p.ID,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("cannot query allowed roots: %w", err)
-		}
-
-		roots := []string{}
-		for rootRows.Next() {
-			var rootPath string
-			if err := rootRows.Scan(&rootPath); err != nil {
-				rootRows.Close()
-				return nil, fmt.Errorf("cannot scan allowed root: %w", err)
-			}
-			roots = append(roots, rootPath)
-		}
-		if err := rootRows.Err(); err != nil {
-			rootRows.Close()
-			return nil, fmt.Errorf("iterate allowed roots: %w", err)
-		}
-		rootRows.Close()
-
-		principals = append(principals, PrincipalWithRoots{
-			Principal:    p,
-			AllowedRoots: roots,
-		})
+		s.Enabled = enabled != 0
+		summaries = append(summaries, s)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate principals: %w", err)
 	}
 
-	return principals, nil
+	return summaries, nil
 }

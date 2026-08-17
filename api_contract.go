@@ -65,6 +65,21 @@ type operationStatusResponse struct {
 	ResultCode  *string        `json:"result_code,omitempty"`
 }
 
+// principalSummary is a principal entry in listPrincipalsResponse.
+type principalSummary struct {
+	Username string `json:"username"`
+	UID      int    `json:"uid"`
+	GID      int    `json:"gid"`
+	Home     string `json:"home"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// listPrincipalsResponse is the response from GET /principals.
+type listPrincipalsResponse struct {
+	OK         bool               `json:"ok"`
+	Principals []principalSummary `json:"principals"`
+}
+
 // operationLogsResponse is the response from GET /operations/{id}/logs.
 type operationLogsResponse struct {
 	OK          bool   `json:"ok"`

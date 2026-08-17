@@ -366,8 +366,8 @@ for full syntax:
   `cleanup`.
 - `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
   `unset`.
-- `principal` — Manage principals. Subcommands: `create`, `show`, `set`,
-  `allowed-root`.
+- `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
+  `set`, `allowed-root`.
 - `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
   `revoke`.
 
