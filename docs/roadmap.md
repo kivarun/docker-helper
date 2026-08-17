@@ -329,6 +329,8 @@ Explicitly outside Release 2:
 - remote or non-loopback access;
 - TLS configuration and certificate lifecycle;
 - remote build-context upload or workspace synchronization;
+- attached/bidirectional streaming execution for long-lived processes;
+- host port publishing and generic Docker network configuration;
 - multiple helper contexts, routing, or helper-to-helper forwarding;
 - durable operation recovery across daemon restarts;
 - dynamic revocation/re-evaluation of existing sessions after principal policy
@@ -359,6 +361,17 @@ Expected scope:
 - define remote build semantics for client-side build contexts without turning
   the helper into a distributed mutable workspace;
 - support image-based remote run without host mounts from the client machine;
+- add generic attached execution for long-lived interactive/stdio processes:
+  bidirectional stdin/stdout/stderr streaming, transport-compatible with both
+  local Unix HTTP and remote TLS, with disconnect/helper shutdown terminating
+  and removing the attached container; protocol/API details remain deferred;
+- keep protocol-specific integrations such as MCP adapters outside the core
+  capability, while leaving room for future secret injection that does not
+  expose secret values to the agent;
+- add controlled host port publishing for container services, sufficient for
+  workloads such as OpenBao, under explicit server-side policy; this is not a
+  commitment to generic Docker network management and API details remain
+  deferred;
 - preserve existing async status, logs, result, and cancellation semantics
   where practical;
 - keep resulting images and build cache on the selected helper unless the user
@@ -369,6 +382,8 @@ Explicitly outside Release 3:
 - mutable remote workspace synchronization;
 - remote runs coupled to a synchronized mutable workspace;
 - multiple helper contexts, target routing, or helper-to-helper forwarding;
+- generic Docker network management beyond the controlled port-publishing
+  capability above;
 - a mandatory shared runtime or control plane;
 - durable operation recovery across daemon restarts unless real use justifies
   pulling it forward.
