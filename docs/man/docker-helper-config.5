@@ -33,7 +33,33 @@ JSON object with the following fields. Two fields are required; all others are o
 .SH FIELDS
 .TP
 .B allowed_root (string, required)
-Absolute path for agent workspace root. Must be a non-empty absolute path.
+Absolute path for agent workspace root. A new workspace root must satisfy
+the following policy:
+.RS 4
+\(bu
+be a non-empty absolute path;
+\(bu
+exist and be a directory;
+\(bu
+not be /;
+\(bu
+not be or descend into a system namespace.
+.RE
+.PP
+Forbidden namespaces (the root itself and all descendants):
+.br
+/bin /boot /dev /etc /lib /lib32 /lib64 /libx32 /proc /root /run /sbin /sys /usr /var /tmp
+.PP
+The following namespaces are forbidden at the root but permit descendants:
+.br
+/home (e.g., /home/alice/work is allowed)
+.br
+/srv /opt /mnt /media (e.g., /srv/workspaces is allowed)
+.PP
+A symlink whose canonical target enters a forbidden namespace is rejected.
+Existing stale AppArmor roots remain removable even if they no longer
+satisfy the current policy.
+.PP
 In system mode, the initial value is added to managed AppArmor roots during
 \fBdocker-helper init\fR. Subsequent changes require manual AppArmor updates
 via \fBdocker-helper apparmor root\fR.

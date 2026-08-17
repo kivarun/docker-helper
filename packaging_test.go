@@ -3807,4 +3807,80 @@ func TestReleaseWorkflow(t *testing.T) {
 	if !strings.Contains(content, "prerelease") {
 		t.Error("release.yml must handle prerelease")
 	}
+
+	// Must include race test (not weaker than CI).
+	if !strings.Contains(content, "go test -race") {
+		t.Error("release.yml must run go test -race")
+	}
+
+	// musl-tools must be installed before tests (not after).
+	muslIdx := strings.Index(content, "musl-tools")
+	testsIdx := strings.Index(content, "go test ./...")
+	if muslIdx < 0 || testsIdx < 0 {
+		t.Fatal("release.yml must contain musl-tools install and go test")
+	}
+	if muslIdx > testsIdx {
+		t.Error("release.yml must install musl-tools before go test")
+	}
+}
+
+func TestReleaseWorkflowRaceBeforeBuild(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Race tests must complete before build-bundle.sh.
+	raceIdx := strings.Index(content, "go test -race")
+	bundleIdx := strings.Index(content, "build-bundle.sh")
+	if raceIdx < 0 || bundleIdx < 0 {
+		t.Fatal("release.yml must contain go test -race and build-bundle.sh")
+	}
+	if raceIdx > bundleIdx {
+		t.Error("release.yml must run race tests before build-bundle.sh")
+	}
+}
+
+func TestReleaseMetadataGPL3Only(t *testing.T) {
+	// nfpm.yaml must use GPL-3.0-only.
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "license: GPL-3.0-only") {
+		t.Error("nfpm.yaml must specify license: GPL-3.0-only")
+	}
+	if strings.Contains(content, "GPL-3.0-or-later") {
+		t.Error("nfpm.yaml must not use GPL-3.0-or-later")
+	}
+
+	// LICENSE file must exist and reference GPLv3.
+	licenseData, err := os.ReadFile("LICENSE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	licenseContent := string(licenseData)
+	if !strings.Contains(licenseContent, "GNU GENERAL PUBLIC LICENSE") {
+		t.Error("LICENSE must contain GNU GENERAL PUBLIC LICENSE")
+	}
+	if !strings.Contains(licenseContent, "Version 3") {
+		t.Error("LICENSE must reference Version 3")
+	}
+}
+
+func TestReleaseReadmeNoR3Features(t *testing.T) {
+	data, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Release 2 must not claim R3 features.
+	for _, feature := range []string{"remote", "TLS", "port publish", "attached exec", "MCP"} {
+		if strings.Contains(content, feature) {
+			t.Errorf("README must not reference R3 feature: %s", feature)
+		}
+	}
 }

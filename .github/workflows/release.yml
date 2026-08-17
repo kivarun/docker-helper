@@ -52,6 +52,11 @@ jobs:
             exit 1
           fi
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Formatting
         run: |
           unformatted="$(gofmt -l .)"
@@ -63,16 +68,14 @@ jobs:
       - name: Tests
         run: go test ./...
 
+      - name: Race tests
+        run: go test -race ./...
+
       - name: Vet
         run: go vet ./...
 
       - name: Whitespace errors
         run: git diff --check
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
 
       - name: Clean dist
         run: rm -rf dist

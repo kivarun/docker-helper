@@ -44,9 +44,8 @@ exposes both a system Unix socket and a loopback HTTP listener. The
 loopback HTTP address is configurable (`http_address`); changing it
 requires a daemon restart.
 
-System daemon mode is implemented. Release 2 is available as a release
-candidate with native DEB/RPM packages, systemd system service, and
-mandatory AppArmor confinement.
+System daemon mode is implemented. Release 2 adds system mode, native
+DEB/RPM packages, systemd system service, and mandatory AppArmor confinement.
 
 ## Authentication model
 
@@ -846,6 +845,63 @@ docker-helper apparmor check
 User mode does not use AppArmor confinement by default. The release tarball
 includes an optional user-mode AppArmor profile template that can be
 installed manually.
+
+## Workspace root policy
+
+A new workspace root (config `allowed_root`, principal allowed roots, or
+AppArmor managed roots) must:
+
+- be a non-empty absolute path;
+- exist and be a directory;
+- not be `/`;
+- not be or descend into a system namespace.
+
+Forbidden namespaces (the root itself and all descendants):
+
+    /bin  /boot  /dev  /etc  /lib  /lib32  /lib64  /libx32
+    /proc /root  /run  /sbin /sys  /usr    /var    /tmp
+
+The following namespaces are forbidden at the root but permit descendants:
+
+    /home/alice/work  (allowed)
+    /srv/workspaces   (allowed)
+    /opt/projects     (allowed)
+    /mnt/data         (allowed)
+    /media/backup     (allowed)
+
+Other non-system absolute paths such as `/data/workspaces` or `/workspace`
+are allowed if otherwise valid.
+
+A symlink whose canonical target enters a forbidden namespace is rejected.
+
+Existing stale AppArmor roots remain removable even if they no longer
+satisfy the current policy.
+
+## System mode: provisioning a principal
+
+System mode requires the operator to configure both docker-helper policy
+and AppArmor confinement separately. Changing principal or config allowed
+roots does NOT automatically update AppArmor.
+
+```bash
+# 1. Create the principal.
+sudo docker-helper principal create alice --allowed-root /srv/workspaces/alice
+
+# 2. Add the workspace to AppArmor confinement.
+sudo docker-helper apparmor root add /srv/workspaces/alice
+
+# 3. Create a launcher credential for the principal.
+sudo docker-helper credential create --name laptop alice
+```
+
+The separation is intentional:
+
+- `principal create` defines docker-helper workspace policy;
+- `apparmor root add` defines daemon filesystem confinement;
+- `credential create` produces a launcher token for session creation.
+
+These layers are not synchronized automatically. The operator must add
+matching AppArmor roots for every workspace that a principal needs.
 
 ## Documentation
 
