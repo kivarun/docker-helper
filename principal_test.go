@@ -295,6 +295,56 @@ func TestRemoveAllowedRoot(t *testing.T) {
 	}
 }
 
+func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
+	app := newTestApp(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "deluser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra-del")
+	if err := os.MkdirAll(extraRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1030", "1030", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "deluser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	if _, _, err := addAllowedRoot(app.DB, "deluser", extraRoot); err != nil {
+		t.Fatalf("addAllowedRoot() error: %v", err)
+	}
+
+	// Delete the directory from filesystem
+	if err := os.RemoveAll(extraRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove should still work even though directory no longer exists
+	changed, _, err := removeAllowedRoot(app.DB, "deluser", extraRoot)
+	if err != nil {
+		t.Fatalf("removeAllowedRoot() error: %v", err)
+	}
+	if !changed {
+		t.Error("expected changed to be true")
+	}
+
+	result, err := findPrincipalByUserName(app.DB, "deluser")
+	if err != nil {
+		t.Fatalf("findPrincipalByUserName() error: %v", err)
+	}
+	if len(result.AllowedRoots) != 1 {
+		t.Fatalf("expected 1 allowed root after removal, got %d", len(result.AllowedRoots))
+	}
+}
+
 func TestRemoveAllowedRootAbsent(t *testing.T) {
 	app := newTestApp(t)
 

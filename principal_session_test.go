@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -872,6 +874,62 @@ func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 	}
 	if session.ID != resp.Session.ID {
 		t.Errorf("session ID mismatch: got %q, want %q", session.ID, resp.Session.ID)
+	}
+}
+
+func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
+	app := newTestApp(t)
+
+	home := filepath.Join(app.Config.AllowedRoot, "home", "concurrentuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1048", "1048", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "concurrentuser"); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	cred, _, err := createCredential(app.DB, "concurrentuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	const goroutines = 10
+	var changedCount int32
+	var errs []error
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			changed, err := revokeCredential(app.DB, cred.ID)
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+				return
+			}
+			if changed {
+				atomic.AddInt32(&changedCount, 1)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if len(errs) > 0 {
+		t.Errorf("unexpected errors: %v", errs)
+	}
+	if changedCount != 1 {
+		t.Errorf("expected exactly 1 changed, got %d", changedCount)
 	}
 }
 
