@@ -2,16 +2,21 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 )
+
+// ErrStaleRotation is returned by rotateAdminToken when the authorizing
+// token is no longer the current admin token at commit time. This can
+// happen when two concurrent rotations race: the first commits, invalidating
+// the second's authorizing token.
+var ErrStaleRotation = errors.New("stale admin token rotation")
 
 type App struct {
 	mu                 sync.RWMutex
@@ -28,6 +33,10 @@ type App struct {
 	// Production default calls the real StageBuildContext; tests can return
 	// a fake stagedBuildContext with controlled Cleanup behavior.
 	StageBuildContextFn func(ctx context.Context, workspace, contextPath, dockerfileRel, runtimeDir, operationID string) (*stagedBuildContext, error)
+	// RotateRenameFn is a test seam for the final atomic rename in
+	// rotateAdminToken. Production default is os.Rename; tests can fail it
+	// deterministically.
+	RotateRenameFn func(oldpath, newpath string) error
 }
 
 // pinMount calls PinMountFn if set, otherwise the real PinMount.
@@ -72,57 +81,82 @@ func (a *App) setConfig(newCfg *Config) {
 	a.Config = &merged
 }
 
-// generateAdminToken generates a new random admin token (32 bytes, hex-encoded).
-func generateAdminToken() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("cannot generate random token: %w", err)
-	}
-	return hex.EncodeToString(buf), nil
-}
-
 // rotateAdminToken generates a new admin token, writes it to the token file
 // atomically, and updates the in-memory hash. The old token is immediately
 // invalidated. Returns the new token (never logged).
-func (a *App) rotateAdminToken() (string, error) {
-	newToken, err := generateAdminToken()
+//
+// The caller must have already authorized with the current admin token.
+// The function verifies that the authorizing token is still current before
+// committing the rotation, preventing stale concurrent rotations.
+func (a *App) rotateAdminToken(authorizingHash [sha256.Size]byte) (string, error) {
+	// Generate new token using the standard generator.
+	newToken, err := generateToken()
 	if err != nil {
 		return "", err
 	}
-
 	newHash := sha256.Sum256([]byte(newToken))
 
-	// Write the new token to the file atomically (write to temp, rename).
-	dir := filepath.Dir(a.Config.AdminTokenPath)
+	// Get a snapshot of the config for the token path.
+	cfg := a.getConfig()
+	tokenPath := cfg.AdminTokenPath
+
+	// Prepare temp file in the same directory as the target.
+	dir := filepath.Dir(tokenPath)
 	tmpFile, err := os.CreateTemp(dir, ".admin-token-*")
 	if err != nil {
 		return "", fmt.Errorf("cannot create temp token file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.WriteString(newToken + "\n"); err != nil {
+	cleanup := func() {
 		tmpFile.Close()
 		os.Remove(tmpPath)
+	}
+
+	// Write token + newline.
+	if _, err := tmpFile.WriteString(newToken + "\n"); err != nil {
+		cleanup()
 		return "", fmt.Errorf("cannot write token file: %w", err)
 	}
+	// Set permissions before closing.
 	if err := tmpFile.Chmod(0600); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		cleanup()
 		return "", fmt.Errorf("cannot set token file permissions: %w", err)
 	}
+	// Sync to disk.
+	if err := tmpFile.Sync(); err != nil {
+		cleanup()
+		return "", fmt.Errorf("cannot sync token file: %w", err)
+	}
+	// Close the file.
 	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("cannot close temp token file: %w", err)
 	}
-	if err := os.Rename(tmpPath, a.Config.AdminTokenPath); err != nil {
+
+	// Atomic commit: verify authorizing token is still current,
+	// then rename and update runtime hash under write lock.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Verify the authorizing token is still the current one.
+	if a.AdminTokenHash != authorizingHash {
+		// Stale concurrent rotation: another rotation already committed.
+		os.Remove(tmpPath)
+		return "", ErrStaleRotation
+	}
+
+	// Atomic rename.
+	rename := os.Rename
+	if a.RotateRenameFn != nil {
+		rename = a.RotateRenameFn
+	}
+	if err := rename(tmpPath, tokenPath); err != nil {
 		os.Remove(tmpPath)
 		return "", fmt.Errorf("cannot replace token file: %w", err)
 	}
 
-	// Update the in-memory hash under the lock.
-	a.mu.Lock()
+	// Update in-memory hash.
 	a.AdminTokenHash = newHash
-	a.mu.Unlock()
 
 	return newToken, nil
 }

@@ -1,28 +1,38 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"time"
 )
 
-type rotateAdminTokenResponse struct {
-	OK    bool   `json:"ok"`
-	Token string `json:"token"`
-}
-
 func (a *App) handleRotateAdminToken(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
-	if !a.requireAdmin(w, r) {
+	tokenHash, ok := a.requireAdminWithHash(w, r)
+	if !ok {
 		return
 	}
 
 	ctx := r.Context()
 
-	newToken, err := a.rotateAdminToken()
+	newToken, err := a.rotateAdminToken(tokenHash)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
+		if errors.Is(err, ErrStaleRotation) {
+			// The authorizing token was invalidated by a concurrent
+			// rotation before this one committed. The capability is no
+			// longer valid; respond with 401.
+			writeAuditWithRequestID(ctx, auditRecord{
+				Event:    "admin_token.rotate",
+				Result:   "stale_token",
+				Duration: duration,
+			})
+			writeUnauthorizedAdmin(ctx, w)
+			return
+		}
+
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:    "admin_token.rotate",
 			Result:   "error",

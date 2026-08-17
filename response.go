@@ -123,12 +123,20 @@ func writeAuthFailure(ctx context.Context, r *http.Request, result string) {
 }
 
 func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	_, ok := a.requireAdminWithHash(w, r)
+	return ok
+}
+
+// requireAdminWithHash authenticates the request and returns the hash of the
+// authorizing token on success. The caller can use this hash to verify the
+// token is still current at a later commit point (e.g., rotation).
+func (a *App) requireAdminWithHash(w http.ResponseWriter, r *http.Request) ([sha256.Size]byte, bool) {
 	ctx := r.Context()
 	token, ok := parseBearerToken(r)
 	if !ok {
 		writeAuthFailure(ctx, r, "admin.parse_failed")
 		writeUnauthorizedAdmin(ctx, w)
-		return false
+		return [sha256.Size]byte{}, false
 	}
 
 	tokenHash := sha256.Sum256([]byte(token))
@@ -136,10 +144,10 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if subtle.ConstantTimeCompare(tokenHash[:], currentHash[:]) != 1 {
 		writeAuthFailure(ctx, r, "admin.wrong_token")
 		writeUnauthorizedAdmin(ctx, w)
-		return false
+		return [sha256.Size]byte{}, false
 	}
 
-	return true
+	return tokenHash, true
 }
 
 func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, bool) {

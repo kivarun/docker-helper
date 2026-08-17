@@ -83,7 +83,7 @@ operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 .B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
 Create a new principal.
 .TP
-.B docker-helper principal list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+.B docker-helper principal list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
 List all principals (username, UID, GID, home, enabled).
 .TP
 .B docker-helper principal show [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER [FIELD]
@@ -107,6 +107,14 @@ List credentials for a principal.
 .TP
 .B docker-helper credential revoke [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] CREDENTIAL_ID
 Revoke a credential.
+.SS Admin Commands
+.TP
+.B docker-helper admin token rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
+Rotate the admin token. Requires the current admin token
+(\fB\-\-token-file\fR is the client auth source, not the destination).
+The new token is shown once on stdout; the old token is invalid
+immediately and no restart is required. \fB\-\-json\fR prints the API
+response.
 .SS AppArmor Commands (System Mode)
 .TP
 .B docker-helper apparmor root list

@@ -370,6 +370,9 @@ for full syntax:
   `set`, `allowed-root`.
 - `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
   `revoke`.
+- `admin` — Administrative operations. Subcommand: `token rotate` (rotate
+  the admin token; requires the current token, new token shown once, old
+  token invalid immediately, no restart).
 
 ### General commands
 
@@ -1528,4 +1531,3 @@ Items discussed but not yet implemented:
 - OpenCode custom tool integration (client-side);
 - launcher component;
 - RPM/DEB packaging;
-- token rotation command;

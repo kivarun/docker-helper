@@ -80,6 +80,14 @@ type listPrincipalsResponse struct {
 	Principals []principalSummary `json:"principals"`
 }
 
+// rotateAdminTokenResponse is the response from POST /admin/token/rotate.
+// The new token is shown once in this response; it is never logged or
+// audited in plaintext.
+type rotateAdminTokenResponse struct {
+	OK    bool   `json:"ok"`
+	Token string `json:"token"`
+}
+
 // operationLogsResponse is the response from GET /operations/{id}/logs.
 type operationLogsResponse struct {
 	OK          bool   `json:"ok"`
