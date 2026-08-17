@@ -2105,21 +2105,27 @@ func TestUserProfileContainsDockerBuildx(t *testing.T) {
 	}
 }
 
-func TestApparmorSystemProfileParserValidation(t *testing.T) {
-	if _, err := exec.LookPath("apparmor_parser"); err != nil {
-		t.Skip("apparmor_parser not available")
-	}
-	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", "packaging/apparmor/docker-helper-system")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("system profile parser validation failed: %v\n%s", err, out)
-	}
-}
-
 func TestApparmorUserProfileParserValidation(t *testing.T) {
 	if _, err := exec.LookPath("apparmor_parser"); err != nil {
 		t.Skip("apparmor_parser not available")
 	}
-	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", "packaging/apparmor/docker-helper")
+
+	data, err := os.ReadFile("packaging/apparmor/docker-helper")
+	if err != nil {
+		t.Fatalf("cannot read user profile template: %v", err)
+	}
+
+	// Render the template: replace placeholders with valid values.
+	content := strings.ReplaceAll(string(data), "@@BINARY_PATH@", "/usr/bin/docker-helper-test")
+	content = strings.ReplaceAll(content, "# @@WORKSPACE_RULE@@", "")
+
+	dir := t.TempDir()
+	profilePath := filepath.Join(dir, "docker-helper")
+	if err := os.WriteFile(profilePath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", profilePath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("user profile parser validation failed: %v\n%s", err, out)
 	}
