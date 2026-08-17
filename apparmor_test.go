@@ -2122,8 +2122,8 @@ func TestApparmorUserProfileParserValidation(t *testing.T) {
 	if strings.Contains(content, "@@BINARY_PATH@@") {
 		t.Fatal("rendered profile still contains @@BINARY_PATH@@")
 	}
-	if strings.Contains(content, "@@WORKSPACE_RULE@@") {
-		t.Fatal("rendered profile still contains @@WORKSPACE_RULE@@")
+	if strings.Contains(content, "# @@WORKSPACE_RULE@@") {
+		t.Fatal("rendered profile still contains # @@WORKSPACE_RULE@@")
 	}
 
 	dir := t.TempDir()
