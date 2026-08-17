@@ -29,6 +29,19 @@ purge=false
 
 # --- Helpers ---
 
+usage() {
+	cat <<'EOF'
+Usage: ./uninstall.sh [--yes] [--purge]
+
+Remove docker-helper user installation.
+
+Flags:
+  -h, --help   Show this help message
+  --yes        Non-interactive: accept all defaults
+  --purge      Also remove config and state (default: preserve)
+EOF
+}
+
 info() {
 	printf '%s\n' "$*"
 }
@@ -62,6 +75,10 @@ ask() {
 parse_args() {
 	for arg in "$@"; do
 		case "$arg" in
+			-h|--help)
+				usage
+				exit 0
+				;;
 			--yes)
 				interactive=false
 				;;
@@ -70,6 +87,8 @@ parse_args() {
 				;;
 			*)
 				error "unknown option: $arg"
+				echo "" >&2
+				echo "Try './uninstall.sh --help' for usage information." >&2
 				exit 1
 				;;
 		esac

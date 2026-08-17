@@ -222,13 +222,42 @@ func TestInstallScriptUnknownFlag(t *testing.T) {
 	}
 }
 
-// TestUninstallScriptUnknownFlag verifies uninstall.sh rejects unknown flags.
+// TestUninstallScriptUnknownFlag verifies uninstall.sh rejects unknown flags
+// and prints a usage hint.
 func TestUninstallScriptUnknownFlag(t *testing.T) {
 	cmd := exec.Command("bash", "packaging/uninstall.sh", "--unknown-flag")
 	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
-	err := cmd.Run()
+	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatal("expected non-zero exit code for unknown flag")
+	}
+	if !strings.Contains(string(out), "Try") {
+		t.Errorf("expected usage hint in stderr, got: %s", out)
+	}
+}
+
+// TestUninstallScriptHelp verifies uninstall.sh --help and -h print usage
+// and exit 0.
+func TestUninstallScriptHelp(t *testing.T) {
+	for _, flag := range []string{"--help", "-h"} {
+		t.Run(flag, func(t *testing.T) {
+			cmd := exec.Command("bash", "packaging/uninstall.sh", flag)
+			cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("expected exit 0 for %s, got: %v: %s", flag, err, out)
+			}
+			output := string(out)
+			if !strings.Contains(output, "--yes") {
+				t.Errorf("--help output missing --yes: %s", output)
+			}
+			if !strings.Contains(output, "--purge") {
+				t.Errorf("--help output missing --purge: %s", output)
+			}
+			if !strings.Contains(output, "--help") {
+				t.Errorf("--help output missing --help: %s", output)
+			}
+		})
 	}
 }
 
