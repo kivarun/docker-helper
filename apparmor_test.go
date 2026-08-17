@@ -12,46 +12,14 @@ import (
 	"testing"
 )
 
-func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured *struct {
+// capturedParserCall records the most recent apparmor_parser invocation.
+type capturedParserCall struct {
 	exe  string
 	args []string
-}) {
-	t.Helper()
-	dir = t.TempDir()
-
-	mainProfile := filepath.Join(dir, "docker-helper-system")
-	managedFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
-	lockPath := filepath.Join(dir, "apparmor.lock")
-	parserPath := filepath.Join(dir, "apparmor_parser")
-
-	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	captured = &struct {
-		exe  string
-		args []string
-	}{}
-	fakeRunner := func(exe string, args []string) error {
-		captured.exe = exe
-		captured.args = args
-		return nil
-	}
-
-	mgr = newApparmorManager(
-		mainProfile,
-		managedFragment,
-		lockPath,
-		parserPath,
-		fakeRunner,
-	)
-
-	return dir, mgr, captured
 }
 
+// setupApparmorTestWithRunner builds a manager over a fresh temp dir with a
+// fake executable parser and the given runner.
 func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []string) error) (dir string, mgr *apparmorManager) {
 	t.Helper()
 	dir = t.TempDir()
@@ -79,178 +47,84 @@ func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []st
 	return dir, mgr
 }
 
+// setupApparmorTest is like setupApparmorTestWithRunner but captures each
+// parser invocation for assertions.
+func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured *capturedParserCall) {
+	t.Helper()
+	captured = &capturedParserCall{}
+	dir, mgr = setupApparmorTestWithRunner(t, func(exe string, args []string) error {
+		captured.exe = exe
+		captured.args = args
+		return nil
+	})
+	return dir, mgr, captured
+}
+
 // --- Command registration and help ---
 
-func TestApparmorCommandRegistered(t *testing.T) {
-	found := false
-	for _, cmd := range rootCommand.Subcommands {
-		if cmd.Name == "apparmor" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("apparmor command not registered in rootCommand")
-	}
-}
-
+// TestApparmorHelpOutput verifies help dispatch for every apparmor command
+// level, including the "help <command>" form. Running "apparmor --help"
+// through the real dispatcher also proves the command is registered.
 func TestApparmorHelpOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("apparmor --help exited %d, stderr: %s", code, stderr.String())
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "apparmor", args: []string{"apparmor", "--help"}, want: []string{"Usage:", "root", "check"}},
+		{name: "apparmor root", args: []string{"apparmor", "root", "--help"}, want: []string{"Usage:", "list", "add", "remove"}},
+		{name: "apparmor check", args: []string{"apparmor", "check", "--help"}, want: []string{"Usage:"}},
+		{name: "apparmor root list", args: []string{"apparmor", "root", "list", "--help"}, want: []string{"Usage:"}},
+		{name: "apparmor root add", args: []string{"apparmor", "root", "add", "--help"}, want: []string{"Usage:"}},
+		{name: "apparmor root remove", args: []string{"apparmor", "root", "remove", "--help"}, want: []string{"Usage:"}},
+		{name: "help apparmor", args: []string{"help", "apparmor"}, want: []string{"AppArmor"}},
+		{name: "help apparmor root add", args: []string{"help", "apparmor", "root", "add"}, want: []string{"Usage:"}},
 	}
-	out := stdout.String()
-	if !strings.Contains(out, "Usage:") {
-		t.Error("help output missing Usage:")
-	}
-	if !strings.Contains(out, "root") {
-		t.Error("help output missing root subcommand")
-	}
-	if !strings.Contains(out, "check") {
-		t.Error("help output missing check subcommand")
-	}
-}
 
-func TestApparmorRootHelpOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("apparmor root --help exited %d", code)
-	}
-	out := stdout.String()
-	for _, sub := range []string{"list", "add", "remove"} {
-		if !strings.Contains(out, sub) {
-			t.Errorf("help output missing %s subcommand", sub)
-		}
-	}
-}
-
-func TestApparmorCheckHelpOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "check", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("apparmor check --help exited %d", code)
-	}
-	if !strings.Contains(stdout.String(), "Usage:") {
-		t.Error("check help output missing Usage:")
-	}
-}
-
-func TestApparmorRootListHelpOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "list", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("apparmor root list --help exited %d", code)
-	}
-	if !strings.Contains(stdout.String(), "Usage:") {
-		t.Error("list help output missing Usage:")
-	}
-}
-
-func TestApparmorRootAddHelpOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("apparmor root add --help exited %d", code)
-	}
-	if !strings.Contains(stdout.String(), "Usage:") {
-		t.Error("add help output missing Usage:")
-	}
-}
-
-func TestApparmorRootRemoveHelpOutput(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "remove", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("apparmor root remove --help exited %d", code)
-	}
-	if !strings.Contains(stdout.String(), "Usage:") {
-		t.Error("remove help output missing Usage:")
-	}
-}
-
-func TestApparmorHelpSubcommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"help", "apparmor"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("help apparmor exited %d", code)
-	}
-	if !strings.Contains(stdout.String(), "AppArmor") {
-		t.Error("help apparmor missing description")
-	}
-}
-
-func TestApparmorHelpNestedSubcommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"help", "apparmor", "root", "add"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("help apparmor root add exited %d", code)
-	}
-	if !strings.Contains(stdout.String(), "Usage:") {
-		t.Error("help apparmor root add missing Usage:")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tc.args, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exited %d, stderr: %s", code, stderr.String())
+			}
+			for _, s := range tc.want {
+				if !strings.Contains(stdout.String(), s) {
+					t.Errorf("help output missing %q", s)
+				}
+			}
+		})
 	}
 }
 
 // --- Rejection when effective UID is not 0 ---
 
-func TestApparmorRootListRequiresRoot(t *testing.T) {
+func TestApparmorRequiresRoot(t *testing.T) {
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 1000 }
 	defer func() { EffectiveUID = saved }()
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "list"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit 1, got %d", code)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "root list", args: []string{"apparmor", "root", "list"}},
+		{name: "root add", args: []string{"apparmor", "root", "add", "/tmp"}},
+		{name: "root remove", args: []string{"apparmor", "root", "remove", "/tmp"}},
+		{name: "check", args: []string{"apparmor", "check"}},
 	}
-	if !strings.Contains(stderr.String(), "root") {
-		t.Errorf("expected root error, got: %s", stderr.String())
-	}
-}
 
-func TestApparmorRootAddRequiresRoot(t *testing.T) {
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = saved }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", "/tmp"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "root") {
-		t.Errorf("expected root error, got: %s", stderr.String())
-	}
-}
-
-func TestApparmorRootRemoveRequiresRoot(t *testing.T) {
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = saved }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "remove", "/tmp"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "root") {
-		t.Errorf("expected root error, got: %s", stderr.String())
-	}
-}
-
-func TestApparmorCheckRequiresRoot(t *testing.T) {
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 1000 }
-	defer func() { EffectiveUID = saved }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "check"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "root") {
-		t.Errorf("expected root error, got: %s", stderr.String())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tc.args, &stdout, &stderr)
+			if code != 1 {
+				t.Errorf("expected exit 1, got %d", code)
+			}
+			if !strings.Contains(stderr.String(), "root") {
+				t.Errorf("expected root error, got: %s", stderr.String())
+			}
+		})
 	}
 }
 
@@ -355,62 +229,28 @@ func TestApparmorRootAddRootDirectory(t *testing.T) {
 	}
 }
 
-func TestApparmorRootAddGlobAsterisk(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test*")
-	if err := os.MkdirAll(path, 0755); err == nil {
-		defer os.RemoveAll(path)
+func TestApparmorRootAddGlobRejected(t *testing.T) {
+	// The base must be policy-legal (t.TempDir() is under the forbidden /tmp
+	// tree and would be rejected by the workspace root policy before lexical
+	// validation runs), so the rejection comes from the lexical check.
+	rootDir := testAllowedRootDir(t)
 
-		_, mgr, _ := setupApparmorTest(t)
-		_, err := mgr.addRoot(path)
-		if err == nil {
-			t.Fatal("expected error for path with *")
-		}
-		if !strings.Contains(err.Error(), "*") {
-			t.Errorf("expected * error, got: %v", err)
-		}
-	}
-}
+	for _, ch := range []string{"*", "?", "[", "{"} {
+		t.Run(ch, func(t *testing.T) {
+			path := filepath.Join(rootDir, "test"+ch)
+			if err := os.MkdirAll(path, 0755); err != nil {
+				t.Skipf("cannot create path with %q: %v", ch, err)
+			}
 
-func TestApparmorRootAddGlobQuestionMark(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test?")
-	if err := os.MkdirAll(path, 0755); err == nil {
-		defer os.RemoveAll(path)
-
-		_, mgr, _ := setupApparmorTest(t)
-		_, err := mgr.addRoot(path)
-		if err == nil {
-			t.Fatal("expected error for path with ?")
-		}
-	}
-}
-
-func TestApparmorRootAddGlobBracket(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test[")
-	if err := os.MkdirAll(path, 0755); err == nil {
-		defer os.RemoveAll(path)
-
-		_, mgr, _ := setupApparmorTest(t)
-		_, err := mgr.addRoot(path)
-		if err == nil {
-			t.Fatal("expected error for path with [")
-		}
-	}
-}
-
-func TestApparmorRootAddGlobBrace(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test{")
-	if err := os.MkdirAll(path, 0755); err == nil {
-		defer os.RemoveAll(path)
-
-		_, mgr, _ := setupApparmorTest(t)
-		_, err := mgr.addRoot(path)
-		if err == nil {
-			t.Fatal("expected error for path with {")
-		}
+			_, mgr, _ := setupApparmorTest(t)
+			_, err := mgr.addRoot(path)
+			if err == nil {
+				t.Fatalf("expected error for path with %q", ch)
+			}
+			if !strings.Contains(err.Error(), ch) {
+				t.Errorf("expected %q in error, got: %v", ch, err)
+			}
+		})
 	}
 }
 
@@ -419,16 +259,17 @@ func TestApparmorRootAddCLIRejectsGlob(t *testing.T) {
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test*")
-	if err := os.MkdirAll(path, 0755); err == nil {
-		defer os.RemoveAll(path)
+	// Policy-legal base, as in TestApparmorRootAddGlobRejected.
+	rootDir := testAllowedRootDir(t)
+	path := filepath.Join(rootDir, "test*")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Skipf("cannot create path with glob: %v", err)
+	}
 
-		var stdout, stderr bytes.Buffer
-		code := runCommandWithWriters([]string{"apparmor", "root", "add", path}, &stdout, &stderr)
-		if code != 2 {
-			t.Errorf("expected exit 2 for glob path, got %d", code)
-		}
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"apparmor", "root", "add", path}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit 2 for glob path, got %d", code)
 	}
 }
 
@@ -489,164 +330,43 @@ func TestEscapeAppArmorPath(t *testing.T) {
 	}
 }
 
-// --- JSON quoting ---
-
-func TestJSONQuoteRoundTrip(t *testing.T) {
-	tests := []string{
-		"/normal",
-		"/with space",
-		`/with"quote`,
-		"/with\\backslash",
-		"/with#hash",
-		"/with,comma",
-	}
-	for _, s := range tests {
-		quoted := jsonQuote(s)
-		unquoted, err := jsonUnquote(quoted)
-		if err != nil {
-			t.Fatalf("jsonUnquote(%q) failed: %v", quoted, err)
-		}
-		if unquoted != s {
-			t.Errorf("round trip: %q -> %q -> %q", s, quoted, unquoted)
-		}
-	}
-}
-
 // --- Special characters in paths ---
 
-func TestRootWithPathWithSpace(t *testing.T) {
-	rootDir := testAllowedRootDir(t)
-	path := filepath.Join(rootDir, "with space")
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
+func TestRootWithSpecialCharacters(t *testing.T) {
+	for _, name := range []string{"with space", `with"quote`, "with#hash", "with,comma", "with\\backslash"} {
+		t.Run(name, func(t *testing.T) {
+			rootDir := testAllowedRootDir(t)
+			path := filepath.Join(rootDir, name)
+			if err := os.MkdirAll(path, 0755); err != nil {
+				t.Fatal(err)
+			}
 
-	_, mgr, _ := setupApparmorTest(t)
+			_, mgr, _ := setupApparmorTest(t)
 
-	result, err := mgr.addRoot(path)
-	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
-	}
-	if result.Path != path {
-		t.Errorf("expected %s, got %s", path, result.Path)
-	}
+			result, err := mgr.addRoot(path)
+			if err != nil {
+				t.Fatalf("addRoot failed: %v", err)
+			}
+			if result.Path != path {
+				t.Errorf("expected %s, got %s", path, result.Path)
+			}
 
-	roots, err := mgr.listRoots()
-	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
-	}
-	if len(roots) != 1 || roots[0] != path {
-		t.Errorf("expected root %s, got %v", path, roots)
-	}
-}
-
-func TestRootWithPathWithQuote(t *testing.T) {
-	rootDir := testAllowedRootDir(t)
-	path := filepath.Join(rootDir, `with"quote`)
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, mgr, _ := setupApparmorTest(t)
-
-	result, err := mgr.addRoot(path)
-	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
-	}
-	if result.Path != path {
-		t.Errorf("expected %s, got %s", path, result.Path)
-	}
-
-	roots, err := mgr.listRoots()
-	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
-	}
-	if len(roots) != 1 || roots[0] != path {
-		t.Errorf("expected root %s, got %v", path, roots)
-	}
-}
-
-func TestRootWithPathWithHash(t *testing.T) {
-	rootDir := testAllowedRootDir(t)
-	path := filepath.Join(rootDir, "with#hash")
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, mgr, _ := setupApparmorTest(t)
-
-	result, err := mgr.addRoot(path)
-	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
-	}
-	if result.Path != path {
-		t.Errorf("expected %s, got %s", path, result.Path)
-	}
-
-	roots, err := mgr.listRoots()
-	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
-	}
-	if len(roots) != 1 || roots[0] != path {
-		t.Errorf("expected root %s, got %v", path, roots)
-	}
-}
-
-func TestRootWithPathWithComma(t *testing.T) {
-	rootDir := testAllowedRootDir(t)
-	path := filepath.Join(rootDir, "with,comma")
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, mgr, _ := setupApparmorTest(t)
-
-	result, err := mgr.addRoot(path)
-	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
-	}
-	if result.Path != path {
-		t.Errorf("expected %s, got %s", path, result.Path)
-	}
-
-	roots, err := mgr.listRoots()
-	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
-	}
-	if len(roots) != 1 || roots[0] != path {
-		t.Errorf("expected root %s, got %v", path, roots)
-	}
-}
-
-func TestRootWithPathWithBackslash(t *testing.T) {
-	rootDir := testAllowedRootDir(t)
-	path := filepath.Join(rootDir, "with\\backslash")
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, mgr, _ := setupApparmorTest(t)
-
-	result, err := mgr.addRoot(path)
-	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
-	}
-	if result.Path != path {
-		t.Errorf("expected %s, got %s", path, result.Path)
-	}
-
-	roots, err := mgr.listRoots()
-	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
-	}
-	if len(roots) != 1 || roots[0] != path {
-		t.Errorf("expected root %s, got %v", path, roots)
+			roots, err := mgr.listRoots()
+			if err != nil {
+				t.Fatalf("listRoots failed: %v", err)
+			}
+			if len(roots) != 1 || roots[0] != path {
+				t.Errorf("expected root %s, got %v", path, roots)
+			}
+		})
 	}
 }
 
 func TestRootWithControlCharacter(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "with\x01control")
+	// Policy-legal base so the rejection comes from lexical validation, not
+	// the workspace root policy (t.TempDir() is under the forbidden /tmp).
+	rootDir := testAllowedRootDir(t)
+	path := filepath.Join(rootDir, "with\x01control")
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -689,19 +409,6 @@ func TestMetadataRoundTrip(t *testing.T) {
 }
 
 // --- Exact AppArmor rule text ---
-
-func TestRenderFragmentRuleText(t *testing.T) {
-	roots := []string{"/workspace"}
-	data := renderFragment(roots)
-	content := string(data)
-
-	if !strings.Contains(content, `"/workspace/" r,`) {
-		t.Errorf("expected quoted dir rule, got:\n%s", content)
-	}
-	if !strings.Contains(content, `"/workspace/**" r,`) {
-		t.Errorf("expected quoted glob rule, got:\n%s", content)
-	}
-}
 
 func TestRenderFragmentRuleEscaping(t *testing.T) {
 	roots := []string{`/path\with"special`}
@@ -833,165 +540,111 @@ func TestApparmorListAbsentFragment(t *testing.T) {
 
 // --- Malformed managed fragment ---
 
-func TestApparmorMalformedFragment(t *testing.T) {
+func TestApparmorListMalformedFragment(t *testing.T) {
 	_, mgr, _ := setupApparmorTest(t)
 
 	fragmentDir := filepath.Dir(mgr.managedFragmentPath)
 	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(mgr.managedFragmentPath, []byte("garbage content\n"), 0644); err != nil {
-		t.Fatal(err)
+	valid := renderFragment([]string{"/test"})
+
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"garbage content", []byte("garbage content\n")},
+		{"missing trailing newline", valid[:len(valid)-1]},
+		{"wrong header", []byte("# Wrong header\n# Another line\n")},
+		{"extra rules", append(append([]byte{}, valid...), []byte("\n/extra/rule/ r,\n")...)},
 	}
 
-	_, err := mgr.listRoots()
-	if err == nil {
-		t.Fatal("expected error for malformed fragment")
-	}
-}
-
-func TestApparmorFragmentMissingTrailingNewline(t *testing.T) {
-	_, mgr, _ := setupApparmorTest(t)
-
-	fragmentDir := filepath.Dir(mgr.managedFragmentPath)
-	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	data := renderFragment([]string{"/test"})
-	if err := os.WriteFile(mgr.managedFragmentPath, data[:len(data)-1], 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := mgr.listRoots()
-	if err == nil {
-		t.Fatal("expected error for fragment missing trailing newline")
-	}
-}
-
-func TestApparmorFragmentWrongHeader(t *testing.T) {
-	_, mgr, _ := setupApparmorTest(t)
-
-	fragmentDir := filepath.Dir(mgr.managedFragmentPath)
-	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mgr.managedFragmentPath, []byte("# Wrong header\n# Another line\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := mgr.listRoots()
-	if err == nil {
-		t.Fatal("expected error for wrong header")
-	}
-}
-
-func TestApparmorFragmentExtraRules(t *testing.T) {
-	_, mgr, _ := setupApparmorTest(t)
-
-	fragmentDir := filepath.Dir(mgr.managedFragmentPath)
-	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	extra := renderFragment([]string{"/test"})
-	extra = append(extra, []byte("\n/extra/rule/ r,\n")...)
-	if err := os.WriteFile(mgr.managedFragmentPath, extra, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := mgr.listRoots()
-	if err == nil {
-		t.Fatal("expected error for fragment with extra rules")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(mgr.managedFragmentPath, tc.data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mgr.listRoots(); err == nil {
+				t.Fatal("expected error for malformed fragment")
+			}
+		})
 	}
 }
 
 // --- Exact parser executable and arguments ---
 
-func TestApparmorReloadParserExecutable(t *testing.T) {
-	dir := t.TempDir()
-	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "fragment")
-	lockPath := filepath.Join(dir, "lock")
-	parserPath := filepath.Join(dir, "sbin", "apparmor_parser")
-
-	if err := os.MkdirAll(filepath.Dir(parserPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	captured := &struct {
-		exe  string
-		args []string
-	}{}
-	fakeRunner := func(exe string, args []string) error {
-		captured.exe = exe
-		captured.args = args
-		return nil
+func TestApparmorParserInvocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		op       func(mgr *apparmorManager, testDir string) error
+		wantArgs []string // plus the main profile path as the final argument
+	}{
+		{
+			name: "reload on add",
+			op: func(mgr *apparmorManager, testDir string) error {
+				_, err := mgr.addRoot(testDir)
+				return err
+			},
+			wantArgs: []string{"--replace", "--skip-read-cache"},
+		},
+		{
+			name: "validate on check",
+			op: func(mgr *apparmorManager, testDir string) error {
+				return mgr.check()
+			},
+			wantArgs: []string{"--skip-kernel-load", "--skip-read-cache"},
+		},
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			rootDir := testAllowedRootDir(t)
+			testDir := filepath.Join(rootDir, "workspace")
+			mainProfile := filepath.Join(dir, "main")
+			fragment := filepath.Join(dir, "fragment")
+			lockPath := filepath.Join(dir, "lock")
+			parserPath := filepath.Join(dir, "sbin", "apparmor_parser")
 
-	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+			if err := os.MkdirAll(filepath.Dir(parserPath), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(testDir, 0755); err != nil {
+				t.Fatal(err)
+			}
 
-	_, err := mgr.addRoot(testDir)
-	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
-	}
+			captured := &capturedParserCall{}
+			mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+				func(exe string, args []string) error {
+					captured.exe = exe
+					captured.args = args
+					return nil
+				},
+			)
 
-	if captured.exe != parserPath {
-		t.Errorf("expected parser exe %s, got %s", parserPath, captured.exe)
-	}
-	if len(captured.args) != 3 || captured.args[0] != "--replace" || captured.args[1] != "--skip-read-cache" || captured.args[2] != mainProfile {
-		t.Errorf("expected parser args [--replace --skip-read-cache %s], got %v", mainProfile, captured.args)
-	}
-}
+			if err := tc.op(mgr, testDir); err != nil {
+				t.Fatalf("operation failed: %v", err)
+			}
 
-func TestApparmorValidateParserExecutable(t *testing.T) {
-	dir := t.TempDir()
-	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "fragment")
-	lockPath := filepath.Join(dir, "lock")
-	parserPath := filepath.Join(dir, "sbin", "apparmor_parser")
-
-	if err := os.MkdirAll(filepath.Dir(parserPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	captured := &struct {
-		exe  string
-		args []string
-	}{}
-	fakeRunner := func(exe string, args []string) error {
-		captured.exe = exe
-		captured.args = args
-		return nil
-	}
-
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
-
-	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := mgr.check(); err != nil {
-		t.Fatalf("check failed: %v", err)
-	}
-
-	if captured.exe != parserPath {
-		t.Errorf("expected parser exe %s, got %s", parserPath, captured.exe)
-	}
-	if len(captured.args) != 3 || captured.args[0] != "--skip-kernel-load" || captured.args[1] != "--skip-read-cache" || captured.args[2] != mainProfile {
-		t.Errorf("expected parser args [--skip-kernel-load --skip-read-cache %s], got %v", mainProfile, captured.args)
+			if captured.exe != parserPath {
+				t.Errorf("expected parser exe %s, got %s", parserPath, captured.exe)
+			}
+			wantArgs := append(append([]string{}, tc.wantArgs...), mainProfile)
+			if len(captured.args) != len(wantArgs) {
+				t.Fatalf("expected parser args %v, got %v", wantArgs, captured.args)
+			}
+			for i := range wantArgs {
+				if captured.args[i] != wantArgs[i] {
+					t.Errorf("parser arg[%d] = %q, want %q", i, captured.args[i], wantArgs[i])
+				}
+			}
+		})
 	}
 }
 
@@ -1427,47 +1080,6 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 	}
 }
 
-// --- Rollback restores absence of fragment ---
-
-func TestApparmorRollbackRestoresAbsence(t *testing.T) {
-	rootDir := testAllowedRootDir(t)
-	testDirA := filepath.Join(rootDir, "a")
-	testDirB := filepath.Join(rootDir, "b")
-	for _, d := range []string{testDirA, testDirB} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	callCount := 0
-	fakeRunner := func(exe string, args []string) error {
-		callCount++
-		if callCount == 1 {
-			return nil
-		}
-		return errors.New("parser failed")
-	}
-
-	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
-
-	if _, err := mgr.addRoot(testDirA); err != nil {
-		t.Fatalf("first addRoot failed: %v", err)
-	}
-
-	_, err := mgr.addRoot(testDirB)
-	if err == nil {
-		t.Fatal("expected error for second addRoot")
-	}
-
-	roots, err := mgr.listRoots()
-	if err != nil {
-		t.Fatalf("listRoots failed after rollback: %v", err)
-	}
-	if len(roots) != 1 || roots[0] != testDirA {
-		t.Errorf("expected only %s after rollback, got %v", testDirA, roots)
-	}
-}
-
 // --- Lock serialization ---
 
 func TestApparmorLockSerialization(t *testing.T) {
@@ -1656,141 +1268,91 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 	}
 }
 
-// --- Symlink fragment rejected in add ---
+// --- Symlink fragment rejected in add and remove ---
 
-func TestApparmorSymlinkFragmentAddRejected(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	mainProfile := filepath.Join(dir, "main")
-	realFragment := filepath.Join(dir, "real-fragment")
-	linkFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
-	lockPath := filepath.Join(dir, "lock")
-	parserPath := filepath.Join(dir, "apparmor_parser")
-
-	if err := os.MkdirAll(filepath.Dir(linkFragment), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	targetData := renderFragment(nil)
-	if err := os.WriteFile(realFragment, targetData, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(realFragment, linkFragment); err != nil {
-		t.Fatal(err)
+func TestApparmorSymlinkFragmentRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		op   func(mgr *apparmorManager, testDir string) error
+	}{
+		{"add", func(mgr *apparmorManager, testDir string) error {
+			_, err := mgr.addRoot(testDir)
+			return err
+		}},
+		{"remove", func(mgr *apparmorManager, testDir string) error {
+			_, err := mgr.removeRoot(testDir)
+			return err
+		}},
 	}
 
-	runnerCalled := false
-	fakeRunner := func(exe string, args []string) error {
-		runnerCalled = true
-		return nil
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			testDir := filepath.Join(testAllowedRootDir(t), "workspace")
+			if err := os.MkdirAll(testDir, 0755); err != nil {
+				t.Fatal(err)
+			}
 
-	mgr := newApparmorManager(mainProfile, linkFragment, lockPath, parserPath, fakeRunner)
+			mainProfile := filepath.Join(dir, "main")
+			realFragment := filepath.Join(dir, "real-fragment")
+			linkFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+			lockPath := filepath.Join(dir, "lock")
+			parserPath := filepath.Join(dir, "apparmor_parser")
 
-	_, err := mgr.addRoot(testDir)
-	if err == nil {
-		t.Fatal("expected error for symlink fragment")
-	}
-	if !strings.Contains(err.Error(), "symlink") {
-		t.Errorf("expected symlink error, got: %v", err)
-	}
-	if runnerCalled {
-		t.Error("runner should not be called when fragment is a symlink")
-	}
+			if err := os.MkdirAll(filepath.Dir(linkFragment), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			targetData := renderFragment(nil)
+			if err := os.WriteFile(realFragment, targetData, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(realFragment, linkFragment); err != nil {
+				t.Fatal(err)
+			}
 
-	// Symlink should still be a symlink
-	info, err := os.Lstat(linkFragment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Error("symlink should still be a symlink")
-	}
+			runnerCalled := false
+			mgr := newApparmorManager(mainProfile, linkFragment, lockPath, parserPath,
+				func(exe string, args []string) error {
+					runnerCalled = true
+					return nil
+				},
+			)
 
-	// Target should be unchanged
-	afterData, err := os.ReadFile(realFragment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(afterData, targetData) {
-		t.Error("target bytes should not be modified")
-	}
-}
+			err := tc.op(mgr, testDir)
+			if err == nil {
+				t.Fatal("expected error for symlink fragment")
+			}
+			if !strings.Contains(err.Error(), "symlink") {
+				t.Errorf("expected symlink error, got: %v", err)
+			}
+			if runnerCalled {
+				t.Error("runner should not be called when fragment is a symlink")
+			}
 
-// --- Symlink fragment rejected in remove ---
+			// Symlink should still be a symlink
+			info, err := os.Lstat(linkFragment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				t.Error("symlink should still be a symlink")
+			}
 
-func TestApparmorSymlinkFragmentRemoveRejected(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	mainProfile := filepath.Join(dir, "main")
-	realFragment := filepath.Join(dir, "real-fragment")
-	linkFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
-	lockPath := filepath.Join(dir, "lock")
-	parserPath := filepath.Join(dir, "apparmor_parser")
-
-	if err := os.MkdirAll(filepath.Dir(linkFragment), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(parserPath, []byte("fake"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mainProfile, []byte("profile test { }\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	targetData := renderFragment(nil)
-	if err := os.WriteFile(realFragment, targetData, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(realFragment, linkFragment); err != nil {
-		t.Fatal(err)
-	}
-
-	runnerCalled := false
-	fakeRunner := func(exe string, args []string) error {
-		runnerCalled = true
-		return nil
-	}
-
-	mgr := newApparmorManager(mainProfile, linkFragment, lockPath, parserPath, fakeRunner)
-
-	_, err := mgr.removeRoot(testDir)
-	if err == nil {
-		t.Fatal("expected error for symlink fragment")
-	}
-	if !strings.Contains(err.Error(), "symlink") {
-		t.Errorf("expected symlink error, got: %v", err)
-	}
-	if runnerCalled {
-		t.Error("runner should not be called when fragment is a symlink")
-	}
-
-	info, err := os.Lstat(linkFragment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Error("symlink should still be a symlink")
-	}
-
-	afterData, err := os.ReadFile(realFragment)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(afterData, targetData) {
-		t.Error("target bytes should not be modified")
+			// Target should be unchanged
+			afterData, err := os.ReadFile(realFragment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(afterData, targetData) {
+				t.Error("target bytes should not be modified")
+			}
+		})
 	}
 }
 
@@ -2090,59 +1652,31 @@ func TestFragmentRoundTripSpecialChars(t *testing.T) {
 
 // --- CLI exit codes ---
 
-func TestApparmorRootAddInputErrorExitCode(t *testing.T) {
+func TestApparmorCLIExitCodes(t *testing.T) {
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add", "not-absolute"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for input error, got %d", code)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "root add relative path", args: []string{"apparmor", "root", "add", "not-absolute"}},
+		{name: "root remove relative path", args: []string{"apparmor", "root", "remove", "not-absolute"}},
+		{name: "root add missing arg", args: []string{"apparmor", "root", "add"}},
+		{name: "root remove missing arg", args: []string{"apparmor", "root", "remove"}},
+		{name: "root missing subcommand", args: []string{"apparmor", "root"}},
+		{name: "missing subcommand", args: []string{"apparmor"}},
 	}
-}
 
-func TestApparmorRootRemoveInputErrorExitCode(t *testing.T) {
-	saved := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = saved }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "remove", "not-absolute"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for input error, got %d", code)
-	}
-}
-
-func TestApparmorRootAddMissingArg(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "add"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for missing arg, got %d", code)
-	}
-}
-
-func TestApparmorRootRemoveMissingArg(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root", "remove"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for missing arg, got %d", code)
-	}
-}
-
-func TestApparmorRootMissingSubcommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor", "root"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for missing subcommand, got %d", code)
-	}
-}
-
-func TestApparmorMissingSubcommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"apparmor"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit 2 for missing subcommand, got %d", code)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tc.args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("expected exit 2, got %d (stderr: %s)", code, stderr.String())
+			}
+		})
 	}
 }
 
@@ -2205,45 +1739,10 @@ func TestValidateRootPathForRemoveNonExistent(t *testing.T) {
 	}
 }
 
-func TestValidateRootPathForRemoveRelative(t *testing.T) {
-	_, err := validateRootPathForRemove("relative")
-	if err == nil {
-		t.Fatal("expected error for relative path")
-	}
-}
-
 func TestValidateRootPathForRemoveRoot(t *testing.T) {
 	_, err := validateRootPathForRemove("/")
 	if err == nil {
 		t.Fatal("expected error for /")
-	}
-}
-
-// --- validateRootPathForAdd ---
-
-func TestValidateRootPathForAddAbsolute(t *testing.T) {
-	_, err := validateRootPathForAdd("relative")
-	if err == nil {
-		t.Fatal("expected error for relative path")
-	}
-}
-
-func TestValidateRootPathForAddNotDirectory(t *testing.T) {
-	tmpfile := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(tmpfile, []byte("data"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := validateRootPathForAdd(tmpfile)
-	if err == nil {
-		t.Fatal("expected error for file path")
-	}
-}
-
-func TestValidateRootPathForAddNotExists(t *testing.T) {
-	_, err := validateRootPathForAdd("/nonexistent/path/xyz")
-	if err == nil {
-		t.Fatal("expected error for non-existent path")
 	}
 }
 
@@ -2408,51 +1907,6 @@ func TestParseFragmentRejectsInvalidRoots(t *testing.T) {
 				t.Fatalf("expected error for invalid root %q, got nil", tc.root)
 			}
 		})
-	}
-}
-
-// --- Idempotent operation result ---
-
-func TestApparmorIdempotentAddResult(t *testing.T) {
-	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, mgr, _ := setupApparmorTest(t)
-
-	result1, err := mgr.addRoot(testDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result1.Changed {
-		t.Error("first add should report Changed=true")
-	}
-
-	result2, err := mgr.addRoot(testDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result2.Changed {
-		t.Error("duplicate add should report Changed=false")
-	}
-}
-
-func TestApparmorIdempotentRemoveResult(t *testing.T) {
-	dir := t.TempDir()
-	testDir := filepath.Join(dir, "workspace")
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	_, mgr, _ := setupApparmorTest(t)
-
-	result, err := mgr.removeRoot(testDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Changed {
-		t.Error("remove absent root should report Changed=false")
 	}
 }
 

@@ -12,19 +12,34 @@ import (
 	"testing"
 )
 
-// TestInstallScriptSyntax verifies install.sh has valid bash syntax.
-func TestInstallScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "packaging/install.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install.sh syntax error: %v", err)
+// TestScriptSyntax verifies every shipped script has valid shell syntax.
+func TestScriptSyntax(t *testing.T) {
+	tests := []struct {
+		shell string
+		path  string
+	}{
+		{"bash", "packaging/install.sh"},
+		{"bash", "packaging/uninstall.sh"},
+		{"bash", "packaging/install-system.sh"},
+		{"bash", "packaging/uninstall-system.sh"},
+		{"bash", "build-static.sh"},
+		{"bash", "build-bundle.sh"},
+		{"bash", "build-packages.sh"},
+		{"bash", "build-manpages.sh"},
+		{"sh", "packaging/scripts/deb/postinstall.sh"},
+		{"sh", "packaging/scripts/deb/preremove.sh"},
+		{"sh", "packaging/scripts/deb/postremove.sh"},
+		{"sh", "packaging/scripts/rpm/postinstall.sh"},
+		{"sh", "packaging/scripts/rpm/preremove.sh"},
+		{"sh", "packaging/scripts/rpm/postremove.sh"},
 	}
-}
 
-// TestUninstallScriptSyntax verifies uninstall.sh has valid bash syntax.
-func TestUninstallScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "packaging/uninstall.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("uninstall.sh syntax error: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if err := exec.Command(tt.shell, "-n", tt.path).Run(); err != nil {
+				t.Fatalf("%s syntax error: %v", tt.path, err)
+			}
+		})
 	}
 }
 
@@ -269,54 +284,24 @@ func TestUninstallScriptNoSudo(t *testing.T) {
 	}
 }
 
-// TestBuildStaticScriptSyntax verifies build-static.sh has valid bash syntax.
-func TestBuildStaticScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "build-static.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("build-static.sh syntax error: %v", err)
-	}
-}
-
-// TestBuildStaticScriptUsesExternalLinkmode verifies build-static.sh
-// explicitly uses -linkmode external to ensure the system linker
-// receives -extldflags '-static'.
-func TestBuildStaticScriptUsesExternalLinkmode(t *testing.T) {
+// TestBuildStaticScriptContent verifies build-static.sh uses external
+// linking and fails closed without musl (except on Alpine).
+func TestBuildStaticScriptContent(t *testing.T) {
 	data, err := os.ReadFile("build-static.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 	if !strings.Contains(content, "-linkmode external") {
-		t.Fatal("build-static.sh must use -linkmode external for static linking")
+		t.Error("build-static.sh must use -linkmode external for static linking")
 	}
-}
-
-// TestBuildStaticScriptRequiresMusl verifies build-static.sh fails
-// on a glibc host without musl-gcc rather than silently falling back
-// to a glibc-linked build.
-func TestBuildStaticScriptRequiresMusl(t *testing.T) {
-	data, err := os.ReadFile("build-static.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// The script must check for musl-gcc first and fail without it
-	// (except on Alpine where gcc uses musl natively).
+	// Must check for musl-gcc first and fail without it (except on Alpine
+	// where gcc uses musl natively).
 	if !strings.Contains(content, "musl-gcc") {
-		t.Fatal("build-static.sh must reference musl-gcc")
+		t.Error("build-static.sh must reference musl-gcc")
 	}
-	// Must have an Alpine check to allow gcc fallback only there.
 	if !strings.Contains(content, "alpine") {
-		t.Fatal("build-static.sh must check for Alpine to allow gcc fallback")
-	}
-}
-
-// TestBuildBundleScriptSyntax verifies build-bundle.sh has valid bash syntax.
-func TestBuildBundleScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "build-bundle.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("build-bundle.sh syntax error: %v", err)
+		t.Error("build-static.sh must check for Alpine to allow gcc fallback")
 	}
 }
 
@@ -331,111 +316,29 @@ func TestBuildBundleRequiresVersion(t *testing.T) {
 	}
 }
 
-// TestReleaseReadmeExists verifies the release README template exists.
-func TestReleaseReadmeExists(t *testing.T) {
+// TestReleaseReadmeContent verifies the release README template exists,
+// documents the key topics and man pages, and contains no secrets.
+func TestReleaseReadmeContent(t *testing.T) {
 	data, err := os.ReadFile("packaging/README.release.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 
-	// Must mention key topics
-	expected := []string{
-		"docker-helper",
-		"install.sh",
-		"agent",
-		"SKILL.md",
-	}
-	for _, s := range expected {
+	for _, s := range []string{"docker-helper", "install.sh", "agent", "SKILL.md"} {
 		if !strings.Contains(content, s) {
 			t.Errorf("release README should mention %q", s)
 		}
 	}
-}
-
-// TestReleaseReadmeNoSecrets verifies the release README does not
-// contain any secrets or sensitive patterns.
-func TestReleaseReadmeNoSecrets(t *testing.T) {
-	data, err := os.ReadFile("packaging/README.release.md")
-	if err != nil {
-		t.Fatal(err)
+	for _, s := range []string{"man/docker-helper.1.gz", "man/docker-helper-config.5.gz"} {
+		if !strings.Contains(content, s) {
+			t.Errorf("release README must document %s", s)
+		}
 	}
-	content := string(data)
-
-	forbidden := []string{
-		"admin_token",
-		"session_token",
-		"Bearer",
-		"password",
-	}
-	for _, s := range forbidden {
+	for _, s := range []string{"admin_token", "session_token", "Bearer", "password"} {
 		if strings.Contains(content, s) {
 			t.Errorf("release README must not contain %q", s)
 		}
-	}
-}
-
-// TestBundleLayoutExpected verifies build-bundle.sh references the
-// expected bundle layout by inspecting the script source.
-func TestBundleLayoutExpected(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// The script must copy these artifacts into the bundle
-	expected := []string{
-		"docker-helper",
-		"install.sh",
-		"uninstall.sh",
-		"systemd/user",
-		"apparmor",
-		"SKILL.md",
-		"README.release.md",
-	}
-	for _, s := range expected {
-		if !strings.Contains(content, s) {
-			t.Errorf("build-bundle.sh should reference %q", s)
-		}
-	}
-}
-
-// TestBundleScriptFailsOnUnconfirmedStatic verifies that build-bundle.sh
-// treats an unconfirmed static binary as a hard failure, not a warning.
-func TestBundleScriptFailsOnUnconfirmedStatic(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// The script must check STATIC_CONFIRMED and fail if not confirmed.
-	if !strings.Contains(content, "STATIC_CONFIRMED") {
-		t.Fatal("build-bundle.sh must track static linking confirmation state")
-	}
-	// Must exit 1 when not confirmed (not just warn).
-	if !strings.Contains(content, "cannot confirm static linking") {
-		t.Fatal("build-bundle.sh must fail on unconfirmed static linking")
-	}
-}
-
-// TestBundleScriptVerifiesExactPaths verifies build-bundle.sh checks
-// the exact mandatory set of paths in the tarball, not just listing them.
-func TestBundleScriptVerifiesExactPaths(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Must have an expected paths array and iterate over it.
-	if !strings.Contains(content, "EXPECTED_PATHS") {
-		t.Fatal("build-bundle.sh must define expected mandatory paths")
-	}
-	// Must check each path exists in the tarball.
-	if !strings.Contains(content, "missing required path") {
-		t.Fatal("build-bundle.sh must fail when a required path is missing")
 	}
 }
 
@@ -633,61 +536,76 @@ func TestAskPrompts(t *testing.T) {
 	}
 }
 
-// TestBundleSkillPath verifies build-bundle.sh places the skill at
-// skills/docker-helper/SKILL.md (not .claude/skills/docker-helper/SKILL.md).
-func TestBundleSkillPath(t *testing.T) {
+// TestBuildBundleScriptContent verifies build-bundle.sh references the
+// expected bundle layout, places the skill at skills/docker-helper,
+// keeps .claude out of the bundle, fails closed on unconfirmed static
+// linking, verifies the exact mandatory tarball paths, and bundles
+// compressed man pages.
+func TestBuildBundleScriptContent(t *testing.T) {
 	data, err := os.ReadFile("build-bundle.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 
-	// Must reference the correct skill path in the bundle
+	// The script must copy these artifacts into the bundle.
+	for _, s := range []string{
+		"docker-helper", "install.sh", "uninstall.sh", "install-system.sh", "uninstall-system.sh",
+		"systemd/user", "systemd/user/docker-helper.service", "systemd/system/docker-helper.service",
+		"apparmor", "apparmor/docker-helper", "apparmor/docker-helper-system", "apparmor/docker-helper.d/managed-roots",
+		"SKILL.md", "README.release.md",
+	} {
+		if !strings.Contains(content, s) {
+			t.Errorf("build-bundle.sh should reference %q", s)
+		}
+	}
+	// System scripts must be set executable in the bundle.
+	if !strings.Contains(content, "755") {
+		t.Error("build-bundle.sh must set system scripts executable (755)")
+	}
+	// Skill placed at skills/docker-helper (never .claude/skills).
 	if !strings.Contains(content, "skills/docker-helper/SKILL.md") {
 		t.Error("build-bundle.sh must reference skills/docker-helper/SKILL.md")
 	}
-
-	// Expected paths must include the correct skill path
 	if !strings.Contains(content, "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md") {
 		t.Error("build-bundle.sh must verify skills/docker-helper/SKILL.md in tarball")
 	}
-
-	// The bundle directory must not contain .claude/skills
-	// (the source copy from .claude is fine, but the destination must be skills/)
-	bundleDirIdx := strings.Index(content, "BUNDLE_DIR=")
-	if bundleDirIdx >= 0 {
-		afterBundleDir := content[bundleDirIdx:]
-		// Check that no cp/mkdir creates .claude inside BUNDLE_DIR
-		if strings.Contains(afterBundleDir, "$BUNDLE_DIR/.claude") {
+	if bundleDirIdx := strings.Index(content, "BUNDLE_DIR="); bundleDirIdx >= 0 {
+		if strings.Contains(content[bundleDirIdx:], "$BUNDLE_DIR/.claude") {
 			t.Error("build-bundle.sh must not create .claude inside BUNDLE_DIR")
 		}
 	}
-}
-
-// TestBundleNoDotClaude verifies the bundle does not contain .claude/
-// in the expected paths check.
-func TestBundleNoDotClaude(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Find the EXPECTED_PATHS array
-	idx := strings.Index(content, "EXPECTED_PATHS=")
-	if idx < 0 {
+	// EXPECTED_PATHS must not contain .claude paths.
+	if idx := strings.Index(content, "EXPECTED_PATHS="); idx < 0 {
 		t.Fatal("EXPECTED_PATHS not found")
+	} else if endIdx := strings.Index(content[idx:], ")"); endIdx >= 0 {
+		if strings.Contains(content[idx:idx+endIdx], ".claude") {
+			t.Error("EXPECTED_PATHS must not contain .claude paths")
+		}
 	}
-	remaining := content[idx:]
-	// Find the closing )
-	endIdx := strings.Index(remaining, ")")
-	if endIdx < 0 {
-		t.Fatal("EXPECTED_PATHS closing paren not found")
+	// Must track static linking confirmation and fail (not just warn)
+	// when it is unconfirmed.
+	if !strings.Contains(content, "STATIC_CONFIRMED") {
+		t.Error("build-bundle.sh must track static linking confirmation state")
 	}
-	expectedPaths := remaining[:endIdx]
-
-	if strings.Contains(expectedPaths, ".claude") {
-		t.Error("EXPECTED_PATHS must not contain .claude paths")
+	if !strings.Contains(content, "cannot confirm static linking") {
+		t.Error("build-bundle.sh must fail on unconfirmed static linking")
+	}
+	// Must check the exact mandatory set of paths in the tarball.
+	if !strings.Contains(content, "EXPECTED_PATHS") {
+		t.Error("build-bundle.sh must define expected mandatory paths")
+	}
+	if !strings.Contains(content, "missing required path") {
+		t.Error("build-bundle.sh must fail when a required path is missing")
+	}
+	// Must build and bundle compressed man pages.
+	if !strings.Contains(content, "build-manpages.sh") {
+		t.Error("build-bundle.sh must call build-manpages.sh")
+	}
+	for _, s := range []string{"man/docker-helper.1.gz", "man/docker-helper-config.5.gz"} {
+		if !strings.Contains(content, s) {
+			t.Errorf("build-bundle.sh EXPECTED_PATHS must include %s", s)
+		}
 	}
 }
 
@@ -839,71 +757,6 @@ func TestUninstallSkillRemovesOnlyDockerHelper(t *testing.T) {
 	// Verify other skill is untouched
 	if _, err := os.Stat(filepath.Join(otherSkillDir, "SKILL.md")); err != nil {
 		t.Error("other skill should not be removed")
-	}
-}
-
-// TestInstallYesSkill verifies --yes auto-accepts skill installation
-// by checking the install_skill function uses ask() which defaults to yes
-// in non-interactive mode.
-func TestInstallYesSkill(t *testing.T) {
-	data, err := os.ReadFile("packaging/install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// install_skill must exist and use ask() for the prompt
-	if !strings.Contains(content, "install_skill()") {
-		t.Fatal("install_skill function not found")
-	}
-
-	// Extract install_skill function body (from install_skill() to the next function)
-	idx := strings.Index(content, "install_skill()")
-	if idx < 0 {
-		t.Fatal("install_skill function not found")
-	}
-	remaining := content[idx:]
-
-	// Find next function definition
-	nextFuncIdx := len(remaining)
-	for _, candidate := range []string{"\ncheck_path()", "\nrun_init()", "\nenable_service()", "\nmain()"} {
-		if i := strings.Index(remaining, candidate); i > 0 && i < nextFuncIdx {
-			nextFuncIdx = i
-		}
-	}
-	funcBody := remaining[:nextFuncIdx]
-
-	// Must use ask for the prompt (bash function call without parens: ask "prompt")
-	if !strings.Contains(funcBody, "ask ") {
-		t.Error("install_skill must use ask for user prompt")
-	}
-
-	// Verify ask() defaults to yes when interactive=false (--yes)
-	// The ask() function has: if $interactive; then ... else true; fi
-	askIdx := strings.Index(content, "ask() {")
-	if askIdx < 0 {
-		t.Fatal("ask() function not found")
-	}
-	askBody := content[askIdx:]
-	// Find the closing brace of ask() function
-	braceCount := 0
-	askEnd := len(askBody)
-	for i, c := range askBody {
-		if c == '{' {
-			braceCount++
-		} else if c == '}' {
-			braceCount--
-			if braceCount == 0 {
-				askEnd = i + 1
-				break
-			}
-		}
-	}
-	askImpl := askBody[:askEnd]
-
-	// When interactive=false, ask() should return true (accept)
-	if !strings.Contains(askImpl, "true") {
-		t.Error("ask() must return true (accept) when interactive=false")
 	}
 }
 
@@ -1381,92 +1234,44 @@ esac
 
 // --- Systemd system unit tests ---
 
-func TestSystemUnitExists(t *testing.T) {
+// TestSystemUnitFile verifies the system unit file: ExecStart/ExecReload,
+// AppArmor binding, apparmor ordering without hard dependency, no dedicated
+// user, and bounded restart behavior.
+func TestSystemUnitFile(t *testing.T) {
 	path := "packaging/systemd/system/docker-helper.service"
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("system unit %s does not exist: %v", path, err)
-	}
-}
-
-func TestSystemUnitExecStart(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("system unit %s not found: %v", path, err)
 	}
-
 	content := string(data)
+
 	if !strings.Contains(content, "ExecStart=/usr/bin/docker-helper serve") {
-		t.Error("system unit ExecStart must point to /usr/bin/docker-helper serve")
+		t.Error("ExecStart must point to /usr/bin/docker-helper serve")
 	}
-}
-
-func TestSystemUnitExecReload(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
 	if !strings.Contains(content, "ExecReload=/usr/bin/docker-helper reload --system") {
-		t.Error("system unit ExecReload must be /usr/bin/docker-helper reload --system")
+		t.Error("ExecReload must be /usr/bin/docker-helper reload --system")
 	}
-}
-
-func TestSystemUnitAppArmorProfile(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
 	if !strings.Contains(content, "AppArmorProfile=docker-helper-system") {
-		t.Error("system unit must contain AppArmorProfile=docker-helper-system")
+		t.Error("unit must contain AppArmorProfile=docker-helper-system")
 	}
-}
-
-func TestSystemUnitAfterAppArmor(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
+	// Must order after apparmor.service but not hard-require it.
 	if !strings.Contains(content, "apparmor.service") {
-		t.Error("system unit After= must include apparmor.service")
+		t.Error("After= must include apparmor.service")
 	}
-	// Must not hard-require apparmor.service
 	if strings.Contains(content, "Requires=apparmor.service") {
-		t.Error("system unit must not hard-require apparmor.service")
+		t.Error("unit must not hard-require apparmor.service")
 	}
-}
-
-func TestSystemUnitNoDedicatedUser(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
+	// Runs as root — no User= directive.
 	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "User=") {
+		if strings.HasPrefix(strings.TrimSpace(line), "User=") {
 			t.Error("system unit must not contain User= (runs as root)")
 		}
 	}
-}
-
-func TestSystemUnitRestartSettings(t *testing.T) {
-	data, err := os.ReadFile("packaging/systemd/system/docker-helper.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
 	if !strings.Contains(content, "Restart=on-failure") {
-		t.Error("system unit must contain Restart=on-failure")
+		t.Error("unit must contain Restart=on-failure")
 	}
 	if !strings.Contains(content, "TimeoutStopSec=") {
-		t.Error("system unit must contain bounded TimeoutStopSec")
+		t.Error("unit must contain bounded TimeoutStopSec")
 	}
 }
 
@@ -1479,147 +1284,70 @@ func TestUserUnitStillExists(t *testing.T) {
 
 // --- System AppArmor profile tests ---
 
-func TestSystemAppArmorProfileExists(t *testing.T) {
+// TestSystemAppArmorProfileFile verifies the system AppArmor profile:
+// named profile with managed-roots fragment, required capabilities,
+// Docker socket policy, scoped mount policy, and no broad/overly
+// permissive rules.
+func TestSystemAppArmorProfileFile(t *testing.T) {
 	path := "packaging/apparmor/docker-helper-system"
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("system AppArmor profile %s does not exist: %v", path, err)
-	}
-}
-
-func TestSystemAppArmorProfileReferencesManagedRoots(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("system AppArmor profile %s not found: %v", path, err)
 	}
-
 	content := string(data)
+
+	// Must include the managed-roots fragment.
 	if !strings.Contains(content, "docker-helper.d/managed-roots") {
-		t.Error("system AppArmor profile must include managed-roots fragment")
+		t.Error("profile must include managed-roots fragment")
 	}
-}
-
-func TestSystemAppArmorProfileNoBroadHomeAccess(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
+	// Must not grant broad home access.
 	if strings.Contains(content, "/home/**") {
-		t.Error("system AppArmor profile must not contain broad /home/** access")
+		t.Error("profile must not contain broad /home/** access")
 	}
-}
-
-func TestSystemAppArmorProfileNoDenySysAdmin(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
+	// sys_admin is required for mount-pin; it must be granted, not denied.
 	if strings.Contains(content, "deny capability sys_admin") {
-		t.Error("system AppArmor profile must not deny sys_admin (required for mount-pin)")
+		t.Error("profile must not deny sys_admin (required for mount-pin)")
 	}
-}
-
-func TestSystemAppArmorProfileHasDacReadSearch(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "capability dac_read_search") {
-		t.Error("system AppArmor profile must grant dac_read_search for private workspace traversal")
-	}
-}
-
-func TestSystemAppArmorProfileHasSysAdmin(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
 	if !strings.Contains(content, "capability sys_admin") {
-		t.Error("system AppArmor profile must grant sys_admin for mount-pin operations")
+		t.Error("profile must grant sys_admin for mount-pin operations")
 	}
-}
-
-func TestSystemAppArmorProfileNamedProfile(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(content, "capability dac_read_search") {
+		t.Error("profile must grant dac_read_search for private workspace traversal")
 	}
-
-	content := string(data)
-	// Profile must use named profile syntax, not path-attached
+	// Named profile, not path-attached.
 	if !strings.Contains(content, "profile docker-helper-system") {
-		t.Error("system AppArmor profile must be named profile docker-helper-system")
+		t.Error("profile must be named profile docker-helper-system")
 	}
-	// Must not use path-based attachment
 	if strings.Contains(content, "profile /usr/bin/docker-helper") {
-		t.Error("system AppArmor profile must not use path-based attachment")
+		t.Error("profile must not use path-based attachment")
 	}
-}
-
-func TestSystemAppArmorProfileNoTouchInInstructions(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
+	// Instructions must not use touch for managed-roots.
 	if strings.Contains(content, "touch") {
-		t.Error("system AppArmor profile instructions must not use touch for managed-roots")
+		t.Error("profile instructions must not use touch for managed-roots")
 	}
-}
-
-func TestSystemAppArmorProfileHasUnixSocketPolicy(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// Must have separate unix socket policy for Docker connection
+	// Docker socket policy: stream connect only, plus filesystem rules.
 	if !strings.Contains(content, "unix (connect,send,receive)") {
-		t.Error("system AppArmor profile must contain unix socket connect policy for Docker")
+		t.Error("profile must contain unix socket connect policy for Docker")
 	}
-	// Must be stream only (Docker socket is stream)
 	if strings.Contains(content, "type=dgram") {
-		t.Error("system AppArmor profile must not contain dgram unix rule for Docker socket")
+		t.Error("profile must not contain dgram unix rule for Docker socket")
 	}
-	// Must still have filesystem socket rules
 	if !strings.Contains(content, "/run/docker.sock rw") {
-		t.Error("system AppArmor profile must retain filesystem Docker socket rule")
+		t.Error("profile must retain filesystem Docker socket rule")
 	}
-}
-
-func TestSystemAppArmorProfileHasMountPolicy(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// Must have mount rules with move option for move_mount
+	// Mount policy scoped to the helper-owned mount directory.
 	if !strings.Contains(content, "mount options in (rw,move)") {
-		t.Error("system AppArmor profile must contain mount policy with move option for move_mount")
+		t.Error("profile must contain mount policy with move option for move_mount")
 	}
-	// Mount rules must be scoped to helper-owned directory
 	if !strings.Contains(content, "/run/docker-helper/mounts") {
-		t.Error("system AppArmor profile mount rules must be scoped to /run/docker-helper/mounts")
+		t.Error("mount rules must be scoped to /run/docker-helper/mounts")
 	}
-	// Must have umount rule (correct syntax: umount PATH,)
 	if !strings.Contains(content, "umount /run/docker-helper/mounts") {
-		t.Error("system AppArmor profile must contain umount policy for mount-pin detach")
+		t.Error("profile must contain umount policy for mount-pin detach")
 	}
-	// Must not have blanket unrestricted mount (line that is just "mount,")
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "mount," {
-			t.Error("system AppArmor profile must not contain blanket unrestricted mount rule")
+		if strings.TrimSpace(line) == "mount," {
+			t.Error("profile must not contain blanket unrestricted mount rule")
 		}
 	}
 }
@@ -1667,227 +1395,108 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 
 // --- System install/uninstall script tests ---
 
-func TestInstallSystemScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "packaging/install-system.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("install-system.sh syntax error: %v", err)
-	}
-}
-
-func TestUninstallSystemScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "packaging/uninstall-system.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("uninstall-system.sh syntax error: %v", err)
-	}
-}
-
-func TestInstallSystemRequiresRoot(t *testing.T) {
-	// The script checks UID 0 before any mutation.
-	// We verify this by checking the script contains the check.
+// TestInstallSystemScriptContent verifies install-system.sh: root check,
+// --allowed-root support, destination paths, managed-roots preservation,
+// AppArmor-before-init ordering, and no skill/user-artifact installation.
+func TestInstallSystemScriptContent(t *testing.T) {
 	data, err := os.ReadFile("packaging/install-system.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	content := string(data)
+
+	// Must check for root (UID 0) before any mutation.
 	if !strings.Contains(content, "id -u") || !strings.Contains(content, "-ne 0") {
 		t.Error("install-system.sh must check for root (UID 0)")
 	}
-}
-
-func TestInstallSystemFreshYesRequiresAllowedRoot(t *testing.T) {
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// Fresh --yes install must require --allowed-root
+	// Fresh --yes install must require --allowed-root.
 	if !strings.Contains(content, "--allowed-root") {
 		t.Error("install-system.sh must support --allowed-root flag")
 	}
-	// Must check that --allowed-root is provided with --yes for fresh install
 	if !strings.Contains(content, "allowed_root") {
 		t.Error("install-system.sh must validate --allowed-root for fresh install")
 	}
-}
-
-func TestInstallSystemDestinationPaths(t *testing.T) {
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	expectedPaths := []string{
+	// Destination paths.
+	for _, p := range []string{
 		"/usr/bin/docker-helper",
 		"/etc/systemd/system/docker-helper.service",
 		"/etc/apparmor.d/docker-helper-system",
 		"/etc/apparmor.d/docker-helper.d/managed-roots",
-	}
-
-	for _, p := range expectedPaths {
+	} {
 		if !strings.Contains(content, p) {
 			t.Errorf("install-system.sh must reference destination path: %s", p)
 		}
 	}
-}
-
-func TestInstallSystemPreservesExistingManagedRoots(t *testing.T) {
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// Must check if fragment exists before installing
+	// Must check for and preserve an existing managed-roots fragment.
 	if !strings.Contains(content, "-f") || !strings.Contains(content, "managed-roots") {
 		t.Error("install-system.sh must check for existing managed-roots")
 	}
-	// Must contain preservation logic
 	if !strings.Contains(content, "preserved") && !strings.Contains(content, "overwrite") {
 		t.Error("install-system.sh must preserve existing managed-roots")
 	}
-}
-
-func TestInstallSystemAppArmorBeforeInit(t *testing.T) {
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// AppArmor profile must be installed before init is called
+	// AppArmor profile must be installed before init is called.
 	profileIdx := strings.Index(content, "install_apparmor_profile")
 	initIdx := strings.Index(content, "run_init")
 	if profileIdx < 0 || initIdx < 0 || profileIdx > initIdx {
 		t.Error("install-system.sh must install AppArmor profile before running init")
 	}
-}
-
-func TestInstallSystemDoesNotInstallSkill(t *testing.T) {
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
+	// Profile load must be idempotent via --replace with a clean cache.
+	if !strings.Contains(content, "--replace") {
+		t.Error("load_apparmor_profile must use --replace")
 	}
-
-	content := string(data)
+	if !strings.Contains(content, "--skip-read-cache") {
+		t.Error("load_apparmor_profile must use --skip-read-cache")
+	}
+	// Must not install the agent skill or touch user artifacts.
 	if strings.Contains(content, "SKILL.md") || strings.Contains(content, ".claude") {
 		t.Error("install-system.sh must not install agent skill")
 	}
-}
-
-func TestInstallSystemDoesNotTouchUserArtifacts(t *testing.T) {
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	userPaths := []string{
-		"~/.local/bin",
-		"~/.config/systemd/user",
-		"$HOME/.local",
-	}
-
-	for _, p := range userPaths {
+	for _, p := range []string{"~/.local/bin", "~/.config/systemd/user", "$HOME/.local"} {
 		if strings.Contains(content, p) {
 			t.Errorf("install-system.sh must not touch user path: %s", p)
 		}
 	}
 }
 
-func TestUninstallSystemRequiresRoot(t *testing.T) {
+// TestUninstallSystemScriptContent verifies uninstall-system.sh: root
+// check, --purge support with default preservation, purge paths, service
+// stop before removal, AppArmor unload, and no user-artifact removal.
+func TestUninstallSystemScriptContent(t *testing.T) {
 	data, err := os.ReadFile("packaging/uninstall-system.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	content := string(data)
+
+	// Must check for root (UID 0) before any mutation.
 	if !strings.Contains(content, "id -u") || !strings.Contains(content, "-ne 0") {
 		t.Error("uninstall-system.sh must check for root (UID 0)")
 	}
-}
-
-func TestUninstallSystemPreservesConfigByDefault(t *testing.T) {
-	data, err := os.ReadFile("packaging/uninstall-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// Config/state/managed-roots should only be removed with --purge
+	// Config/state/managed-roots are only removed with --purge.
 	if !strings.Contains(content, "--purge") {
 		t.Error("uninstall-system.sh must support --purge flag")
 	}
-	// Must preserve by default
 	if !strings.Contains(content, "preserve") && !strings.Contains(content, "Preserved") {
 		t.Error("uninstall-system.sh must document preservation of config/state")
 	}
-}
-
-func TestUninstallSystemPurgeRemovesPersistentData(t *testing.T) {
-	data, err := os.ReadFile("packaging/uninstall-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	purgePaths := []string{
-		"/etc/docker-helper",
-		"/var/lib/docker-helper",
-		"/run/docker-helper",
-	}
-
-	for _, p := range purgePaths {
+	for _, p := range []string{"/etc/docker-helper", "/var/lib/docker-helper", "/run/docker-helper"} {
 		if !strings.Contains(content, p) {
 			t.Errorf("uninstall-system.sh --purge must remove: %s", p)
 		}
 	}
-}
-
-func TestUninstallSystemDoesNotTouchUserArtifacts(t *testing.T) {
-	data, err := os.ReadFile("packaging/uninstall-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	userPaths := []string{
-		"~/.local/bin",
-		"~/.config/systemd/user",
-		"$HOME/.local",
-	}
-
-	for _, p := range userPaths {
+	// Must not touch user artifacts.
+	for _, p := range []string{"~/.local/bin", "~/.config/systemd/user", "$HOME/.local"} {
 		if strings.Contains(content, p) {
 			t.Errorf("uninstall-system.sh must not touch user path: %s", p)
 		}
 	}
-}
-
-func TestUninstallSystemStopsServiceBeforeRemoval(t *testing.T) {
-	data, err := os.ReadFile("packaging/uninstall-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// Stop must come before removal
+	// Stop must come before removal.
 	stopIdx := strings.Index(content, "stop_service")
 	removeIdx := strings.Index(content, "remove_binary")
 	if stopIdx < 0 || removeIdx < 0 || stopIdx > removeIdx {
 		t.Error("uninstall-system.sh must stop service before removing binary")
 	}
-}
-
-func TestUninstallSystemUnloadsAppArmor(t *testing.T) {
-	data, err := os.ReadFile("packaging/uninstall-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
+	// Must unload the AppArmor profile with apparmor_parser -R.
 	if !strings.Contains(content, "apparmor_parser") {
 		t.Error("uninstall-system.sh must unload AppArmor profile")
 	}
@@ -1897,63 +1506,6 @@ func TestUninstallSystemUnloadsAppArmor(t *testing.T) {
 }
 
 // --- Bundle tests ---
-
-func TestBundleContainsSystemAssets(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	expectedAssets := []string{
-		"install-system.sh",
-		"uninstall-system.sh",
-		"systemd/system/docker-helper.service",
-		"apparmor/docker-helper-system",
-		"apparmor/docker-helper.d/managed-roots",
-	}
-
-	for _, a := range expectedAssets {
-		if !strings.Contains(content, a) {
-			t.Errorf("build-bundle.sh must include system asset: %s", a)
-		}
-	}
-}
-
-func TestBundleContainsUserAssets(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	expectedAssets := []string{
-		"install.sh",
-		"uninstall.sh",
-		"systemd/user/docker-helper.service",
-		"apparmor/docker-helper",
-		"skills/docker-helper/SKILL.md",
-	}
-
-	for _, a := range expectedAssets {
-		if !strings.Contains(content, a) {
-			t.Errorf("build-bundle.sh must still include user asset: %s", a)
-		}
-	}
-}
-
-func TestBundleSystemScriptsExecutable(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	// System scripts must be set executable
-	if !strings.Contains(content, "install-system.sh") || !strings.Contains(content, "755") {
-		t.Error("build-bundle.sh must set install-system.sh executable")
-	}
-}
 
 // --- Behavioral tests for install-system.sh ---
 
@@ -2080,70 +1632,48 @@ func readLifecycleCalls(t *testing.T, logFile string) []string {
 	return calls
 }
 
-func TestInstallSystemParseArgsOrder(t *testing.T) {
+// TestInstallSystemParseArgs verifies install-system.sh parse_args:
+// option order independence, and rejection of missing values,
+// options-as-values, and unknown flags.
+func TestInstallSystemParseArgs(t *testing.T) {
 	scriptDir, _, _, _ := setupInstallTest(t)
 	scriptPath := filepath.Join(scriptDir, "install-system.sh")
 
-	// Test --yes --allowed-root PATH
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
-		source %s
-		parse_args --yes --allowed-root /srv/ws
+	tests := []struct {
+		name    string
+		args    string
+		wantErr bool
+	}{
+		{name: "yes_then_root", args: "--yes --allowed-root /srv/ws"},
+		{name: "root_then_yes", args: "--allowed-root /srv/ws --yes"},
+		{name: "missing_value", args: "--allowed-root", wantErr: true},
+		{name: "option_as_value", args: "--allowed-root --yes", wantErr: true},
+		{name: "unknown_arg", args: "--unknown", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			verify := ""
+			if !tt.wantErr {
+				verify = `
 		if [[ "$interactive" != "false" ]]; then echo "FAIL: interactive should be false"; exit 1; fi
-		if [[ "$allowed_root" != "/srv/ws" ]]; then echo "FAIL: allowed_root wrong: $allowed_root"; exit 1; fi
-	`, scriptPath))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("--yes --allowed-root failed: %v\n%s", err, out)
-	}
-
-	// Test --allowed-root PATH --yes
-	cmd = exec.Command("bash", "-c", fmt.Sprintf(`
+		if [[ "$allowed_root" != "/srv/ws" ]]; then echo "FAIL: allowed_root wrong: $allowed_root"; exit 1; fi`
+			}
+			cmd := exec.Command("bash", "-c", fmt.Sprintf(`
 		source %s
-		parse_args --allowed-root /srv/ws --yes
-		if [[ "$interactive" != "false" ]]; then echo "FAIL: interactive should be false"; exit 1; fi
-		if [[ "$allowed_root" != "/srv/ws" ]]; then echo "FAIL: allowed_root wrong: $allowed_root"; exit 1; fi
-	`, scriptPath))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("--allowed-root --yes failed: %v\n%s", err, out)
-	}
-}
-
-func TestInstallSystemParseArgsMissingValue(t *testing.T) {
-	scriptDir, _, _, _ := setupInstallTest(t)
-	scriptPath := filepath.Join(scriptDir, "install-system.sh")
-
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
-		source %s
-		parse_args --allowed-root
-	`, scriptPath))
-	if _, err := cmd.CombinedOutput(); err == nil {
-		t.Fatal("--allowed-root without value should fail")
-	}
-}
-
-func TestInstallSystemParseArgsOptionAsValue(t *testing.T) {
-	scriptDir, _, _, _ := setupInstallTest(t)
-	scriptPath := filepath.Join(scriptDir, "install-system.sh")
-
-	// --allowed-root --yes should fail (--yes is an option, not a path)
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
-		source %s
-		parse_args --allowed-root --yes
-	`, scriptPath))
-	if _, err := cmd.CombinedOutput(); err == nil {
-		t.Fatal("--allowed-root --yes should fail (option as value)")
-	}
-}
-
-func TestInstallSystemParseArgsUnknownArg(t *testing.T) {
-	scriptDir, _, _, _ := setupInstallTest(t)
-	scriptPath := filepath.Join(scriptDir, "install-system.sh")
-
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
-		source %s
-		parse_args --unknown
-	`, scriptPath))
-	if _, err := cmd.CombinedOutput(); err == nil {
-		t.Fatal("unknown arg should fail")
+		parse_args %s%s
+	`, scriptPath, tt.args, verify))
+			out, err := cmd.CombinedOutput()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parse_args %s should fail", tt.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse_args %s failed: %v\n%s", tt.args, err, out)
+			}
+		})
 	}
 }
 
@@ -2268,21 +1798,6 @@ func TestInstallSystemCopiesMissingFragment(t *testing.T) {
 	}
 	if string(actual) != bundledContent {
 		t.Errorf("fragment not copied correctly\ngot:  %q\nwant: %q", string(actual), bundledContent)
-	}
-}
-
-func TestInstallSystemParserUsesReplace(t *testing.T) {
-	data, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "--replace") {
-		t.Error("load_apparmor_profile must use --replace")
-	}
-	if !strings.Contains(content, "--skip-read-cache") {
-		t.Error("load_apparmor_profile must use --skip-read-cache")
 	}
 }
 
@@ -3542,36 +3057,25 @@ exit 42
 
 // --- nFPM config static tests ---
 
-// TestNfpmConfigExists verifies the nFPM config file is present.
-func TestNfpmConfigExists(t *testing.T) {
-	if _, err := os.Stat("packaging/nfpm.yaml"); err != nil {
-		t.Fatalf("packaging/nfpm.yaml not found: %v", err)
-	}
-}
-
-// TestNfpmConfigRequiredFields checks that the nFPM config contains
-// all required top-level fields.
-func TestNfpmConfigRequiredFields(t *testing.T) {
+// TestNfpmConfigFile verifies the nFPM config: required fields, system
+// asset destinations, exclusions, vendor systemd directory, managed-roots
+// config type, modes, version templating, and per-format depends and
+// lifecycle scripts.
+func TestNfpmConfigFile(t *testing.T) {
 	data, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("packaging/nfpm.yaml not found: %v", err)
 	}
 	content := string(data)
+
+	// Required top-level fields.
 	for _, field := range []string{"name:", "version:", "arch:", "platform:"} {
 		if !strings.Contains(content, field) {
 			t.Errorf("nfpm.yaml missing required field: %s", field)
 		}
 	}
-}
 
-// TestNfpmConfigRequiredDestinations verifies the config installs all
-// required system assets.
-func TestNfpmConfigRequiredDestinations(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
+	// Required system asset destinations (also proves vendor systemd dir).
 	for _, path := range []string{
 		"/usr/bin/docker-helper",
 		"/usr/lib/systemd/system/docker-helper.service",
@@ -3582,16 +3086,8 @@ func TestNfpmConfigRequiredDestinations(t *testing.T) {
 			t.Errorf("nfpm.yaml missing required destination: %s", path)
 		}
 	}
-}
 
-// TestNfpmConfigExcludesRuntimeState ensures the package does not ship
-// operator-managed runtime or state paths.
-func TestNfpmConfigExcludesRuntimeState(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
+	// Must not ship operator-managed runtime/state paths.
 	for _, path := range []string{
 		"/etc/docker-helper/config.json",
 		"/etc/docker-helper/admin.token",
@@ -3602,25 +3098,13 @@ func TestNfpmConfigExcludesRuntimeState(t *testing.T) {
 			t.Errorf("nfpm.yaml must not include runtime path: %s", path)
 		}
 	}
-}
 
-// TestNfpmConfigExcludesUserAssets ensures the system package does not
-// ship user-mode or installer artifacts.
-func TestNfpmConfigExcludesUserAssets(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	for _, s := range []string{
-		"systemd/user",
-		"SKILL.md",
-	} {
+	// Must not ship user-mode or installer artifacts.
+	for _, s := range []string{"systemd/user", "SKILL.md"} {
 		if strings.Contains(content, s) {
 			t.Errorf("nfpm.yaml must not include: %s", s)
 		}
 	}
-	// Check for standalone install.sh/uninstall.sh (not postinstall.sh etc.)
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "install.sh" || trimmed == "uninstall.sh" ||
@@ -3628,34 +3112,13 @@ func TestNfpmConfigExcludesUserAssets(t *testing.T) {
 			t.Errorf("nfpm.yaml must not include: %s", trimmed)
 		}
 	}
-}
-
-// TestNfpmConfigSystemdVendorDirectory verifies the systemd unit is
-// installed to the vendor directory, not /etc/systemd/system.
-func TestNfpmConfigSystemdVendorDirectory(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
+	// systemd unit must not be installed to /etc/systemd/system.
 	if strings.Contains(content, "/etc/systemd/system") {
 		t.Error("systemd unit must not be installed to /etc/systemd/system")
 	}
-	if !strings.Contains(content, "/usr/lib/systemd/system/docker-helper.service") {
-		t.Error("systemd unit must be installed to /usr/lib/systemd/system/")
-	}
-}
 
-// TestNfpmConfigManagedRootsType verifies the managed-roots content entry
-// uses type: config|noreplace so that both DEB (conffile) and RPM
-// (%config(noreplace)) preserve operator-modified contents on upgrade.
-func TestNfpmConfigManagedRootsType(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
+	// managed-roots entry must be config|noreplace so operator edits
+	// survive upgrades on both DEB (conffile) and RPM (%config(noreplace)).
 	idx := strings.Index(content, "dst: /etc/apparmor.d/docker-helper.d/managed-roots")
 	if idx < 0 {
 		t.Fatal("managed-roots destination entry not found")
@@ -3665,68 +3128,38 @@ func TestNfpmConfigManagedRootsType(t *testing.T) {
 	if entryStart < 0 {
 		entryStart = 0
 	}
-	entry := content[entryStart:]
-	if !strings.Contains(entry, "type: config|noreplace") {
+	if !strings.Contains(content[entryStart:], "type: config|noreplace") {
 		t.Error("managed-roots content entry must have type: config|noreplace")
 	}
-}
 
-// TestNfpmConfigBinaryMode verifies the binary destination mode is 0755.
-func TestNfpmConfigBinaryMode(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
+	// Modes: binary 0755, assets 0644.
 	if !strings.Contains(content, "0755") {
 		t.Error("nfpm.yaml must set binary mode 0755")
 	}
-}
-
-// TestNfpmConfigAssetModes verifies system asset modes are 0644.
-func TestNfpmConfigAssetModes(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	count := strings.Count(content, "0644")
-	if count < 3 {
+	if count := strings.Count(content, "0644"); count < 3 {
 		t.Errorf("expected at least 3 assets with mode 0644, found %d", count)
 	}
-}
 
-// TestNfpmConfigVersionFromEnvironment verifies the version is sourced
-// from an environment variable, not hardcoded.
-func TestNfpmConfigVersionFromEnvironment(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
+	// Version sourced from environment, not hardcoded.
 	if !strings.Contains(content, "${VERSION}") {
 		t.Error("version must use ${VERSION} template variable")
 	}
-}
 
-// TestNfpmConfigDebDepends verifies DEB depends are correct.
-func TestNfpmConfigDebDepends(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
+	// DEB overrides: lifecycle scripts and depends.
 	debIdx := strings.Index(content, "deb:")
+	rpmIdx := strings.Index(content, "rpm:")
 	if debIdx < 0 {
 		t.Fatal("deb overrides section not found")
 	}
-	rpmIdx := strings.Index(content, "rpm:")
 	if rpmIdx < 0 || debIdx > rpmIdx {
 		t.Fatal("rpm overrides section not found or ordering wrong")
 	}
 	debSection := content[debIdx:rpmIdx]
-
+	for _, script := range []string{"postinstall:", "preremove:", "postremove:"} {
+		if !strings.Contains(debSection, script) {
+			t.Errorf("DEB overrides must include script: %s", script)
+		}
+	}
 	if !strings.Contains(debSection, "depends:") {
 		t.Fatal("deb depends: section not found")
 	}
@@ -3737,31 +3170,22 @@ func TestNfpmConfigDebDepends(t *testing.T) {
 		t.Error("DEB depends must include apparmor")
 	}
 	for _, line := range strings.Split(debSection, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- docker") {
+		if strings.HasPrefix(strings.TrimSpace(line), "- docker") {
 			t.Error("DEB depends must not include docker package")
 		}
 	}
-}
 
-// TestNfpmConfigRpmDepends verifies RPM depends are correct.
-func TestNfpmConfigRpmDepends(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	rpmIdx := strings.Index(content, "rpm:")
-	if rpmIdx < 0 {
-		t.Fatal("rpm overrides section not found")
-	}
+	// RPM overrides: lifecycle scripts and depends.
 	contentsIdx := strings.Index(content[rpmIdx:], "\ncontents:")
 	if contentsIdx < 0 {
 		contentsIdx = len(content) - rpmIdx
 	}
 	rpmSection := content[rpmIdx : rpmIdx+contentsIdx]
-
+	for _, script := range []string{"postinstall:", "preremove:", "postremove:"} {
+		if !strings.Contains(rpmSection, script) {
+			t.Errorf("RPM overrides must include script: %s", script)
+		}
+	}
 	if !strings.Contains(rpmSection, "depends:") {
 		t.Fatal("rpm depends: section not found")
 	}
@@ -3772,22 +3196,13 @@ func TestNfpmConfigRpmDepends(t *testing.T) {
 		t.Error("RPM depends must include apparmor-parser")
 	}
 	for _, line := range strings.Split(rpmSection, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "- docker") {
+		if strings.HasPrefix(strings.TrimSpace(line), "- docker") {
 			t.Error("RPM depends must not include docker package")
 		}
 	}
 }
 
 // --- build-packages.sh tests ---
-
-// TestBuildPackagesScriptSyntax verifies build-packages.sh has valid bash syntax.
-func TestBuildPackagesScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "build-packages.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("build-packages.sh syntax error: %v", err)
-	}
-}
 
 // TestBuildPackagesScriptRequiresVersion verifies the script fails when
 // VERSION is not provided.
@@ -3814,76 +3229,39 @@ func TestBuildPackagesScriptNfpmMissing(t *testing.T) {
 	}
 }
 
-// TestBuildPackagesScriptCallsStaticBuild verifies the script delegates
-// binary building to build-static.sh with the exact VERSION.
-func TestBuildPackagesScriptCallsStaticBuild(t *testing.T) {
+// TestBuildPackagesScriptContent verifies build-packages.sh delegates to
+// build-static.sh, builds both formats to dist/, verifies the binary,
+// and does not generate a temporary nFPM config via sed/mktemp.
+func TestBuildPackagesScriptContent(t *testing.T) {
 	data, err := os.ReadFile("build-packages.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
+
 	if !strings.Contains(content, "build-static.sh") {
 		t.Error("build-packages.sh must call build-static.sh")
 	}
 	if !strings.Contains(content, "$VERSION") {
 		t.Error("build-packages.sh must pass VERSION to build-static.sh")
 	}
-}
-
-// TestBuildPackagesScriptBuildsBothFormats verifies the script builds
-// both DEB and RPM packages.
-func TestBuildPackagesScriptBuildsBothFormats(t *testing.T) {
-	data, err := os.ReadFile("build-packages.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
 	if !strings.Contains(content, "deb") {
 		t.Error("build-packages.sh must build DEB packages")
 	}
 	if !strings.Contains(content, "rpm") {
 		t.Error("build-packages.sh must build RPM packages")
 	}
-}
-
-// TestBuildPackagesScriptOutputsToDist verifies package artifacts are
-// written to the dist/ directory.
-func TestBuildPackagesScriptOutputsToDist(t *testing.T) {
-	data, err := os.ReadFile("build-packages.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
 	if !strings.Contains(content, "dist") {
 		t.Error("build-packages.sh must output artifacts to dist/")
 	}
-}
-
-// TestBuildPackagesScriptVerifiesBinary verifies the script checks that
-// the static binary exists and is executable before packaging.
-func TestBuildPackagesScriptVerifiesBinary(t *testing.T) {
-	data, err := os.ReadFile("build-packages.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
 	if !strings.Contains(content, "dist/docker-helper") {
 		t.Error("build-packages.sh must verify dist/docker-helper exists")
 	}
 	if !strings.Contains(content, "-x") {
 		t.Error("build-packages.sh must check binary is executable")
 	}
-}
-
-// TestBuildPackagesScriptNoSedConfig verifies the script does not use
-// sed/mktemp to generate a temporary nFPM config — nFPM expands
-// ${VERSION} from the environment directly.
-func TestBuildPackagesScriptNoSedConfig(t *testing.T) {
-	data, err := os.ReadFile("build-packages.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
+	// nFPM expands ${VERSION} from the environment directly; the script
+	// must not generate a temporary config via sed/mktemp.
 	if strings.Contains(content, "sed") {
 		t.Error("build-packages.sh must not use sed to substitute version")
 	}
@@ -4248,90 +3626,6 @@ func TestPackageBuildIntegration(t *testing.T) {
 		verifyRPMPackage(t, rpmPath, rpmFile)
 	} else {
 		t.Log("rpm not available, skipping RPM verification")
-	}
-}
-
-// --- Lifecycle script syntax tests ---
-
-func TestDebPostinstallSyntax(t *testing.T) {
-	if err := exec.Command("sh", "-n", "packaging/scripts/deb/postinstall.sh").Run(); err != nil {
-		t.Fatalf("deb postinstall.sh syntax error: %v", err)
-	}
-}
-
-func TestDebPreremoveSyntax(t *testing.T) {
-	if err := exec.Command("sh", "-n", "packaging/scripts/deb/preremove.sh").Run(); err != nil {
-		t.Fatalf("deb preremove.sh syntax error: %v", err)
-	}
-}
-
-func TestDebPostremoveSyntax(t *testing.T) {
-	if err := exec.Command("sh", "-n", "packaging/scripts/deb/postremove.sh").Run(); err != nil {
-		t.Fatalf("deb postremove.sh syntax error: %v", err)
-	}
-}
-
-func TestRpmPostinstallSyntax(t *testing.T) {
-	if err := exec.Command("sh", "-n", "packaging/scripts/rpm/postinstall.sh").Run(); err != nil {
-		t.Fatalf("rpm postinstall.sh syntax error: %v", err)
-	}
-}
-
-func TestRpmPreremoveSyntax(t *testing.T) {
-	if err := exec.Command("sh", "-n", "packaging/scripts/rpm/preremove.sh").Run(); err != nil {
-		t.Fatalf("rpm preremove.sh syntax error: %v", err)
-	}
-}
-
-func TestRpmPostremoveSyntax(t *testing.T) {
-	if err := exec.Command("sh", "-n", "packaging/scripts/rpm/postremove.sh").Run(); err != nil {
-		t.Fatalf("rpm postremove.sh syntax error: %v", err)
-	}
-}
-
-// --- nFPM config: scripts wired up ---
-
-func TestNfpmConfigDebScripts(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	debIdx := strings.Index(content, "deb:")
-	if debIdx < 0 {
-		t.Fatal("deb section not found")
-	}
-	rpmIdx := strings.Index(content, "rpm:")
-	if rpmIdx < 0 || debIdx > rpmIdx {
-		t.Fatal("rpm section not found or ordering wrong")
-	}
-	debSection := content[debIdx:rpmIdx]
-	for _, script := range []string{"postinstall:", "preremove:", "postremove:"} {
-		if !strings.Contains(debSection, script) {
-			t.Errorf("DEB overrides must include script: %s", script)
-		}
-	}
-}
-
-func TestNfpmConfigRpmScripts(t *testing.T) {
-	data, err := os.ReadFile("packaging/nfpm.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	rpmIdx := strings.Index(content, "rpm:")
-	if rpmIdx < 0 {
-		t.Fatal("rpm section not found")
-	}
-	contentsIdx := strings.Index(content[rpmIdx:], "\ncontents:")
-	if contentsIdx < 0 {
-		contentsIdx = len(content) - rpmIdx
-	}
-	rpmSection := content[rpmIdx : rpmIdx+contentsIdx]
-	for _, script := range []string{"postinstall:", "preremove:", "postremove:"} {
-		if !strings.Contains(rpmSection, script) {
-			t.Errorf("RPM overrides must include script: %s", script)
-		}
 	}
 }
 
@@ -5041,93 +4335,34 @@ func TestRpmPostremoveFinalErase(t *testing.T) {
 
 // --- Offline (no live system) tests ---
 
-// TestDebPostinstallOffline verifies DEB postinst is no-op without live system.
-func TestDebPostinstallOffline(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
-
-	_, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
-		[]string{"configure"}, false, nil)
-	if code != 0 {
-		t.Fatalf("offline postinst should exit 0, got %d", code)
+// TestLifecycleScriptsOfflineNoop verifies all DEB/RPM lifecycle scripts
+// are no-ops (exit 0, no tool calls) when no live system is present.
+func TestLifecycleScriptsOfflineNoop(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		args   []string
+	}{
+		{"deb_postinst", "packaging/scripts/deb/postinstall.sh", []string{"configure"}},
+		{"deb_prerm", "packaging/scripts/deb/preremove.sh", []string{"remove"}},
+		{"deb_postrm", "packaging/scripts/deb/postremove.sh", []string{"remove"}},
+		{"rpm_postinst", "packaging/scripts/rpm/postinstall.sh", []string{"1"}},
+		{"rpm_preun", "packaging/scripts/rpm/preremove.sh", []string{"0"}},
+		{"rpm_postun", "packaging/scripts/rpm/postremove.sh", []string{"0"}},
 	}
-	calls := readLifecycleScriptCalls(t, logFile)
-	if len(calls) > 0 {
-		t.Errorf("offline postinst must not call any tools: %v", calls)
-	}
-}
 
-// TestDebPreremoveOffline verifies DEB prerm is no-op without live system.
-func TestDebPreremoveOffline(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeDir, logFile := setupScriptTest(t)
 
-	_, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
-		[]string{"remove"}, false, nil)
-	if code != 0 {
-		t.Fatalf("offline prerm should exit 0, got %d", code)
-	}
-	calls := readLifecycleScriptCalls(t, logFile)
-	if len(calls) > 0 {
-		t.Errorf("offline prerm must not call any tools: %v", calls)
-	}
-}
-
-// TestDebPostremoveOffline verifies DEB postrm remove is no-op without live system.
-func TestDebPostremoveOffline(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
-
-	_, _, code := runScript(t, "packaging/scripts/deb/postremove.sh", fakeDir, logFile,
-		[]string{"remove"}, false, nil)
-	if code != 0 {
-		t.Fatalf("offline postrm should exit 0, got %d", code)
-	}
-	calls := readLifecycleScriptCalls(t, logFile)
-	if len(calls) > 0 {
-		t.Errorf("offline postrm must not call any tools: %v", calls)
-	}
-}
-
-// TestRpmPostinstallOffline verifies RPM postinstall is no-op without live system.
-func TestRpmPostinstallOffline(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
-
-	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
-		[]string{"1"}, false, nil)
-	if code != 0 {
-		t.Fatalf("offline rpm postinstall should exit 0, got %d", code)
-	}
-	calls := readLifecycleScriptCalls(t, logFile)
-	if len(calls) > 0 {
-		t.Errorf("offline rpm postinstall must not call any tools: %v", calls)
-	}
-}
-
-// TestRpmPreremoveOffline verifies RPM preun is no-op without live system.
-func TestRpmPreremoveOffline(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
-
-	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
-		[]string{"0"}, false, nil)
-	if code != 0 {
-		t.Fatalf("offline rpm preun should exit 0, got %d", code)
-	}
-	calls := readLifecycleScriptCalls(t, logFile)
-	if len(calls) > 0 {
-		t.Errorf("offline rpm preun must not call any tools: %v", calls)
-	}
-}
-
-// TestRpmPostremoveOffline verifies RPM postun is no-op without live system.
-func TestRpmPostremoveOffline(t *testing.T) {
-	fakeDir, logFile := setupScriptTest(t)
-
-	_, _, code := runScript(t, "packaging/scripts/rpm/postremove.sh", fakeDir, logFile,
-		[]string{"0"}, false, nil)
-	if code != 0 {
-		t.Fatalf("offline rpm postun should exit 0, got %d", code)
-	}
-	calls := readLifecycleScriptCalls(t, logFile)
-	if len(calls) > 0 {
-		t.Errorf("offline rpm postun must not call any tools: %v", calls)
+			_, _, code := runScript(t, tt.script, fakeDir, logFile, tt.args, false, nil)
+			if code != 0 {
+				t.Fatalf("offline %s should exit 0, got %d", tt.name, code)
+			}
+			if calls := readLifecycleScriptCalls(t, logFile); len(calls) > 0 {
+				t.Errorf("offline %s must not call any tools: %v", tt.name, calls)
+			}
+		})
 	}
 }
 
@@ -5235,54 +4470,31 @@ func TestPackageMetadataScripts(t *testing.T) {
 
 // --- Man page source tests ---
 
-func TestManPageSourceExists(t *testing.T) {
-	for _, f := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
-		if _, err := os.Stat(f); err != nil {
-			t.Errorf("man page source not found: %s", f)
-		}
+// TestManPageSources verifies the man page sources exist, carry correct
+// .TH/NAME/SYNOPSIS structure, and contain no placeholder text.
+func TestManPageSources(t *testing.T) {
+	pages := map[string]string{
+		"docs/man/docker-helper.1":        ".TH DOCKER-HELPER 1",
+		"docs/man/docker-helper-config.5": ".TH DOCKER-HELPER-CONFIG 5",
 	}
-}
-
-func TestManPageTH(t *testing.T) {
-	data1, err := os.ReadFile("docs/man/docker-helper.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data1), ".TH DOCKER-HELPER 1") {
-		t.Error("docker-helper.1 missing exact '.TH DOCKER-HELPER 1' directive")
-	}
-	if !strings.Contains(string(data1), "NAME") {
-		t.Error("docker-helper.1 missing NAME section")
-	}
-	if !strings.Contains(string(data1), "SYNOPSIS") {
-		t.Error("docker-helper.1 missing SYNOPSIS section")
-	}
-
-	data5, err := os.ReadFile("docs/man/docker-helper-config.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data5), ".TH DOCKER-HELPER-CONFIG 5") {
-		t.Error("docker-helper-config.5 missing exact '.TH DOCKER-HELPER-CONFIG 5' directive")
-	}
-	if !strings.Contains(string(data5), "NAME") {
-		t.Error("docker-helper-config.5 missing NAME section")
-	}
-	if !strings.Contains(string(data5), "SYNOPSIS") {
-		t.Error("docker-helper-config.5 missing SYNOPSIS section")
-	}
-}
-
-func TestManPageNoPlaceholders(t *testing.T) {
-	for _, f := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
-		data, err := os.ReadFile(f)
+	for file, th := range pages {
+		data, err := os.ReadFile(file)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("man page source not found: %s: %v", file, err)
 		}
 		content := string(data)
+		if !strings.Contains(content, th) {
+			t.Errorf("%s missing exact %q directive", file, th)
+		}
+		if !strings.Contains(content, "NAME") {
+			t.Errorf("%s missing NAME section", file)
+		}
+		if !strings.Contains(content, "SYNOPSIS") {
+			t.Errorf("%s missing SYNOPSIS section", file)
+		}
 		if strings.Contains(content, "TODO") || strings.Contains(content, "FIXME") ||
 			strings.Contains(content, "PLACEHOLDER") {
-			t.Errorf("man page %s contains placeholder text", f)
+			t.Errorf("man page %s contains placeholder text", file)
 		}
 	}
 }
@@ -5326,13 +4538,6 @@ func TestManPageConfigFields(t *testing.T) {
 }
 
 // --- Build script tests ---
-
-func TestBuildManpagesScriptSyntax(t *testing.T) {
-	cmd := exec.Command("bash", "-n", "build-manpages.sh")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("build-manpages.sh syntax error: %v", err)
-	}
-}
 
 func TestBuildManpagesScriptBuilds(t *testing.T) {
 	if _, err := exec.LookPath("gzip"); err != nil {
@@ -5497,49 +4702,6 @@ func TestPackageMetadataManPages(t *testing.T) {
 		}
 	} else {
 		t.Log("rpm not available, skipping RPM man page verification")
-	}
-}
-
-// --- Bundle tests for man pages ---
-
-func TestBundleManPages(t *testing.T) {
-	data, err := os.ReadFile("build-bundle.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Must call build-manpages.sh.
-	if !strings.Contains(content, "build-manpages.sh") {
-		t.Error("build-bundle.sh must call build-manpages.sh")
-	}
-
-	// Must copy .gz files.
-	if !strings.Contains(content, "man/docker-helper.1.gz") {
-		t.Error("build-bundle.sh must include man/docker-helper.1.gz")
-	}
-	if !strings.Contains(content, "man/docker-helper-config.5.gz") {
-		t.Error("build-bundle.sh must include man/docker-helper-config.5.gz")
-	}
-
-	// EXPECTED_PATHS must use .gz.
-	if !strings.Contains(content, "man/docker-helper.1.gz") || !strings.Contains(content, "man/docker-helper-config.5.gz") {
-		t.Error("build-bundle.sh EXPECTED_PATHS must include man pages as .gz")
-	}
-}
-
-func TestReleaseBundleReadmeManPages(t *testing.T) {
-	data, err := os.ReadFile("packaging/README.release.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	if !strings.Contains(content, "man/docker-helper.1.gz") {
-		t.Error("README.release.md must document man/docker-helper.1.gz")
-	}
-	if !strings.Contains(content, "man/docker-helper-config.5.gz") {
-		t.Error("README.release.md must document man/docker-helper-config.5.gz")
 	}
 }
 

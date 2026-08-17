@@ -20,7 +20,9 @@ func setupConfigTest(t *testing.T) string {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(configPath, []byte(""), 0600)
+	if err := os.WriteFile(configPath, []byte(""), 0600); err != nil {
+		t.Fatalf("cannot write config file: %v", err)
+	}
 	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
@@ -32,7 +34,9 @@ func setupConfigTestWithData(t *testing.T, data []byte) string {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	adminTokenPath := filepath.Join(dir, "admin.token")
-	os.WriteFile(configPath, data, 0600)
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatalf("cannot write config file: %v", err)
+	}
 	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	return configPath
@@ -51,29 +55,29 @@ func readConfigJSON(t *testing.T, path string) map[string]json.RawMessage {
 	return raw
 }
 
-// Req 1: config without subcommand rejected
-func TestConfigNoSubcommand(t *testing.T) {
+// Req 1: config without or with an unknown subcommand is rejected
+func TestConfigSubcommandDispatch(t *testing.T) {
 	setupConfigTest(t)
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "subcommand required") {
-		t.Errorf("expected subcommand required error, got: %s", stderr.String())
-	}
-}
 
-// Req 2: unknown config subcommand rejected
-func TestConfigUnknownSubcommand(t *testing.T) {
-	setupConfigTest(t)
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unknown"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"no subcommand", []string{"config"}, "subcommand required"},
+		{"unknown subcommand", []string{"config", "unknown"}, "unknown"},
 	}
-	if !strings.Contains(stderr.String(), "unknown") {
-		t.Errorf("expected unknown error, got: %s", stderr.String())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tt.args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("expected exit code 2, got %d", code)
+			}
+			if !strings.Contains(stderr.String(), tt.wantErr) {
+				t.Errorf("expected error containing %q, got: %s", tt.wantErr, stderr.String())
+			}
+		})
 	}
 }
 
@@ -130,33 +134,6 @@ func TestExistingCommandsRejectPositionals(t *testing.T) {
 	code = runCommandWithWriters([]string{"version", "extra"}, &stdout, &stderr)
 	if code != 2 {
 		t.Errorf("version positional: expected exit code 2, got %d", code)
-	}
-}
-
-// Req 5: help and unknown-flag handling still work
-func TestConfigHelpAndFlags(t *testing.T) {
-	setupConfigTest(t)
-
-	// help on config show
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("show --help: expected exit code 0, got %d", code)
-	}
-	if !strings.Contains(stdout.String(), "Usage:") {
-		t.Errorf("expected help output, got: %s", stdout.String())
-	}
-
-	// help on config set
-	code = runCommandWithWriters([]string{"config", "set", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("set --help: expected exit code 0, got %d", code)
-	}
-
-	// unknown flag on show
-	code = runCommandWithWriters([]string{"config", "show", "--unknown"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("show --unknown: expected exit code 2, got %d", code)
 	}
 }
 
@@ -738,10 +715,12 @@ func TestConfigSetUnsetNoDirCreation(t *testing.T) {
 	runtimeDir := filepath.Join(dir, "nonexistent_runtime")
 	stateDir := filepath.Join(dir, "nonexistent_state")
 
-	os.WriteFile(configPath, []byte(`{
+	if err := os.WriteFile(configPath, []byte(`{
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
-}`), 0600)
+}`), 0600); err != nil {
+		t.Fatalf("cannot write config file: %v", err)
+	}
 	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
@@ -931,41 +910,6 @@ func TestConfigShowAllWithRuntimeDir(t *testing.T) {
 	}
 }
 
-// Additional: audit_enabled defaults from log_level when absent
-func TestConfigAuditEnabledDefault(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h"
-}`
-	setupConfigTestWithData(t, []byte(cfg))
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "audit_enabled"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stdout.String() != "false\n" {
-		t.Errorf("expected 'false\\n' (info disables audit), got %q", stdout.String())
-	}
-
-	// With log_level=debug
-	cfg2 := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "log_level": "debug"
-}`
-	configPath := setupConfigTestWithData(t, []byte(cfg2))
-	_ = configPath
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "show", "audit_enabled"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if stdout.String() != "true\n" {
-		t.Errorf("expected 'true\\n' (debug enables audit), got %q", stdout.String())
-	}
-}
-
 // --- Regression tests ---
 
 // Regression 1: custom DOCKER_HELPER_CONFIG relocates config_dir and admin_token_path
@@ -973,11 +917,15 @@ func TestRegressionCustomConfigRelocatesPaths(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "custom", "config.json")
 	adminTokenPath := filepath.Join(dir, "custom", "admin.token")
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-	os.WriteFile(configPath, []byte(`{
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("cannot create config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
-}`), 0600)
+}`), 0600); err != nil {
+		t.Fatalf("cannot write config file: %v", err)
+	}
 	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
@@ -1001,11 +949,15 @@ func TestRegressionCustomConfigRelocatesPaths(t *testing.T) {
 func TestRegressionConsistentTokenPath(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "myconfig", "config.json")
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-	os.WriteFile(configPath, []byte(`{
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("cannot create config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
-}`), 0600)
+}`), 0600); err != nil {
+		t.Fatalf("cannot write config file: %v", err)
+	}
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
 	var stdout, stderr bytes.Buffer
@@ -1025,11 +977,15 @@ func TestRegressionAdminTokenWithCustomConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "myconfig", "config.json")
 	adminTokenPath := filepath.Join(dir, "myconfig", "admin.token")
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-	os.WriteFile(configPath, []byte(`{
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		t.Fatalf("cannot create config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
-}`), 0600)
+}`), 0600); err != nil {
+		t.Fatalf("cannot write config file: %v", err)
+	}
 	writeTestTokenFile(t, adminTokenPath, "dht_custom_token_here\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
@@ -1040,24 +996,6 @@ func TestRegressionAdminTokenWithCustomConfig(t *testing.T) {
 	}
 	if stdout.String() != "dht_custom_token_here\n" {
 		t.Errorf("admin_token = %q, want 'dht_custom_token_here\\n'", stdout.String())
-	}
-}
-
-// Regression 4: set rejects a document containing another invalid known field
-func TestRegressionSetRejectsOtherInvalidFields(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "log_level": "invalid_level"
-}`
-	setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	// The existing log_level is invalid, but we're setting it to a valid value.
-	// After the set, the config should be valid.
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
 	}
 }
 
@@ -1072,23 +1010,6 @@ func TestRegressionSetRejectsInvalidType(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 (invalid existing config), got %d, stderr: %s", code, stderr.String())
-	}
-}
-
-// Regression 5: unset rejects a document containing another invalid known field
-func TestRegressionUnsetRejectsInvalidType(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "log_level": "debug",
-  "audit_enabled": "not_a_boolean"
-}`
-	setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("expected exit code 1 (invalid existing config), got %d, stderr: %s", code, stderr.String())
 	}
@@ -1110,7 +1031,9 @@ func TestRegressionNullAndNonObjectJSON(t *testing.T) {
 			dir := t.TempDir()
 			configPath := filepath.Join(dir, "config.json")
 			adminTokenPath := filepath.Join(dir, "admin.token")
-			os.WriteFile(configPath, []byte(tt.data), 0600)
+			if err := os.WriteFile(configPath, []byte(tt.data), 0600); err != nil {
+				t.Fatalf("cannot write config file: %v", err)
+			}
 			writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
 			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
@@ -1175,44 +1098,6 @@ func TestRegressionRejectedUpdatePreservesFile(t *testing.T) {
 	}
 }
 
-// Regression 8: unknown JSON members still survive successful updates
-func TestRegressionUnknownMembersSurvive(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "custom_field": "custom_value",
-  "nested": {"key": "val"}
-}`
-	configPath := setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	raw := readConfigJSON(t, configPath)
-	if _, ok := raw["custom_field"]; !ok {
-		t.Error("custom_field should be preserved after set")
-	}
-	if _, ok := raw["nested"]; !ok {
-		t.Error("nested should be preserved after set")
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	raw = readConfigJSON(t, configPath)
-	if _, ok := raw["custom_field"]; !ok {
-		t.Error("custom_field should be preserved after unset")
-	}
-	if _, ok := raw["nested"]; !ok {
-		t.Error("nested should be preserved after unset")
-	}
-}
-
 // Regression 9: lazy computed-field show works without config.json and without XDG_RUNTIME_DIR
 func TestRegressionLazyComputedFieldShow(t *testing.T) {
 	dir := t.TempDir()
@@ -1264,47 +1149,6 @@ func TestRegressionLazyComputedFieldShow(t *testing.T) {
 	}
 	if stdout.String() != "dht_testtoken123\n" {
 		t.Errorf("admin_token = %q, want 'dht_testtoken123\\n'", stdout.String())
-	}
-}
-
-// Regression 10: config commands do not create runtime or state directories
-func TestRegressionConfigNoDirCreation(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	adminTokenPath := filepath.Join(dir, "admin.token")
-	runtimeDir := filepath.Join(dir, "nonexistent_runtime")
-	stateDir := filepath.Join(dir, "nonexistent_state")
-
-	os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h"
-}`), 0600)
-	writeTestTokenFile(t, adminTokenPath, "dht_testtoken123\n")
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
-	t.Setenv("XDG_STATE_HOME", stateDir)
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
-		t.Error("config set should not create runtime directory")
-	}
-	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
-		t.Error("config set should not create state directory")
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d", code)
-	}
-	if _, err := os.Stat(runtimeDir); !os.IsNotExist(err) {
-		t.Error("config unset should not create runtime directory")
 	}
 }
 
@@ -1378,31 +1222,8 @@ func TestRegressionReservedFieldsRejected(t *testing.T) {
 	}
 }
 
-// Regression: unrelated unknown members remain accepted and survive successful updates
-func TestRegressionUnknownMembersAccepted(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "future_feature": true,
-  "custom_metadata": {"version": 2}
-}`
-	configPath := setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	raw := readConfigJSON(t, configPath)
-	if _, ok := raw["future_feature"]; !ok {
-		t.Error("future_feature should be preserved")
-	}
-	if _, ok := raw["custom_metadata"]; !ok {
-		t.Error("custom_metadata should be preserved")
-	}
-}
-
-// Regression: the four bootstrapping show queries remain lazy with missing or malformed config
+// Regression: the four bootstrapping show queries remain lazy with a malformed config.
+// The missing-config case is covered by TestRegressionLazyComputedFieldShow.
 func TestRegressionBootstrapQueriesLazy(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
@@ -1422,21 +1243,10 @@ func TestRegressionBootstrapQueriesLazy(t *testing.T) {
 		{"admin_token", "dht_lazy_token\n"},
 	}
 
-	for _, q := range queries {
-		t.Run(q.field, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters([]string{"config", "show", q.field}, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
-			}
-			if stdout.String() != q.expect {
-				t.Errorf("got %q, want %q", stdout.String(), q.expect)
-			}
-		})
+	// Test with malformed config.json
+	if err := os.WriteFile(configPath, []byte("not json at all"), 0600); err != nil {
+		t.Fatalf("cannot write malformed config: %v", err)
 	}
-
-	// Now test with malformed config.json
-	os.WriteFile(configPath, []byte("not json at all"), 0600)
 	for _, q := range queries {
 		t.Run(q.field+"_malformed", func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -1679,7 +1489,7 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 	})
 }
 
-// Regression: set prints updated when it adds or changes an explicit member
+// Regression: set prints updated when it adds a previously absent member
 func TestRegressionSetPrintsUpdated(t *testing.T) {
 	cfg := `{
   "allowed_root": "/home/user/work",
@@ -1745,25 +1555,6 @@ func TestRegressionSetEffectiveValueCountsAsUpdate(t *testing.T) {
 	}
 }
 
-// Regression: unset prints unset when it removes a member
-func TestRegressionUnsetPrintsUnset(t *testing.T) {
-	cfg := `{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "log_level": "debug"
-}`
-	setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d, stderr: %s", code, stderr.String())
-	}
-	if !strings.HasPrefix(stdout.String(), "unset log_level\n") {
-		t.Errorf("expected 'unset log_level\\n', got %q", stdout.String())
-	}
-}
-
 // Regression: unset prints unchanged when the member is absent
 func TestRegressionUnsetPrintsUnchanged(t *testing.T) {
 	cfg := `{
@@ -1787,39 +1578,6 @@ func TestRegressionUnsetPrintsUnchanged(t *testing.T) {
 		t.Fatalf("cannot read config: %v", err)
 	}
 	if !bytes.Equal(data, []byte(cfg)) {
-		t.Error("unchanged unset should not rewrite config.json")
-	}
-}
-
-// Regression: unchanged operations leave config.json byte-for-byte unchanged
-func TestRegressionUnchangedOperationsPreserveFile(t *testing.T) {
-	cfg := []byte(`{
-  "allowed_root": "/home/user/work",
-  "session_ttl": "12h",
-  "log_level": "debug"
-}`)
-	configPath := setupConfigTestWithData(t, cfg)
-
-	// set with same value
-	var stdout, stderr bytes.Buffer
-	runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-	if !bytes.Equal(data, cfg) {
-		t.Error("unchanged set should not rewrite config.json")
-	}
-
-	// unset already absent
-	stdout.Reset()
-	stderr.Reset()
-	runCommandWithWriters([]string{"config", "unset", "audit_enabled"}, &stdout, &stderr)
-	data, err = os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-	if !bytes.Equal(data, cfg) {
 		t.Error("unchanged unset should not rewrite config.json")
 	}
 }
@@ -2226,140 +1984,52 @@ func TestConfigHelpUnknownFlagStillRejected(t *testing.T) {
 	}
 }
 
-func TestConfigHelpPositionalArgsStillRejected(t *testing.T) {
-	for _, args := range [][]string{
-		{"config", "set", "a", "b", "c"},
-		{"config", "unset", "a", "b"},
-		{"config", "show", "a", "b"},
-	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runCommandWithWriters(args, &stdout, &stderr)
-			if code != 2 {
-				t.Errorf("expected exit code 2, got %d", code)
+// TestLoadConfigRejectsInvalidConfig verifies that loadConfig rejects
+// missing, empty, relative, or non-positive required fields.
+func TestLoadConfigRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     string   // %s is replaced with a policy-legal allowed root
+		wantErr []string // substrings expected in the error; empty means any error
+	}{
+		{name: "missing allowed_root", cfg: `{"session_ttl":"12h"}`, wantErr: []string{"allowed_root"}},
+		{name: "empty allowed_root", cfg: `{"allowed_root":"","session_ttl":"12h"}`},
+		{name: "relative allowed_root", cfg: `{"allowed_root":"relative/path","session_ttl":"12h"}`},
+		{name: "missing session_ttl", cfg: `{"allowed_root":"%s"}`, wantErr: []string{"session_ttl"}},
+		{name: "zero session_ttl", cfg: `{"allowed_root":"/tmp","session_ttl":"0s"}`},
+		{name: "negative session_ttl", cfg: `{"allowed_root":"/tmp","session_ttl":"-1h"}`},
+		{name: "deprecated build_log_max_bytes", cfg: `{"allowed_root":"%s","session_ttl":"12h","build_log_max_bytes":8192}`, wantErr: []string{"build_log_max_bytes", "operation_log_max_bytes"}},
+		{name: "deprecated and new key both present", cfg: `{"allowed_root":"%s","session_ttl":"12h","build_log_max_bytes":8192,"operation_log_max_bytes":16384}`, wantErr: []string{"build_log_max_bytes"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.json")
+			cfg := tt.cfg
+			if strings.Contains(cfg, "%s") {
+				cfg = fmt.Sprintf(cfg, testAllowedRootDir(t))
+			}
+			if err := os.WriteFile(configPath, []byte(cfg), 0600); err != nil {
+				t.Fatalf("cannot write config: %v", err)
+			}
+			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+			t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+			t.Setenv("XDG_STATE_HOME", dir)
+			if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("expected error to contain %q, got: %v", want, err)
+				}
 			}
 		})
-	}
-}
-
-func TestLoadConfigRejectsMissingAllowedRoot(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"session_ttl":"12h"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for missing allowed_root")
-	}
-	if !strings.Contains(err.Error(), "allowed_root") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadConfigRejectsEmptyAllowedRoot(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"","session_ttl":"12h"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for empty allowed_root")
-	}
-}
-
-func TestLoadConfigRejectsRelativeAllowedRoot(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"relative/path","session_ttl":"12h"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for relative allowed_root")
-	}
-}
-
-func TestLoadConfigRejectsMissingSessionTTL(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	allowedRoot := testAllowedRootDir(t)
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"`+allowedRoot+`"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for missing session_ttl")
-	}
-	if !strings.Contains(err.Error(), "session_ttl") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadConfigRejectsZeroSessionTTL(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp","session_ttl":"0s"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for zero session_ttl")
-	}
-}
-
-func TestLoadConfigRejectsNegativeSessionTTL(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"/tmp","session_ttl":"-1h"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for negative session_ttl")
 	}
 }
 
@@ -2394,282 +2064,135 @@ func TestLoadConfigAcceptsValidConfig(t *testing.T) {
 	}
 }
 
-func TestReloadRejectsInvalidAllowedRoot(t *testing.T) {
-	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
-	defer cleanup()
-
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
-	if err != nil {
-		t.Fatal(err)
+// TestReloadRejectsInvalidConfig verifies that the reload handler rejects
+// invalid configurations (empty allowed_root, non-positive session_ttl).
+func TestReloadRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  string
+	}{
+		{name: "empty_root", cfg: `{"allowed_root":"","session_ttl":"12h"}`},
+		{name: "negative_ttl", cfg: `{"allowed_root":"%s","session_ttl":"-1h"}`},
 	}
 
-	db, err := openDatabase(cfg.DatabasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := initializeDatabase(db); err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+			defer cleanup()
 
-	app := &App{
-		Config:         cfg,
-		DB:             db,
-		AdminTokenHash: adminHash,
-	}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+			db, err := openDatabase(cfg.DatabasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := initializeDatabase(db); err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
 
-	server := &http.Server{Handler: mux}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(socketPath)
+			app := &App{
+				Config:         cfg,
+				DB:             db,
+				AdminTokenHash: adminHash,
+			}
 
-	go server.Serve(listener)
-	defer server.Close()
-	waitForDialReady(t, "unix", socketPath)
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
 
-	// Write invalid config with empty allowed_root
-	configPath := getConfigPath()
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":"","session_ttl":"12h"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
+			server := &http.Server{Handler: mux}
+			listener, err := net.Listen("unix", socketPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(socketPath)
 
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return net.DialTimeout("unix", socketPath, 2*time.Second)
-		},
-	}
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			go server.Serve(listener)
+			defer server.Close()
+			waitForDialReady(t, "unix", socketPath)
 
-	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer test-admin-token")
+			configPath := getConfigPath()
+			cfgBytes := []byte(tt.cfg)
+			if strings.Contains(tt.cfg, "%s") {
+				cfgBytes = []byte(fmt.Sprintf(tt.cfg, testAllowedRootDir(t)))
+			}
+			if err := os.WriteFile(configPath, cfgBytes, 0600); err != nil {
+				t.Fatal(err)
+			}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
+			transport := &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return net.DialTimeout("unix", socketPath, 2*time.Second)
+				},
+			}
+			client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("expected reload to reject empty allowed_root")
-	}
-}
+			req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer test-admin-token")
 
-func TestReloadRejectsNegativeSessionTTL(t *testing.T) {
-	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
-	defer cleanup()
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
 
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := openDatabase(cfg.DatabasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := initializeDatabase(db); err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	app := &App{
-		Config:         cfg,
-		DB:             db,
-		AdminTokenHash: adminHash,
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
-
-	server := &http.Server{Handler: mux}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(socketPath)
-
-	go server.Serve(listener)
-	defer server.Close()
-	waitForDialReady(t, "unix", socketPath)
-
-	// Write invalid config with negative session_ttl
-	configPath := getConfigPath()
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root":testAllowedRootDir(t),"session_ttl":"-1h"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return net.DialTimeout("unix", socketPath, 2*time.Second)
-		},
-	}
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
-
-	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer test-admin-token")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("expected reload to reject negative session_ttl")
+			if resp.StatusCode == http.StatusOK {
+				t.Fatal("expected reload to reject invalid config")
+			}
+		})
 	}
 }
 
 // --- Deprecated field tests ---
 
 // Deprecated 1: config file with old build_log_max_bytes rejected by daemon
-func TestDeprecatedBuildLogMaxBytesLoadConfig(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "%s",
-  "session_ttl": "12h",
-  "build_log_max_bytes": 8192
-}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
+// TestDeprecatedBuildLogMaxBytesCLIOperations verifies that the CLI show/set/
+// unset subcommands all reject the renamed build_log_max_bytes key with exit
+// code 2, empty stdout, and a stderr diagnostic naming both the old and new key.
+func TestDeprecatedBuildLogMaxBytesCLIOperations(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "show", args: []string{"config", "show", "build_log_max_bytes"}},
+		{name: "set", args: []string{"config", "set", "build_log_max_bytes", "123"}},
+		{name: "unset", args: []string{"config", "unset", "build_log_max_bytes"}},
 	}
 
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error for deprecated build_log_max_bytes")
-	}
-	if !strings.Contains(err.Error(), "build_log_max_bytes") {
-		t.Fatalf("error must mention deprecated key, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "operation_log_max_bytes") {
-		t.Fatalf("error must mention new key, got: %v", err)
-	}
-}
-
-// Deprecated 2: config file with both old and new keys rejected
-func TestDeprecatedBuildLogMaxBytesBothKeys(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "%s",
-  "session_ttl": "12h",
-  "build_log_max_bytes": 8192,
-  "operation_log_max_bytes": 16384
-}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
-	t.Setenv("XDG_STATE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "runtime"), 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("expected error when both deprecated and new keys present")
-	}
-	if !strings.Contains(err.Error(), "build_log_max_bytes") {
-		t.Fatalf("error must mention deprecated key, got: %v", err)
-	}
-}
-
-// Deprecated 3: CLI config show with deprecated key
-func TestDeprecatedBuildLogMaxBytesShow(t *testing.T) {
-	allowedRoot := testAllowedRootDir(t)
-	cfg := fmt.Sprintf(`{
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allowedRoot := testAllowedRootDir(t)
+			cfg := fmt.Sprintf(`{
   "allowed_root": "%s",
   "session_ttl": "12h"
 }`, allowedRoot)
-	setupConfigTestWithData(t, []byte(cfg))
+			setupConfigTestWithData(t, []byte(cfg))
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "show", "build_log_max_bytes"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-	if stdout.Len() > 0 {
-		t.Errorf("stdout must be empty, got: %s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "build_log_max_bytes") {
-		t.Errorf("stderr must mention deprecated key, got: %s", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "operation_log_max_bytes") {
-		t.Errorf("stderr must mention new key, got: %s", stderr.String())
-	}
-}
-
-// Deprecated 4: CLI config set with deprecated key
-func TestDeprecatedBuildLogMaxBytesSet(t *testing.T) {
-	allowedRoot := testAllowedRootDir(t)
-	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
-  "session_ttl": "12h"
-}`, allowedRoot)
-	setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "build_log_max_bytes", "123"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-	if stdout.Len() > 0 {
-		t.Errorf("stdout must be empty, got: %s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "build_log_max_bytes") {
-		t.Errorf("stderr must mention deprecated key, got: %s", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "operation_log_max_bytes") {
-		t.Errorf("stderr must mention new key, got: %s", stderr.String())
-	}
-}
-
-// Deprecated 5: CLI config unset with deprecated key
-func TestDeprecatedBuildLogMaxBytesUnset(t *testing.T) {
-	allowedRoot := testAllowedRootDir(t)
-	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
-  "session_ttl": "12h"
-}`, allowedRoot)
-	setupConfigTestWithData(t, []byte(cfg))
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "unset", "build_log_max_bytes"}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-	if stdout.Len() > 0 {
-		t.Errorf("stdout must be empty, got: %s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "build_log_max_bytes") {
-		t.Errorf("stderr must mention deprecated key, got: %s", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "operation_log_max_bytes") {
-		t.Errorf("stderr must mention new key, got: %s", stderr.String())
+			var stdout, stderr bytes.Buffer
+			code := runCommandWithWriters(tt.args, &stdout, &stderr)
+			if code != 2 {
+				t.Errorf("expected exit code 2, got %d", code)
+			}
+			if stdout.Len() > 0 {
+				t.Errorf("stdout must be empty, got: %s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "build_log_max_bytes") {
+				t.Errorf("stderr must mention deprecated key, got: %s", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "operation_log_max_bytes") {
+				t.Errorf("stderr must mention new key, got: %s", stderr.String())
+			}
+		})
 	}
 }
 

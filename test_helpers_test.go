@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+// candidateBasePaths returns the allocator's candidate bases in priority
+// order: the user's home directory, then the test process working directory.
+func candidateBasePaths() []string {
+	var candidates []string
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, home)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, wd)
+	}
+	return candidates
+}
+
 // testAllowedRootDir creates a unique directory that is valid as a workspace
 // root and returns it in canonical form, matching what loadConfig stores in
 // Config.AllowedRoot. Candidate bases are tried in order: the user's home
@@ -20,16 +33,7 @@ import (
 // directory returned; tests must never remove a shared parent.
 func testAllowedRootDir(t *testing.T) string {
 	t.Helper()
-	var candidates []string
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, home)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, wd)
-	}
-	candidates = append(candidates, "/")
-
-	dir, err := allocateTestWorkspaceRoot(candidates)
+	dir, err := allocateTestWorkspaceRoot(append(candidateBasePaths(), "/"))
 	if err != nil {
 		t.Fatalf("cannot allocate workspace root test dir: %v", err)
 	}
@@ -68,49 +72,41 @@ func allocateTestWorkspaceRoot(candidates []string) (string, error) {
 
 // TestWorkspaceRootAllocationForbiddenCandidates verifies the allocator's
 // core invariant with a controlled candidate list: the bases themselves need
-// not be policy-legal workspace roots. Both regular candidates here are
-// forbidden system trees (the root scenario: HOME=/root, cwd=/root/...), so
-// the allocator must skip them and return a policy-valid root created under
-// the fallback base.
+// not be policy-legal workspace roots. The first candidate is a writable
+// base whose created children are policy-forbidden (it lives under the
+// forbidden /tmp tree, the root scenario where HOME=/root or /tmp is a
+// candidate); the allocator must reject the created child, remove it, and
+// fall through to the policy-legal base.
 func TestWorkspaceRootAllocationForbiddenCandidates(t *testing.T) {
-	// Pick a policy-legal, writable fallback base for the controlled
-	// candidate list (t.TempDir() is unusable: /tmp is a forbidden tree).
-	selectGoodBase := func(c string) (string, bool) {
+	// Controlled rejected base: t.TempDir() lives under the forbidden /tmp
+	// tree, so every child created in it is rejected by the production
+	// policy, yet the test owns the directory it inspects.
+	rejectedBase := t.TempDir()
+	if err := validateWorkspaceRootPolicy(filepath.Join(rejectedBase, "child")); err == nil {
+		t.Skipf("temp base %s is policy-legal; cannot exercise policy rejection", rejectedBase)
+	}
+
+	// A policy-legal, writable base for the allocator to fall through to
+	// (t.TempDir() is unusable: /tmp is a forbidden tree).
+	var goodBase string
+	for _, c := range candidateBasePaths() {
 		canonical, err := filepath.EvalSymlinks(c)
-		if err != nil {
-			return "", false
-		}
-		if err := validateWorkspaceRootPolicy(canonical); err != nil {
-			return "", false
+		if err != nil || validateWorkspaceRootPolicy(canonical) != nil {
+			continue
 		}
 		probe, err := os.MkdirTemp(canonical, ".docker-helper-test-*")
 		if err != nil {
-			return "", false
+			continue
 		}
 		os.RemoveAll(probe)
-		return canonical, true
-	}
-	var goodBase string
-	var candidateBases []string
-	if home, err := os.UserHomeDir(); err == nil {
-		candidateBases = append(candidateBases, home)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		candidateBases = append(candidateBases, wd)
-	}
-	for _, c := range candidateBases {
-		if base, ok := selectGoodBase(c); ok {
-			goodBase = base
-			break
-		}
+		goodBase = canonical
+		break
 	}
 	if goodBase == "" {
 		t.Skip("no policy-legal, writable base available for the controlled test")
 	}
 
-	rejectedBefore := testWorkspaceRootPrefixCount(t, "/tmp")
-
-	dir, err := allocateTestWorkspaceRoot([]string{"/tmp", "/root", goodBase})
+	dir, err := allocateTestWorkspaceRoot([]string{rejectedBase, goodBase})
 	if err != nil {
 		t.Fatalf("allocateTestWorkspaceRoot: %v", err)
 	}
@@ -122,9 +118,15 @@ func TestWorkspaceRootAllocationForbiddenCandidates(t *testing.T) {
 	if !strings.HasPrefix(dir, goodBase+string(filepath.Separator)) {
 		t.Fatalf("allocated root %q, want under fallback base %s", dir, goodBase)
 	}
-	// The policy-rejected /tmp child must not linger.
-	if rejectedAfter := testWorkspaceRootPrefixCount(t, "/tmp"); rejectedAfter != rejectedBefore {
-		t.Errorf("policy-rejected /tmp child not removed (before=%d after=%d)", rejectedBefore, rejectedAfter)
+	// The policy-rejected child must not linger in the controlled base.
+	entries, err := os.ReadDir(rejectedBase)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", rejectedBase, err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".docker-helper-test-") {
+			t.Fatalf("policy-rejected child %s not removed", e.Name())
+		}
 	}
 }
 
@@ -173,23 +175,6 @@ func TestWorkspaceRootAllocationRootFallback(t *testing.T) {
 	if !strings.HasPrefix(dir, "/.docker-helper-test-") {
 		t.Fatalf("expected root-level fallback dir, got %q", dir)
 	}
-}
-
-// testWorkspaceRootPrefixCount counts entries in dir whose names carry the
-// test workspace-root prefix, to verify that rejected allocations are removed.
-func testWorkspaceRootPrefixCount(t *testing.T, dir string) int {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("cannot read %s: %v", dir, err)
-	}
-	n := 0
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".docker-helper-test-") {
-			n++
-		}
-	}
-	return n
 }
 
 // waitForDialReady polls until a TCP/unix listener accepts connections.
