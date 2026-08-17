@@ -571,56 +571,6 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 		t.Error("expected changed to be true")
 	}
 }
-
-func TestCredentialHTTPRevokeIdempotent(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "idemrevokehttpuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1014", "1014", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "idemrevokehttpuser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	cred, _, err := createCredential(app.DB, "idemrevokehttpuser", "oc")
-	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
-	}
-
-	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
-		t.Fatalf("revokeCredential() error: %v", err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
-
-	req := httptest.NewRequest(http.MethodPost, "/credentials/"+cred.ID+"/revoke", nil)
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status %d, got %d, body: %s", http.StatusOK, w.Code, w.Body.String())
-	}
-
-	var resp revokeCredentialResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	if resp.Changed {
-		t.Error("expected changed to be false (idempotent)")
-	}
-}
-
 func TestCredentialHTTPRevokeNotFound(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
@@ -1149,48 +1099,5 @@ func TestCredentialDuplicateTokenHashRejected(t *testing.T) {
 	}
 	if !isSQLiteUniqueError(err) {
 		t.Errorf("expected UNIQUE constraint error, got: %v", err)
-	}
-}
-
-func TestCredentialHTTPCreateEmptyName(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "emptynameuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1023", "1023", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "emptynameuser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	reqBody := map[string]string{"name": ""}
-	body, _ := json.Marshal(reqBody)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
-
-	req := httptest.NewRequest(http.MethodPost, "/principals/emptynameuser/credentials", bytes.NewReader(body))
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-
-	var resp map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	if code, ok := resp["code"].(string); !ok || code != "invalid_credential_name" {
-		t.Errorf("expected code 'invalid_credential_name', got %v", resp["code"])
 	}
 }

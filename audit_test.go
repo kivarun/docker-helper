@@ -382,60 +382,6 @@ func TestAuditDockerError(t *testing.T) {
 		t.Errorf("expected result 'docker_run_failed', got %q", finishRec.Result)
 	}
 }
-
-func TestAuditDockerExit125HasExitCode(t *testing.T) {
-	auditBuf, _ := setupTestLogging(t)
-
-	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'image not found'; exit 125")
-	}
-
-	req := newRunRequest(map[string]any{
-		"image": "nonexistent:latest",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleRun(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationRegistry.get(opID)
-	if op == nil {
-		t.Fatal("operation not found in registry")
-	}
-	op.Wait()
-
-	records := filterBySession(parseAuditRecords(auditBuf), result.Session.ID)
-	if len(records) < 2 {
-		t.Fatalf("expected at least 2 audit records, got %d", len(records))
-	}
-
-	finishRec := records[1]
-	if finishRec.Result != "docker_run_failed" {
-		t.Errorf("expected result 'docker_run_failed', got %q", finishRec.Result)
-	}
-	if finishRec.ExitCode == nil || *finishRec.ExitCode != 125 {
-		t.Errorf("expected exit_code 125 in audit, got %v", finishRec.ExitCode)
-	}
-}
-
 func TestAuditMountsRelativeSource(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 

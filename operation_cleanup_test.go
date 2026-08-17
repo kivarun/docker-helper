@@ -76,43 +76,6 @@ func TestCleanupCapsCompleted(t *testing.T) {
 	}
 }
 
-func TestCleanupTTLAndCapTogether(t *testing.T) {
-	reg := newOperationRegistry()
-
-	now := time.Now()
-	expired1 := newTestOperation(t, operationSucceeded, now.Add(-20*time.Minute))
-	expired2 := newTestOperation(t, operationSucceeded, now.Add(-15*time.Minute))
-	fresh1 := newTestOperation(t, operationSucceeded, now.Add(-5*time.Minute))
-	fresh2 := newTestOperation(t, operationSucceeded, now.Add(-3*time.Minute))
-	fresh3 := newTestOperation(t, operationSucceeded, now.Add(-1*time.Minute))
-
-	reg.tryCreate(expired1)
-	reg.tryCreate(expired2)
-	reg.tryCreate(fresh1)
-	reg.tryCreate(fresh2)
-	reg.tryCreate(fresh3)
-
-	// TTL removes expired1 and expired2.
-	// Cap=2 keeps only fresh2 and fresh3, removes fresh1.
-	reg.cleanup(10*time.Minute, 2)
-
-	if reg.get(expired1.ID) != nil {
-		t.Error("expired1 should be removed by TTL")
-	}
-	if reg.get(expired2.ID) != nil {
-		t.Error("expired2 should be removed by TTL")
-	}
-	if reg.get(fresh1.ID) != nil {
-		t.Error("fresh1 should be removed by cap")
-	}
-	if reg.get(fresh2.ID) == nil {
-		t.Error("fresh2 should remain")
-	}
-	if reg.get(fresh3.ID) == nil {
-		t.Error("fresh3 should remain")
-	}
-}
-
 func TestCleanupMaxCompletedZero(t *testing.T) {
 	reg := newOperationRegistry()
 

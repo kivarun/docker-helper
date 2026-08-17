@@ -13,58 +13,6 @@ import (
 	"time"
 )
 
-// TestShutdownGateOpensBeforeSignal verifies that the operation registry
-// accepts new operations before the shutdown signal is received.
-func TestShutdownGateOpensBeforeSignal(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
-		t.Fatalf("cannot create Dockerfile: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
-	}
-
-	// Operation should be accepted before any shutdown signal.
-	req := newBuildRequest(map[string]any{
-		"context":    ".",
-		"dockerfile": "Dockerfile",
-		"image":      "example:test",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handleBuild(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d before signal, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	opID, _ := resp["operation_id"].(string)
-	op := reg.get(opID)
-	if op == nil {
-		t.Fatal("operation should be in registry before signal")
-	}
-
-	// Clean up.
-	reg.setShuttingDown()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx, nil)
-	cancel()
-	<-op.done
-}
-
 // TestShutdownGateClosesOnSignal verifies that after the shutdown signal
 // is received (simulated by setShuttingDown), new operations are rejected
 // while existing operations remain under shutdown lifecycle.

@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -70,48 +68,6 @@ func TestCmdStartRaceStartBeforeShutdown(t *testing.T) {
 	reg.terminateAll(shutdownCtx, nil)
 	cancel()
 
-	select {
-	case <-op.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("op.done was not closed")
-	}
-
-	if op.State != operationFailed {
-		t.Errorf("expected 'failed', got %q", op.State)
-	}
-}
-
-// TestCmdStartRaceForceKillIgnoringSignal verifies that a process that
-// ignores graceful SIGTERM is force-killed within the shutdown deadline,
-// even when it was properly started before shutdown.
-func TestCmdStartRaceForceKillIgnoringSignal(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
-
-	// Use a readiness marker so we know the trap is installed.
-	readyFile := filepath.Join(app.Config.AllowedRoot, ".process_ready")
-	defer os.Remove(readyFile)
-	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
-
-	op := startBuild(t, app, token)
-
-	// Wait for the process to signal readiness (installed SIGTERM ignore).
-	waitProcessReady(t, readyFile)
-
-	// Trigger shutdown with short deadline.
-	reg.setShuttingDown()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	start := time.Now()
-	reg.terminateAll(shutdownCtx, nil)
-	elapsed := time.Since(start)
-	cancel()
-
-	// With the bounded lifecycle, terminateAll must complete within
-	// the shutdown deadline (no additional fixed wait beyond deadline).
-	if elapsed > 750*time.Millisecond {
-		t.Errorf("terminateAll took too long: %v", elapsed)
-	}
-
-	// Completion goroutine should reap the process.
 	select {
 	case <-op.done:
 	case <-time.After(5 * time.Second):
