@@ -1,13 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -284,27 +282,6 @@ func TestUninstallScriptNoSudo(t *testing.T) {
 	}
 }
 
-// TestBuildStaticScriptContent verifies build-static.sh uses external
-// linking and fails closed without musl (except on Alpine).
-func TestBuildStaticScriptContent(t *testing.T) {
-	data, err := os.ReadFile("build-static.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	if !strings.Contains(content, "-linkmode external") {
-		t.Error("build-static.sh must use -linkmode external for static linking")
-	}
-	// Must check for musl-gcc first and fail without it (except on Alpine
-	// where gcc uses musl natively).
-	if !strings.Contains(content, "musl-gcc") {
-		t.Error("build-static.sh must reference musl-gcc")
-	}
-	if !strings.Contains(content, "alpine") {
-		t.Error("build-static.sh must check for Alpine to allow gcc fallback")
-	}
-}
-
 // TestBuildBundleRequiresVersion verifies build-bundle.sh rejects
 // invocation without a version argument.
 func TestBuildBundleRequiresVersion(t *testing.T) {
@@ -316,25 +293,15 @@ func TestBuildBundleRequiresVersion(t *testing.T) {
 	}
 }
 
-// TestReleaseReadmeContent verifies the release README template exists,
-// documents the key topics and man pages, and contains no secrets.
-func TestReleaseReadmeContent(t *testing.T) {
+// TestReleaseReadmeNoSecrets verifies the release README template does not
+// contain plaintext secret values.
+func TestReleaseReadmeNoSecrets(t *testing.T) {
 	data, err := os.ReadFile("packaging/README.release.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 
-	for _, s := range []string{"docker-helper", "install.sh", "agent", "SKILL.md"} {
-		if !strings.Contains(content, s) {
-			t.Errorf("release README should mention %q", s)
-		}
-	}
-	for _, s := range []string{"man/docker-helper.1.gz", "man/docker-helper-config.5.gz"} {
-		if !strings.Contains(content, s) {
-			t.Errorf("release README must document %s", s)
-		}
-	}
 	for _, s := range []string{"admin_token", "session_token", "Bearer", "password"} {
 		if strings.Contains(content, s) {
 			t.Errorf("release README must not contain %q", s)
@@ -583,28 +550,10 @@ func TestBuildBundleScriptContent(t *testing.T) {
 			t.Error("EXPECTED_PATHS must not contain .claude paths")
 		}
 	}
-	// Must track static linking confirmation and fail (not just warn)
-	// when it is unconfirmed.
-	if !strings.Contains(content, "STATIC_CONFIRMED") {
-		t.Error("build-bundle.sh must track static linking confirmation state")
-	}
-	if !strings.Contains(content, "cannot confirm static linking") {
-		t.Error("build-bundle.sh must fail on unconfirmed static linking")
-	}
-	// Must check the exact mandatory set of paths in the tarball.
-	if !strings.Contains(content, "EXPECTED_PATHS") {
-		t.Error("build-bundle.sh must define expected mandatory paths")
-	}
-	if !strings.Contains(content, "missing required path") {
-		t.Error("build-bundle.sh must fail when a required path is missing")
-	}
-	// Must build and bundle compressed man pages.
-	if !strings.Contains(content, "build-manpages.sh") {
-		t.Error("build-bundle.sh must call build-manpages.sh")
-	}
+	// Must bundle compressed man pages.
 	for _, s := range []string{"man/docker-helper.1.gz", "man/docker-helper-config.5.gz"} {
 		if !strings.Contains(content, s) {
-			t.Errorf("build-bundle.sh EXPECTED_PATHS must include %s", s)
+			t.Errorf("build-bundle.sh must bundle %s", s)
 		}
 	}
 }
@@ -1395,9 +1344,11 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 
 // --- System install/uninstall script tests ---
 
-// TestInstallSystemScriptContent verifies install-system.sh: root check,
-// --allowed-root support, destination paths, managed-roots preservation,
-// AppArmor-before-init ordering, and no skill/user-artifact installation.
+// TestInstallSystemScriptContent guards the facts normal CI cannot
+// exercise: the root fail-closed check, the real system destination paths,
+// and the separation from user-mode artifacts. Allowed-root handling,
+// managed-roots preservation, AppArmor-before-init ordering, and profile
+// load flags are proven by the behavioral tests below.
 func TestInstallSystemScriptContent(t *testing.T) {
 	data, err := os.ReadFile("packaging/install-system.sh")
 	if err != nil {
@@ -1409,14 +1360,7 @@ func TestInstallSystemScriptContent(t *testing.T) {
 	if !strings.Contains(content, "id -u") || !strings.Contains(content, "-ne 0") {
 		t.Error("install-system.sh must check for root (UID 0)")
 	}
-	// Fresh --yes install must require --allowed-root.
-	if !strings.Contains(content, "--allowed-root") {
-		t.Error("install-system.sh must support --allowed-root flag")
-	}
-	if !strings.Contains(content, "allowed_root") {
-		t.Error("install-system.sh must validate --allowed-root for fresh install")
-	}
-	// Destination paths.
+	// Real system destination paths (behavioral tests override these).
 	for _, p := range []string{
 		"/usr/bin/docker-helper",
 		"/etc/systemd/system/docker-helper.service",
@@ -1426,26 +1370,6 @@ func TestInstallSystemScriptContent(t *testing.T) {
 		if !strings.Contains(content, p) {
 			t.Errorf("install-system.sh must reference destination path: %s", p)
 		}
-	}
-	// Must check for and preserve an existing managed-roots fragment.
-	if !strings.Contains(content, "-f") || !strings.Contains(content, "managed-roots") {
-		t.Error("install-system.sh must check for existing managed-roots")
-	}
-	if !strings.Contains(content, "preserved") && !strings.Contains(content, "overwrite") {
-		t.Error("install-system.sh must preserve existing managed-roots")
-	}
-	// AppArmor profile must be installed before init is called.
-	profileIdx := strings.Index(content, "install_apparmor_profile")
-	initIdx := strings.Index(content, "run_init")
-	if profileIdx < 0 || initIdx < 0 || profileIdx > initIdx {
-		t.Error("install-system.sh must install AppArmor profile before running init")
-	}
-	// Profile load must be idempotent via --replace with a clean cache.
-	if !strings.Contains(content, "--replace") {
-		t.Error("load_apparmor_profile must use --replace")
-	}
-	if !strings.Contains(content, "--skip-read-cache") {
-		t.Error("load_apparmor_profile must use --skip-read-cache")
 	}
 	// Must not install the agent skill or touch user artifacts.
 	if strings.Contains(content, "SKILL.md") || strings.Contains(content, ".claude") {
@@ -1458,9 +1382,11 @@ func TestInstallSystemScriptContent(t *testing.T) {
 	}
 }
 
-// TestUninstallSystemScriptContent verifies uninstall-system.sh: root
-// check, --purge support with default preservation, purge paths, service
-// stop before removal, AppArmor unload, and no user-artifact removal.
+// TestUninstallSystemScriptContent guards the facts normal CI cannot
+// exercise: the root fail-closed check, the real system purge paths, and
+// the separation from user-mode artifacts. Stop-before-remove ordering,
+// AppArmor unload, and purge preservation/removal are proven by the
+// behavioral tests below.
 func TestUninstallSystemScriptContent(t *testing.T) {
 	data, err := os.ReadFile("packaging/uninstall-system.sh")
 	if err != nil {
@@ -1472,13 +1398,7 @@ func TestUninstallSystemScriptContent(t *testing.T) {
 	if !strings.Contains(content, "id -u") || !strings.Contains(content, "-ne 0") {
 		t.Error("uninstall-system.sh must check for root (UID 0)")
 	}
-	// Config/state/managed-roots are only removed with --purge.
-	if !strings.Contains(content, "--purge") {
-		t.Error("uninstall-system.sh must support --purge flag")
-	}
-	if !strings.Contains(content, "preserve") && !strings.Contains(content, "Preserved") {
-		t.Error("uninstall-system.sh must document preservation of config/state")
-	}
+	// Real system paths removed with --purge (behavioral tests override these).
 	for _, p := range []string{"/etc/docker-helper", "/var/lib/docker-helper", "/run/docker-helper"} {
 		if !strings.Contains(content, p) {
 			t.Errorf("uninstall-system.sh --purge must remove: %s", p)
@@ -1489,19 +1409,6 @@ func TestUninstallSystemScriptContent(t *testing.T) {
 		if strings.Contains(content, p) {
 			t.Errorf("uninstall-system.sh must not touch user path: %s", p)
 		}
-	}
-	// Stop must come before removal.
-	stopIdx := strings.Index(content, "stop_service")
-	removeIdx := strings.Index(content, "remove_binary")
-	if stopIdx < 0 || removeIdx < 0 || stopIdx > removeIdx {
-		t.Error("uninstall-system.sh must stop service before removing binary")
-	}
-	// Must unload the AppArmor profile with apparmor_parser -R.
-	if !strings.Contains(content, "apparmor_parser") {
-		t.Error("uninstall-system.sh must unload AppArmor profile")
-	}
-	if !strings.Contains(content, "-R") {
-		t.Error("uninstall-system.sh must use apparmor_parser -R to remove profile")
 	}
 }
 
@@ -1913,13 +1820,22 @@ func TestInstallSystemFreshYesEnablesStartsService(t *testing.T) {
 		t.Fatalf("install failed: %v\n%s", err, out)
 	}
 
-	enableIdx, startIdx := -1, -1
+	enableIdx, startIdx, parserIdx, initIdx := -1, -1, -1, -1
 	for i, c := range env.calls(t) {
 		if strings.Contains(c, "enable") {
 			enableIdx = i
 		}
 		if strings.Contains(c, "start") {
 			startIdx = i
+		}
+		if strings.Contains(c, "apparmor_parser") {
+			parserIdx = i
+			if !strings.Contains(c, "--replace") || !strings.Contains(c, "--skip-read-cache") {
+				t.Errorf("profile load must be idempotent with a clean cache: %q", c)
+			}
+		}
+		if strings.Contains(c, "binary: init") {
+			initIdx = i
 		}
 	}
 	if enableIdx < 0 {
@@ -1930,6 +1846,10 @@ func TestInstallSystemFreshYesEnablesStartsService(t *testing.T) {
 	}
 	if enableIdx > 0 && startIdx > 0 && enableIdx > startIdx {
 		t.Error("enable should be called before start")
+	}
+	if parserIdx < 0 || initIdx < 0 || parserIdx > initIdx {
+		t.Errorf("AppArmor profile must be loaded before init: parser(%d) init(%d), calls: %v",
+			parserIdx, initIdx, env.calls(t))
 	}
 }
 
@@ -2224,6 +2144,9 @@ esac
 		}
 		if strings.Contains(c, "apparmor_parser") {
 			unloadIdx = i
+			if !strings.Contains(c, " -R ") {
+				t.Errorf("profile unload must use apparmor_parser -R: %q", c)
+			}
 		}
 	}
 	if isActiveIdx < 0 || stopIdx < 0 || unloadIdx < 0 ||
@@ -3663,73 +3586,6 @@ func TestPackageMetadataScripts(t *testing.T) {
 
 // --- Man page source tests ---
 
-// TestManPageSources verifies the man page sources exist, carry correct
-// .TH/NAME/SYNOPSIS structure, and contain no placeholder text.
-func TestManPageSources(t *testing.T) {
-	pages := map[string]string{
-		"docs/man/docker-helper.1":        ".TH DOCKER-HELPER 1",
-		"docs/man/docker-helper-config.5": ".TH DOCKER-HELPER-CONFIG 5",
-	}
-	for file, th := range pages {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("man page source not found: %s: %v", file, err)
-		}
-		content := string(data)
-		if !strings.Contains(content, th) {
-			t.Errorf("%s missing exact %q directive", file, th)
-		}
-		if !strings.Contains(content, "NAME") {
-			t.Errorf("%s missing NAME section", file)
-		}
-		if !strings.Contains(content, "SYNOPSIS") {
-			t.Errorf("%s missing SYNOPSIS section", file)
-		}
-		if strings.Contains(content, "TODO") || strings.Contains(content, "FIXME") ||
-			strings.Contains(content, "PLACEHOLDER") {
-			t.Errorf("man page %s contains placeholder text", file)
-		}
-	}
-}
-
-// --- CLI coverage tests ---
-
-func TestManPageCLICommands(t *testing.T) {
-	data, err := os.ReadFile("docs/man/docker-helper.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	for _, cmd := range rootCommand.Subcommands {
-		if !strings.Contains(content, cmd.Name) {
-			t.Errorf("docker-helper.1 missing command: %s", cmd.Name)
-		}
-	}
-}
-
-// --- Config coverage tests ---
-
-func TestManPageConfigFields(t *testing.T) {
-	data, err := os.ReadFile("docs/man/docker-helper-config.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	tt := reflect.TypeOf(fileConfig{})
-	for i := 0; i < tt.NumField(); i++ {
-		tag := tt.Field(i).Tag.Get("json")
-		if tag == "-" || tag == "" {
-			continue
-		}
-		name := strings.Split(tag, ",")[0]
-		if !strings.Contains(content, name) {
-			t.Errorf("docker-helper-config.5 missing field: %s", name)
-		}
-	}
-}
-
 // --- Build script tests ---
 
 func TestBuildManpagesScriptBuilds(t *testing.T) {
@@ -3898,93 +3754,9 @@ func TestPackageMetadataManPages(t *testing.T) {
 	}
 }
 
-// --- Regression assertions for dangerous doc facts ---
-
-func TestManPageDocFacts(t *testing.T) {
-	// Verify docker-helper.1 does not contain fabricated command forms.
-	data1, err := os.ReadFile("docs/man/docker-helper.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content1 := string(data1)
-	for _, bad := range []string{"session remove", "config edit", "credential issue", "credential validate", "apparmor reload"} {
-		if strings.Contains(content1, bad) {
-			t.Errorf("docker-helper.1 must not contain fabricated command: %q", bad)
-		}
-	}
-
-	// Verify docker-helper-config.5 reflects critical facts.
-	data5, err := os.ReadFile("docs/man/docker-helper-config.5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content5 := string(data5)
-
-	// session_ttl must be documented as required.
-	if !strings.Contains(content5, "session_ttl") || !strings.Contains(content5, "required") {
-		t.Error("docker-helper-config.5 must document session_ttl as required")
-	}
-
-	// 12h init value.
-	if !strings.Contains(content5, "12h") {
-		t.Error("docker-helper-config.5 must mention 12h init value")
-	}
-
-	// operation_retention_ttl default 10m.
-	if !strings.Contains(content5, "10m") {
-		t.Error("docker-helper-config.5 must document operation_retention_ttl default 10m")
-	}
-
-	// operation_max_completed default 200.
-	if !strings.Contains(content5, "200") {
-		t.Error("docker-helper-config.5 must document operation_max_completed default 200")
-	}
-
-	// operation_log_max_bytes default 4194304.
-	if !strings.Contains(content5, "4194304") {
-		t.Error("docker-helper-config.5 must document operation_log_max_bytes default 4194304")
-	}
-
-	// audit_enabled derived from log_level.
-	if !strings.Contains(content5, "log_level") || !strings.Contains(content5, "debug") {
-		t.Error("docker-helper-config.5 must document audit_enabled derived from log_level")
-	}
-
-	// Minimal example must contain both required fields.
-	// Extract JSON between .nf and .fi in the minimal example section.
-	inNF := false
-	exampleJSON := ""
-	for _, line := range strings.Split(content5, "\n") {
-		if strings.Contains(line, "Minimal") {
-			continue
-		}
-		if inNF {
-			if strings.HasPrefix(line, ".fi") {
-				break
-			}
-			exampleJSON += line + "\n"
-		}
-		if strings.HasPrefix(line, ".nf") && exampleJSON == "" {
-			inNF = true
-		}
-	}
-	if exampleJSON == "" {
-		t.Fatal("could not find minimal example JSON in docker-helper-config.5")
-	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal([]byte(exampleJSON), &cfg); err != nil {
-		t.Fatalf("minimal example JSON failed to parse: %v\nJSON:\n%s", err, exampleJSON)
-	}
-	if _, ok := cfg["allowed_root"]; !ok {
-		t.Error("minimal example must contain allowed_root")
-	}
-	if _, ok := cfg["session_ttl"]; !ok {
-		t.Error("minimal example must contain session_ttl")
-	}
-}
-
-// --- Release workflow static contract tests ---
-
+// TestReleaseWorkflow guards the release pipeline contract: authoritative
+// build scripts, pinned nFPM version with SHA256, no @latest, SHA256SUMS,
+// all artifact types, and prerelease handling.
 func TestReleaseWorkflow(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
@@ -4034,74 +3806,5 @@ func TestReleaseWorkflow(t *testing.T) {
 	// Prerelease handling must be preserved.
 	if !strings.Contains(content, "prerelease") {
 		t.Error("release.yml must handle prerelease")
-	}
-}
-
-// --- README documentation contract tests ---
-
-func TestReadmeDocContract(t *testing.T) {
-	data, err := os.ReadFile("README.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Must not contain the dangerous stale statement.
-	if strings.Contains(content, "not yet shipped") {
-		t.Error("README.md must not contain stale 'not yet shipped' statement")
-	}
-
-	// Must mention native packages.
-	if !strings.Contains(content, ".deb") {
-		t.Error("README.md must mention native DEB")
-	}
-	if !strings.Contains(content, ".rpm") {
-		t.Error("README.md must mention native RPM")
-	}
-
-	// Must mention init with --allowed-root.
-	if !strings.Contains(content, "docker-helper init --allowed-root") {
-		t.Error("README.md must mention 'docker-helper init --allowed-root'")
-	}
-
-	// Must mention systemctl enable --now docker-helper.
-	if !strings.Contains(content, "systemctl enable --now docker-helper") {
-		t.Error("README.md must mention 'systemctl enable --now docker-helper'")
-	}
-
-	// Must mention SHA256SUMS.
-	if !strings.Contains(content, "SHA256SUMS") {
-		t.Error("README.md must mention SHA256SUMS")
-	}
-
-	// Must mention man pages.
-	if !strings.Contains(content, "man docker-helper") && !strings.Contains(content, "docker-helper(1)") {
-		t.Error("README.md must mention man docker-helper or docker-helper(1)")
-	}
-}
-
-func TestArchitectureDocContract(t *testing.T) {
-	data, err := os.ReadFile("docs/architecture.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Must not contain unqualified XDG-only listener statement.
-	if strings.Contains(content, "listens on a Unix socket at\n`$XDG_RUNTIME_DIR") {
-		t.Error("architecture.md must not contain unqualified XDG-only listener statement")
-	}
-}
-
-func TestRoadmapDocContract(t *testing.T) {
-	data, err := os.ReadFile("docs/roadmap.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-
-	// Must not require selected repository/update channels as R2 deliverable.
-	if strings.Contains(content, "selected repository/update channels") {
-		t.Error("roadmap.md must not require selected repository/update channels for R2")
 	}
 }

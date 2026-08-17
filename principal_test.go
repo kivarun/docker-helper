@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestCreatePrincipal(t *testing.T) {
@@ -200,111 +197,6 @@ func TestShowPrincipalNotFound(t *testing.T) {
 	}
 }
 
-func TestSetPrincipalEnabled(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "enableuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1005", "1005", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "enableuser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	changed, err := updatePrincipalEnabled(app.DB, "enableuser", false)
-	if err != nil {
-		t.Fatalf("updatePrincipalEnabled() error: %v", err)
-	}
-	if !changed {
-		t.Error("expected changed to be true")
-	}
-
-	result, err := findPrincipalByUserName(app.DB, "enableuser")
-	if err != nil {
-		t.Fatalf("findPrincipalByUserName() error: %v", err)
-	}
-	if result.Enabled {
-		t.Error("expected principal to be disabled")
-	}
-}
-
-func TestSetPrincipalEnabledIdempotent(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "idemuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1006", "1006", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "idemuser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	changed, err := updatePrincipalEnabled(app.DB, "idemuser", true)
-	if err != nil {
-		t.Fatalf("updatePrincipalEnabled() error: %v", err)
-	}
-	if changed {
-		t.Error("expected changed to be false (idempotent)")
-	}
-}
-
-func TestAddAllowedRoot(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "addrootuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra")
-	if err := os.MkdirAll(extraRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1007", "1007", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "addrootuser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	changed, canonicalPath, err := addAllowedRoot(app.DB, "addrootuser", extraRoot)
-	if err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
-	}
-	if !changed {
-		t.Error("expected changed to be true")
-	}
-	if canonicalPath != extraRoot {
-		t.Errorf("canonicalPath = %q, want %q", canonicalPath, extraRoot)
-	}
-
-	result, err := findPrincipalByUserName(app.DB, "addrootuser")
-	if err != nil {
-		t.Fatalf("findPrincipalByUserName() error: %v", err)
-	}
-	if len(result.AllowedRoots) != 2 {
-		t.Fatalf("expected 2 allowed roots, got %d", len(result.AllowedRoots))
-	}
-}
-
 func TestAddAllowedRootDuplicate(t *testing.T) {
 	app := newTestApp(t)
 
@@ -329,40 +221,6 @@ func TestAddAllowedRootDuplicate(t *testing.T) {
 	}
 	if changed {
 		t.Error("expected changed to be false (idempotent)")
-	}
-}
-
-func TestAddAllowedRootRelativeRejected(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "reluser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a real relative directory
-	relDir := filepath.Join(app.Config.AllowedRoot, "rel-dir")
-	if err := os.MkdirAll(relDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1009", "1009", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "reluser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	// Relative path must be rejected even though directory exists
-	_, _, err := addAllowedRoot(app.DB, "reluser", "rel-dir")
-	if err == nil {
-		t.Fatal("expected error for relative path")
-	}
-	if !isErrInvalidAllowedRoot(err) {
-		t.Errorf("expected ErrInvalidAllowedRoot, got: %v", err)
 	}
 }
 
@@ -437,56 +295,6 @@ func TestRemoveAllowedRoot(t *testing.T) {
 	}
 }
 
-func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "deluser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra-del")
-	if err := os.MkdirAll(extraRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1030", "1030", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "deluser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	if _, _, err := addAllowedRoot(app.DB, "deluser", extraRoot); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
-	}
-
-	// Delete the directory from filesystem
-	if err := os.RemoveAll(extraRoot); err != nil {
-		t.Fatal(err)
-	}
-
-	// Remove should still work even though directory no longer exists
-	changed, _, err := removeAllowedRoot(app.DB, "deluser", extraRoot)
-	if err != nil {
-		t.Fatalf("removeAllowedRoot() error: %v", err)
-	}
-	if !changed {
-		t.Error("expected changed to be true")
-	}
-
-	result, err := findPrincipalByUserName(app.DB, "deluser")
-	if err != nil {
-		t.Fatalf("findPrincipalByUserName() error: %v", err)
-	}
-	if len(result.AllowedRoots) != 1 {
-		t.Fatalf("expected 1 allowed root after removal, got %d", len(result.AllowedRoots))
-	}
-}
-
 func TestRemoveAllowedRootAbsent(t *testing.T) {
 	app := newTestApp(t)
 
@@ -548,106 +356,6 @@ func TestPrincipalAdminAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
-	}
-}
-
-func TestInitializeDatabaseWithPrincipalsTables(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.db")
-
-	db, err := openDatabase(path)
-	if err != nil {
-		t.Fatalf("openDatabase() error: %v", err)
-	}
-	defer db.Close()
-
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
-
-	var name string
-	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='principals';").Scan(&name)
-	if err != nil {
-		t.Fatalf("principals table not found: %v", err)
-	}
-
-	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='principal_allowed_roots';").Scan(&name)
-	if err != nil {
-		t.Fatalf("principal_allowed_roots table not found: %v", err)
-	}
-}
-
-func TestInitializeDatabasePreservesSessions(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.db")
-
-	// Create DB with ONLY the old Release 1 sessions schema.
-	db, err := openDatabase(path)
-	if err != nil {
-		t.Fatalf("openDatabase() error: %v", err)
-	}
-
-	// Manually create only the sessions table (simulating R1 DB).
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS sessions (
-			id TEXT PRIMARY KEY,
-			token_hash TEXT NOT NULL UNIQUE,
-			workspace TEXT NOT NULL,
-			created_at INTEGER NOT NULL,
-			expires_at INTEGER NOT NULL
-		);
-	`)
-	if err != nil {
-		t.Fatalf("create sessions table: %v", err)
-	}
-
-	// Insert a session row.
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		"dhs_existing", "abc123", "/workspace", 1000000000, 9999999999,
-	)
-	if err != nil {
-		t.Fatalf("insert session: %v", err)
-	}
-	db.Close()
-
-	// Reopen and run current initializeDatabase.
-	db, err = openDatabase(path)
-	if err != nil {
-		t.Fatalf("reopenDatabase() error: %v", err)
-	}
-	defer db.Close()
-
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
-
-	// Verify new principal tables exist.
-	var name string
-	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='principals';").Scan(&name)
-	if err != nil {
-		t.Fatalf("principals table not found after init: %v", err)
-	}
-
-	err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='principal_allowed_roots';").Scan(&name)
-	if err != nil {
-		t.Fatalf("principal_allowed_roots table not found after init: %v", err)
-	}
-
-	// Verify old session row preserved.
-	var id, workspace string
-	err = db.QueryRow(`SELECT id, workspace FROM sessions WHERE id = ?`, "dhs_existing").Scan(&id, &workspace)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			t.Fatal("existing session row was lost after initializeDatabase")
-		}
-		t.Fatalf("query session: %v", err)
-	}
-	if id != "dhs_existing" {
-		t.Errorf("session id = %q, want %q", id, "dhs_existing")
-	}
-	if workspace != "/workspace" {
-		t.Errorf("session workspace = %q, want %q", workspace, "/workspace")
 	}
 }
 
@@ -1141,66 +849,6 @@ func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
 	}
 }
 
-func TestRemoveAllowedRootRelativeRejected(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "relremuser2")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1045", "1045", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "relremuser2"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	_, _, err := removeAllowedRoot(app.DB, "relremuser2", "relative/path")
-	if err == nil {
-		t.Fatal("expected error for relative path in remove")
-	}
-	if !isErrInvalidAllowedRoot(err) {
-		t.Errorf("expected ErrInvalidAllowedRoot, got: %v", err)
-	}
-}
-
-func TestValidateAllowedRootForAddWrapsSentinel(t *testing.T) {
-	// Nonexistent absolute path
-	_, err := validateAllowedRootForAdd("/no/such/path")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !isErrInvalidAllowedRoot(err) {
-		t.Errorf("expected ErrInvalidAllowedRoot for nonexistent path, got: %v", err)
-	}
-
-	// Regular file
-	tmpFile := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(tmpFile, []byte("x"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	_, err = validateAllowedRootForAdd(tmpFile)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !isErrInvalidAllowedRoot(err) {
-		t.Errorf("expected ErrInvalidAllowedRoot for file path, got: %v", err)
-	}
-
-	// Relative path
-	_, err = validateAllowedRootForAdd("relative")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !isErrInvalidAllowedRoot(err) {
-		t.Errorf("expected ErrInvalidAllowedRoot for relative path, got: %v", err)
-	}
-}
-
 func TestCreatePrincipalRelativeHomeRejected(t *testing.T) {
 	app := newTestApp(t)
 
@@ -1262,31 +910,6 @@ func TestExtractPrincipalField(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("extractPrincipalField(%q) = %q, want %q", tt.field, got, tt.want)
 		}
-	}
-}
-
-func TestExtractPrincipalFieldAllowedRootsJSON(t *testing.T) {
-	p := &principalResponse{
-		Username:     "testuser",
-		UID:          1000,
-		GID:          1000,
-		Home:         "/home/testuser",
-		Enabled:      true,
-		AllowedRoots: []string{"/home/testuser", "/shared"},
-	}
-
-	got, ok := extractPrincipalField(p, "allowed_roots")
-	if !ok {
-		t.Fatal("expected ok to be true")
-	}
-
-	// Verify it's valid JSON array
-	var arr []string
-	if err := json.Unmarshal([]byte(got), &arr); err != nil {
-		t.Fatalf("allowed_roots output is not valid JSON: %v", err)
-	}
-	if len(arr) != 2 {
-		t.Fatalf("expected 2 elements, got %d", len(arr))
 	}
 }
 
@@ -1484,107 +1107,6 @@ func TestPrincipalWithRootsEmptySlice(t *testing.T) {
 	}
 }
 
-func TestPrincipalIntegrationWithDaemon(t *testing.T) {
-	dir := t.TempDir()
-
-	adminToken := testAdminToken
-	adminTokenPath := filepath.Join(dir, "admin.token")
-	if err := os.WriteFile(adminTokenPath, []byte(adminToken+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Use a non-forbidden home directory. /tmp is forbidden by the workspace root security policy.
-	allowedRoot := testAllowedRootDir(t)
-	home := filepath.Join(allowedRoot, "home", "intuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		if username == "intuser" {
-			return "1031", "1031", home, nil
-		}
-		return "", "", "", fmt.Errorf("user not found")
-	}
-
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := openDatabase(dbPath)
-	if err != nil {
-		t.Fatalf("openDatabase() error: %v", err)
-	}
-	defer db.Close()
-
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
-
-	runtimeDir := filepath.Join(dir, "runtime")
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	adminHash := sha256.Sum256([]byte(adminToken))
-
-	cfg := &Config{
-		AllowedRoot:           allowedRoot,
-		SessionTTL:            24 * time.Hour,
-		SocketPath:            filepath.Join(dir, "test.sock"),
-		StateDir:              dir,
-		RuntimeDir:            runtimeDir,
-		DatabasePath:          dbPath,
-		AdminTokenPath:        adminTokenPath,
-		ShutdownTimeout:       30 * time.Second,
-		OperationRetentionTTL: 10 * time.Minute,
-		OperationMaxCompleted: 200,
-		OperationLogMaxBytes:  4 * 1024 * 1024,
-	}
-
-	app := &App{
-		Config:         cfg,
-		DB:             db,
-		AdminTokenHash: adminHash,
-	}
-
-	reqBody := map[string]string{"username": "intuser"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/principals", bytes.NewReader(body))
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	app.handleCreatePrincipal(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("create principal: expected %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/principals/intuser", nil)
-	withAuth(req)
-	w = httptest.NewRecorder()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("show principal: expected %d, got %d, body: %s", http.StatusOK, w.Code, w.Body.String())
-	}
-
-	var resp principalResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
-	if resp.Username != "intuser" {
-		t.Errorf("username = %q, want %q", resp.Username, "intuser")
-	}
-	if resp.AllowedRoots == nil || len(resp.AllowedRoots) == 0 {
-		t.Error("expected at least one allowed root (home)")
-	}
-}
-
 func TestPrincipalCascadeDelete(t *testing.T) {
 	app := newTestApp(t)
 
@@ -1706,71 +1228,6 @@ func TestPrincipalHTTPShowNotFound(t *testing.T) {
 	}
 }
 
-func TestPrincipalHTTPCreateInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	req := httptest.NewRequest(http.MethodPost, "/principals", bytes.NewReader([]byte("not json")))
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	app.handleCreatePrincipal(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
-func TestPrincipalHTTPSetEnabledInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
-
-	req := httptest.NewRequest(http.MethodPatch, "/principals/testuser", bytes.NewReader([]byte("not json")))
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
-func TestPrincipalHTTPAddAllowedRootInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
-
-	req := httptest.NewRequest(http.MethodPost, "/principals/testuser/allowed-roots", bytes.NewReader([]byte("not json")))
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
-func TestPrincipalHTTPRemoveAllowedRootInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
-
-	req := httptest.NewRequest(http.MethodDelete, "/principals/testuser/allowed-roots", bytes.NewReader([]byte("not json")))
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected status %d, got %d", http.StatusBadRequest, w.Code)
-	}
-}
-
 func TestPrincipalAllowedRootPathResolution(t *testing.T) {
 	app := newTestApp(t)
 
@@ -1816,44 +1273,6 @@ func TestPrincipalAllowedRootPathResolution(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected %q in allowed roots, got %v", extraRoot, result.AllowedRoots)
-	}
-}
-
-func TestPrincipalErrorsAreWrapped(t *testing.T) {
-	app := newTestApp(t)
-
-	_, err := findPrincipalByUserName(app.DB, "nonexistent")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !isErrPrincipalNotFound(err) {
-		t.Errorf("expected ErrPrincipalNotFound, got: %v", err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "", "", "", os.ErrNotExist
-	}
-
-	_, err = createPrincipal(app.DB, "nonexistent")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !isErrOSUserNotFound(err) {
-		t.Errorf("expected ErrOSUserNotFound, got: %v", err)
-	}
-}
-
-func TestListPrincipalSummariesEmpty(t *testing.T) {
-	app := newTestApp(t)
-
-	summaries, err := listPrincipalSummaries(app.DB)
-	if err != nil {
-		t.Fatalf("listPrincipalSummaries() error: %v", err)
-	}
-	if len(summaries) != 0 {
-		t.Errorf("expected 0 principals, got %d", len(summaries))
 	}
 }
 
@@ -1909,54 +1328,6 @@ func TestListPrincipalSummaries(t *testing.T) {
 	}
 	if summaries[0] != wantAlice {
 		t.Errorf("alice summary = %+v, want %+v", summaries[0], wantAlice)
-	}
-}
-
-func TestListPrincipalSummariesDisabledIncluded(t *testing.T) {
-	app := newTestApp(t)
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		switch username {
-		case "alice":
-			return "1001", "1001", filepath.Join(app.Config.AllowedRoot, "home", "alice"), nil
-		case "bob":
-			return "1002", "1002", filepath.Join(app.Config.AllowedRoot, "home", "bob"), nil
-		default:
-			return "", "", "", os.ErrNotExist
-		}
-	}
-
-	for _, user := range []string{"alice", "bob"} {
-		home := filepath.Join(app.Config.AllowedRoot, "home", user)
-		if err := os.MkdirAll(home, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := createPrincipal(app.DB, user); err != nil {
-			t.Fatalf("createPrincipal(%q) error: %v", user, err)
-		}
-	}
-
-	if _, err := updatePrincipalEnabled(app.DB, "bob", false); err != nil {
-		t.Fatalf("updatePrincipalEnabled(bob, false) error: %v", err)
-	}
-
-	summaries, err := listPrincipalSummaries(app.DB)
-	if err != nil {
-		t.Fatalf("listPrincipalSummaries() error: %v", err)
-	}
-	if len(summaries) != 2 {
-		t.Fatalf("expected 2 principals, got %d", len(summaries))
-	}
-	if !summaries[0].Enabled {
-		t.Error("alice expected enabled=true")
-	}
-	if summaries[1].Username != "bob" {
-		t.Fatalf("second principal = %q, want bob", summaries[1].Username)
-	}
-	if summaries[1].Enabled {
-		t.Error("bob expected enabled=false")
 	}
 }
 

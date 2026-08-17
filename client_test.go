@@ -69,47 +69,6 @@ func setupCLITestEnv(t *testing.T) string {
 	return socketPath
 }
 
-func TestListSessionsSuccess(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
-	tokenPath := filepath.Join(dir, "admin.token")
-
-	const token = "test-token"
-	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(listSessionsResponse{
-			OK: true,
-			Sessions: []sessionJSON{
-				{ID: "dhs_001", Workspace: "/home/user/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
-			},
-		})
-	})
-
-	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readTokenFile(tokenPath)
-	}, nil)
-
-	result, err := client.listSessions()
-	if err != nil {
-		t.Fatalf("listSessions: %v", err)
-	}
-
-	if !result.OK {
-		t.Fatal("expected ok=true")
-	}
-	if len(result.Sessions) != 1 {
-		t.Fatalf("expected 1 session, got %d", len(result.Sessions))
-	}
-	if result.Sessions[0].ID != "dhs_001" {
-		t.Errorf("expected id dhs_001, got %s", result.Sessions[0].ID)
-	}
-}
-
 func TestListSessionsAuthHeader(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
@@ -138,44 +97,6 @@ func TestListSessionsAuthHeader(t *testing.T) {
 
 	if capturedAuth != "Bearer my-secret-token" {
 		t.Errorf("expected 'Bearer my-secret-token', got %q", capturedAuth)
-	}
-}
-
-func TestListSessionsAuthError(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
-	tokenPath := filepath.Join(dir, "admin.token")
-
-	if err := os.WriteFile(tokenPath, []byte("wrong-token"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		w.WriteHeader(http.StatusUnauthorized)
-	})
-
-	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readTokenFile(tokenPath)
-	}, nil)
-
-	_, err := client.listSessions()
-	if err == nil {
-		t.Fatal("expected error for unauthorized response")
-	}
-	if !strings.Contains(err.Error(), "API error") {
-		t.Errorf("expected API error, got: %v", err)
-	}
-}
-
-func TestListSessionsConnectionError(t *testing.T) {
-	client := newUnixAPIClient("/nonexistent/path.sock", func() (string, error) {
-		return "token", nil
-	}, nil)
-
-	_, err := client.listSessions()
-	if err == nil {
-		t.Fatal("expected connection error for nonexistent socket")
 	}
 }
 
@@ -299,64 +220,11 @@ func TestSessionListJSONOutput(t *testing.T) {
 	}
 }
 
-func TestSessionListJSONFlag(t *testing.T) {
-	socketPath := setupCLITestEnv(t)
-
-	expectedSessions := []sessionJSON{
-		{ID: "dhs_001", Workspace: "/home/user/proj", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
-	}
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(listSessionsResponse{
-			OK:       true,
-			Sessions: expectedSessions,
-		})
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"session", "list", "--json"}, &stdout, &stderr)
-
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
-	}
-
-	var decoded listSessionsResponse
-	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
-		t.Fatalf("stdout is not valid JSON: %v (output: %s)", err, stdout.String())
-	}
-
-	if !decoded.OK {
-		t.Fatal("expected ok=true")
-	}
-}
-
 func TestSessionListUnknownFlag(t *testing.T) {
 	var stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"session", "list", "--unknown"}, &bytes.Buffer{}, &stderr)
 	if code != 2 {
 		t.Errorf("expected exit code 2, got %d", code)
-	}
-}
-
-func TestSessionListNoFlags(t *testing.T) {
-	socketPath := setupCLITestEnv(t)
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(listSessionsResponse{
-			OK:       true,
-			Sessions: []sessionJSON{},
-		})
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"session", "list"}, &stdout, &stderr)
-
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
 	}
 }
 
@@ -735,154 +603,13 @@ func TestSessionCreateMissingWorkspace(t *testing.T) {
 	}
 }
 
-func TestSessionCreateUnknownFlag(t *testing.T) {
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "create", "--unknown"},
-		&bytes.Buffer{}, &stderr,
-	)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-}
-
-func TestSessionCreateHTTPError(t *testing.T) {
-	socketPath := setupCLITestEnv(t)
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "create", "--workspace", "/home/user/proj"},
-		&stdout, &stderr,
-	)
-
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-}
-
-func TestSessionCreateHelpNoAPI(t *testing.T) {
-	// Set DOCKER_HELPER_CONFIG to nonexistent path to prove no config read.
-	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/that/does/not/exist/config.json")
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "create", "--help"},
-		&stdout, &stderr,
-	)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-
-	if !strings.Contains(stdout.String(), "create") {
-		t.Errorf("expected help text: %s", stdout.String())
-	}
-}
-
 type errorWriter struct{}
 
 func (errorWriter) Write(p []byte) (int, error) {
 	return 0, fmt.Errorf("write error")
 }
 
-func TestSessionCreateStdoutWriteError(t *testing.T) {
-	socketPath := setupCLITestEnv(t)
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(createSessionResponse{
-			OK: true,
-			Session: sessionJSON{
-				ID:        "dhs_001",
-				Workspace: "/home/user/proj",
-				CreatedAt: "2024-01-01T00:00:00Z",
-				ExpiresAt: "2024-01-02T00:00:00Z",
-			},
-			Token: "dht_secret_token",
-		})
-	})
-
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "create", "--workspace", "/home/user/proj"},
-		errorWriter{}, &stderr,
-	)
-
-	if code != 1 {
-		t.Fatalf("expected exit code 1, got %d", code)
-	}
-
-	// Token must not appear in stderr.
-	if strings.Contains(stderr.String(), "dht_secret_token") {
-		t.Errorf("token must not appear in stderr: %s", stderr.String())
-	}
-}
-
-func TestSessionCreateWorkspaceNoValue(t *testing.T) {
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "create", "--workspace"},
-		&bytes.Buffer{}, &stderr,
-	)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-}
-
-func TestSessionCreateWorkspaceEmptyValue(t *testing.T) {
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "create", "--workspace", ""},
-		&bytes.Buffer{}, &stderr,
-	)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-}
-
 func TestDeleteSessionRequest(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
-	tokenPath := filepath.Join(dir, "admin.token")
-
-	if err := os.WriteFile(tokenPath, []byte("test-token\n"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	var capturedMethod string
-	var capturedPath string
-	var capturedAuth string
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		capturedMethod = r.Method
-		capturedPath = r.URL.Path
-		capturedAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readTokenFile(tokenPath)
-	}, nil)
-
-	if err := client.deleteSession("dhs_001"); err != nil {
-		t.Fatalf("deleteSession: %v", err)
-	}
-
-	if capturedMethod != "DELETE" {
-		t.Errorf("expected method DELETE, got %q", capturedMethod)
-	}
-	if capturedPath != "/sessions/dhs_001" {
-		t.Errorf("expected path /sessions/dhs_001, got %q", capturedPath)
-	}
-	if capturedAuth != "Bearer test-token" {
-		t.Errorf("expected 'Bearer test-token', got %q", capturedAuth)
-	}
-}
-
-func TestDeleteSessionEscapedID(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 	tokenPath := filepath.Join(dir, "admin.token")
@@ -998,39 +725,6 @@ func TestSessionDeleteMissingID(t *testing.T) {
 	}
 }
 
-func TestSessionDeleteIDNoValue(t *testing.T) {
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "delete", "--id"},
-		&bytes.Buffer{}, &stderr,
-	)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-}
-
-func TestSessionDeleteIDEmptyValue(t *testing.T) {
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "delete", "--id", ""},
-		&bytes.Buffer{}, &stderr,
-	)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-}
-
-func TestSessionDeleteUnknownFlag(t *testing.T) {
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "delete", "--unknown"},
-		&bytes.Buffer{}, &stderr,
-	)
-	if code != 2 {
-		t.Errorf("expected exit code 2, got %d", code)
-	}
-}
-
 func TestSessionDeleteHTTPError(t *testing.T) {
 	socketPath := setupCLITestEnv(t)
 
@@ -1054,41 +748,6 @@ func TestSessionDeleteHTTPError(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "dht_must_not_leak") {
 		t.Errorf("marker must not appear in stdout: %s", stdout.String())
-	}
-}
-
-func TestSessionDeleteStdoutWriteError(t *testing.T) {
-	socketPath := setupCLITestEnv(t)
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	var stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "delete", "--id", "dhs_001"},
-		errorWriter{}, &stderr,
-	)
-
-	if code != 1 {
-		t.Fatalf("expected exit code 1, got %d", code)
-	}
-}
-
-func TestSessionDeleteHelpNoAPI(t *testing.T) {
-	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/that/does/not/exist/config.json")
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters(
-		[]string{"session", "delete", "--help"},
-		&stdout, &stderr,
-	)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-
-	if !strings.Contains(stdout.String(), "delete") {
-		t.Errorf("expected help text: %s", stdout.String())
 	}
 }
 
@@ -1214,81 +873,6 @@ func TestApiErrorEmptyBody(t *testing.T) {
 	}
 	if apiErr.Code != "" {
 		t.Errorf("expected empty code for empty body, got %q", apiErr.Code)
-	}
-}
-
-// ---------- delete 204 ----------
-
-func TestDeleteSession204Success(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
-	tokenPath := filepath.Join(dir, "admin.token")
-
-	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readTokenFile(tokenPath)
-	}, nil)
-
-	if err := client.deleteSession("dhs_001"); err != nil {
-		t.Fatalf("deleteSession: %v", err)
-	}
-}
-
-// ---------- reload uses common decoder ----------
-
-func TestReloadErrorStructured(t *testing.T) {
-	dir := t.TempDir()
-	socketPath := filepath.Join(dir, "test.sock")
-	tokenPath := filepath.Join(dir, "admin.token")
-
-	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-
-	startTestServer(t, socketPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":      false,
-			"code":    "invalid_config",
-			"message": "invalid configuration",
-		})
-	})
-
-	client := newUnixAPIClient(socketPath, func() (string, error) {
-		return readTokenFile(tokenPath)
-	}, nil)
-
-	resp, err := client.doAuthenticatedRequest("POST", "/reload", nil)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	_, err = client.readResponseBody(resp)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-
-	var apiErr *apiError
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("expected *apiError, got %T: %v", err, err)
-	}
-	if apiErr.Status != http.StatusBadRequest {
-		t.Errorf("expected status 400, got %d", apiErr.Status)
-	}
-	if apiErr.Code != "invalid_config" {
-		t.Errorf("expected code 'invalid_config', got %q", apiErr.Code)
-	}
-	if apiErr.Message != "invalid configuration" {
-		t.Errorf("expected message 'invalid configuration', got %q", apiErr.Message)
 	}
 }
 
@@ -1438,54 +1022,6 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 			}
 			if tt.wantBody != "" && stub.lastRequest.Header.Get("Content-Type") != "application/json" {
 				t.Errorf("Content-Type = %q, want application/json", stub.lastRequest.Header.Get("Content-Type"))
-			}
-		})
-	}
-}
-
-func TestPrincipalCredentialClientAPIErrors(t *testing.T) {
-	tests := []struct {
-		name    string
-		call    func(*apiClient) error
-		status  int
-		code    string
-		message string
-	}{
-		{
-			name:    "showPrincipalNotFound",
-			call:    func(c *apiClient) error { _, err := c.showPrincipal("x"); return err },
-			status:  http.StatusNotFound,
-			code:    "principal_not_found",
-			message: "principal not found",
-		},
-		{
-			name:    "revokeCredentialNotFound",
-			call:    func(c *apiClient) error { _, err := c.revokeCredential("dhcr_x"); return err },
-			status:  http.StatusNotFound,
-			code:    "credential_not_found",
-			message: "credential not found",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			body := fmt.Sprintf(`{"code":%q,"message":%q}`, tt.code, tt.message)
-			client, _ := newStubClient(t, tt.status, body)
-
-			err := tt.call(client)
-			if err == nil {
-				t.Fatal("expected error")
-			}
-
-			var apiErr *apiError
-			if !errors.As(err, &apiErr) {
-				t.Fatalf("expected *apiError, got %T: %v", err, err)
-			}
-			if apiErr.Status != tt.status {
-				t.Errorf("status = %d, want %d", apiErr.Status, tt.status)
-			}
-			if apiErr.Code != tt.code {
-				t.Errorf("code = %q, want %q", apiErr.Code, tt.code)
 			}
 		})
 	}

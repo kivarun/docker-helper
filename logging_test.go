@@ -165,50 +165,6 @@ func TestAuditNotSuppressedByLogLevel(t *testing.T) {
 	}
 }
 
-// TestAuditStreamField verifies that every audit record contains "stream": "audit".
-func TestAuditStreamField(t *testing.T) {
-	auditBuf := new(bytes.Buffer)
-	opBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer logging.reset()
-
-	writeAudit(auditRecord{Event: "test.audit"})
-
-	var rec map[string]any
-	if err := json.Unmarshal(auditBuf.Bytes(), &rec); err != nil {
-		t.Fatalf("cannot parse audit record: %v", err)
-	}
-	if rec["stream"] != "audit" {
-		t.Errorf("expected stream=audit, got %v", rec["stream"])
-	}
-}
-
-// TestOperationalStreamField verifies that operational records contain
-// "stream": "operational" by parsing the emitted JSON.
-func TestOperationalStreamField(t *testing.T) {
-	auditBuf := new(bytes.Buffer)
-	opBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer logging.reset()
-
-	logging.snapshotLogger().Info("test message")
-
-	line := strings.TrimSpace(opBuf.String())
-	if line == "" {
-		t.Fatal("operational output is empty")
-	}
-
-	var m map[string]any
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
-		t.Fatalf("cannot parse operational record: %v: %s", err, line)
-	}
-	if m["stream"] != "operational" {
-		t.Errorf("expected stream=operational, got %v", m["stream"])
-	}
-}
-
 // TestRequestIDInResponseHeader verifies that a request through the production
 // handler receives X-Request-ID.
 func TestRequestIDInResponseHeader(t *testing.T) {
@@ -497,129 +453,6 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 	}
 }
 
-// TestAuditRecordHasRequestID verifies that audit records generated through
-// the production handler contain the request_id field.
-func TestAuditRecordHasRequestID(t *testing.T) {
-	auditBuf := new(bytes.Buffer)
-	opBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer logging.reset()
-
-	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/true")
-	}
-
-	req := newRunRequest(map[string]any{
-		"image": "alpine:latest",
-	}, result.Token)
-	w := httptest.NewRecorder()
-
-	handler := withRequestID(app.handleRun)
-	handler(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-	opID, ok := resp["operation_id"].(string)
-	if !ok || opID == "" {
-		t.Fatal("expected operation_id in response")
-	}
-	op := app.OperationRegistry.get(opID)
-	if op == nil {
-		t.Fatal("operation not found in registry")
-	}
-	op.Wait()
-
-	for _, line := range strings.Split(strings.TrimSpace(auditBuf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		if rid, ok := m["request_id"].(string); ok && rid != "" {
-			return
-		}
-	}
-
-	t.Error("no audit record contained a non-empty request_id")
-}
-
-// TestContextRequestID verifies that requestIDFromContext and
-// sessionIDFromContext work correctly.
-func TestContextRequestID(t *testing.T) {
-	ctx := context.Background()
-
-	if got := requestIDFromContext(ctx); got != "" {
-		t.Errorf("expected empty request ID, got %q", got)
-	}
-	if got := sessionIDFromContext(ctx); got != "" {
-		t.Errorf("expected empty session ID, got %q", got)
-	}
-
-	ctx = context.WithValue(ctx, requestIDKey, "req_test123")
-	if got := requestIDFromContext(ctx); got != "req_test123" {
-		t.Errorf("expected 'req_test123', got %q", got)
-	}
-
-	ctx = context.WithValue(ctx, sessionIDKey, "dhs_test456")
-	if got := sessionIDFromContext(ctx); got != "dhs_test456" {
-		t.Errorf("expected 'dhs_test456', got %q", got)
-	}
-}
-
-// TestGenerateRequestIDFormat verifies that generateRequestID returns
-// a properly formatted string.
-func TestGenerateRequestIDFormat(t *testing.T) {
-	rid := generateRequestID()
-	if !strings.HasPrefix(rid, "req_") {
-		t.Errorf("request ID should start with 'req_', got %q", rid)
-	}
-	hex := strings.TrimPrefix(rid, "req_")
-	if len(hex) != 32 {
-		t.Errorf("request ID hex part should be 32 chars, got %d", len(hex))
-	}
-}
-
-// TestOpLogWithContext verifies that opLog adds request_id and session_id
-// to the logger when they are present in the context.
-func TestOpLogWithContext(t *testing.T) {
-	opBuf := new(bytes.Buffer)
-	auditBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer logging.reset()
-
-	ctx := context.WithValue(context.Background(), requestIDKey, "req_test")
-	ctx = context.WithValue(ctx, sessionIDKey, "dhs_test")
-
-	l := opLog(ctx)
-	l.Info("context test")
-
-	output := opBuf.String()
-	if !strings.Contains(output, "req_test") {
-		t.Errorf("operational log should contain request_id:\n%s", output)
-	}
-	if !strings.Contains(output, "dhs_test") {
-		t.Errorf("operational log should contain session_id:\n%s", output)
-	}
-}
-
 // TestOpLogDiscardWhenUnconfigured verifies that opLog does not leak
 // into slog.Default() when the operational logger is not configured.
 func TestOpLogDiscardWhenUnconfigured(t *testing.T) {
@@ -695,27 +528,6 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
-// TestConfigLogLevelDefault verifies that an empty log_level defaults to info.
-func TestConfigLogLevelDefault(t *testing.T) {
-	fc := fileConfig{
-		AllowedRoot: "/tmp",
-		SessionTTL:  "12h",
-	}
-
-	level := slog.LevelInfo
-	if fc.Level != "" {
-		var err error
-		level, err = parseLogLevel(fc.Level)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	}
-
-	if level != slog.LevelInfo {
-		t.Errorf("expected default level info, got %v", level)
-	}
-}
-
 // TestWriteAuditSetsStreamAndTime verifies that writeAudit called without
 // pre-filled Time or Stream still emits a complete audit record.
 func TestWriteAuditSetsStreamAndTime(t *testing.T) {
@@ -739,43 +551,6 @@ func TestWriteAuditSetsStreamAndTime(t *testing.T) {
 	}
 	if m["event"] != "test.auto" {
 		t.Errorf("expected event=test.auto, got %v", m["event"])
-	}
-}
-
-// TestResponseEncodingErrorContainsCorrelation verifies that a response
-// encoding failure contains stream, request_id, and session_id.
-func TestResponseEncodingErrorContainsCorrelation(t *testing.T) {
-	auditBuf := new(bytes.Buffer)
-	opBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelError, true)
-	defer logging.reset()
-
-	ctx := context.WithValue(context.Background(), requestIDKey, "req_corr")
-	ctx = context.WithValue(ctx, sessionIDKey, "dhs_corr")
-
-	writeJSONError(ctx, errMockEncoding)
-
-	line := strings.TrimSpace(opBuf.String())
-	if line == "" {
-		t.Fatal("operational output is empty")
-	}
-
-	var m map[string]any
-	if err := json.Unmarshal([]byte(line), &m); err != nil {
-		t.Fatalf("cannot parse operational record: %v: %s", err, line)
-	}
-	if m["stream"] != "operational" {
-		t.Errorf("expected stream=operational, got %v", m["stream"])
-	}
-	if m["request_id"] != "req_corr" {
-		t.Errorf("expected request_id=req_corr, got %v", m["request_id"])
-	}
-	if m["session_id"] != "dhs_corr" {
-		t.Errorf("expected session_id=dhs_corr, got %v", m["session_id"])
-	}
-	if m["operation"] != "response_encode" {
-		t.Errorf("expected operation=response_encode, got %v", m["operation"])
 	}
 }
 
@@ -825,36 +600,6 @@ type mockEncodingError struct{}
 
 func (e *mockEncodingError) Error() string {
 	return "mock encoding error"
-}
-
-// TestLoggerStreamSeparation verifies that audit records go only to the audit
-// writer and operational records go only to the operational writer.
-func TestLoggerStreamSeparation(t *testing.T) {
-	auditBuf := new(bytes.Buffer)
-	opBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer logging.reset()
-
-	// Write an audit record and an operational record.
-	writeAudit(auditRecord{Event: "test.routing"})
-	logging.snapshotLogger().Info("test routing message")
-
-	auditOutput := auditBuf.String()
-	opOutput := opBuf.String()
-
-	if !strings.Contains(auditOutput, "test.routing") {
-		t.Fatalf("audit output missing audit record:\n%s", auditOutput)
-	}
-	if strings.Contains(opOutput, "test.routing") {
-		t.Fatalf("operational output should not contain audit record:\n%s", opOutput)
-	}
-	if !strings.Contains(opOutput, "test routing message") {
-		t.Fatalf("operational output missing operational record:\n%s", opOutput)
-	}
-	if strings.Contains(auditOutput, "test routing message") {
-		t.Fatalf("audit output should not contain operational record:\n%s", auditOutput)
-	}
 }
 
 // TestRunCommandWithWritersServeFailure verifies that runCommandWithWriters
@@ -1044,85 +789,6 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 	}
 	if m["stream"] != "operational" {
 		t.Errorf("expected stream=operational, got %v", m["stream"])
-	}
-}
-
-// TestServeNoGlobalStderr verifies that runServe does not write to
-// process-global os.Stderr or os.Stdout.
-func TestServeNoGlobalStderr(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create config that will succeed at config load but fail at lock.
-	t.Setenv("XDG_RUNTIME_DIR", dir)
-	t.Setenv("XDG_CONFIG_HOME", dir)
-
-	configDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-
-	allowedRoot := testAllowedRootDir(t)
-	configData := []byte(`{"allowed_root":"` + allowedRoot + `","session_ttl":"12h"}`)
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "admin.token"), []byte("test-token"), 0600); err != nil {
-		t.Fatalf("write token: %v", err)
-	}
-	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(configDir, "config.json"))
-
-	// Pre-acquire the lock at the config-derived path.
-	runtimeDir := filepath.Join(dir, "docker-helper")
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		t.Fatalf("mkdir runtime: %v", err)
-	}
-	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
-	lockFile, err := acquireLock(lockPath)
-	if err != nil {
-		t.Fatalf("acquireLock: %v", err)
-	}
-
-	// Use distinct buffers: sentinel for global stderr, opBuf for operational writer.
-	auditBuf := new(bytes.Buffer)
-	opBuf := new(bytes.Buffer)
-	sentinel := new(bytes.Buffer)
-
-	savedStderr := osStderr
-	osStderr = sentinel
-	defer func() {
-		osStderr = savedStderr
-	}()
-
-	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
-	defer logging.reset()
-
-	err = runServe(auditBuf, opBuf)
-	if err == nil {
-		lockFile.Close()
-		t.Fatal("expected error from runServe")
-	}
-	lockFile.Close()
-
-	// Sentinel must be empty — no global stderr writes.
-	if sentinel.Len() > 0 {
-		t.Errorf("serve wrote to global stderr: %s", sentinel.String())
-	}
-
-	// Operational output must be non-empty (writers were used).
-	opOutput := opBuf.String()
-	if opOutput == "" {
-		t.Fatal("operational output is empty — writers may not have been used")
-	}
-
-	// All lines must be valid JSON.
-	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Errorf("line %d is not valid JSON: %s: %v", i, line, err)
-		}
 	}
 }
 

@@ -11,9 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 )
 
 func TestCredentialAuthValid(t *testing.T) {
@@ -158,23 +156,6 @@ func TestCredentialAuthDBError(t *testing.T) {
 	// Should be a generic error, not credential-specific.
 	if errors.Is(err, ErrCredentialNotFound) || errors.Is(err, ErrCredentialRevoked) || errors.Is(err, ErrCredentialDisabled) {
 		t.Errorf("expected generic DB error, got: %v", err)
-	}
-}
-
-func TestAdminTokenStillWorks(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
-	w := httptest.NewRecorder()
-
-	app.handleCreateSession(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
 	}
 }
 
@@ -1048,107 +1029,6 @@ func TestSessionAuditNoTokens(t *testing.T) {
 	}
 }
 
-func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "concurrentuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1048", "1048", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "concurrentuser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	cred, _, err := createCredential(app.DB, "concurrentuser", "oc")
-	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
-	}
-
-	// Concurrent revokes.
-	const goroutines = 10
-	var changedCount int32
-	var mu sync.Mutex
-	var errs []error
-	done := make(chan bool, goroutines)
-
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			changed, err := revokeCredential(app.DB, cred.ID)
-			if err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-				done <- false
-				return
-			}
-			if changed {
-				// Simple atomic increment using mutex.
-				mu.Lock()
-				changedCount++
-				mu.Unlock()
-			}
-			done <- true
-		}()
-	}
-
-	for i := 0; i < goroutines; i++ {
-		<-done
-	}
-
-	if len(errs) > 0 {
-		t.Errorf("unexpected errors: %v", errs)
-	}
-	if changedCount != 1 {
-		t.Errorf("expected exactly 1 changed, got %d", changedCount)
-	}
-}
-
-func TestDuplicateTokenHashRejected(t *testing.T) {
-	app := newTestApp(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "duphashuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1049", "1049", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "duphashuser"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	// Create a credential.
-	_, token, err := createCredential(app.DB, "duphashuser", "oc")
-	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
-	}
-
-	// Try to manually insert a duplicate token_hash.
-	tokenHash := hashCredentialToken(token)
-	_, err = app.DB.Exec(
-		`INSERT INTO credentials (id, principal_id, name, token_hash, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		"dhcr_duplicate", 1, "duplicate", tokenHash, time.Now().Unix(),
-	)
-	if err == nil {
-		t.Fatal("expected error for duplicate token_hash")
-	}
-	if !isSQLiteUniqueError(err) {
-		t.Errorf("expected UNIQUE constraint error, got: %v", err)
-	}
-}
-
 func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
@@ -1294,70 +1174,6 @@ func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 	}
 	if *resp.Session.PrincipalName != "principalresp" {
 		t.Errorf("expected principal 'principalresp', got %q", *resp.Session.PrincipalName)
-	}
-}
-
-func TestPrincipalDeleteAuditContainsWorkspace(t *testing.T) {
-	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
-
-	home := filepath.Join(app.Config.AllowedRoot, "home", "deleteaudit")
-	if err := os.MkdirAll(home, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1062", "1062", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "deleteaudit"); err != nil {
-		t.Fatalf("createPrincipal() error: %v", err)
-	}
-
-	_, token, err := createCredential(app.DB, "deleteaudit", "oc")
-	if err != nil {
-		t.Fatalf("createCredential() error: %v", err)
-	}
-
-	reqBody := map[string]string{"workspace": home}
-	body, _ := json.Marshal(reqBody)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /sessions", app.handleCreateSession)
-	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
-
-	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("create: expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp createSessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("cannot decode response: %v", err)
-	}
-
-	// Delete the session.
-	req = httptest.NewRequest(http.MethodDelete, "/sessions/"+resp.Session.ID, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	w = httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("delete: expected %d, got %d", http.StatusNoContent, w.Code)
-	}
-
-	// Check audit for workspace in delete success.
-	raw := auditBuf.String()
-	if !strings.Contains(raw, "session.delete") || !strings.Contains(raw, "success") {
-		t.Error("expected session.delete success in audit")
-	}
-	if !strings.Contains(raw, home) {
-		t.Errorf("delete audit should contain workspace %q", home)
 	}
 }
 

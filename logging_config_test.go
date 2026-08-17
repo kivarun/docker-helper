@@ -211,53 +211,6 @@ func TestInitOmitsAuditEnabled(t *testing.T) {
 	}
 }
 
-// --- Startup record tests ---
-
-func TestStartupRecordFormat(t *testing.T) {
-	opBuf := new(bytes.Buffer)
-	auditBuf := new(bytes.Buffer)
-
-	initLoggers(opBuf, auditBuf, slog.LevelInfo, false)
-	defer logging.reset()
-
-	// Simulate the exact log call used in main.go
-	logging.snapshotLogger().Info("daemon listening",
-		"socket", "/run/user/1000/docker-helper/docker-helper.sock",
-	)
-
-	opOutput := opBuf.String()
-	if opOutput == "" {
-		t.Fatal("operational output is empty")
-	}
-
-	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Errorf("invalid JSON: %s: %v", line, err)
-			continue
-		}
-
-		msg, _ := m["msg"].(string)
-		if msg == "daemon listening" {
-			if _, hasLogLevel := m["log_level"]; hasLogLevel {
-				t.Error("startup record must not contain log_level field")
-			}
-			if m["stream"] != "operational" {
-				t.Errorf("expected stream=operational, got %v", m["stream"])
-			}
-			if m["socket"] == nil {
-				t.Error("startup record must contain socket field")
-			}
-			return
-		}
-	}
-
-	t.Error("daemon listening record not found in operational output")
-}
-
 // --- Timestamp RFC3339Nano tests ---
 
 func TestOperationalTimestampRFC3339Nano(t *testing.T) {

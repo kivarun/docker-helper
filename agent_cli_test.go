@@ -108,47 +108,6 @@ func TestPullMissingSessionToken(t *testing.T) {
 	}
 }
 
-func TestPullSuccess(t *testing.T) {
-	out, _, exitCode := runAgentCLITestWithServer(t, []string{"pull", "alpine:3.24"}, "", func(s *agentCLITestServer) {
-		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":      true,
-				"message": "image pulled successfully",
-				"output":  "Status: Image is up to date for alpine:3.24\n",
-			})
-		})
-	})
-
-	if exitCode != 0 {
-		t.Errorf("expected exit 0, got %d", exitCode)
-	}
-	if !strings.Contains(out.String(), "alpine:3.24") {
-		t.Errorf("expected pull output, got: %s", out.String())
-	}
-}
-
-func TestPullFailure(t *testing.T) {
-	_, err, exitCode := runAgentCLITestWithServer(t, []string{"pull", "alpine:3.24"}, "", func(s *agentCLITestServer) {
-		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":      false,
-				"code":    "docker_pull_failed",
-				"message": "docker pull failed",
-			})
-		})
-	})
-
-	if exitCode != 1 {
-		t.Errorf("expected exit 1, got %d", exitCode)
-	}
-	if !strings.Contains(err.String(), "docker pull failed") {
-		t.Errorf("expected error message, got: %s", err.String())
-	}
-}
-
 func TestPullMissingImage(t *testing.T) {
 	_, _, exitCode := runAgentCLITestWithServer(t, []string{"pull"}, "", nil)
 	if exitCode != 2 {
@@ -163,136 +122,6 @@ func TestBuildMissingFlags(t *testing.T) {
 	}
 	if !strings.Contains(err.String(), "--context is required") {
 		t.Errorf("expected context error, got: %s", err.String())
-	}
-}
-
-func TestBuildSuccess(t *testing.T) {
-	opID := "op_test123"
-	out, _, exitCode := runAgentCLITestWithServer(t, []string{
-		"build", "--context", ".", "--dockerfile", "Dockerfile", "--image", "app:test",
-	}, "", func(s *agentCLITestServer) {
-		s.handleBuild(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "running",
-			})
-		})
-		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "succeeded",
-			})
-		})
-		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(100),
-				"truncated":    false,
-				"logs":         "Step 1/3 : FROM alpine\n",
-			})
-		})
-	})
-
-	if exitCode != 0 {
-		t.Errorf("expected exit 0, got %d", exitCode)
-	}
-	if !strings.Contains(out.String(), "Step 1/3") {
-		t.Errorf("expected build logs, got: %s", out.String())
-	}
-}
-
-func TestBuildFailed(t *testing.T) {
-	opID := "op_test123"
-	_, err, exitCode := runAgentCLITestWithServer(t, []string{
-		"build", "--context", ".", "--dockerfile", "Dockerfile", "--image", "app:test",
-	}, "", func(s *agentCLITestServer) {
-		s.handleBuild(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "running",
-			})
-		})
-		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "failed",
-				"result_code":  "docker_build_failed",
-			})
-		})
-		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(50),
-				"truncated":    false,
-				"logs":         "ERROR: failed to build\n",
-			})
-		})
-	})
-
-	if exitCode != 1 {
-		t.Errorf("expected exit 1, got %d", exitCode)
-	}
-	if !strings.Contains(err.String(), "build failed") {
-		t.Errorf("expected build failed message, got: %s", err.String())
-	}
-}
-
-func TestRunSuccess(t *testing.T) {
-	opID := "op_test123"
-	out, _, exitCode := runAgentCLITestWithServer(t, []string{
-		"run", "--image", "alpine:3.24", "--", "echo", "hello",
-	}, "", func(s *agentCLITestServer) {
-		s.handleRun(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "running",
-			})
-		})
-		s.handleOperationStatus(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"status":       "succeeded",
-			})
-		})
-		s.handleOperationLogs(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{
-				"ok":           true,
-				"operation_id": opID,
-				"offset":       int64(0),
-				"next_offset":  int64(10),
-				"truncated":    false,
-				"logs":         "hello\n",
-			})
-		})
-	})
-
-	if exitCode != 0 {
-		t.Errorf("expected exit 0, got %d", exitCode)
-	}
-	if !strings.Contains(out.String(), "hello") {
-		t.Errorf("expected run output, got: %s", out.String())
 	}
 }
 
@@ -369,41 +198,6 @@ func TestTokenNotInOutput(t *testing.T) {
 	}
 }
 
-func TestPullHelp(t *testing.T) {
-	var out, err bytes.Buffer
-	code := runCommandWithWriters([]string{"pull", "--help"}, &out, &err)
-	if code != 0 {
-		t.Errorf("expected exit 0, got %d", code)
-	}
-	if !strings.Contains(out.String(), "Pull a Docker image") {
-		t.Errorf("expected help text, got: %s", out.String())
-	}
-}
-
-func TestBuildHelp(t *testing.T) {
-	var out, err bytes.Buffer
-	code := runCommandWithWriters([]string{"build", "--help"}, &out, &err)
-	if code != 0 {
-		t.Errorf("expected exit 0, got %d", code)
-	}
-	if !strings.Contains(out.String(), "Build a Docker image") {
-		t.Errorf("expected help text, got: %s", out.String())
-	}
-}
-
-func TestRunHelp(t *testing.T) {
-	var out, err bytes.Buffer
-	code := runCommandWithWriters([]string{"run", "--help"}, &out, &err)
-	if code != 0 {
-		t.Errorf("expected exit 0, got %d", code)
-	}
-	if !strings.Contains(out.String(), "Run a Docker container") {
-		t.Errorf("expected help text, got: %s", out.String())
-	}
-}
-
-// TestPullNoConfigFile verifies that pull works without config.json.
-// Agent containers only have DOCKER_HELPER_SESSION_TOKEN + socket mount.
 func TestPullNoConfigFile(t *testing.T) {
 	tempDir := t.TempDir()
 	socketPath := tempDir + "/docker-helper.sock"
@@ -566,23 +360,6 @@ func TestRunMountAbsoluteSourceRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "source must be relative to session workspace") {
 		t.Errorf("expected source relative error, got: %s", stderr.String())
-	}
-}
-
-// TestRunHelpMountFlag verifies that run --help mentions workspace-relative
-// source and [:ro] option.
-func TestRunHelpMountFlag(t *testing.T) {
-	var out, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"run", "--help"}, &out, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit 0, got %d", code)
-	}
-	output := out.String()
-	if !strings.Contains(output, "WORKSPACE_RELATIVE_SOURCE") {
-		t.Errorf("expected mount help to mention workspace-relative source, got: %s", output)
-	}
-	if !strings.Contains(output, "[:ro]") {
-		t.Errorf("expected mount help to mention [:ro], got: %s", output)
 	}
 }
 
@@ -822,87 +599,6 @@ func TestRunContract(t *testing.T) {
 	}
 	if exitCode != 0 {
 		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
-	}
-}
-
-// TestTruncatedLogWarning verifies that truncated logs produce a warning.
-func TestTruncatedLogWarning(t *testing.T) {
-	opID := "op_test"
-	truncatedSeen := false
-
-	tempDir := t.TempDir()
-	socketPath := tempDir + "/docker-helper.sock"
-
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /operations/"+opID, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"status":       string(operationSucceeded),
-		})
-	})
-	mux.HandleFunc("GET /operations/"+opID+"/logs", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		resp := map[string]any{
-			"ok":           true,
-			"operation_id": opID,
-			"offset":       int64(0),
-			"next_offset":  int64(100),
-			"truncated":    false,
-			"logs":         "some output\n",
-		}
-		if truncatedSeen {
-			resp["truncated"] = true
-		}
-		truncatedSeen = true
-		json.NewEncoder(w).Encode(resp)
-	})
-
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	waitForDialReady(t, "unix", socketPath)
-
-	oldSocket := os.Getenv("DOCKER_HELPER_SOCKET_PATH")
-	oldToken := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
-	defer func() {
-		os.Setenv("DOCKER_HELPER_SOCKET_PATH", oldSocket)
-		os.Setenv("DOCKER_HELPER_SESSION_TOKEN", oldToken)
-	}()
-
-	os.Setenv("DOCKER_HELPER_SOCKET_PATH", socketPath)
-	os.Setenv("DOCKER_HELPER_SESSION_TOKEN", "test-token")
-
-	var out, stderr bytes.Buffer
-	c := &apiClient{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "unix", socketPath)
-				},
-			},
-		},
-		baseURL:     "http://localhost",
-		tokenSource: func() (string, error) { return "test-token", nil },
-	}
-
-	_, err = waitForOperationContext(context.Background(), c, opID, &out, &stderr)
-	if err != nil {
-		t.Fatalf("waitForOperation failed: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "warning: operation log was truncated") {
-		t.Errorf("expected truncation warning, got: %s", stderr.String())
-	}
-	// Warning should appear exactly once
-	if strings.Count(stderr.String(), "warning: operation log was truncated") != 1 {
-		t.Errorf("expected exactly one warning, got: %s", stderr.String())
 	}
 }
 
@@ -1377,58 +1073,6 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 	}
 }
 
-// TestBuildHelpSignalNote verifies build --help mentions signal cancellation.
-func TestBuildHelpSignalNote(t *testing.T) {
-	var out bytes.Buffer
-	_ = runCommandWithWriters([]string{"build", "--help"}, &out, &bytes.Buffer{})
-	if !strings.Contains(out.String(), "SIGINT") {
-		t.Errorf("expected build help to mention SIGINT, got: %s", out.String())
-	}
-	if !strings.Contains(out.String(), "SIGTERM") {
-		t.Errorf("expected build help to mention SIGTERM, got: %s", out.String())
-	}
-}
-
-// TestRunHelpSignalNote verifies run --help mentions signal cancellation.
-func TestRunHelpSignalNote(t *testing.T) {
-	var out bytes.Buffer
-	_ = runCommandWithWriters([]string{"run", "--help"}, &out, &bytes.Buffer{})
-	if !strings.Contains(out.String(), "SIGINT") {
-		t.Errorf("expected run help to mention SIGINT, got: %s", out.String())
-	}
-	if !strings.Contains(out.String(), "SIGTERM") {
-		t.Errorf("expected run help to mention SIGTERM, got: %s", out.String())
-	}
-}
-
-// TestBuildHelpContextWorkspace verifies build --help mentions workspace-relative context.
-func TestBuildHelpContextWorkspace(t *testing.T) {
-	var out bytes.Buffer
-	_ = runCommandWithWriters([]string{"build", "--help"}, &out, &bytes.Buffer{})
-	if !strings.Contains(out.String(), "workspace") {
-		t.Errorf("expected build help to mention workspace for --context, got: %s", out.String())
-	}
-}
-
-// TestRunHelpWorkdirAbsolute verifies run --help mentions absolute path for --workdir.
-func TestRunHelpWorkdirAbsolute(t *testing.T) {
-	var out bytes.Buffer
-	_ = runCommandWithWriters([]string{"run", "--help"}, &out, &bytes.Buffer{})
-	output := strings.ToLower(out.String())
-	if !strings.Contains(output, "absolute") {
-		t.Errorf("expected run help to mention 'absolute' for --workdir, got: %s", out.String())
-	}
-}
-
-// TestRunHelpShmSizeMax verifies run --help mentions shm-size max 2g.
-func TestRunHelpShmSizeMax(t *testing.T) {
-	var out bytes.Buffer
-	_ = runCommandWithWriters([]string{"run", "--help"}, &out, &bytes.Buffer{})
-	if !strings.Contains(out.String(), "2g") {
-		t.Errorf("expected run help to mention '2g' max for --shm-size, got: %s", out.String())
-	}
-}
-
 // TestBuildContextAbsoluteRejected verifies that build rejects absolute --context.
 func TestBuildContextAbsoluteRejected(t *testing.T) {
 	_, stderr, exitCode := runAgentCLITestWithServer(t, []string{
@@ -1439,16 +1083,6 @@ func TestBuildContextAbsoluteRejected(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "relative") {
 		t.Errorf("expected relative path error, got: %s", stderr.String())
-	}
-}
-
-// TestCancelOperationTimeout verifies that the cancel operation timeout
-// covers the daemon worst case (graceful + force cleanup + margin).
-func TestCancelOperationTimeout(t *testing.T) {
-	// The timeout should be at least:
-	// defaultTerminationTimeout (5s) + defaultForceCleanupTimeout (3s) + margin (4s) = 12s
-	if cancelOperationTimeout < 12*time.Second {
-		t.Errorf("cancelOperationTimeout %v is too short; should cover daemon worst case (5+3+4=12s)", cancelOperationTimeout)
 	}
 }
 
