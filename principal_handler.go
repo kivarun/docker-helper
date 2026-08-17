@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -98,6 +99,10 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		case isErrPrincipalExists(err):
 			writeError(ctx, w, http.StatusConflict, "principal_exists", "principal already exists")
 		default:
+			opLog(ctx).Error("principal create failed",
+				slog.String("operation", "principal_create"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
@@ -131,6 +136,10 @@ func (a *App) handleShowPrincipal(w http.ResponseWriter, r *http.Request) {
 		if isErrPrincipalNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		} else {
+			opLog(ctx).Error("principal show failed",
+				slog.String("operation", "principal_show"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
@@ -148,6 +157,10 @@ func (a *App) handleListPrincipals(w http.ResponseWriter, r *http.Request) {
 
 	summaries, err := listPrincipalSummaries(a.DB)
 	if err != nil {
+		opLog(ctx).Error("principal list failed",
+			slog.String("operation", "principal_list"),
+			slog.String("error", err.Error()),
+		)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
@@ -218,6 +231,10 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		if isErrPrincipalNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		} else {
+			opLog(ctx).Error("principal set failed",
+				slog.String("operation", "principal_set"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
@@ -307,6 +324,10 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		default:
+			opLog(ctx).Error("principal allowed_root_add failed",
+				slog.String("operation", "principal_allowed_root_add"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
@@ -396,6 +417,10 @@ func (a *App) handleRemoveAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		default:
+			opLog(ctx).Error("principal allowed_root_remove failed",
+				slog.String("operation", "principal_allowed_root_remove"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
@@ -555,6 +580,10 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		case isErrCredentialExists(err):
 			writeError(ctx, w, http.StatusConflict, "credential_exists", "credential already exists")
 		default:
+			opLog(ctx).Error("credential create failed",
+				slog.String("operation", "credential_create"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
@@ -594,6 +623,10 @@ func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 		if isErrPrincipalNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		} else {
+			opLog(ctx).Error("credential list failed",
+				slog.String("operation", "credential_list"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
@@ -631,11 +664,12 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, err := revokeCredential(a.DB, id)
-	duration := time.Since(started).Round(time.Millisecond).String()
-
-	if err != nil {
-		if isErrCredentialNotFound(err) {
+	// Pre-read credential metadata before any mutation so that audit
+	// always has full context even if the mutation fails.
+	cred, preReadErr := findCredentialByID(a.DB, id)
+	if preReadErr != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		if isErrCredentialNotFound(preReadErr) {
 			writeAuditWithRequestID(ctx, auditRecord{
 				Event:    "principal.credential_revoke",
 				Result:   "credential_not_found",
@@ -648,19 +682,31 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 				Result:   "error",
 				Duration: duration,
 			})
+			opLog(ctx).Error("credential revoke pre-read failed",
+				slog.String("operation", "credential_revoke"),
+				slog.String("error", preReadErr.Error()),
+			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
 	}
 
-	// Fetch credential metadata for audit.
-	cred, err := findCredentialByID(a.DB, id)
+	changed, err := revokeCredential(a.DB, id)
+	duration := time.Since(started).Round(time.Millisecond).String()
+
 	if err != nil {
 		writeAuditWithRequestID(ctx, auditRecord{
-			Event:    "principal.credential_revoke",
-			Result:   "error",
-			Duration: duration,
+			Event:          "principal.credential_revoke",
+			PrincipalName:  cred.Principal,
+			CredentialID:   cred.ID,
+			CredentialName: cred.Name,
+			Result:         "error",
+			Duration:       duration,
 		})
+		opLog(ctx).Error("credential revoke mutation failed",
+			slog.String("operation", "credential_revoke"),
+			slog.String("error", err.Error()),
+		)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}

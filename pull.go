@@ -63,8 +63,9 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	cmd.Stderr = &output
 
 	err = cmd.Start()
+	var waitErr error
 	if err == nil {
-		err = cmd.Wait()
+		waitErr = cmd.Wait()
 	}
 	outputBytes := output.Bytes()
 	duration := time.Since(started).Round(time.Millisecond).String()
@@ -73,13 +74,25 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	var exitCode *int
 
 	if err != nil {
-		exitCode = extractExitCode(err)
+		// cmd.Start() failed — operational error.
 		result = "pull_error"
 
-		opLog(ctx).Error("docker pull error",
+		opLog(ctx).Error("cannot start docker pull",
 			slog.String("operation", "pull"),
 			slog.String("error", err.Error()),
 		)
+
+		writeJSONRaw(ctx, w, http.StatusInternalServerError, pullResponse{
+			OK:       false,
+			Code:     "docker_pull_failed",
+			Message:  "docker pull failed",
+			Output:   string(outputBytes),
+			Duration: duration,
+		})
+	} else if waitErr != nil {
+		// cmd.Wait() returned non-zero — workload result, not operational error.
+		exitCode = extractExitCode(waitErr)
+		result = "pull_error"
 
 		writeJSONRaw(ctx, w, http.StatusInternalServerError, pullResponse{
 			OK:       false,

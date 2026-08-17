@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -38,6 +39,10 @@ func (a *App) handleRotateAdminToken(w http.ResponseWriter, r *http.Request) {
 			Result:   "error",
 			Duration: duration,
 		})
+		opLog(ctx).Error("admin token rotate failed",
+			slog.String("operation", "admin_token_rotate"),
+			slog.String("error", err.Error()),
+		)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}

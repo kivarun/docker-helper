@@ -743,9 +743,10 @@ func TestDockerErrorLogPull(t *testing.T) {
 
 	raw := opBuf.String()
 
-	// Error is logged
-	if !strings.Contains(raw, "exit status 1") {
-		t.Errorf("expected error in log, got:\n%s", raw)
+	// Non-zero exit is a workload result, not an operational error.
+	// No ERROR should be logged for non-zero exit.
+	if strings.Contains(raw, "ERROR") {
+		t.Errorf("pull non-zero exit must not produce operational ERROR, got:\n%s", raw)
 	}
 	// Docker output not logged
 	if strings.Contains(raw, dockerOutput) {

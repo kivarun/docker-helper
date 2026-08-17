@@ -160,12 +160,16 @@ func writeAudit(record auditRecord) {
 			l := logger.With(
 				slog.String("operation", "audit_encode"),
 				slog.String("error", err.Error()),
+				slog.String("audit_event", record.Event),
 			)
 			if record.RequestID != "" {
 				l = l.With(slog.String("request_id", record.RequestID))
 			}
 			if record.SessionID != "" {
 				l = l.With(slog.String("session_id", record.SessionID))
+			}
+			if record.OperationID != "" {
+				l = l.With(slog.String("operation_id", record.OperationID))
 			}
 			l.Error("audit: cannot marshal record")
 		}
@@ -180,12 +184,16 @@ func writeAudit(record auditRecord) {
 			l := logger.With(
 				slog.String("operation", "audit_write"),
 				slog.String("error", err.Error()),
+				slog.String("audit_event", record.Event),
 			)
 			if record.RequestID != "" {
 				l = l.With(slog.String("request_id", record.RequestID))
 			}
 			if record.SessionID != "" {
 				l = l.With(slog.String("session_id", record.SessionID))
+			}
+			if record.OperationID != "" {
+				l = l.With(slog.String("operation_id", record.OperationID))
 			}
 			l.Error("audit: cannot write record")
 		}

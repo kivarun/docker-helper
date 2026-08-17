@@ -153,6 +153,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", err.Error()),
 			)
 		}
+		opLog(ctx).Error("cannot start build process",
+			slog.String("operation", "build"),
+			slog.String("error", result.Err.Error()),
+		)
 		msg := fmt.Sprintf("cannot start build: %v", result.Err)
 		op.fail("docker_build_failed", msg, nil)
 		writeOperationCreated(ctx, w, op.ID, op.State)

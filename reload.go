@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
 // runReload is the CLI entry point for the reload command.
@@ -47,13 +48,22 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	started := time.Now()
+	ctx := r.Context()
+
 	newCfg, err := loadConfig()
 	if err != nil {
-		opLog(r.Context()).Error("reload config error",
+		duration := time.Since(started).Round(time.Millisecond).String()
+		opLog(ctx).Error("reload config error",
 			slog.String("operation", "reload"),
 			slog.String("error", err.Error()),
 		)
-		writeError(r.Context(), w, http.StatusBadRequest,
+		writeAuditWithRequestID(ctx, auditRecord{
+			Event:    "config.reload",
+			Result:   "invalid_config",
+			Duration: duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest,
 			"invalid_config",
 			"invalid configuration",
 		)
@@ -70,9 +80,30 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	// with the new log level and audit setting under write lock.
 	opW, audW := logging.snapshotWriters()
 
-	logging.configure(opW, audW, newCfg.LogLevel, newCfg.AuditEnabled)
+	// Capture old audit_enabled state before reconfiguring.
+	oldAuditEnabled, _, _ := logging.snapshotAudit()
 
-	opLog(r.Context()).Info("configuration reloaded",
+	// When audit is being disabled (true->false), write the success event
+	// before reconfiguring so the record is actually emitted.
+	if oldAuditEnabled && !newCfg.AuditEnabled {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeAuditWithRequestID(ctx, auditRecord{
+			Event:    "config.reload",
+			Result:   "success",
+			Duration: duration,
+		})
+		logging.configure(opW, audW, newCfg.LogLevel, newCfg.AuditEnabled)
+	} else {
+		logging.configure(opW, audW, newCfg.LogLevel, newCfg.AuditEnabled)
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeAuditWithRequestID(ctx, auditRecord{
+			Event:    "config.reload",
+			Result:   "success",
+			Duration: duration,
+		})
+	}
+
+	opLog(ctx).Info("configuration reloaded",
 		slog.String("allowed_root", newCfg.AllowedRoot),
 		slog.String("session_ttl", newCfg.SessionTTL.String()),
 		slog.String("log_level", newCfg.LogLevel.String()),

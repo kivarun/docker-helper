@@ -551,6 +551,10 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("error", ce.Error()),
 			)
 		}
+		opLog(ctx).Error("cannot start run process",
+			slog.String("operation", "run"),
+			slog.String("error", result.Err.Error()),
+		)
 		msg := fmt.Sprintf("cannot start run: %v", result.Err)
 		op.fail("docker_run_failed", msg, nil)
 		writeOperationCreated(ctx, w, op.ID, op.State)

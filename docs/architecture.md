@@ -1169,6 +1169,16 @@ Every HTTP request receives a server-generated request ID. It is:
 
 The server does not trust or reuse any client-supplied request ID.
 
+**Async operation completion** (build.finish, run.finish) is not
+request-scoped. These audit records do not include `request_id`.
+Correlation for async events uses `session_id` + `operation_id`.
+
+**Audit writer failures** are logged as operational ERROR records with
+`audit_event` and `operation_id` (when present in the original record)
+for correlation. Existing `request_id` and `session_id` are preserved.
+Audit writer failure is best-effort and does not affect the request
+or operation outcome.
+
 ### Sensitive data
 
 The following are **never** logged:
@@ -1388,9 +1398,25 @@ Emitted after a Docker pull completes (success or failure).
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | pull wall-clock time |
 
+#### config.reload
+
+Emitted for every `POST /reload` request after admin authentication.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `request_id` | string | request correlation ID |
+| `result` | string | `success` or `invalid_config` |
+| `duration` | string | request wall-clock time |
+
+When `audit_enabled` changes from `true` to `false`, the `config.reload`
+success event is written before audit is disabled, ensuring the event
+is not lost. When `audit_enabled` changes from `false` to `true`, the
+event is written after the new configuration is applied.
+
 ### What is never logged
 
-The daemon audit log and operational log never contain:
+The following are **never** logged to either the audit or operational
+streams:
 
 - the raw HTTP request body;
 - HTTP request headers;
@@ -1398,8 +1424,15 @@ The daemon audit log and operational log never contain:
 - environment variable values (only names appear in `env_keys`);
 - build-arg values (only names appear in `build_arg_keys`);
 - Docker build output or container stdout/stderr;
-- internal error messages or stack traces;
-- command arguments (only `command_arg_count` is recorded).
+- command arguments (only `command_arg_count` is recorded);
+- registry passwords;
+- CA certificate contents.
+
+**Audit records** never contain internal error messages or stack traces.
+
+**Operational ERROR/WARN records** may contain internal error diagnostics
+for debugging unexpected failures. These error strings are operational
+internals and are not exposed to the API.
 
 This section refers to the daemon's audit and operational logs. The per-operation
 output buffer accessed via `GET /operations/{id}/logs` is intentionally separate:
