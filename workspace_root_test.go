@@ -160,25 +160,29 @@ func TestCanonicalizeWorkspaceRootSymlinkEscape(t *testing.T) {
 }
 
 func TestCanonicalizeWorkspaceRootTildeExpansion(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home directory")
-	}
+	home := safeTestBaseDir(t)
 
-	// Create a valid workspace root under home
-	testDir := filepath.Join(home, "docker-helper-test", "tilde-test")
-	if err := os.MkdirAll(testDir, 0755); err != nil {
+	// Create a valid workspace root directly under home so it is addressable
+	// with a ~/ spelling.
+	testDir, err := os.MkdirTemp(home, ".docker-helper-test-*")
+	if err != nil {
+		t.Fatalf("cannot create workspace root test dir: %v", err)
+	}
+	defer os.RemoveAll(testDir)
+
+	rel, err := filepath.Rel(home, testDir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(filepath.Join(home, "docker-helper-test"))
+	tildePath := "~/" + rel
 
-	canonical, err := canonicalizeWorkspaceRootForAdd("~/docker-helper-test/tilde-test")
+	canonical, err := canonicalizeWorkspaceRootForAdd(tildePath)
 	if err != nil {
-		t.Fatalf("canonicalizeWorkspaceRootForAdd(~/docker-helper-test/tilde-test) = %v", err)
+		t.Fatalf("canonicalizeWorkspaceRootForAdd(%q) = %v", tildePath, err)
 	}
 	expected, _ := filepath.EvalSymlinks(testDir)
 	if canonical != expected {
-		t.Errorf("canonicalizeWorkspaceRootForAdd = %q, want %q", canonical, expected)
+		t.Errorf("canonicalizeWorkspaceRootForAdd(%q) = %q, want %q", tildePath, canonical, expected)
 	}
 }
 

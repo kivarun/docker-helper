@@ -6,40 +6,34 @@ import (
 	"testing"
 )
 
-// testAllowedRootDir creates a non-forbidden test directory for use as an
-// allowed_root in tests. /tmp is forbidden by the workspace root security policy.
-// The directory is cleaned up when the test finishes.
-func testAllowedRootDir(t *testing.T) string {
+// safeTestBaseDir returns a writable base directory outside the forbidden
+// /tmp tree where unique workspace-root test directories can be created.
+// Workspace roots must live outside /tmp (see workspace root security
+// policy); t.TempDir() is therefore unsuitable for them.
+func safeTestBaseDir(t *testing.T) string {
 	t.Helper()
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/home"
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("cannot determine home directory: %v", err)
 	}
-	// Use a unique subdirectory per test to avoid conflicts.
-	dir := filepath.Join(home, "docker-helper-test", t.Name())
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		os.RemoveAll(filepath.Join(home, "docker-helper-test"))
-	})
-	return dir
+	return home
 }
 
-// testAllowedRootPath creates a non-forbidden path with a given name for use
-// as a workspace root in AppArmor tests. The path is created if it doesn't exist.
-func testAllowedRootPath(t *testing.T, name string) string {
+// testAllowedRootDir creates a unique directory that is valid as a workspace
+// root (outside the forbidden /tmp tree) and returns it in canonical form,
+// matching what loadConfig stores in Config.AllowedRoot. Cleanup removes only
+// the specific directory returned; tests must never remove a shared parent
+// in HOME.
+func testAllowedRootDir(t *testing.T) string {
 	t.Helper()
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/home"
+	dir, err := os.MkdirTemp(safeTestBaseDir(t), ".docker-helper-test-*")
+	if err != nil {
+		t.Fatalf("cannot create workspace root test dir: %v", err)
 	}
-	dir := filepath.Join(home, "docker-helper-test", t.Name(), name)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("cannot canonicalize workspace root test dir: %v", err)
 	}
-	t.Cleanup(func() {
-		os.RemoveAll(filepath.Join(home, "docker-helper-test"))
-	})
-	return dir
+	return canonical
 }

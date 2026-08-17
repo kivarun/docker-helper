@@ -507,10 +507,14 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: allowed_root must be a non-empty absolute path\n")
 			return 2
 		}
-		if _, err := canonicalizeWorkspaceRootForAdd(value); err != nil {
+		canonical, err := canonicalizeWorkspaceRootForAdd(value)
+		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 2
 		}
+		// Persist the canonical form so the stored value cannot later be
+		// retargeted through symlink manipulation.
+		value = canonical
 	case "session_ttl":
 		if _, err := time.ParseDuration(value); err != nil {
 			fmt.Fprintf(stderr, "error: invalid duration %q: %v\n", value, err)

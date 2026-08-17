@@ -2500,3 +2500,58 @@ func TestValidateRootPathForRemoveNonDirectory(t *testing.T) {
 		t.Errorf("expected %s, got %s", tmpfile, canonical)
 	}
 }
+
+// --- Stale unsafe roots: parser tolerance and REMOVE semantics ---
+
+// TestApparmorStaleUnsafeRootPreservedSemantics verifies that a managed
+// fragment containing a root that violates the current workspace root
+// policy (e.g., a pre-policy /var/... root) is still parsed, can still be
+// removed (stale REMOVE semantics), and is diagnosed by check.
+func TestApparmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
+	_, mgr, _ := setupApparmorTest(t)
+
+	staleUnsafe := "/var/lib/legacy-workspaces"
+	fragmentPath := mgr.managedFragmentPath
+	if err := os.MkdirAll(filepath.Dir(fragmentPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fragmentPath, renderFragment([]string{staleUnsafe}), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) Parser must tolerate the stale unsafe root.
+	roots, err := mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots() error: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != staleUnsafe {
+		t.Fatalf("listRoots() = %v, want [%s]", roots, staleUnsafe)
+	}
+
+	// 2) Stale REMOVE semantics: the unsafe root must still be removable.
+	res, err := mgr.removeRoot(staleUnsafe)
+	if err != nil {
+		t.Fatalf("removeRoot() error: %v", err)
+	}
+	if !res.Changed {
+		t.Error("removeRoot should report Changed=true")
+	}
+	roots, err = mgr.listRoots()
+	if err != nil {
+		t.Fatalf("listRoots() after remove: %v", err)
+	}
+	if len(roots) != 0 {
+		t.Errorf("listRoots() after remove = %v, want empty", roots)
+	}
+
+	// 3) check() must diagnose the policy violation (not crash or reject parse).
+	if err := os.WriteFile(fragmentPath, renderFragment([]string{staleUnsafe}), 0644); err != nil {
+		t.Fatal(err)
+	}
+	err = mgr.check()
+	if err == nil {
+		t.Error("check() should diagnose policy-violating managed root")
+	} else if !strings.Contains(err.Error(), "workspace root policy") {
+		t.Errorf("check() error = %q, want workspace root policy diagnostic", err.Error())
+	}
+}

@@ -17,20 +17,21 @@ import (
 	"time"
 )
 
-// testAllowedRoot returns a non-forbidden allowed_root path for tests.
-// /tmp is forbidden by the workspace root security policy.
+// testAllowedRoot returns a unique non-forbidden allowed_root path for
+// tests, in canonical form (matching Config.AllowedRoot). /tmp is forbidden
+// by the workspace root security policy.
 func testAllowedRoot(t *testing.T) string {
 	t.Helper()
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/home"
-	}
-	p := filepath.Join(home, "docker-helper-test-work")
-	if err := os.MkdirAll(p, 0755); err != nil {
-		t.Fatal(err)
+	p, err := os.MkdirTemp(safeTestBaseDir(t), ".docker-helper-test-*")
+	if err != nil {
+		t.Fatalf("cannot create allowed root test dir: %v", err)
 	}
 	t.Cleanup(func() { os.RemoveAll(p) })
-	return p
+	canonical, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatalf("cannot canonicalize allowed root test dir: %v", err)
+	}
+	return canonical
 }
 
 func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPath string, cleanup func()) {
@@ -579,11 +580,7 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	}
 
 	// Update config file
-	newAllowedRoot := filepath.Join(os.Getenv("HOME"), "docker-helper-test-new-work")
-	if err := os.MkdirAll(newAllowedRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(newAllowedRoot) })
+	newAllowedRoot := testAllowedRoot(t)
 
 	newCfg := map[string]any{
 		"allowed_root": newAllowedRoot,
@@ -622,13 +619,18 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	// Verify config was updated
+	// Verify config was updated. The runtime config stores the canonical
+	// form of allowed_root.
 	cfgAfter := app.getConfig()
 	if cfgAfter.LogLevel != -4 { // slog.LevelDebug = -4
 		t.Fatalf("expected log_level=debug after reload, got %s", cfgAfter.LogLevel.String())
 	}
-	if cfgAfter.AllowedRoot != newAllowedRoot {
-		t.Fatalf("expected allowed_root=%s, got %s", newAllowedRoot, cfgAfter.AllowedRoot)
+	wantRoot, err := filepath.EvalSymlinks(newAllowedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfgAfter.AllowedRoot != wantRoot {
+		t.Fatalf("expected allowed_root=%s, got %s", wantRoot, cfgAfter.AllowedRoot)
 	}
 }
 

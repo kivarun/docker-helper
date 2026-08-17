@@ -252,6 +252,15 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	// The runtime allowed_root must be the canonical, policy-validated form.
+	// This closes the manual-config symlink bypass: a config.json that points
+	// allowed_root at a symlink into a forbidden tree is rejected here, before
+	// any runtime/state filesystem side effects.
+	allowedRoot, err := canonicalizeWorkspaceRootForAdd(fc.AllowedRoot)
+	if err != nil {
+		return nil, fmt.Errorf("invalid allowed_root: %w", err)
+	}
+
 	ec := resolveEffectiveConfig(fc)
 
 	level, err := parseLogLevel(ec.LogLevel)
@@ -308,7 +317,7 @@ func loadConfig() (*Config, error) {
 	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
 
 	cfg := &Config{
-		AllowedRoot:           fc.AllowedRoot,
+		AllowedRoot:           allowedRoot,
 		SessionTTL:            ttl,
 		LogLevel:              level,
 		AuditEnabled:          ec.AuditEnabled,

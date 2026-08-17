@@ -26,12 +26,9 @@ func newTestApp(t *testing.T) *App {
 		t.Fatalf("initializeDatabase() error: %v", err)
 	}
 
-	// Use a non-forbidden allowed_root. /tmp is forbidden by the workspace root security policy.
-	allowedRoot := filepath.Join(os.Getenv("HOME"), "docker-helper-test-work")
-	if err := os.MkdirAll(allowedRoot, 0755); err != nil {
-		t.Fatalf("cannot create allowed root: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(allowedRoot) })
+	// Use a non-forbidden allowed_root. /tmp is forbidden by the workspace
+	// root security policy; the helper returns the canonical form.
+	allowedRoot := testAllowedRootDir(t)
 
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
