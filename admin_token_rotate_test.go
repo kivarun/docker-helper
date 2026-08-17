@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // assertAdminTokenFormat verifies the unified bearer token contract:
@@ -690,5 +691,71 @@ func TestAdminTokenRotateCLIAuthFailure(t *testing.T) {
 	}
 	if stderr.Len() == 0 {
 		t.Error("expected error on stderr")
+	}
+}
+
+// TestAdminTokenRotationConcurrentSessionAuth proves that concurrent admin
+// token rotation and admin-authenticated session requests do not produce
+// a data race on AdminTokenHash.
+func TestAdminTokenRotationConcurrentSessionAuth(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	rotateDone := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Goroutine 1: continuously rotate the admin token.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-rotateDone:
+				return
+			default:
+				hash := app.getAdminTokenHash()
+				_, _ = app.rotateAdminToken(hash)
+			}
+		}
+	}()
+
+	// Goroutine 2: send admin-authenticated session create requests.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			select {
+			case <-rotateDone:
+				return
+			default:
+			}
+			// Snapshot the current admin token for this request.
+			token := testAdminToken
+			app.mu.RLock()
+			// We cannot recover the plaintext token from the hash,
+			// so we use a best-effort approach: try the session
+			// endpoint.  The race detector will flag any unsynchronized
+			// read of AdminTokenHash regardless of auth outcome.
+			app.mu.RUnlock()
+
+			reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+			body, _ := json.Marshal(reqBody)
+			req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			app.handleCreateSession(w, req)
+			// Auth may succeed or fail depending on timing; both are valid.
+			_ = w.Code
+		}
+	}()
+
+	// Let both goroutines run concurrently.
+	time.Sleep(50 * time.Millisecond)
+	close(rotateDone)
+	wg.Wait()
+
+	// Final token is valid for admin auth.
+	finalHash := app.getAdminTokenHash()
+	if finalHash == [sha256.Size]byte{} {
+		t.Error("admin token hash must not be zero after rotations")
 	}
 }

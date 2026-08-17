@@ -41,6 +41,17 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# Docker CLI binary.
 	/usr/bin/docker rix,
 
+	# OpenSSL (for trusted CA auto-injection).
+	/usr/bin/openssl ix,
+
+	#include <abstractions/openssl>
+
+	# Docker Buildx CLI plugin (required by `docker build`).
+	/usr/local/lib/docker/cli-plugins/docker-buildx ix,
+	/usr/local/libexec/docker/cli-plugins/docker-buildx ix,
+	/usr/lib/docker/cli-plugins/docker-buildx ix,
+	/usr/libexec/docker/cli-plugins/docker-buildx ix,
+
 	# Docker helper binary itself.
 	/usr/bin/docker-helper r,
 

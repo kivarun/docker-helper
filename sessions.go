@@ -79,7 +79,8 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 
 	// Check admin token.
 	tokenHash := sha256.Sum256([]byte(token))
-	if subtle.ConstantTimeCompare(tokenHash[:], a.AdminTokenHash[:]) == 1 {
+	currentHash := a.getAdminTokenHash()
+	if subtle.ConstantTimeCompare(tokenHash[:], currentHash[:]) == 1 {
 		return &sessionAuthContext{isAdmin: true}, nil
 	}
 

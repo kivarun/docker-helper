@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -2007,5 +2008,119 @@ func TestApparmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
 		t.Error("check() should diagnose policy-violating managed root")
 	} else if !strings.Contains(err.Error(), "workspace root policy") {
 		t.Errorf("check() error = %q, want workspace root policy diagnostic", err.Error())
+	}
+}
+
+// --- Shipped profile regression tests ---
+
+func TestSystemProfileContainsOpenSSL(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "/usr/bin/openssl ix,") {
+		t.Error("system profile must permit /usr/bin/openssl with inherited confinement")
+	}
+	if !strings.Contains(content, "#include <abstractions/openssl>") {
+		t.Error("system profile must include abstractions/openssl")
+	}
+}
+
+func TestSystemProfileContainsDockerBuildx(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	buildxPaths := []string{
+		"/usr/local/lib/docker/cli-plugins/docker-buildx ix,",
+		"/usr/local/libexec/docker/cli-plugins/docker-buildx ix,",
+		"/usr/lib/docker/cli-plugins/docker-buildx ix,",
+		"/usr/libexec/docker/cli-plugins/docker-buildx ix,",
+	}
+	for _, p := range buildxPaths {
+		if !strings.Contains(content, p) {
+			t.Errorf("system profile missing buildx path: %s", p)
+		}
+	}
+
+	// Must NOT contain broad cli-plugins wildcard.
+	if strings.Contains(content, "cli-plugins/**") {
+		t.Error("system profile must not grant broad cli-plugins/** execute")
+	}
+}
+
+func TestSystemProfileDockerInheritedConfinement(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "/usr/bin/docker rix,") {
+		t.Error("system profile must permit /usr/bin/docker with inherited confinement")
+	}
+}
+
+func TestUserProfileContainsOpenSSL(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper")
+	if err != nil {
+		t.Skipf("user profile not found: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "/usr/bin/openssl ix,") {
+		t.Error("user profile must permit /usr/bin/openssl with inherited confinement")
+	}
+	if !strings.Contains(content, "#include <abstractions/openssl>") {
+		t.Error("user profile must include abstractions/openssl")
+	}
+}
+
+func TestUserProfileContainsDockerBuildx(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper")
+	if err != nil {
+		t.Skipf("user profile not found: %v", err)
+	}
+	content := string(data)
+
+	buildxPaths := []string{
+		"/usr/local/lib/docker/cli-plugins/docker-buildx ix,",
+		"/usr/local/libexec/docker/cli-plugins/docker-buildx ix,",
+		"/usr/lib/docker/cli-plugins/docker-buildx ix,",
+		"/usr/libexec/docker/cli-plugins/docker-buildx ix,",
+	}
+	for _, p := range buildxPaths {
+		if !strings.Contains(content, p) {
+			t.Errorf("user profile missing buildx path: %s", p)
+		}
+	}
+
+	// Must NOT contain broad cli-plugins wildcard.
+	if strings.Contains(content, "cli-plugins/**") {
+		t.Error("user profile must not grant broad cli-plugins/** execute")
+	}
+}
+
+func TestApparmorSystemProfileParserValidation(t *testing.T) {
+	if _, err := exec.LookPath("apparmor_parser"); err != nil {
+		t.Skip("apparmor_parser not available")
+	}
+	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", "packaging/apparmor/docker-helper-system")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("system profile parser validation failed: %v\n%s", err, out)
+	}
+}
+
+func TestApparmorUserProfileParserValidation(t *testing.T) {
+	if _, err := exec.LookPath("apparmor_parser"); err != nil {
+		t.Skip("apparmor_parser not available")
+	}
+	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", "packaging/apparmor/docker-helper")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("user profile parser validation failed: %v\n%s", err, out)
 	}
 }
