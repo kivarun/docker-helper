@@ -158,6 +158,7 @@ jobs:
           dpkg-deb --contents "$DEB" | grep -q "/etc/apparmor.d/docker-helper-system"
           dpkg-deb --contents "$DEB" | grep -q "/usr/share/man/man1/docker-helper.1.gz"
           dpkg-deb --contents "$DEB" | grep -q "/usr/share/man/man5/docker-helper-config.5.gz"
+          dpkg-deb --contents "$DEB" | grep -q "/usr/share/doc/docker-helper/LICENSE"
 
       - name: Install rpm for verification
         run: |
@@ -181,6 +182,12 @@ jobs:
           rpm -qpl "$RPM" | grep -q "/etc/apparmor.d/docker-helper-system"
           rpm -qpl "$RPM" | grep -q "/usr/share/man/man1/docker-helper.1.gz"
           rpm -qpl "$RPM" | grep -q "/usr/share/man/man5/docker-helper-config.5.gz"
+          rpm -qpl "$RPM" | grep -q "/usr/share/doc/docker-helper/LICENSE"
+          RPM_LICENSE="$(rpm -qp --queryformat '%{LICENSE}' "$RPM")"
+          if [ "$RPM_LICENSE" != "GPL-3.0-only" ]; then
+            echo "error: RPM license mismatch: expected GPL-3.0-only, got $RPM_LICENSE" >&2
+            exit 1
+          fi
 
       - name: Generate SHA256SUMS
         run: |

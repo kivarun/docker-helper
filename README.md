@@ -874,6 +874,10 @@ are allowed if otherwise valid.
 
 A symlink whose canonical target enters a forbidden namespace is rejected.
 
+New workspace roots are resolved to their canonical path through symlink
+resolution before policy evaluation; the canonical path is the effective
+and stored root.
+
 Existing stale AppArmor roots remain removable even if they no longer
 satisfy the current policy.
 
@@ -885,23 +889,46 @@ roots does NOT automatically update AppArmor.
 
 ```bash
 # 1. Create the principal.
-sudo docker-helper principal create alice --allowed-root /srv/workspaces/alice
+#    principal create resolves the OS user; the canonical home directory
+#    becomes the initial allowed root.
+sudo docker-helper principal create --system alice
 
-# 2. Add the workspace to AppArmor confinement.
+# 2. Review the principal's allowed roots.
+#    The default home root is shown; this is what AppArmor must cover
+#    if the operator wants it to remain usable.
+sudo docker-helper principal show --system alice
+
+# 3. Add additional allowed roots as needed.
+sudo docker-helper principal allowed-root add \
+    --system alice /srv/workspaces/alice
+
+# 4. Add matching AppArmor roots for every allowed root.
+#    The show command above reveals the actual home/default root.
+sudo docker-helper apparmor root add /home/alice
 sudo docker-helper apparmor root add /srv/workspaces/alice
 
-# 3. Create a launcher credential for the principal.
-sudo docker-helper credential create --name laptop alice
+# 5. Create a launcher credential for the principal.
+sudo docker-helper credential create \
+    --system --name laptop alice
 ```
 
 The separation is intentional:
 
-- `principal create` defines docker-helper workspace policy;
+- `principal create` and `principal allowed-root add` define docker-helper
+  workspace policy;
 - `apparmor root add` defines daemon filesystem confinement;
 - `credential create` produces a launcher token for session creation.
 
 These layers are not synchronized automatically. The operator must add
 matching AppArmor roots for every workspace that a principal needs.
+
+If the operator does not want the default home root to remain usable,
+they may remove it before provisioning AppArmor:
+
+```bash
+sudo docker-helper principal allowed-root remove \
+    --system alice /home/alice
+```
 
 ## Documentation
 
@@ -928,6 +955,10 @@ Verify downloaded artifacts:
 ```bash
 sha256sum --check SHA256SUMS
 ```
+
+## License
+
+docker-helper is licensed under GPL-3.0-only. See LICENSE.
 
 ## More information
 

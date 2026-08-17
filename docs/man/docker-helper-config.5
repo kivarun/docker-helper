@@ -57,6 +57,11 @@ The following namespaces are forbidden at the root but permit descendants:
 /srv /opt /mnt /media (e.g., /srv/workspaces is allowed)
 .PP
 A symlink whose canonical target enters a forbidden namespace is rejected.
+.PP
+New workspace roots are resolved to their canonical path through symlink
+resolution before policy evaluation; the canonical path is the effective
+and stored root.
+.PP
 Existing stale AppArmor roots remain removable even if they no longer
 satisfy the current policy.
 .PP

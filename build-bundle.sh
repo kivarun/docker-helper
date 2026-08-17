@@ -69,6 +69,9 @@ mkdir -p "$BUNDLE_DIR"
 cp "$OUT_DIR/docker-helper" "$BUNDLE_DIR/docker-helper"
 chmod 755 "$BUNDLE_DIR/docker-helper"
 
+# License
+cp "$SCRIPT_DIR/LICENSE" "$BUNDLE_DIR/LICENSE"
+
 # Release-specific README
 cp "$SCRIPT_DIR/packaging/README.release.md" "$BUNDLE_DIR/README.md"
 
@@ -161,6 +164,7 @@ echo "OK: binary is statically linked"
 # Check tarball contains the exact mandatory set of paths.
 EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/docker-helper"
+  "docker-helper-${VERSION}-linux-amd64/LICENSE"
   "docker-helper-${VERSION}-linux-amd64/README.md"
   "docker-helper-${VERSION}-linux-amd64/install.sh"
   "docker-helper-${VERSION}-linux-amd64/uninstall.sh"

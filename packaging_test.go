@@ -520,7 +520,7 @@ func TestBuildBundleScriptContent(t *testing.T) {
 		"docker-helper", "install.sh", "uninstall.sh", "install-system.sh", "uninstall-system.sh",
 		"systemd/user", "systemd/user/docker-helper.service", "systemd/system/docker-helper.service",
 		"apparmor", "apparmor/docker-helper", "apparmor/docker-helper-system", "apparmor/docker-helper.d/managed-roots",
-		"SKILL.md", "README.release.md",
+		"SKILL.md", "README.release.md", "LICENSE",
 	} {
 		if !strings.Contains(content, s) {
 			t.Errorf("build-bundle.sh should reference %q", s)
