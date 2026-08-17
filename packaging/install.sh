@@ -30,6 +30,21 @@ service_was_active=false
 
 # --- Helpers ---
 
+usage() {
+	cat <<'EOF'
+Usage: ./install.sh [--yes]
+
+Install docker-helper for the current user.
+
+Installs the binary to ~/.local/bin/docker-helper, the systemd user
+unit, and optionally the agent skill.
+
+Flags:
+  -h, --help   Show this help message
+  --yes        Non-interactive: accept all defaults, run init, enable+start service
+EOF
+}
+
 info() {
 	printf '%s\n' "$*"
 }
@@ -65,11 +80,17 @@ parse_args() {
 
 	for arg in "$@"; do
 		case "$arg" in
+			-h|--help)
+				usage
+				exit 0
+				;;
 			--yes)
 				interactive=false
 				;;
 			*)
 				error "unknown option: $arg"
+				echo "" >&2
+				echo "Try './install.sh --help' for usage information." >&2
 				exit 1
 				;;
 		esac

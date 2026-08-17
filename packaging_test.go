@@ -212,13 +212,39 @@ func TestUninstallPurgeDoesNotRemoveParent(t *testing.T) {
 	}
 }
 
-// TestInstallScriptUnknownFlag verifies install.sh rejects unknown flags.
+// TestInstallScriptUnknownFlag verifies install.sh rejects unknown flags
+// and prints a usage hint.
 func TestInstallScriptUnknownFlag(t *testing.T) {
 	cmd := exec.Command("bash", "packaging/install.sh", "--unknown-flag")
 	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
-	err := cmd.Run()
+	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatal("expected non-zero exit code for unknown flag")
+	}
+	if !strings.Contains(string(out), "Try") {
+		t.Errorf("expected usage hint in stderr, got: %s", out)
+	}
+}
+
+// TestInstallScriptHelp verifies install.sh --help and -h print usage
+// and exit 0.
+func TestInstallScriptHelp(t *testing.T) {
+	for _, flag := range []string{"--help", "-h"} {
+		t.Run(flag, func(t *testing.T) {
+			cmd := exec.Command("bash", "packaging/install.sh", flag)
+			cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("expected exit 0 for %s, got: %v: %s", flag, err, out)
+			}
+			output := string(out)
+			if !strings.Contains(output, "--yes") {
+				t.Errorf("--help output missing --yes: %s", output)
+			}
+			if !strings.Contains(output, "--help") {
+				t.Errorf("--help output missing --help: %s", output)
+			}
+		})
 	}
 }
 
@@ -1254,10 +1280,11 @@ func TestSystemUnitFile(t *testing.T) {
 }
 
 // TestSystemUnitNoRestrictSUIDSGID verifies that the system unit does not
-// contain RestrictSUIDSGID=true.
+// contain an active RestrictSUIDSGID directive.
 // Reason: docker-helper build staging requires openat2(2). systemd's
 // RestrictSUIDSGID seccomp filtering blocks openat2 with ENOSYS on
 // supported kernels (observed on Linux 7.1.x).
+// Only comments are allowed.
 func TestSystemUnitNoRestrictSUIDSGID(t *testing.T) {
 	path := "packaging/systemd/system/docker-helper.service"
 	data, err := os.ReadFile(path)
@@ -1266,14 +1293,22 @@ func TestSystemUnitNoRestrictSUIDSGID(t *testing.T) {
 	}
 	content := string(data)
 
-	if strings.Contains(content, "RestrictSUIDSGID=true") {
-		t.Error("system unit must not contain RestrictSUIDSGID=true (blocks openat2 required by build staging)")
+	// Reject any non-comment RestrictSUIDSGID directive.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue // skip comments
+		}
+		if strings.HasPrefix(trimmed, "RestrictSUIDSGID=") {
+			t.Error("system unit must not contain active RestrictSUIDSGID directive (blocks openat2 required by build staging)")
+		}
 	}
 }
 
 // TestUserUnitNoRestrictSUIDSGID verifies that the user unit does not
-// contain RestrictSUIDSGID=true.
+// contain an active RestrictSUIDSGID directive.
 // Reason: same as TestSystemUnitNoRestrictSUIDSGID.
+// Only comments are allowed.
 func TestUserUnitNoRestrictSUIDSGID(t *testing.T) {
 	path := "packaging/systemd/user/docker-helper.service"
 	data, err := os.ReadFile(path)
@@ -1282,8 +1317,15 @@ func TestUserUnitNoRestrictSUIDSGID(t *testing.T) {
 	}
 	content := string(data)
 
-	if strings.Contains(content, "RestrictSUIDSGID=true") {
-		t.Error("user unit must not contain RestrictSUIDSGID=true (blocks openat2 required by build staging)")
+	// Reject any non-comment RestrictSUIDSGID directive.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue // skip comments
+		}
+		if strings.HasPrefix(trimmed, "RestrictSUIDSGID=") {
+			t.Error("user unit must not contain active RestrictSUIDSGID directive (blocks openat2 required by build staging)")
+		}
 	}
 }
 
