@@ -1224,6 +1224,40 @@ func TestSystemUnitFile(t *testing.T) {
 	}
 }
 
+// TestSystemUnitNoRestrictSUIDSGID verifies that the system unit does not
+// contain RestrictSUIDSGID=true.
+// Reason: docker-helper build staging requires openat2(2). systemd's
+// RestrictSUIDSGID seccomp filtering blocks openat2 with ENOSYS on
+// supported kernels (observed on Linux 7.1.x).
+func TestSystemUnitNoRestrictSUIDSGID(t *testing.T) {
+	path := "packaging/systemd/system/docker-helper.service"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("system unit %s not found: %v", path, err)
+	}
+	content := string(data)
+
+	if strings.Contains(content, "RestrictSUIDSGID=true") {
+		t.Error("system unit must not contain RestrictSUIDSGID=true (blocks openat2 required by build staging)")
+	}
+}
+
+// TestUserUnitNoRestrictSUIDSGID verifies that the user unit does not
+// contain RestrictSUIDSGID=true.
+// Reason: same as TestSystemUnitNoRestrictSUIDSGID.
+func TestUserUnitNoRestrictSUIDSGID(t *testing.T) {
+	path := "packaging/systemd/user/docker-helper.service"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("user unit %s not found: %v", path, err)
+	}
+	content := string(data)
+
+	if strings.Contains(content, "RestrictSUIDSGID=true") {
+		t.Error("user unit must not contain RestrictSUIDSGID=true (blocks openat2 required by build staging)")
+	}
+}
+
 func TestUserUnitStillExists(t *testing.T) {
 	path := "packaging/systemd/user/docker-helper.service"
 	if _, err := os.Stat(path); err != nil {

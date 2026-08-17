@@ -30,7 +30,9 @@ SyslogIdentifier=docker-helper
 
 # Hardening
 NoNewPrivileges=true
-RestrictSUIDSGID=true
+# RestrictSUIDSGID is intentionally omitted: docker-helper build staging
+# requires openat2(2), and systemd's RestrictSUIDSGID seccomp filtering
+# blocks openat2 with ENOSYS on supported kernels.
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictRTP=true
