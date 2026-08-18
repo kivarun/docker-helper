@@ -1282,6 +1282,13 @@ func TestSystemUnitFile(t *testing.T) {
 	if !strings.Contains(content, "ConditionSecurity=apparmor") {
 		t.Error("system unit must contain ConditionSecurity=apparmor")
 	}
+	// RestrictRealtime must be present; RestrictRTP is invalid.
+	if !strings.Contains(content, "RestrictRealtime=true") {
+		t.Error("unit must contain RestrictRealtime=true")
+	}
+	if strings.Contains(content, "RestrictRTP=") {
+		t.Error("unit must not contain invalid RestrictRTP= directive")
+	}
 }
 
 // TestSystemUnitNoMountNamespace verifies that the system unit does not
@@ -1477,6 +1484,23 @@ func TestSystemAppArmorProfileFile(t *testing.T) {
 		if strings.TrimSpace(line) == "mount," {
 			t.Error("profile must not contain blanket unrestricted mount rule")
 		}
+	}
+	// SQLite locking: specific rwk rules for database files.
+	// /var/lib/docker-helper/** rw must NOT be present (too broad for k permission).
+	if strings.Contains(content, "/var/lib/docker-helper/** rw") {
+		t.Error("profile must not grant broad /var/lib/docker-helper/** rw (SQLite needs explicit rwk)")
+	}
+	if !strings.Contains(content, "/var/lib/docker-helper/docker-helper.db rwk,") {
+		t.Error("profile must grant rwk for docker-helper.db")
+	}
+	if !strings.Contains(content, "/var/lib/docker-helper/docker-helper.db-wal rwk,") {
+		t.Error("profile must grant rwk for docker-helper.db-wal")
+	}
+	if !strings.Contains(content, "/var/lib/docker-helper/docker-helper.db-shm rwk,") {
+		t.Error("profile must grant rwk for docker-helper.db-shm")
+	}
+	if !strings.Contains(content, "/var/lib/docker-helper/docker-helper.db-journal rwk,") {
+		t.Error("profile must grant rwk for docker-helper.db-journal")
 	}
 }
 

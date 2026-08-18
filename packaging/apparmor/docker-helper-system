@@ -23,8 +23,13 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/docker-helper/** r,
 
 	# State directory (database, persistent state).
+	# SQLite requires file-locking (k) permission for WAL mode.
+	# Grant rwk only on the specific database files, not the entire directory.
 	/var/lib/docker-helper/ r,
-	/var/lib/docker-helper/** rw,
+	/var/lib/docker-helper/docker-helper.db rwk,
+	/var/lib/docker-helper/docker-helper.db-wal rwk,
+	/var/lib/docker-helper/docker-helper.db-shm rwk,
+	/var/lib/docker-helper/docker-helper.db-journal rwk,
 
 	# Runtime directory (socket, lock, CA injection, mount pins).
 	/run/docker-helper/ r,
