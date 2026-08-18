@@ -68,7 +68,6 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		effectiveUID  int
 		logLevel      string
 		auditEnabled  *bool
 		expectedAudit bool
@@ -77,7 +76,6 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 		// User mode: absent derived from log_level.
 		{
 			name:          "user + absent + info -> false / log_level",
-			effectiveUID:  1000,
 			logLevel:      "info",
 			auditEnabled:  nil,
 			expectedAudit: false,
@@ -85,7 +83,6 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 		},
 		{
 			name:          "user + absent + debug -> true / log_level",
-			effectiveUID:  1000,
 			logLevel:      "debug",
 			auditEnabled:  nil,
 			expectedAudit: true,
@@ -94,7 +91,6 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 		// User mode: explicit always wins.
 		{
 			name:          "user + explicit false + debug -> false / explicit",
-			effectiveUID:  1000,
 			logLevel:      "debug",
 			auditEnabled:  &falseVal,
 			expectedAudit: false,
@@ -102,41 +98,6 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 		},
 		{
 			name:          "user + explicit true + info -> true / explicit",
-			effectiveUID:  1000,
-			logLevel:      "info",
-			auditEnabled:  &trueVal,
-			expectedAudit: true,
-			expectedSrc:   "explicit",
-		},
-		// System mode: absent always true regardless of log_level.
-		{
-			name:          "system + absent + info -> true / system_default",
-			effectiveUID:  0,
-			logLevel:      "info",
-			auditEnabled:  nil,
-			expectedAudit: true,
-			expectedSrc:   "system_default",
-		},
-		{
-			name:          "system + absent + error -> true / system_default",
-			effectiveUID:  0,
-			logLevel:      "error",
-			auditEnabled:  nil,
-			expectedAudit: true,
-			expectedSrc:   "system_default",
-		},
-		// System mode: explicit always wins.
-		{
-			name:          "system + explicit false -> false / explicit",
-			effectiveUID:  0,
-			logLevel:      "info",
-			auditEnabled:  &falseVal,
-			expectedAudit: false,
-			expectedSrc:   "explicit",
-		},
-		{
-			name:          "system + explicit true -> true / explicit",
-			effectiveUID:  0,
 			logLevel:      "info",
 			auditEnabled:  &trueVal,
 			expectedAudit: true,
@@ -146,11 +107,10 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 
 	saveUID := EffectiveUID
 	defer func() { EffectiveUID = saveUID }()
+	EffectiveUID = func() int { return 1000 }
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			EffectiveUID = func() int { return tt.effectiveUID }
-
 			dir := t.TempDir()
 			t.Setenv("XDG_CONFIG_HOME", dir)
 			t.Setenv("XDG_RUNTIME_DIR", dir)
@@ -161,7 +121,6 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 			}
 
 			configPath := filepath.Join(configDir, "config.json")
-			// System mode ignores XDG_CONFIG_HOME; must use DOCKER_HELPER_CONFIG.
 			t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
 			allowedRoot := testAllowedRootDir(t)
@@ -190,6 +149,71 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 			}
 
 			ec := resolveEffectiveConfig(*loadFileConfigSafe(t, configPath))
+			if ec.AuditEnabledSource != tt.expectedSrc {
+				t.Errorf("audit_enabled_source = %q, want %q", ec.AuditEnabledSource, tt.expectedSrc)
+			}
+		})
+	}
+}
+
+// TestResolveEffectiveConfigAuditEnabled verifies that resolveEffectiveConfig
+// wires deployment mode through EffectiveUID into audit_enabled resolution.
+// This exercises the mode→audit bridge without calling loadConfig (which would
+// require root filesystem privileges for system mode).
+func TestResolveEffectiveConfigAuditEnabled(t *testing.T) {
+	falseVal := false
+
+	tests := []struct {
+		name          string
+		effectiveUID  int
+		logLevel      string
+		auditEnabled  *bool
+		expectedAudit bool
+		expectedSrc   string
+	}{
+		// System mode: absent always true regardless of log_level.
+		{
+			name:          "system + absent + info -> true / system_default",
+			effectiveUID:  0,
+			logLevel:      "info",
+			auditEnabled:  nil,
+			expectedAudit: true,
+			expectedSrc:   "system_default",
+		},
+		{
+			name:          "system + explicit false -> false / explicit",
+			effectiveUID:  0,
+			logLevel:      "info",
+			auditEnabled:  &falseVal,
+			expectedAudit: false,
+			expectedSrc:   "explicit",
+		},
+		// User mode via resolveEffectiveConfig.
+		{
+			name:          "user + absent + info -> false / log_level",
+			effectiveUID:  1000,
+			logLevel:      "info",
+			auditEnabled:  nil,
+			expectedAudit: false,
+			expectedSrc:   "log_level",
+		},
+	}
+
+	saveUID := EffectiveUID
+	defer func() { EffectiveUID = saveUID }()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			EffectiveUID = func() int { return tt.effectiveUID }
+
+			fc := fileConfig{
+				Level:        tt.logLevel,
+				AuditEnabled: tt.auditEnabled,
+			}
+			ec := resolveEffectiveConfig(fc)
+			if ec.AuditEnabled != tt.expectedAudit {
+				t.Errorf("audit_enabled = %v, want %v", ec.AuditEnabled, tt.expectedAudit)
+			}
 			if ec.AuditEnabledSource != tt.expectedSrc {
 				t.Errorf("audit_enabled_source = %q, want %q", ec.AuditEnabledSource, tt.expectedSrc)
 			}
