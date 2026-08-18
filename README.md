@@ -936,6 +936,27 @@ sudo docker-helper principal allowed-root remove \
     --system alice /home/alice
 ```
 
+### Principal: install the credential
+
+The principal installs the token on their machine (not as root):
+
+```bash
+# Pipe the token from the operator (hidden input on TTY):
+echo "dhc_..." | docker-helper credential install
+
+# Or paste interactively (hidden input on TTY):
+docker-helper credential install
+
+# Replace an existing credential:
+docker-helper credential install --force
+```
+
+The token is stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`
+with mode `0600`. The directory is created with mode `0700` if it does not exist.
+The write is atomic: a failure will not corrupt an existing credential.
+
+Once installed, `docker-helper --system` uses the credential automatically.
+
 ## Documentation
 
 Man pages are installed with native packages:

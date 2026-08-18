@@ -574,6 +574,26 @@ Three credential classes provide different levels of access:
 - sent as `Authorization: Bearer <credential-token>`;
 - resolved through database lookup by token hash.
 
+#### Credential install
+
+The `credential install` command stores the launcher token for the principal
+user. It is not run as root.
+
+- Token format: `dhc_` + 64 lowercase hex characters (68 total).
+- Token stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`
+  with mode `0600`; directory created with mode `0700`.
+- Input: hidden TTY via `term.ReadPassword` on terminal; `bufio.Scanner` on
+  non-TTY stdin. Token never appears in stdout or stderr.
+- `--force`: skip existence check; atomic `rename` replaces file without prior
+  deletion. Write failure leaves existing file intact.
+- Root invocation rejected with clear message.
+
+Token resolution for `--system` mode:
+1. `--token-file` — explicit path, always wins.
+2. Non-root `--system` — credential.token from `credentialPath()`.
+3. Root `--system` — `/etc/docker-helper/admin.token`.
+4. User mode — admin.token in user config dir (unchanged).
+
 ### Session token
 
 - generated per session by `POST /sessions`;

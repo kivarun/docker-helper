@@ -33,6 +33,8 @@ type credentialInstallConfig struct {
 	uid func() int
 	// isTerminal checks if stdin is a terminal.
 	isTerminal func() bool
+	// readPassword reads a hidden password from stdin (for TTY).
+	readPassword func() (string, error)
 }
 
 // credentialPath returns the user credential file path.
@@ -112,14 +114,19 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 	// Read token.
 	var token string
 	if cfg.isTerminal() {
-		// TTY: use hidden input.
-		return "", fmt.Errorf("TTY input requires stderr writer: use installCredentialWithIO")
-	}
-	// Non-TTY: read from stdin.
-	var err error
-	token, err = readTokenFromReader(cfg.reader)
-	if err != nil {
-		return "", err
+		// TTY: use hidden input via readPassword callback.
+		var err error
+		token, err = cfg.readPassword()
+		if err != nil {
+			return "", err
+		}
+	} else {
+		// Non-TTY: read from stdin.
+		var err error
+		token, err = readTokenFromReader(cfg.reader)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// Validate token format.
