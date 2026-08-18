@@ -404,11 +404,12 @@ Reports `updated` or `unchanged`. If the daemon is running, the change is
 applied automatically for reloadable fields. `http_address` is startup-only
 and requires a daemon restart.
 
-The operation is transactional: the new config is written atomically, then
-the daemon is asked to reload. If the daemon rejects the reload (e.g.
+The operation is transactional: the entire read-modify-write-reload cycle
+runs under a process-level lock. If the daemon rejects the reload (e.g.
 invalid config), the original config.json is restored atomically and the
-command exits with a non-zero status. This ensures config.json and the
-daemon runtime configuration never diverge.
+command exits with a non-zero status. If rollback and re-reload succeed,
+config.json and the daemon are synchronized. If re-reload fails, they may
+diverge until the next manual reload or restart.
 
 `docker-helper config unset FIELD` — removes an optional field to restore
 its default. `allowed_root` and `session_ttl` are required and cannot be

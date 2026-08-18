@@ -356,8 +356,9 @@ will apply on the next start.
 
 The operation is transactional: if the daemon rejects the new configuration
 during reload, the change is automatically rolled back to the previous
-config.json contents and the command exits with a non-zero status. This
-ensures config.json and the daemon runtime configuration never diverge.
+config.json contents and the command exits with a non-zero status. If
+rollback and re-reload succeed, config.json and the daemon are synchronized.
+If re-reload fails, they may diverge until the next manual reload or restart.
 
 You can also trigger a reload explicitly:
 

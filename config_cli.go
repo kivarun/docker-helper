@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +12,21 @@ import (
 	"syscall"
 	"time"
 )
+
+// configOp identifies the type of config mutation.
+type configOp int
+
+const (
+	configOpSet   configOp = iota // config set FIELD VALUE
+	configOpUnset                 // config unset FIELD
+)
+
+// configWriter abstracts the atomic file write so tests can inject
+// failure scenarios (e.g., rollback write failure).
+type configWriter func(path string, data []byte) error
+
+// defaultConfigWriter is the production writer backed by safeWriteConfig.
+var defaultConfigWriter configWriter = safeWriteConfig
 
 var configCommand = &Command{
 	Name:    "config",
@@ -190,20 +204,29 @@ will apply on the next start.`,
 // Returns the raw map, the config file path, and any error.
 func loadRawConfig() (map[string]json.RawMessage, string, error) {
 	configPath := getConfigPath()
-	data, err := os.ReadFile(configPath)
+	raw, err := loadRawConfigFile(configPath)
 	if err != nil {
 		return nil, "", err
+	}
+	return raw, configPath, nil
+}
+
+// loadRawConfigFile reads config.json from the given path as a raw JSON map.
+func loadRawConfigFile(configPath string) (map[string]json.RawMessage, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, err
 	}
 
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if raw == nil {
-		return nil, "", fmt.Errorf("configuration is not a JSON object")
+		return nil, fmt.Errorf("configuration is not a JSON object")
 	}
 
-	return raw, configPath, nil
+	return raw, nil
 }
 
 // decodeFileConfig decodes a raw config map into a fileConfig struct.
@@ -246,22 +269,6 @@ func safeWriteConfig(configPath string, data []byte) error {
 		return err
 	}
 	return nil
-}
-
-// persistRawConfig validates, encodes, and atomically writes the raw config.
-func persistRawConfig(configPath string, raw map[string]json.RawMessage) error {
-	if err := validateRawConfig(raw); err != nil {
-		return err
-	}
-	if err := validateCAConfig(raw); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("cannot encode JSON: %w", err)
-	}
-	data = append(data, '\n')
-	return safeWriteConfig(configPath, data)
 }
 
 func getRuntimeDirSafe() string {
@@ -579,12 +586,6 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	raw, configPath, err := loadRawConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
 	// Compute the JSON-encoded value for the field.
 	var newValue json.RawMessage
 	switch field {
@@ -616,44 +617,18 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		newValue, _ = json.Marshal(value)
 	}
 
-	// Compare with the existing explicit JSON member.
-	if existing, ok := raw[field]; ok && bytes.Equal(existing, newValue) {
-		// Validate the existing configuration before returning unchanged.
-		if err := validateRawConfig(raw); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
-		if err := validateCAConfig(raw); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "unchanged %s=%s\n", field, value)
-		return 0
-	}
-
-	raw[field] = newValue
-
-	exitCode, daemonNotRunning := applyConfigChangeTransactionally(
-		configPath,
+	return applyConfigChangeTransactionally(
+		configOpSet,
 		field,
 		value,
-		func() ([]byte, error) {
-			encoded, _ := json.MarshalIndent(raw, "", "  ")
-			return append(encoded, '\n'), nil
+		newValue,
+		func(raw map[string]json.RawMessage) {
+			raw[field] = newValue
 		},
+		defaultConfigWriter,
 		stdout,
 		stderr,
 	)
-	if exitCode != 0 {
-		return exitCode
-	}
-	fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
-	if field == "http_address" {
-		fmt.Fprintln(stdout, "restart required")
-	} else if daemonNotRunning {
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-	}
-	return 0
 }
 
 func configUnset(field string, stdout, stderr io.Writer) int {
@@ -674,50 +649,18 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	raw, configPath, err := loadRawConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// Check if the member is already absent.
-	if _, ok := raw[field]; !ok {
-		// Validate the existing configuration before returning unchanged.
-		if err := validateRawConfig(raw); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
-		if err := validateCAConfig(raw); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
-		return 0
-	}
-
-	delete(raw, field)
-
-	exitCode, daemonNotRunning := applyConfigChangeTransactionally(
-		configPath,
+	return applyConfigChangeTransactionally(
+		configOpUnset,
 		field,
 		"",
-		func() ([]byte, error) {
-			encoded, _ := json.MarshalIndent(raw, "", "  ")
-			return append(encoded, '\n'), nil
+		nil,
+		func(raw map[string]json.RawMessage) {
+			delete(raw, field)
 		},
+		defaultConfigWriter,
 		stdout,
 		stderr,
 	)
-	if exitCode != 0 {
-		return exitCode
-	}
-	fmt.Fprintln(stdout, "unset", field)
-	if field == "http_address" {
-		fmt.Fprintln(stdout, "restart required")
-	} else if daemonNotRunning {
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-	}
-	return 0
 }
 
 // configChangeLockPath returns the lock file path for serializing config
@@ -727,18 +670,18 @@ func configChangeLockPath(configPath string) string {
 }
 
 // acquireConfigChangeLock opens the lock file and acquires an exclusive
-// non-blocking flock. Returns the open file that must stay open for the lock
-// to remain held, or an error if another process holds it.
+// blocking flock. Returns the open file that must stay open for the lock
+// to remain held, or an error if the lock file cannot be opened.
+//
+// Uses blocking flock so concurrent operations serialize automatically
+// instead of failing with EWOULDBLOCK.
 func acquireConfigChangeLock(configPath string) (*os.File, error) {
 	f, err := os.OpenFile(configChangeLockPath(configPath), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open config lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		f.Close()
-		if err == syscall.EWOULDBLOCK {
-			return nil, errors.New("another config operation is in progress")
-		}
 		return nil, fmt.Errorf("cannot acquire config lock: %w", err)
 	}
 	return f, nil
@@ -754,151 +697,201 @@ const (
 	reloadTransportError                       // transport error (not daemon-not-running)
 )
 
+// reloadOutcome captures the outcome of a reload attempt.
+type reloadOutcome struct {
+	result reloadResult
+	err    error // nil for success/daemonNotRunning
+}
+
+// formatReloadError returns a human-readable description of a reload failure.
+// For daemon-not-running, err is nil so it is not formatted.
+func formatReloadError(r reloadOutcome) string {
+	switch r.result {
+	case reloadRejected:
+		return fmt.Sprintf("reload rejected: %v", r.err)
+	case reloadTransportError:
+		return fmt.Sprintf("reload transport error: %v", r.err)
+	case reloadDaemonNotRunning:
+		return "daemon not running"
+	default:
+		return "reload failed"
+	}
+}
+
 // applyConfigChangeTransactionally performs the atomic write + reload + rollback
 // transaction for a config set/unset operation.
 //
-// It returns (exitCode, daemonWasNotRunning).
-// The caller prints "updated"/"unset" before the daemon-not-running message
-// to avoid false success output on rollback.
+// The entire read-modify-write-reload-rollback cycle runs under a single
+// process-level lock to serialize concurrent config mutations.
+//
+// It returns exit code 0 on success, 1 on failure.
 func applyConfigChangeTransactionally(
-	configPath string,
+	op configOp,
 	field string,
 	value string,
-	encodeNew func() ([]byte, error),
+	newValue json.RawMessage,
+	modify func(map[string]json.RawMessage),
+	writeFn configWriter,
 	stdout, stderr io.Writer,
-) (int, bool) {
-	// Acquire process-level lock.
+) int {
+	configPath := getConfigPath()
+
+	// Acquire process-level lock BEFORE reading config.
 	lockFile, err := acquireConfigChangeLock(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1, false
+		return 1
 	}
 	defer lockFile.Close()
+
+	// Read current config under lock.
+	raw, err := loadRawConfigFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Check unchanged.
+	if op == configOpSet && newValue != nil {
+		if existing, ok := raw[field]; ok && bytes.Equal(existing, newValue) {
+			if err := validateRawConfig(raw); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+			if err := validateCAConfig(raw); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stdout, "unchanged %s=%s\n", field, value)
+			return 0
+		}
+	} else if op == configOpUnset {
+		if _, ok := raw[field]; !ok {
+			if err := validateRawConfig(raw); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+			if err := validateCAConfig(raw); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
+			return 0
+		}
+	}
 
 	// Save original bytes for rollback.
 	original, err := os.ReadFile(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
-		return 1, false
+		return 1
 	}
+
+	// Apply modification.
+	modify(raw)
 
 	// Encode new config.
-	newData, err := encodeNew()
+	newData, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1, false
+		return 1
 	}
+	newData = append(newData, '\n')
 
-	// Validate the new config before writing. We re-parse it to exercise
-	// the same validation path as persistRawConfig.
-	var newRaw map[string]json.RawMessage
-	if err := json.Unmarshal(newData, &newRaw); err != nil {
-		fmt.Fprintf(stderr, "error: cannot parse new config: %v\n", err)
-		return 1, false
-	}
-	if err := validateRawConfig(newRaw); err != nil {
+	// Validate before writing.
+	if err := validateRawConfig(raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1, false
+		return 1
 	}
-	if err := validateCAConfig(newRaw); err != nil {
+	if err := validateCAConfig(raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1, false
+		return 1
 	}
 
 	// Atomically write new config.
-	if err := safeWriteConfig(configPath, newData); err != nil {
+	if err := writeFn(configPath, newData); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1, false
+		return 1
 	}
 
 	// http_address is startup-only: no reload.
 	if field == "http_address" {
-		return 0, false
+		if op == configOpSet {
+			fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+		} else {
+			fmt.Fprintln(stdout, "unset", field)
+		}
+		fmt.Fprintln(stdout, "restart required")
+		return 0
 	}
 
 	// Attempt reload.
-	result := attemptReload(stdout, stderr)
-	switch result {
+	outcome := attemptReload()
+	switch outcome.result {
 	case reloadSuccess:
-		return 0, false
+		if op == configOpSet {
+			fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+		} else {
+			fmt.Fprintln(stdout, "unset", field)
+		}
+		return 0
 	case reloadDaemonNotRunning:
-		return 0, true
+		if op == configOpSet {
+			fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+		} else {
+			fmt.Fprintln(stdout, "unset", field)
+		}
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
+		return 0
 	case reloadRejected, reloadTransportError:
+		// Always print the initial reload failure reason first.
+		reloadErrStr := formatReloadError(outcome)
+
 		// Rollback: restore original bytes.
-		if rollErr := safeWriteConfig(configPath, original); rollErr != nil {
-			fmt.Fprintf(stderr, "error: reload failed and rollback failed: %v; rollback: %v\n",
-				rollErr, "cannot restore config.json")
-			return 1, false
+		if rollErr := writeFn(configPath, original); rollErr != nil {
+			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+			fmt.Fprintf(stderr, "error: rollback write failed: %v\n", rollErr)
+			return 1
 		}
 
 		// Re-reload to synchronize runtime with restored file.
-		reReloadResult := attemptReloadQuiet()
-		rollbackMsg := ""
-		if reReloadResult == reloadRejected || reReloadResult == reloadTransportError {
-			rollbackMsg = "; re-reload after rollback also failed"
+		reOutcome := attemptReload()
+		if reOutcome.result != reloadSuccess {
+			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReloadError(reOutcome))
+			return 1
 		}
 
-		fmt.Fprintf(stderr, "error: config change rolled back%v\n", rollbackMsg)
-		return 1, false
+		fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+		fmt.Fprintln(stderr, "error: config rolled back")
+		return 1
 	}
 
-	return 0, false
+	return 0
 }
 
-// attemptReload calls POST /reload and returns a structured result.
-// It prints warnings to stderr on rejection/transport error.
-func attemptReload(stdout, stderr io.Writer) reloadResult {
+// attemptReload calls POST /reload and returns a structured result with error.
+func attemptReload() reloadOutcome {
 	client, resolveErr := resolveOperatorClient(operatorClientOptions{})
 	if resolveErr != nil {
-		// Cannot construct client (missing runtime dir, token, etc.).
-		// This is a local error, NOT proof the daemon is not running.
-		// Treat as transport error so rollback triggers.
-		fmt.Fprintf(stderr, "warning: reload failed: %v\n", resolveErr)
-		return reloadTransportError
+		return reloadOutcome{reloadTransportError, resolveErr}
 	}
 
 	resp, reqErr := client.doAuthenticatedRequest("POST", "/reload", nil)
 	if reqErr != nil {
 		if isDaemonNotRunning(reqErr) {
-			return reloadDaemonNotRunning
+			return reloadOutcome{reloadDaemonNotRunning, nil}
 		}
-		fmt.Fprintf(stderr, "warning: reload failed: %v\n", reqErr)
-		return reloadTransportError
+		return reloadOutcome{reloadTransportError, reqErr}
 	}
 	defer resp.Body.Close()
 
 	_, bodyErr := client.readResponseBody(resp)
 	if bodyErr != nil {
-		fmt.Fprintf(stderr, "warning: reload failed: %v\n", bodyErr)
-		return reloadRejected
+		return reloadOutcome{reloadRejected, bodyErr}
 	}
 
-	return reloadSuccess
-}
-
-// attemptReloadQuiet is like attemptReload but does not print anything.
-// Used for the re-reload after rollback.
-func attemptReloadQuiet() reloadResult {
-	client, resolveErr := resolveOperatorClient(operatorClientOptions{})
-	if resolveErr != nil {
-		return reloadTransportError
-	}
-
-	resp, reqErr := client.doAuthenticatedRequest("POST", "/reload", nil)
-	if reqErr != nil {
-		if isDaemonNotRunning(reqErr) {
-			return reloadDaemonNotRunning
-		}
-		return reloadTransportError
-	}
-	defer resp.Body.Close()
-
-	_, bodyErr := client.readResponseBody(resp)
-	if bodyErr != nil {
-		return reloadRejected
-	}
-
-	return reloadSuccess
+	return reloadOutcome{reloadSuccess, nil}
 }
 
 // isDaemonNotRunning returns true if the error indicates the daemon
