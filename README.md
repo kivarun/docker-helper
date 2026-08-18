@@ -354,6 +354,11 @@ applied automatically, except for startup-only fields such as `http_address`
 which require a daemon restart. If the daemon is not running, the change
 will apply on the next start.
 
+The operation is transactional: if the daemon rejects the new configuration
+during reload, the change is automatically rolled back to the previous
+config.json contents and the command exits with a non-zero status. This
+ensures config.json and the daemon runtime configuration never diverge.
+
 You can also trigger a reload explicitly:
 
 ```bash

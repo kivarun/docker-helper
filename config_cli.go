@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -631,16 +633,25 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 
 	raw[field] = newValue
 
-	if err := persistRawConfig(configPath, raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
+	exitCode, daemonNotRunning := applyConfigChangeTransactionally(
+		configPath,
+		field,
+		value,
+		func() ([]byte, error) {
+			encoded, _ := json.MarshalIndent(raw, "", "  ")
+			return append(encoded, '\n'), nil
+		},
+		stdout,
+		stderr,
+	)
+	if exitCode != 0 {
+		return exitCode
 	}
-
 	fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
 	if field == "http_address" {
 		fmt.Fprintln(stdout, "restart required")
-	} else {
-		tryReloadConfig(stdout, stderr)
+	} else if daemonNotRunning {
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 	}
 	return 0
 }
@@ -686,51 +697,213 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 
 	delete(raw, field)
 
-	if err := persistRawConfig(configPath, raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
+	exitCode, daemonNotRunning := applyConfigChangeTransactionally(
+		configPath,
+		field,
+		"",
+		func() ([]byte, error) {
+			encoded, _ := json.MarshalIndent(raw, "", "  ")
+			return append(encoded, '\n'), nil
+		},
+		stdout,
+		stderr,
+	)
+	if exitCode != 0 {
+		return exitCode
 	}
-
 	fmt.Fprintln(stdout, "unset", field)
 	if field == "http_address" {
 		fmt.Fprintln(stdout, "restart required")
-	} else {
-		tryReloadConfig(stdout, stderr)
+	} else if daemonNotRunning {
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 	}
 	return 0
 }
 
-// tryReloadConfig attempts to reload the running daemon's configuration.
-// It is called after a successful config set/unset.
-// If the daemon is not running, the operation is still considered successful.
-// If the daemon is running but reload fails (e.g., invalid config), the error
-// is printed but the config change is not rolled back.
-func tryReloadConfig(stdout, stderr io.Writer) {
-	client, err := resolveOperatorClient(operatorClientOptions{})
+// configChangeLockPath returns the lock file path for serializing config
+// mutations across processes. It sits beside the config file.
+func configChangeLockPath(configPath string) string {
+	return configPath + ".lock"
+}
+
+// acquireConfigChangeLock opens the lock file and acquires an exclusive
+// non-blocking flock. Returns the open file that must stay open for the lock
+// to remain held, or an error if another process holds it.
+func acquireConfigChangeLock(configPath string) (*os.File, error) {
+	f, err := os.OpenFile(configChangeLockPath(configPath), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-		return
+		return nil, fmt.Errorf("cannot open config lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if err == syscall.EWOULDBLOCK {
+			return nil, errors.New("another config operation is in progress")
+		}
+		return nil, fmt.Errorf("cannot acquire config lock: %w", err)
+	}
+	return f, nil
+}
+
+// reloadResult captures the outcome of a transactional reload attempt.
+type reloadResult int
+
+const (
+	reloadSuccess          reloadResult = iota // daemon accepted the new config
+	reloadDaemonNotRunning                     // daemon is not running
+	reloadRejected                             // daemon rejected (HTTP 4xx/5xx)
+	reloadTransportError                       // transport error (not daemon-not-running)
+)
+
+// applyConfigChangeTransactionally performs the atomic write + reload + rollback
+// transaction for a config set/unset operation.
+//
+// It returns (exitCode, daemonWasNotRunning).
+// The caller prints "updated"/"unset" before the daemon-not-running message
+// to avoid false success output on rollback.
+func applyConfigChangeTransactionally(
+	configPath string,
+	field string,
+	value string,
+	encodeNew func() ([]byte, error),
+	stdout, stderr io.Writer,
+) (int, bool) {
+	// Acquire process-level lock.
+	lockFile, err := acquireConfigChangeLock(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1, false
+	}
+	defer lockFile.Close()
+
+	// Save original bytes for rollback.
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
+		return 1, false
 	}
 
-	resp, err := client.doAuthenticatedRequest("POST", "/reload", nil)
+	// Encode new config.
+	newData, err := encodeNew()
 	if err != nil {
-		if isDaemonNotRunning(err) {
-			fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-		} else {
-			fmt.Fprintf(stderr, "warning: reload failed: %v\n", err)
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1, false
+	}
+
+	// Validate the new config before writing. We re-parse it to exercise
+	// the same validation path as persistRawConfig.
+	var newRaw map[string]json.RawMessage
+	if err := json.Unmarshal(newData, &newRaw); err != nil {
+		fmt.Fprintf(stderr, "error: cannot parse new config: %v\n", err)
+		return 1, false
+	}
+	if err := validateRawConfig(newRaw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1, false
+	}
+	if err := validateCAConfig(newRaw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1, false
+	}
+
+	// Atomically write new config.
+	if err := safeWriteConfig(configPath, newData); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1, false
+	}
+
+	// http_address is startup-only: no reload.
+	if field == "http_address" {
+		return 0, false
+	}
+
+	// Attempt reload.
+	result := attemptReload(stdout, stderr)
+	switch result {
+	case reloadSuccess:
+		return 0, false
+	case reloadDaemonNotRunning:
+		return 0, true
+	case reloadRejected, reloadTransportError:
+		// Rollback: restore original bytes.
+		if rollErr := safeWriteConfig(configPath, original); rollErr != nil {
+			fmt.Fprintf(stderr, "error: reload failed and rollback failed: %v; rollback: %v\n",
+				rollErr, "cannot restore config.json")
+			return 1, false
 		}
-		return
+
+		// Re-reload to synchronize runtime with restored file.
+		reReloadResult := attemptReloadQuiet()
+		rollbackMsg := ""
+		if reReloadResult == reloadRejected || reReloadResult == reloadTransportError {
+			rollbackMsg = "; re-reload after rollback also failed"
+		}
+
+		fmt.Fprintf(stderr, "error: config change rolled back%v\n", rollbackMsg)
+		return 1, false
+	}
+
+	return 0, false
+}
+
+// attemptReload calls POST /reload and returns a structured result.
+// It prints warnings to stderr on rejection/transport error.
+func attemptReload(stdout, stderr io.Writer) reloadResult {
+	client, resolveErr := resolveOperatorClient(operatorClientOptions{})
+	if resolveErr != nil {
+		// Cannot construct client (missing runtime dir, token, etc.).
+		// This is a local error, NOT proof the daemon is not running.
+		// Treat as transport error so rollback triggers.
+		fmt.Fprintf(stderr, "warning: reload failed: %v\n", resolveErr)
+		return reloadTransportError
+	}
+
+	resp, reqErr := client.doAuthenticatedRequest("POST", "/reload", nil)
+	if reqErr != nil {
+		if isDaemonNotRunning(reqErr) {
+			return reloadDaemonNotRunning
+		}
+		fmt.Fprintf(stderr, "warning: reload failed: %v\n", reqErr)
+		return reloadTransportError
 	}
 	defer resp.Body.Close()
 
-	_, err = client.readResponseBody(resp)
-	if err != nil {
-		fmt.Fprintf(stderr, "warning: reload failed: %v\n", err)
+	_, bodyErr := client.readResponseBody(resp)
+	if bodyErr != nil {
+		fmt.Fprintf(stderr, "warning: reload failed: %v\n", bodyErr)
+		return reloadRejected
 	}
+
+	return reloadSuccess
+}
+
+// attemptReloadQuiet is like attemptReload but does not print anything.
+// Used for the re-reload after rollback.
+func attemptReloadQuiet() reloadResult {
+	client, resolveErr := resolveOperatorClient(operatorClientOptions{})
+	if resolveErr != nil {
+		return reloadTransportError
+	}
+
+	resp, reqErr := client.doAuthenticatedRequest("POST", "/reload", nil)
+	if reqErr != nil {
+		if isDaemonNotRunning(reqErr) {
+			return reloadDaemonNotRunning
+		}
+		return reloadTransportError
+	}
+	defer resp.Body.Close()
+
+	_, bodyErr := client.readResponseBody(resp)
+	if bodyErr != nil {
+		return reloadRejected
+	}
+
+	return reloadSuccess
 }
 
 // isDaemonNotRunning returns true if the error indicates the daemon
-// is not listening on the socket.
+// is not listening on the socket. Only transport-level errors are
+// checked; local errors (missing token, bad config) never qualify.
 func isDaemonNotRunning(err error) bool {
 	if err == nil {
 		return false

@@ -87,8 +87,13 @@ func TestReloadDaemonNotRunning(t *testing.T) {
 }
 
 func TestConfigSetDaemonNotRunning(t *testing.T) {
-	_, _, _, _, cleanup := setupReloadTestEnv(t)
+	configPath, _, _, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
+
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	setOut, setErr := &bytes.Buffer{}, &bytes.Buffer{}
 	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, setOut, setErr)
@@ -100,6 +105,14 @@ func TestConfigSetDaemonNotRunning(t *testing.T) {
 	}
 	if !strings.Contains(setOut.String(), "daemon not running") {
 		t.Fatalf("expected 'daemon not running' message, got: %s", setOut.String())
+	}
+	// Verify config was updated (not rolled back).
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(original, restored) {
+		t.Error("config should be changed when daemon is not running")
 	}
 }
 
@@ -910,8 +923,9 @@ func TestReloadRuntimeAuditEnabled(t *testing.T) {
 	}
 }
 
-// TestTryReloadConfigNoRuntimeDir verifies that config set prints
-// "daemon not running" when XDG_RUNTIME_DIR is absent (early return path).
+// TestTryReloadConfigNoRuntimeDir verifies that config set rolls back
+// when XDG_RUNTIME_DIR is absent. A missing runtime dir is a local error,
+// NOT proof the daemon is not running (requirement #9).
 func TestTryReloadConfigNoRuntimeDir(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
@@ -931,18 +945,36 @@ func TestTryReloadConfigNoRuntimeDir(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", "")
 
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+	if code != 1 {
+		t.Fatalf("expected exit 1 (local error triggers rollback), got %d, stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "daemon not running") {
-		t.Fatalf("expected 'daemon not running' message, got: %s", stdout.String())
+	if !strings.Contains(stderr.String(), "rolled back") {
+		t.Fatalf("expected 'rolled back' in stderr, got: %s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "updated") {
+		t.Error("must not print 'updated' on rollback")
+	}
+
+	// Verify config was rolled back.
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config.json should be byte-for-byte restored after rollback")
 	}
 }
 
-// TestTryReloadConfigMissingToken verifies that config set prints
-// "daemon not running" when the admin token file is absent (early return path).
+// TestTryReloadConfigMissingToken verifies that config set rolls back
+// when the admin token file is absent. A missing token is a local error,
+// NOT proof the daemon is not running (requirement #9).
 func TestTryReloadConfigMissingToken(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
@@ -963,13 +995,30 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+	if code != 1 {
+		t.Fatalf("expected exit 1 (local error triggers rollback), got %d, stdout: %s stderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "daemon not running") {
-		t.Fatalf("expected 'daemon not running' message, got: %s", stdout.String())
+	if !strings.Contains(stderr.String(), "rolled back") {
+		t.Fatalf("expected 'rolled back' in stderr, got: %s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "updated") {
+		t.Error("must not print 'updated' on rollback")
+	}
+
+	// Verify config was rolled back.
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config.json should be byte-for-byte restored after rollback")
 	}
 }
 
@@ -1271,4 +1320,395 @@ func TestReloadInvalidConfigNoLeak(t *testing.T) {
 	if !strings.Contains(opLog, "allowed_root must be a non-empty absolute path") {
 		t.Errorf("expected operational log to contain the full error detail, got:\n%s", opLog)
 	}
+}
+
+// --- Transactional config set/unset tests ---
+
+// TestConfigSetReloadSuccess verifies that a successful set + reload
+// keeps the new config and prints "updated".
+func TestConfigSetReloadSuccess(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{Config: cfg, DB: db, AdminTokenHash: adminHash}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated log_level=debug") {
+		t.Fatalf("expected 'updated' in stdout, got: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "daemon not running") {
+		t.Error("should not print 'daemon not running' when reload succeeds")
+	}
+
+	// Verify config was updated.
+	raw := readConfigJSON(t, configPath)
+	if v, ok := raw["log_level"]; !ok {
+		t.Fatal("log_level not in config")
+	} else {
+		var s string
+		json.Unmarshal(v, &s)
+		if s != "debug" {
+			t.Errorf("log_level = %q, want debug", s)
+		}
+	}
+}
+
+// TestConfigUnsetReloadSuccess verifies that a successful unset + reload
+// keeps the new config and prints "unset".
+func TestConfigUnsetReloadSuccess(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set log_level first so we can unset it.
+	allowedRoot := testAllowedRootDir(t)
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf(`{"allowed_root":%q,"session_ttl":"12h","log_level":"debug"}`, allowedRoot)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{Config: cfg, DB: db, AdminTokenHash: adminHash}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "unset", "log_level"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "unset log_level") {
+		t.Fatalf("expected 'unset' in stdout, got: %s", stdout.String())
+	}
+}
+
+// TestConfigSetReloadHTTP400 verifies that when the daemon rejects with
+// HTTP 400, the config is rolled back and the command exits non-zero.
+func TestConfigSetReloadHTTP400(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	// Reject all reloads with 400.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d, stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "updated") {
+		t.Error("must not print 'updated' on reload rejection")
+	}
+	if !strings.Contains(stderr.String(), "rolled back") {
+		t.Errorf("expected 'rolled back' in stderr, got: %s", stderr.String())
+	}
+
+	// Verify config was rolled back.
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config.json should be byte-for-byte restored after rollback")
+	}
+}
+
+// TestConfigSetReloadHTTP401 verifies that when the daemon rejects with
+// HTTP 401, the config is rolled back and the command exits non-zero.
+func TestConfigSetReloadHTTP401(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+	if strings.Contains(stdout.String(), "updated") {
+		t.Error("must not print 'updated' on reload rejection")
+	}
+
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config should be restored after rollback")
+	}
+}
+
+// TestConfigSetReloadHTTP500 verifies that when the daemon rejects with
+// HTTP 500, the config is rolled back and the command exits non-zero.
+func TestConfigSetReloadHTTP500(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config should be restored after rollback")
+	}
+}
+
+// TestConfigSetHTTPAddressNoReload verifies that http_address set does
+// not trigger a reload and prints "restart required".
+func TestConfigSetHTTPAddressNoReload(t *testing.T) {
+	// http_address requires system mode. Skip if not root.
+	if EffectiveUID() != 0 {
+		t.Skip("http_address requires system mode (UID 0)")
+	}
+
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{Config: cfg, DB: db, AdminTokenHash: adminHash}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "http_address", "127.0.0.1:9999"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated http_address") {
+		t.Fatalf("expected 'updated' in stdout, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "restart required") {
+		t.Fatalf("expected 'restart required' in stdout, got: %s", stdout.String())
+	}
+}
+
+// TestConfigSetConcurrent verifies that concurrent config set operations
+// are serialized by the process-level lock.
+func TestConfigSetConcurrent(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{Config: cfg, DB: db, AdminTokenHash: adminHash}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	// Concurrent sets from different processes (simulated via goroutines).
+	// They share the same config file and lock, so they must serialize.
+	var wg sync.WaitGroup
+	errors := make([]string, 0, 10)
+	var mu sync.Mutex
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			var stdout, stderr bytes.Buffer
+			runCommandWithWriters([]string{"config", "set", "log_level",
+				[]string{"debug", "info", "warn", "error"}[i%4]}, &stdout, &stderr)
+			if stderr.Len() > 0 {
+				mu.Lock()
+				errors = append(errors, stderr.String())
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// Verify config is valid after all concurrent operations.
+	raw := readConfigJSON(t, configPath)
+	if v, ok := raw["log_level"]; ok {
+		var s string
+		json.Unmarshal(v, &s)
+		valid := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
+		if !valid[s] {
+			t.Errorf("log_level = %q, want valid level", s)
+		}
+	}
+}
+
+// getSocketPathForTest returns the socket path for the current test environment.
+func getSocketPathForTest(t *testing.T) string {
+	t.Helper()
+	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeDir == "" {
+		return ""
+	}
+	return filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
 }
