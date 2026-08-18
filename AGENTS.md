@@ -215,10 +215,41 @@ Keep:
 Avoid tests whose only purpose is freezing an unnecessary implementation
 detail.
 
-13. Do not build a test framework.
+13. Tests must exercise the production path.
+
+Do not make a test pass by reimplementing the production behavior inside the
+test, a fake, or a test-only helper.
+
+In particular, do not create a second implementation of:
+- operation lifecycle/state transitions;
+- log buffering or incremental log reads;
+- cleanup/termination behavior;
+- path validation/canonicalization;
+- authentication/authorization decisions;
+- request/response semantics.
+
+A fake or seam may replace an external dependency, but the production code
+under test must still own the semantics being asserted.
+
+When a test needs readiness or synchronization, observe a real state transition,
+process state, channel, callback, or other deterministic signal. Do not use an
+arbitrary `time.Sleep` as synchronization or assume that a fixed delay proves
+readiness.
+
+When stabilizing a flaky test, first determine whether the test has a timing
+assumption or bypasses the real lifecycle. Do not change production behavior,
+API contracts, validation, authentication, audit behavior, or 4xx/5xx semantics
+merely to make such a test pass unless the production behavior is independently
+shown to be wrong.
+
+14. Do not build a test framework.
 
 Extract helpers when setup/behavior is genuinely identical across several
 tests.
+
+Before adding a new test helper, search for an existing helper serving the same
+domain. Prefer extending or reusing one clear helper over creating parallel
+families with slightly different behavior.
 
 Do not combine fixtures from different domains merely because they share a few
 filesystem operations.
@@ -234,16 +265,53 @@ Use `t.Setenv` for test-scoped environment changes.
 
 Check errors from fixture setup operations.
 
-14. Be careful with global state.
+15. Be careful with global state.
 
 Before adding `t.Parallel()`, inspect whether the test touches package-global
 state such as logging/test seams.
 
 Do not assume a test is parallel-safe just because it uses `t.Setenv`.
 
+# Parallel implementation avoidance
+
+16. One production mechanism per responsibility.
+
+Before adding a new helper, registry, lifecycle abstraction, executor, buffer,
+cleanup path, validation path, or state-transition mechanism, search the current
+implementation for the existing owner of that responsibility.
+
+Do not create a parallel implementation merely because the existing one is
+awkward for the new call site. Prefer extending or adapting the authoritative
+path when the semantics are the same.
+
+In particular, avoid introducing a second:
+- operation registry;
+- operation lifecycle/state machine;
+- log buffer/log cursor mechanism;
+- Docker command executor;
+- cleanup/termination path;
+- terminal-transition mechanism;
+- path canonicalization/containment implementation;
+- operator/client path for an API that already has one.
+
+A separate implementation is justified only when the semantics or trust
+boundary are genuinely different. Make that distinction explicit in the code
+and tests.
+
+When integrating work produced in parallel by multiple agents/contributors,
+review specifically for:
+- duplicate helpers with overlapping purpose;
+- old and new lifecycle paths coexisting;
+- one caller bypassing a shared client or policy layer;
+- slightly different validation/auth/error/audit behavior for the same action;
+- test-only abstractions that duplicate production semantics.
+
+Do not preserve both implementations for convenience. Consolidate on one owner
+unless compatibility requires otherwise.
+
 # Documentation ownership
 
-15. Keep documentation roles distinct.
+17. Keep documentation roles distinct.
 
 `README.md` owns:
 - project introduction;
@@ -269,7 +337,7 @@ Prefer links to the canonical owner.
 
 # Versioning
 
-16. Version ownership.
+18. Version ownership.
 
 Source default:
 
@@ -284,7 +352,7 @@ Do not manually maintain a release number in source code.
 
 # Change procedure
 
-17. Before implementation.
+19. Before implementation.
 
 For non-trivial implementation tasks, inspect and understand the current
 behavior before editing.
@@ -300,7 +368,7 @@ explicitly asks for analysis/review first.
 If the task explicitly asks for analysis, inspection, review, or says not to
 modify code, stop after the analysis and do not edit files or create commits.
 
-18. After implementation run:
+20. After implementation run:
 
     gofmt
     go test ./...
@@ -336,7 +404,7 @@ operational need justifies it.
 
 Review the final diff for unrelated changes.
 
-19. Commits.
+21. Commits.
 
 Keep commits focused.
 
@@ -344,7 +412,7 @@ Commit messages must describe the code that is actually in the commit.
 
 Do not leave stale commit-message claims after amending implementation.
 
-20. GitHub.
+22. GitHub.
 
 When the task explicitly requests push:
 - push to the existing `github` remote;
@@ -355,7 +423,7 @@ When the task explicitly requests push:
 Do not push merely because implementation is complete unless the task requests
 it.
 
-21. Architecture cleanup after feature blocks.
+23. Architecture cleanup after feature blocks.
 
 After a significant feature block (multiple commits adding new capabilities),
 before starting the next major phase, do an architecture cleanup/review:
@@ -363,13 +431,15 @@ before starting the next major phase, do an architecture cleanup/review:
 - obsolete compatibility code;
 - contract drift between implementation and documentation;
 - help/docs drift;
-- tests freezing accidental implementation details.
+- tests freezing accidental implementation details;
+- parallel test helpers and production lifecycle implementations introduced by
+  independent work.
 
 Do not require cleanup after every small commit.
 
 Focus on deletion and simplification over new abstractions.
 
-22. shm_size 2 GiB limit.
+24. shm_size 2 GiB limit.
 
 The POST /run `shm_size` maximum of 2 GiB is a deliberate Release 1
 limit. Whether it becomes configurable in a later release is not committed.
