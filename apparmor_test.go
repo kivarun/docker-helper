@@ -2065,6 +2065,34 @@ func TestSystemProfileDockerInheritedConfinement(t *testing.T) {
 	}
 }
 
+func TestSystemProfileSocketLockFileLocking(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// The socket lock file must have the k (file locking) permission.
+	if !strings.Contains(content, "/run/docker-helper/docker-helper.sock.lock rwk,") {
+		t.Error("system profile must grant rwk on /run/docker-helper/docker-helper.sock.lock for flock-based single-instance locking")
+	}
+
+	// The broad /run/docker-helper/** rule must NOT include k (file locking).
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/run/docker-helper/**") {
+			// Check the permission flags (last token before comma) for 'k'.
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "k") {
+				t.Errorf("system profile must not grant k on /run/docker-helper/** (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
 func TestUserProfileContainsOpenSSL(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper")
 	if err != nil {

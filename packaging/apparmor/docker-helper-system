@@ -30,6 +30,10 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/run/docker-helper/ r,
 	/run/docker-helper/** rw,
 
+	# Socket lock file — file locking (k) is required for the single-instance
+	# lock; the broader /run/docker-helper/** rule intentionally omits k.
+	/run/docker-helper/docker-helper.sock.lock rwk,
+
 	# Docker socket — filesystem access.
 	/run/docker.sock rw,
 	/var/run/docker.sock rw,
