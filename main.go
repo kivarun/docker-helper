@@ -216,6 +216,16 @@ func runServe(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
 	initLoggers(stderr, stdout, slog.LevelInfo, false)
 
+	// System mode requires AppArmor confinement. Check before loadConfig()
+	// to avoid side effects (runtime directory creation) when confinement
+	// is not satisfied.
+	if resolveDeploymentMode() == ModeSystem {
+		if err := requireAppArmorConfinement(); err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		hint := "run docker-helper init"
@@ -228,15 +238,6 @@ func runServe(stdout, stderr io.Writer) error {
 
 	// Re-initialize with the configured log level and audit setting.
 	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
-
-	// System mode requires AppArmor confinement. Check before acquiring
-	// lock, opening database, or binding listeners.
-	if cfg.Mode == ModeSystem {
-		if err := requireAppArmorConfinement(); err != nil {
-			serveStartupError(err, "")
-			return err
-		}
-	}
 
 	callbackEntered := false
 	err = runWithLock(cfg.LockPath, func() error {
