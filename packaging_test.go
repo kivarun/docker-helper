@@ -1279,53 +1279,45 @@ func TestSystemUnitFile(t *testing.T) {
 	}
 }
 
-// TestSystemUnitNoRestrictSUIDSGID verifies that the system unit does not
-// contain an active RestrictSUIDSGID directive.
-// Reason: docker-helper build staging requires openat2(2). systemd's
-// RestrictSUIDSGID seccomp filtering blocks openat2 with ENOSYS on
-// supported kernels (observed on Linux 7.1.x).
-// Only comments are allowed.
-func TestSystemUnitNoRestrictSUIDSGID(t *testing.T) {
-	path := "packaging/systemd/system/docker-helper.service"
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("system unit %s not found: %v", path, err)
+// TestUnitNoRestrictSUIDSGID verifies that neither shipped systemd unit
+// contains an active RestrictSUIDSGID directive that would enable the
+// restriction. Any active directive with a true-equivalent value (true, yes,
+// on, 1) would block openat2(2), which docker-helper build staging requires.
+// Comments explaining the omission are allowed.
+func TestUnitNoRestrictSUIDSGID(t *testing.T) {
+	trueValues := map[string]bool{
+		"true": true, "yes": true, "on": true, "1": true,
 	}
-	content := string(data)
 
-	// Reject any non-comment RestrictSUIDSGID directive.
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue // skip comments
-		}
-		if strings.HasPrefix(trimmed, "RestrictSUIDSGID=") {
-			t.Error("system unit must not contain active RestrictSUIDSGID directive (blocks openat2 required by build staging)")
-		}
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"system unit", "packaging/systemd/system/docker-helper.service"},
+		{"user unit", "packaging/systemd/user/docker-helper.service"},
 	}
-}
 
-// TestUserUnitNoRestrictSUIDSGID verifies that the user unit does not
-// contain an active RestrictSUIDSGID directive.
-// Reason: same as TestSystemUnitNoRestrictSUIDSGID.
-// Only comments are allowed.
-func TestUserUnitNoRestrictSUIDSGID(t *testing.T) {
-	path := "packaging/systemd/user/docker-helper.service"
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("user unit %s not found: %v", path, err)
-	}
-	content := string(data)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := os.ReadFile(tt.path)
+			if err != nil {
+				t.Fatalf("%s not found: %v", tt.path, err)
+			}
 
-	// Reject any non-comment RestrictSUIDSGID directive.
-	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue // skip comments
-		}
-		if strings.HasPrefix(trimmed, "RestrictSUIDSGID=") {
-			t.Error("user unit must not contain active RestrictSUIDSGID directive (blocks openat2 required by build staging)")
-		}
+			for _, line := range strings.Split(string(data), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if !strings.HasPrefix(trimmed, "RestrictSUIDSGID=") {
+					continue
+				}
+				value := strings.TrimSpace(strings.TrimPrefix(trimmed, "RestrictSUIDSGID="))
+				if trueValues[strings.ToLower(value)] {
+					t.Errorf("%s: active RestrictSUIDSGID=%s blocks openat2 required by build staging", tt.path, value)
+				}
+			}
+		})
 	}
 }
 

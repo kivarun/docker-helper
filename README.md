@@ -334,7 +334,7 @@ Configuration fields:
 | `allowed_root` | string | Root directory for agent workspaces (required) |
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
-| `audit_enabled` | boolean | Override audit behavior (default: derived from `log_level`) |
+| `audit_enabled` | boolean | Override audit behavior (default: `true` in system mode; in user mode, `true` only when `log_level` is `debug`) |
 | `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `30s`) |
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |

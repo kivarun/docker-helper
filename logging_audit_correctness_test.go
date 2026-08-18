@@ -208,20 +208,33 @@ func TestReloadAuditWriterRecover(t *testing.T) {
 }
 
 // TestReloadAuditNoSensitiveValues verifies that config.reload audit records
-// do not contain any sensitive or host-specific config values, regardless of
-// which JSON field they might accidentally land in.
+// do not contain sensitive config values. Uses unique marker values for both
+// allowed_root and trusted_ca_path and checks the raw audit JSON for absence
+// of those specific values.
 func TestReloadAuditNoSensitiveValues(t *testing.T) {
 	app, configPath, adminToken, auditBuf, _ := setupReloadApp(t, true)
 
-	// Write config with unique marker values for sensitive/host-specific fields.
-	// trusted_ca_path must be an absolute path per validation.
-	allowedRoot := testAllowedRootDir(t)
-	markerCA := "/unique-marker-ca-path-abc123"
+	// Create a workspace root with a unique marker name so we can detect
+	// if its value leaks into the audit JSON.
+	markerRoot := "audit-sensitive-root-marker-7f3a9c"
+	allowedRoot, err := allocateTestWorkspaceRoot(append(candidateBasePaths(), "/"))
+	if err != nil {
+		t.Fatalf("cannot allocate workspace root: %v", err)
+	}
+	// Rename to our marker name for deterministic detection.
+	markerRootPath := filepath.Join(filepath.Dir(allowedRoot), markerRoot)
+	if err := os.Rename(allowedRoot, markerRootPath); err != nil {
+		t.Fatalf("rename to marker: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(markerRootPath) })
+
+	markerCA := "audit-sensitive-ca-marker-4b2e8d"
+
 	newCfg := map[string]any{
-		"allowed_root":    allowedRoot,
+		"allowed_root":    markerRootPath,
 		"session_ttl":     "12h",
 		"log_level":       "info",
-		"trusted_ca_path": markerCA,
+		"trusted_ca_path": "/" + markerCA,
 	}
 	data, _ := json.MarshalIndent(newCfg, "", "  ")
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
@@ -236,10 +249,19 @@ func TestReloadAuditNoSensitiveValues(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	// Check raw audit JSON for marker values.
+	// Verify the reload actually produced an audit record (proves we reached the path).
+	rec := findAuditEvent(auditBuf, "config.reload")
+	if rec == nil {
+		t.Fatal("expected config.reload audit record — test did not reach the audit path")
+	}
+
+	// Check raw audit JSON for both unique marker values.
 	auditRaw := auditBuf.String()
+	if strings.Contains(auditRaw, markerRoot) {
+		t.Errorf("config.reload audit must not contain allowed_root value %q", markerRoot)
+	}
 	if strings.Contains(auditRaw, markerCA) {
-		t.Errorf("config.reload audit must not contain sensitive value %q", markerCA)
+		t.Errorf("config.reload audit must not contain trusted_ca_path value %q", markerCA)
 	}
 }
 

@@ -79,8 +79,9 @@ Logging level: \fBdebug\fR, \fBinfo\fR, \fBwarn\fR, or \fBerror\fR.
 .TP
 .B audit_enabled (boolean, optional)
 Enable audit logging for Docker operations. When absent, the effective value
-is derived from \fBlog_level\fR: \fBtrue\fR when effective log_level is \fBdebug\fR,
-\fBfalse\fR otherwise.
+depends on deployment mode: in system mode (effective UID 0) audit is always
+\fBtrue\fR; in user mode it is \fBtrue\fR only when effective \fBlog_level\fR is
+\fBdebug\fR, \fBfalse\fR otherwise. An explicit value always overrides the default.
 .TP
 .B shutdown_timeout (string, optional, default="30s")
 Graceful shutdown timeout using Go duration syntax.
