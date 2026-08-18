@@ -16,7 +16,10 @@ import (
 
 func TestInitCoreCreatesConfig(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	// Use a real directory for the allowed root
 	rootDir := t.TempDir()
@@ -38,13 +41,13 @@ func TestInitCoreCreatesConfig(t *testing.T) {
 	}
 
 	// Verify config file exists
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	if _, err := os.Stat(configPath); err != nil {
 		t.Errorf("config file not created: %v", err)
 	}
 
 	// Verify token file exists
-	tokenPath := filepath.Join(dir, "docker-helper", "admin.token")
+	tokenPath := filepath.Join(dir, "admin.token")
 	if _, err := os.Stat(tokenPath); err != nil {
 		t.Errorf("token file not created: %v", err)
 	}
@@ -52,10 +55,13 @@ func TestInitCoreCreatesConfig(t *testing.T) {
 
 func TestInitCoreExistingTokenFails(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	// Create existing token
-	tokenPath := filepath.Join(dir, "docker-helper", "admin.token")
+	tokenPath := filepath.Join(dir, "admin.token")
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +84,10 @@ func TestInitCoreExistingTokenFails(t *testing.T) {
 
 func TestInitSystemCallsAddRoot(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
 
@@ -113,9 +122,12 @@ func TestInitSystemCallsAddRoot(t *testing.T) {
 
 func TestInitSystemAddRootFailure(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
 
-	rootDir := t.TempDir()
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	rootDir := testAllowedRootDir(t)
 
 	coreCalled := false
 	addRoot := func(path string) (rootResult, error) {
@@ -141,7 +153,7 @@ func TestInitSystemAddRootFailure(t *testing.T) {
 	}
 
 	// Verify no config created
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Error("config should not be created on AppArmor failure")
 	}
@@ -149,7 +161,10 @@ func TestInitSystemAddRootFailure(t *testing.T) {
 
 func TestInitSystemCoreFailureRollback(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
 	// Distinct path that addRoot returns to prove rollback uses result.Path
@@ -190,7 +205,10 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 
 func TestInitSystemCoreFailureNoRollbackWhenNotChanged(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := t.TempDir()
 
@@ -220,7 +238,10 @@ func TestInitSystemCoreFailureNoRollbackWhenNotChanged(t *testing.T) {
 
 func TestInitSystemRollbackFailureReportsBothErrors(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
 
@@ -251,7 +272,10 @@ func TestInitSystemRollbackFailureReportsBothErrors(t *testing.T) {
 
 func TestInitSystemExistingConfigMismatch(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	// Create two real directories for the mismatch
 	baseDir := testAllowedRootDir(t)
@@ -264,7 +288,7 @@ func TestInitSystemExistingConfigMismatch(t *testing.T) {
 	}
 
 	// Create existing config with old root
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -306,13 +330,16 @@ func TestInitSystemExistingConfigMismatch(t *testing.T) {
 
 func TestInitSystemExistingConfigMatch(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	// Create real directory for the matching root
 	rootDir := testAllowedRootDir(t)
 
 	// Create existing config with matching allowed_root
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +380,10 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 
 func TestInitSystemExistingTokenNoAppArmor(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := t.TempDir()
 
@@ -393,7 +423,10 @@ func TestInitSystemExistingTokenNoAppArmor(t *testing.T) {
 
 func TestInitSystemAlreadyPresent(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
 
@@ -424,7 +457,10 @@ func TestInitSystemAlreadyPresent(t *testing.T) {
 
 func TestInitUserModeNoAppArmor(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := t.TempDir()
 
@@ -448,7 +484,10 @@ func TestInitUserModeNoAppArmor(t *testing.T) {
 
 func TestInitUserModeNoAppArmorRestrictions(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	// Create a directory with a name that AppArmor would reject (glob character)
 	rootDir := filepath.Join(dir, "workspace*")
@@ -472,7 +511,11 @@ func TestInitUserModeNoAppArmorRestrictions(t *testing.T) {
 
 func TestInitSystemInvalidAppArmorPath(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	configPath := filepath.Join(dir, "config.json")
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
 
@@ -505,7 +548,11 @@ func TestInitSystemInvalidAppArmorPath(t *testing.T) {
 
 func TestInitSystemOrderingAddRootBeforeCore(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	configPath := filepath.Join(dir, "config.json")
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
 
@@ -687,7 +734,10 @@ func TestInitHelpContainsAutomationBoundary(t *testing.T) {
 
 func TestInitSystemRollbackChangedFalseNotError(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
 
@@ -722,12 +772,15 @@ func TestInitSystemRollbackChangedFalseNotError(t *testing.T) {
 
 func TestInitSystemConfigPathIsDirectory(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := t.TempDir()
 
 	// Create config.json as a directory
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	if err := os.MkdirAll(configPath, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -765,12 +818,15 @@ func TestInitSystemConfigPathIsDirectory(t *testing.T) {
 
 func TestInitSystemExistingConfigReadError(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := t.TempDir()
 
 	// Create config file without read permissions
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -812,12 +868,15 @@ func TestInitSystemExistingConfigReadError(t *testing.T) {
 
 func TestInitSystemExistingConfigInvalid(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := t.TempDir()
 
 	// Create invalid config
-	configPath := filepath.Join(dir, "docker-helper", "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -226,7 +226,7 @@ func getStateDir() string {
 }
 
 func loadConfig() (*Config, error) {
-	configPath := getConfigPath()
+	configPath := getConfigPathFunc()
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -718,6 +718,9 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	}
 
 	// System mode: integrate with AppArmor.
+	if err := requireAppArmorActive(); err != nil {
+		return fmt.Errorf("system mode requires active AppArmor LSM: %w", err)
+	}
 	return initSystemWithAppArmor(allowedRoot, stdout, stderr,
 		getAppArmorAddRoot(),
 		getAppArmorRemoveRoot(),

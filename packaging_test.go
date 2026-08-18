@@ -1277,6 +1277,11 @@ func TestSystemUnitFile(t *testing.T) {
 	if !strings.Contains(content, "TimeoutStopSec=") {
 		t.Error("unit must contain bounded TimeoutStopSec")
 	}
+	// ConditionSecurity=apparmor prevents systemd from starting the unit
+	// when AppArmor LSM is not active, providing a first-layer guard.
+	if !strings.Contains(content, "ConditionSecurity=apparmor") {
+		t.Error("system unit must contain ConditionSecurity=apparmor")
+	}
 }
 
 // TestSystemUnitNoMountNamespace verifies that the system unit does not
@@ -1711,11 +1716,22 @@ log_file="%s"
 echo "$0 $@" >> "$log_file"
 exit 0
 `, logFile))
+	// Standard AppArmor LSM status: active.
+	aaDir := filepath.Join(e.destDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaDir, "enabled"), []byte("Y"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	scriptData, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Replace the hardcoded AppArmor LSM path with the test-controlled one.
+	scriptData = []byte(strings.ReplaceAll(string(scriptData),
+		"/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH"))
 	if err := os.WriteFile(e.scriptPath, scriptData, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1762,6 +1778,7 @@ exit 0
 		"AA_PARSER=" + filepath.Join(e.fakeBinDir, "apparmor_parser"),
 		"SYSTEMCTL=" + filepath.Join(e.fakeBinDir, "systemctl"),
 		"DOCKER=" + filepath.Join(e.fakeBinDir, "docker"),
+		"AA_ENABLED_PATH=" + filepath.Join(e.destDir, "sys", "module", "apparmor", "parameters", "enabled"),
 	}
 	return e
 }
@@ -2230,6 +2247,53 @@ esac
 
 	if strings.Contains(out, "system installation complete") {
 		t.Error("should not print installation complete on start failure")
+	}
+}
+
+// TestInstallSystemInactiveApparmorLsm verifies that install-system.sh
+// fails early when AppArmor LSM is not active, before any file installation.
+func TestInstallSystemInactiveApparmorLsm(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+
+	// Write "N" to simulate inactive AppArmor LSM.
+	aaEnabledDir := filepath.Join(env.destDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the script with the AppArmor LSM path overridden.
+	scriptData, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := strings.ReplaceAll(string(scriptData),
+		"/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH")
+	modifiedFile := filepath.Join(env.scriptDir, "modified-install.sh")
+	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	testRoot := t.TempDir()
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(
+		"source %s\ncheck_root() { :; }\nmain --yes --allowed-root %s",
+		modifiedFile, testRoot))
+	cmd.Env = append(os.Environ(), env.env...)
+	cmd.Env = append(cmd.Env, "AA_ENABLED_PATH="+filepath.Join(aaEnabledDir, "enabled"))
+	cmd.Dir = env.scriptDir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("install should fail when AppArmor LSM is inactive")
+	}
+	output := string(out)
+	if !strings.Contains(output, "not active") && !strings.Contains(output, "AppArmor") {
+		t.Errorf("expected AppArmor error, got: %s", output)
+	}
+	// Binary should NOT have been installed.
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should not be installed when AppArmor LSM is inactive")
 	}
 }
 
@@ -3047,6 +3111,8 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 
 	// Replace /run/systemd/system with a test-controlled path.
 	modified := strings.ReplaceAll(string(data), "/run/systemd/system", "$TEST_RUN_SYSTEMD")
+	// Replace AppArmor LSM status path with a test-controlled path.
+	modified = strings.ReplaceAll(modified, "/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH")
 	modifiedFile := filepath.Join(scriptDir, "modified.sh")
 	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
 		t.Fatal(err)
@@ -3059,6 +3125,16 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		}
 	}
 
+	// Default: AppArmor LSM is active. Tests can override by providing
+	// their own AA_ENABLED_PATH via extraEnv and creating the file.
+	aaEnabledPath := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters", "enabled")
+	if err := os.MkdirAll(filepath.Dir(aaEnabledPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aaEnabledPath, []byte("Y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	env := append(os.Environ(),
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 		"STOP_FAIL=false",
@@ -3067,6 +3143,7 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		"RELOAD_FAIL=false",
 		"DISABLE_FAIL=false",
 		"TEST_RUN_SYSTEMD="+testRunDir,
+		"AA_ENABLED_PATH="+aaEnabledPath,
 	)
 	env = append(env, extraEnv...)
 
@@ -3270,6 +3347,100 @@ func TestRpmPostinstallRestartFailure(t *testing.T) {
 	}
 	if !foundReplace || !foundReload || !foundRestart {
 		t.Errorf("expected replace+reload+restart calls, got replace=%v reload=%v restart=%v", foundReplace, foundReload, foundRestart)
+	}
+}
+
+// --- DEB postinstall: AppArmor LSM inactive ---
+
+// TestDebPostinstallInactiveApparmorLsm verifies that when AppArmor LSM
+// is not active, the postinst skips apparmor_parser but still performs
+// daemon-reload and exits 0.
+func TestDebPostinstallInactiveApparmorLsm(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	// Write "N" to simulate inactive AppArmor LSM.
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled")})
+	if code != 0 {
+		t.Fatalf("postinst should exit 0 when AppArmor LSM inactive, got %d (stderr: %s)", code, stderr)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	// Must NOT call apparmor_parser
+	for _, c := range calls {
+		if strings.Contains(c, "--replace") {
+			t.Error("must not call apparmor_parser when AppArmor LSM is inactive")
+		}
+	}
+	// Must call daemon-reload
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call daemon-reload even when AppArmor LSM is inactive")
+	}
+	// Must emit warning
+	if !strings.Contains(stderr, "not active") && !strings.Contains(stderr, "warning") {
+		t.Errorf("expected warning about inactive AppArmor, got: %s", stderr)
+	}
+}
+
+// TestRpmPostinstallInactiveApparmorLsm verifies that when AppArmor LSM
+// is not active, the RPM postinst skips apparmor_parser but still performs
+// daemon-reload and exits 0.
+func TestRpmPostinstallInactiveApparmorLsm(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled")})
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0 when AppArmor LSM inactive, got %d (stderr: %s)", code, stderr)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "--replace") {
+			t.Error("must not call apparmor_parser when AppArmor LSM is inactive")
+		}
+	}
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("must call daemon-reload even when AppArmor LSM is inactive")
+	}
+	if !strings.Contains(stderr, "not active") && !strings.Contains(stderr, "warning") {
+		t.Errorf("expected warning about inactive AppArmor, got: %s", stderr)
 	}
 }
 

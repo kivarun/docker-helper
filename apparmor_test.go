@@ -61,6 +61,15 @@ func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured
 	return dir, mgr, captured
 }
 
+// mockApparmorActive sets apparmorLSMActive to return (active, nil) and
+// returns a cleanup function to restore the original.
+func mockApparmorActive(t *testing.T, active bool) {
+	t.Helper()
+	saved := apparmorLSMActive
+	apparmorLSMActive = func() (bool, error) { return active, nil }
+	t.Cleanup(func() { apparmorLSMActive = saved })
+}
+
 // --- Command registration and help ---
 
 // TestApparmorHelpOutput verifies help dispatch for every apparmor command
@@ -132,6 +141,7 @@ func TestApparmorRequiresRoot(t *testing.T) {
 // --- Absolute/existing-directory validation ---
 
 func TestApparmorRootAddRelativePath(t *testing.T) {
+	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -147,6 +157,7 @@ func TestApparmorRootAddRelativePath(t *testing.T) {
 }
 
 func TestApparmorRootAddNonExistentPath(t *testing.T) {
+	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -162,6 +173,7 @@ func TestApparmorRootAddNonExistentPath(t *testing.T) {
 }
 
 func TestApparmorRootAddFileNotDirectory(t *testing.T) {
+	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -256,6 +268,7 @@ func TestApparmorRootAddGlobRejected(t *testing.T) {
 }
 
 func TestApparmorRootAddCLIRejectsGlob(t *testing.T) {
+	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -1654,6 +1667,7 @@ func TestFragmentRoundTripSpecialChars(t *testing.T) {
 // --- CLI exit codes ---
 
 func TestApparmorCLIExitCodes(t *testing.T) {
+	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()

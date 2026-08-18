@@ -104,6 +104,10 @@ func runApparmorRootList(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	if err := requireAppArmorActive(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
 
 	mgr := newProductionApparmorManager()
 	roots, err := mgr.listRoots()
@@ -121,6 +125,10 @@ func runApparmorRootList(stdout, stderr io.Writer) int {
 
 func runApparmorRootAdd(path string, stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := requireAppArmorActive(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
@@ -150,6 +158,10 @@ func runApparmorRootRemove(path string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	if err := requireAppArmorActive(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
 
 	mgr := newProductionApparmorManager()
 	result, err := mgr.removeRoot(path)
@@ -173,6 +185,10 @@ func runApparmorRootRemove(path string, stdout, stderr io.Writer) int {
 
 func runApparmorCheck(stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := requireAppArmorActive(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}

@@ -21,9 +21,14 @@ fi
 was_active=false
 systemctl is-active --quiet docker-helper.service && was_active=true
 
-# Load/replace the production AppArmor profile.
-if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system; then
-  exit 1
+# Load/replace the production AppArmor profile only if AppArmor LSM is active.
+aa_enabled="$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" || true
+if [ "$aa_enabled" = "Y" ]; then
+  if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system; then
+    exit 1
+  fi
+else
+  echo "warning: AppArmor LSM is not active; skipping apparmor_parser (system mode will not start)" >&2
 fi
 
 # Reload systemd unit files.

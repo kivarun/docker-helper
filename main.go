@@ -229,6 +229,15 @@ func runServe(stdout, stderr io.Writer) error {
 	// Re-initialize with the configured log level and audit setting.
 	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
 
+	// System mode requires AppArmor confinement. Check before acquiring
+	// lock, opening database, or binding listeners.
+	if cfg.Mode == ModeSystem {
+		if err := requireAppArmorConfinement(); err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+	}
+
 	callbackEntered := false
 	err = runWithLock(cfg.LockPath, func() error {
 		callbackEntered = true

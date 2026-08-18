@@ -145,6 +145,23 @@ check_apparmor_parser() {
 	fi
 }
 
+check_apparmor_active() {
+	local enabled_file="/sys/module/apparmor/parameters/enabled"
+	if [[ ! -r "$enabled_file" ]]; then
+		error "AppArmor LSM status file not readable at $enabled_file"
+		error "AppArmor is mandatory for system mode installation."
+		exit 1
+	fi
+	local val
+	val="$(cat "$enabled_file" 2>/dev/null)" || true
+	val="$(echo "$val" | tr -d '[:space:]')"
+	if [[ "$val" != "Y" ]]; then
+		error "AppArmor LSM is not active on this kernel (value: '$val')"
+		error "AppArmor is mandatory for system mode installation."
+		exit 1
+	fi
+}
+
 check_docker() {
 	info ""
 	info "WARNING: docker-helper requires access to the Docker daemon."
@@ -328,6 +345,7 @@ main() {
 	check_bundled_assets
 	check_systemctl
 	check_apparmor_parser
+	check_apparmor_active
 	check_docker
 	check_allowed_root
 	check_active_service
