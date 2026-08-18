@@ -6,6 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+
+	"golang.org/x/term"
 )
 
 var principalCommand = &Command{
@@ -511,7 +514,17 @@ With --force, an existing credential is replaced atomically.`,
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				credPath, err := installCredentialWithIO(*force, stderr)
+				credPath, err := installCredential(credentialInstallConfig{
+					reader:     os.Stdin,
+					writer:     safeWriteCredential,
+					uid:        EffectiveUID,
+					isTerminal: func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
+					readPassword: func() (string, error) {
+						return readTokenHidden("Credential token: ", stderr)
+					},
+					force:  *force,
+					stderr: stderr,
+				})
 				if err != nil {
 					if errors.Is(err, ErrCredentialInstallAsRoot) {
 						fmt.Fprintln(stderr, "error: credential install must not be run as root")

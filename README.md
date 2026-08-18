@@ -941,10 +941,7 @@ sudo docker-helper principal allowed-root remove \
 The principal installs the token on their machine (not as root):
 
 ```bash
-# Pipe the token from the operator (hidden input on TTY):
-echo "dhc_..." | docker-helper credential install
-
-# Or paste interactively (hidden input on TTY):
+# Interactive input (token is hidden on terminal):
 docker-helper credential install
 
 # Replace an existing credential:

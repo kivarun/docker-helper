@@ -25,7 +25,7 @@ var (
 
 // credentialInstallConfig holds the injectable dependencies for installCredential.
 type credentialInstallConfig struct {
-	// reader provides the raw input (stdin for non-TTY).
+	// reader provides the raw input for non-TTY token reading.
 	reader io.Reader
 	// writer performs the atomic file write.
 	writer func(path string, data []byte) error
@@ -35,6 +35,10 @@ type credentialInstallConfig struct {
 	isTerminal func() bool
 	// readPassword reads a hidden password from stdin (for TTY).
 	readPassword func() (string, error)
+	// force replaces an existing credential without error.
+	force bool
+	// stderr receives prompts and messages.
+	stderr io.Writer
 }
 
 // credentialPath returns the user credential file path.
@@ -103,25 +107,23 @@ func readTokenHidden(prompt string, stderr io.Writer) (string, error) {
 	return token, nil
 }
 
-// installCredential performs the credential installation.
+// installCredential performs the full credential installation flow.
+// Rejects root, reads token (hidden on TTY, stdin otherwise), validates,
+// checks --force for existing credential, and writes atomically.
 // Returns the credential path on success.
 func installCredential(cfg credentialInstallConfig) (string, error) {
-	// Reject root.
 	if cfg.uid() == 0 {
 		return "", ErrCredentialInstallAsRoot
 	}
 
-	// Read token.
 	var token string
 	if cfg.isTerminal() {
-		// TTY: use hidden input via readPassword callback.
 		var err error
 		token, err = cfg.readPassword()
 		if err != nil {
 			return "", err
 		}
 	} else {
-		// Non-TTY: read from stdin.
 		var err error
 		token, err = readTokenFromReader(cfg.reader)
 		if err != nil {
@@ -129,27 +131,27 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 		}
 	}
 
-	// Validate token format.
 	if err := validateCredentialToken(token); err != nil {
 		return "", err
 	}
 
-	// Resolve credential path.
 	credPath, err := credentialPath()
 	if err != nil {
 		return "", err
 	}
 
-	// Create directory with mode 0700.
 	dir := filepath.Dir(credPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("cannot create credential directory: %w", ErrCredentialDirectoryMissing)
+	if err := ensureCredentialDir(dir); err != nil {
+		return "", err
 	}
 
-	// Write token with trailing newline.
-	data := append([]byte(token), '\n')
+	if !cfg.force {
+		if info, err := os.Stat(credPath); err == nil && !info.IsDir() {
+			return "", fmt.Errorf("credential already exists: use --force to replace: %w", ErrCredentialAlreadyExists)
+		}
+	}
 
-	// Atomic write with mode 0600.
+	data := append([]byte(token), '\n')
 	if err := cfg.writer(credPath, data); err != nil {
 		return "", err
 	}
@@ -157,66 +159,22 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 	return credPath, nil
 }
 
-// installCredentialWithIO is the full install flow with TTY support.
-// It handles root check, token input (hidden for TTY), validation,
-// --force check, and atomic write.
-func installCredentialWithIO(force bool, stderr io.Writer) (string, error) {
-	// Reject root.
-	if EffectiveUID() == 0 {
-		return "", ErrCredentialInstallAsRoot
-	}
-
-	// Read token.
-	var token string
-	if isStdinTTY() {
-		// TTY: use hidden input.
-		var err error
-		token, err = readTokenHidden("Credential token: ", stderr)
-		if err != nil {
-			return "", err
-		}
-	} else {
-		// Non-TTY: read from stdin.
-		var err error
-		token, err = readTokenFromReader(os.Stdin)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	// Validate token format.
-	if err := validateCredentialToken(token); err != nil {
-		return "", err
-	}
-
-	// Resolve credential path.
-	credPath, err := credentialPath()
-	if err != nil {
-		return "", err
-	}
-
-	// Check if credential already exists.
-	if info, err := os.Stat(credPath); err == nil {
-		if !info.IsDir() && !force {
-			return "", fmt.Errorf("credential already exists: use --force to replace: %w", ErrCredentialAlreadyExists)
-		}
-	}
-
-	// Create directory with mode 0700.
-	dir := filepath.Dir(credPath)
+// ensureCredentialDir creates the credential directory with mode 0700.
+// If the directory already exists, it verifies and fixes the mode to 0700.
+func ensureCredentialDir(dir string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("cannot create credential directory: %w", ErrCredentialDirectoryMissing)
+		return fmt.Errorf("cannot create credential directory: %w", ErrCredentialDirectoryMissing)
 	}
-
-	// Write token with trailing newline.
-	data := append([]byte(token), '\n')
-
-	// Atomic write with mode 0600.
-	if err := safeWriteCredential(credPath, data); err != nil {
-		return "", err
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
 	}
-
-	return credPath, nil
+	if info.Mode().Perm() != 0700 {
+		if err := os.Chmod(dir, 0700); err != nil {
+			return fmt.Errorf("cannot set credential directory permissions: %w", err)
+		}
+	}
+	return nil
 }
 
 // safeWriteCredential is the production writer for credential files.
@@ -249,13 +207,4 @@ func safeWriteCredential(path string, data []byte) error {
 		return fmt.Errorf("cannot install credential: %w", err)
 	}
 	return nil
-}
-
-// isStdinTTY checks if stdin is a terminal.
-func isStdinTTY() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
 }
