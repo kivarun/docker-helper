@@ -396,6 +396,11 @@ operational experience justifies it.
   - `docker-helper-config(5)`.
 - Add Bash completion for commands, subcommands, and flags, and ship it with
   native packages and generic release artifacts.
+- Add an operator-facing `docker-helper ca` command group for the single managed
+  trusted-CA lifecycle. Its command contract must cover importing a validated
+  source certificate into helper-owned state, inspection, and removal without
+  giving the confined daemon arbitrary source-path access or reusing workspace
+  AppArmor roots.
 - Add package/service upgrade tests, including an existing Release 1 user-mode
   installation on the same machine.
 

@@ -322,6 +322,11 @@ Accepted direction:
 - provide at least `docker-helper(1)` and `docker-helper-config(5)` manual pages;
 - add Bash completion for commands, subcommands, and flags, and ship it with
   native packages and generic release artifacts;
+- add an operator-facing `docker-helper ca` command group for the single managed
+  trusted-CA lifecycle; its contract must cover importing a validated source
+  certificate into helper-owned state, inspection, and removal without giving
+  the confined daemon arbitrary source-path access or reusing workspace
+  AppArmor roots;
 
 **Remote execution** is part of Release 2:
 
