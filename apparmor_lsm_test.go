@@ -163,7 +163,6 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
-	// Create a minimal valid config so serve reaches the AppArmor check.
 	allowedRoot := testAllowedRootDir(t)
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.json")
@@ -178,9 +177,8 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	combined := stderr.String() + stdout.String()
-	if !strings.Contains(combined, "not active") && !strings.Contains(combined, "AppArmor") {
-		t.Errorf("expected AppArmor error, got: %s", combined)
+	if !strings.Contains(stderr.String(), "not active") {
+		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
 	}
 }
 
@@ -202,7 +200,6 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
-	// Create a minimal valid config so serve reaches the AppArmor check.
 	allowedRoot := testAllowedRootDir(t)
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.json")
@@ -217,18 +214,59 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	combined := stderr.String() + stdout.String()
-	if !strings.Contains(combined, "not confined") && !strings.Contains(combined, "AppArmor") {
-		t.Errorf("expected confinement error, got: %s", combined)
+	if !strings.Contains(stderr.String(), "not confined") {
+		t.Errorf("expected 'not confined' in stderr, got: %s", stderr.String())
+	}
+}
+
+// TestServeSystemModePreflightEnforce verifies that a process confined in
+// the correct profile passes the AppArmor preflight and proceeds to the
+// next startup check (lock, admin token, etc.). This proves the preflight
+// does not block a properly confined process.
+func TestServeSystemModePreflightEnforce(t *testing.T) {
+	origActive := apparmorLSMActive
+	origConfinement := apparmorProcessConfinement
+	apparmorLSMActive = func() (bool, error) { return true, nil }
+	apparmorProcessConfinement = func() (string, error) {
+		return "docker-helper-system (enforce)", nil
+	}
+	defer func() {
+		apparmorLSMActive = origActive
+		apparmorProcessConfinement = origConfinement
+	}()
+
+	origUID := EffectiveUID
+	origGetConfig := getConfigPathFunc
+	EffectiveUID = func() int { return 0 }
+	defer func() {
+		EffectiveUID = origUID
+		getConfigPathFunc = origGetConfig
+	}()
+
+	allowedRoot := testAllowedRootDir(t)
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	configData := fmt.Sprintf(`{"allowed_root":%q,"session_ttl":"12h"}`, allowedRoot)
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
+		t.Fatal(err)
+	}
+	getConfigPathFunc = func() string { return configPath }
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	// AppArmor preflight passed — error is from a later startup step, not AppArmor.
+	if strings.Contains(stderr.String(), "AppArmor") {
+		t.Errorf("AppArmor preflight should not block enforce mode, got: %s", stderr.String())
 	}
 }
 
 // --- Integration: init preflight ---
 
 func TestInitSystemModePreflightInactive(t *testing.T) {
-	origActive := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = origActive }()
+	mockApparmorActive(t, false)
 
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
@@ -246,77 +284,94 @@ func TestInitSystemModePreflightInactive(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	combined := stderr.String() + stdout.String()
-	if !strings.Contains(combined, "not active") && !strings.Contains(combined, "AppArmor") {
-		t.Errorf("expected AppArmor error, got: %s", combined)
+	if !strings.Contains(stderr.String(), "not active") {
+		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
 	}
 }
 
 // --- Integration: AppArmor CLI preflight ---
 
 func TestApparmorRootListInactive(t *testing.T) {
-	origActive := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = origActive }()
-
+	mockApparmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
-	defer func() {
-		EffectiveUID = origUID
-	}()
+	defer func() { EffectiveUID = origUID }()
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"apparmor", "root", "list"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	combined := stderr.String() + stdout.String()
-	if !strings.Contains(combined, "not active") && !strings.Contains(combined, "AppArmor") {
-		t.Errorf("expected AppArmor error, got: %s", combined)
+	if !strings.Contains(stderr.String(), "not active") {
+		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestApparmorRootAddInactive(t *testing.T) {
+	mockApparmorActive(t, false)
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	rootDir := testAllowedRootDir(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"apparmor", "root", "add", rootDir}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "not active") {
+		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestApparmorRootRemoveInactive(t *testing.T) {
+	mockApparmorActive(t, false)
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"apparmor", "root", "remove", "/nonexistent"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "not active") {
+		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
 	}
 }
 
 func TestApparmorCheckInactive(t *testing.T) {
-	origActive := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = origActive }()
-
+	mockApparmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
-	defer func() {
-		EffectiveUID = origUID
-	}()
+	defer func() { EffectiveUID = origUID }()
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"apparmor", "check"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	combined := stderr.String() + stdout.String()
-	if !strings.Contains(combined, "not active") && !strings.Contains(combined, "AppArmor") {
-		t.Errorf("expected AppArmor error, got: %s", combined)
+	if !strings.Contains(stderr.String(), "not active") {
+		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
 	}
 }
 
 // --- User mode should not trigger AppArmor checks ---
 
 func TestServeUserModeNoAppArmorCheck(t *testing.T) {
-	// Even with AppArmor seams set to error, user mode should not fail
-	// on AppArmor preflight.
 	origActive := apparmorLSMActive
 	apparmorLSMActive = func() (bool, error) { return false, nil }
 	defer func() { apparmorLSMActive = origActive }()
 
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
-	// Non-root = user mode
 	EffectiveUID = func() int { return 1000 }
 	defer func() {
 		EffectiveUID = origUID
 		getConfigPathFunc = origGetConfig
 	}()
 
-	// Create a valid config so serve reaches past config loading.
 	allowedRoot := testAllowedRootDir(t)
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.json")
@@ -328,14 +383,12 @@ func TestServeUserModeNoAppArmorCheck(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
-	// Should fail (missing admin token), but NOT with AppArmor error.
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	// Verify no AppArmor-related error in stderr (not in help text).
-	stderrStr := stderr.String()
-	if strings.Contains(stderrStr, "AppArmor LSM") || strings.Contains(stderrStr, "not confined") {
-		t.Errorf("user mode should not produce AppArmor error, got: %s", stderrStr)
+	// User mode should not produce any AppArmor LSM error.
+	if strings.Contains(stderr.String(), "AppArmor LSM") {
+		t.Errorf("user mode should not check AppArmor LSM, got: %s", stderr.String())
 	}
 }
 
@@ -362,8 +415,7 @@ func TestInitUserModeNoAppArmorCheck(t *testing.T) {
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
 	}
-	// Verify no AppArmor-related error (check stderr specifically, not paths).
-	if strings.Contains(stderr.String(), "AppArmor") {
-		t.Errorf("user mode init should not produce AppArmor error, got: %s", stderr.String())
+	if strings.Contains(stderr.String(), "AppArmor LSM") {
+		t.Errorf("user mode init should not check AppArmor LSM, got: %s", stderr.String())
 	}
 }

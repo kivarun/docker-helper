@@ -2255,41 +2255,19 @@ esac
 func TestInstallSystemInactiveApparmorLsm(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 
-	// Write "N" to simulate inactive AppArmor LSM.
-	aaEnabledDir := filepath.Join(env.destDir, "sys", "module", "apparmor", "parameters")
-	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run the script with the AppArmor LSM path overridden.
-	scriptData, err := os.ReadFile("packaging/install-system.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	modified := strings.ReplaceAll(string(scriptData),
-		"/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH")
-	modifiedFile := filepath.Join(env.scriptDir, "modified-install.sh")
-	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
+	// Override LSM status to inactive.
+	aaEnabledPath := filepath.Join(env.destDir, "sys", "module", "apparmor", "parameters", "enabled")
+	if err := os.WriteFile(aaEnabledPath, []byte("N"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	testRoot := t.TempDir()
-	cmd := exec.Command("bash", "-c", fmt.Sprintf(
-		"source %s\ncheck_root() { :; }\nmain --yes --allowed-root %s",
-		modifiedFile, testRoot))
-	cmd.Env = append(os.Environ(), env.env...)
-	cmd.Env = append(cmd.Env, "AA_ENABLED_PATH="+filepath.Join(aaEnabledDir, "enabled"))
-	cmd.Dir = env.scriptDir
-	out, err := cmd.CombinedOutput()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
 	if err == nil {
 		t.Fatal("install should fail when AppArmor LSM is inactive")
 	}
-	output := string(out)
-	if !strings.Contains(output, "not active") && !strings.Contains(output, "AppArmor") {
-		t.Errorf("expected AppArmor error, got: %s", output)
+	if !strings.Contains(out, "not active") && !strings.Contains(out, "AppArmor") {
+		t.Errorf("expected AppArmor error, got: %s", out)
 	}
 	// Binary should NOT have been installed.
 	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
