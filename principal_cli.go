@@ -522,8 +522,7 @@ With --force, an existing credential is replaced atomically.`,
 					readPassword: func() (string, error) {
 						return readTokenHidden("Credential token: ", stderr)
 					},
-					force:  *force,
-					stderr: stderr,
+					force: *force,
 				})
 				if err != nil {
 					if errors.Is(err, ErrCredentialInstallAsRoot) {

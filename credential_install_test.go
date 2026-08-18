@@ -19,7 +19,6 @@ func TestValidateCredentialTokenValid(t *testing.T) {
 		t.Fatalf("expected valid token, got: %v", err)
 	}
 }
-
 func TestValidateCredentialTokenInvalidPrefix(t *testing.T) {
 	token := "abc_" + strings.Repeat("a", 64)
 	err := validateCredentialToken(token)
@@ -30,7 +29,6 @@ func TestValidateCredentialTokenInvalidPrefix(t *testing.T) {
 		t.Errorf("expected prefix error, got: %v", err)
 	}
 }
-
 func TestValidateCredentialTokenInvalidLength(t *testing.T) {
 	token := "dhc_" + strings.Repeat("a", 63)
 	err := validateCredentialToken(token)
@@ -41,7 +39,6 @@ func TestValidateCredentialTokenInvalidLength(t *testing.T) {
 		t.Errorf("expected length error, got: %v", err)
 	}
 }
-
 func TestValidateCredentialTokenInvalidHex(t *testing.T) {
 	token := "dhc_" + strings.Repeat("g", 64)
 	err := validateCredentialToken(token)
@@ -52,7 +49,6 @@ func TestValidateCredentialTokenInvalidHex(t *testing.T) {
 		t.Errorf("expected character error, got: %v", err)
 	}
 }
-
 func TestValidateCredentialTokenUppercaseHex(t *testing.T) {
 	token := "dhc_" + strings.Repeat("A", 64)
 	err := validateCredentialToken(token)
@@ -60,13 +56,10 @@ func TestValidateCredentialTokenUppercaseHex(t *testing.T) {
 		t.Fatal("expected error for uppercase hex")
 	}
 }
-
 func TestCredentialInstallNonTTY(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	validToken := "dhc_" + strings.Repeat("a", 64)
-
 	credPath, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(validToken),
 		writer:       safeWriteCredential,
@@ -74,18 +67,15 @@ func TestCredentialInstallNonTTY(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err != nil {
 		t.Fatalf("installCredential: %v", err)
 	}
-
 	expectedDir := filepath.Join(dir, "docker-helper")
 	expectedPath := filepath.Join(expectedDir, "credential.token")
 	if credPath != expectedPath {
 		t.Errorf("credPath = %q, want %q", credPath, expectedPath)
 	}
-
 	dirInfo, err := os.Stat(expectedDir)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +83,6 @@ func TestCredentialInstallNonTTY(t *testing.T) {
 	if perm := dirInfo.Mode().Perm(); perm != 0700 {
 		t.Errorf("directory mode = %o, want 0700", perm)
 	}
-
 	fileInfo, err := os.Stat(expectedPath)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +90,6 @@ func TestCredentialInstallNonTTY(t *testing.T) {
 	if perm := fileInfo.Mode().Perm(); perm != 0600 {
 		t.Errorf("file mode = %o, want 0600", perm)
 	}
-
 	data, err := os.ReadFile(expectedPath)
 	if err != nil {
 		t.Fatal(err)
@@ -110,11 +98,9 @@ func TestCredentialInstallNonTTY(t *testing.T) {
 		t.Errorf("file content = %q, want %q", string(data), validToken+"\n")
 	}
 }
-
 func TestCredentialInstallEmptyStdin(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(""),
 		writer:       safeWriteCredential,
@@ -122,7 +108,6 @@ func TestCredentialInstallEmptyStdin(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err == nil {
 		t.Fatal("expected error for empty input")
@@ -131,14 +116,11 @@ func TestCredentialInstallEmptyStdin(t *testing.T) {
 		t.Errorf("expected empty error, got: %v", err)
 	}
 }
-
 func TestCredentialInstallExistingNoForce(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	oldToken := "dhc_" + strings.Repeat("a", 64)
 	newToken := "dhc_" + strings.Repeat("b", 64)
-
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(oldToken),
 		writer:       safeWriteCredential,
@@ -146,12 +128,10 @@ func TestCredentialInstallExistingNoForce(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err != nil {
 		t.Fatalf("first install: %v", err)
 	}
-
 	// Re-install with different token, no force — should reject.
 	_, err = installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(newToken),
@@ -160,7 +140,6 @@ func TestCredentialInstallExistingNoForce(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err == nil {
 		t.Fatal("expected error when re-installing without --force")
@@ -168,7 +147,6 @@ func TestCredentialInstallExistingNoForce(t *testing.T) {
 	if !errors.Is(err, ErrCredentialAlreadyExists) {
 		t.Errorf("expected ErrCredentialAlreadyExists, got: %v", err)
 	}
-
 	// Verify old token is still installed.
 	credPath, _ := credentialPath()
 	data, _ := os.ReadFile(credPath)
@@ -176,11 +154,9 @@ func TestCredentialInstallExistingNoForce(t *testing.T) {
 		t.Errorf("credential was changed: %q", string(data))
 	}
 }
-
 func TestCredentialInstallRootRejected(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader("dhc_" + strings.Repeat("a", 64)),
 		writer:       safeWriteCredential,
@@ -188,7 +164,6 @@ func TestCredentialInstallRootRejected(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err == nil {
 		t.Fatal("expected error for root")
@@ -197,15 +172,12 @@ func TestCredentialInstallRootRejected(t *testing.T) {
 		t.Errorf("expected ErrCredentialInstallAsRoot, got: %v", err)
 	}
 }
-
 func TestCredentialInstallWriterFailure(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	failingWriter := func(path string, data []byte) error {
 		return fmt.Errorf("simulated write failure")
 	}
-
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader("dhc_" + strings.Repeat("a", 64)),
 		writer:       failingWriter,
@@ -213,17 +185,18 @@ func TestCredentialInstallWriterFailure(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err == nil {
 		t.Fatal("expected error for write failure")
 	}
 }
-
 func TestCredentialInstallTokenNotInOutput(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	orig := EffectiveUID
+	defer func() { EffectiveUID = orig }()
+	EffectiveUID = func() int { return 1000 }
 	validToken := "dhc_" + strings.Repeat("a", 64)
-
-	// Pipe a real token via stdin and verify it doesn't appear in output.
 	r, w, _ := os.Pipe()
 	go func() {
 		fmt.Fprintln(w, validToken)
@@ -232,12 +205,21 @@ func TestCredentialInstallTokenNotInOutput(t *testing.T) {
 	oldStdin := os.Stdin
 	os.Stdin = r
 	defer func() { os.Stdin = oldStdin }()
-
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"credential", "install"}, &stdout, &stderr)
-	// May fail if running as root or credential already exists,
-	// but token must never appear in output.
-	_ = code
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	}
+	// Verify credential was created with the correct token.
+	credPath := filepath.Join(dir, "docker-helper", "credential.token")
+	data, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatalf("credential file not created: %v", err)
+	}
+	if string(data) != validToken+"\n" {
+		t.Errorf("credential = %q, want %q", string(data), validToken+"\n")
+	}
+	// Token must never appear in stdout or stderr.
 	if strings.Contains(stdout.String(), validToken) {
 		t.Error("token must not appear in stdout")
 	}
@@ -245,7 +227,6 @@ func TestCredentialInstallTokenNotInOutput(t *testing.T) {
 		t.Error("token must not appear in stderr")
 	}
 }
-
 func TestCredentialInstallHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"credential", "install", "--help"}, &stdout, &stderr)
@@ -260,7 +241,6 @@ func TestCredentialInstallHelp(t *testing.T) {
 		t.Error("help should mention --force")
 	}
 }
-
 func TestCredentialCreateShowsNextStep(t *testing.T) {
 	// Set up a test server that serves POST /principals/{username}/credentials.
 	mux := http.NewServeMux()
@@ -280,14 +260,12 @@ func TestCredentialCreateShowsNextStep(t *testing.T) {
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
-
 	// Create a token file for authentication.
 	tokenDir := t.TempDir()
 	tokenPath := filepath.Join(tokenDir, "token")
 	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
 		t.Fatal(err)
 	}
-
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"credential", "create",
@@ -299,7 +277,6 @@ func TestCredentialCreateShowsNextStep(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
 	}
-
 	out := stdout.String()
 	// Verify the output includes the next step.
 	if !strings.Contains(out, "docker-helper credential install") {
@@ -314,7 +291,6 @@ func TestCredentialCreateShowsNextStep(t *testing.T) {
 		t.Error("output must include the token")
 	}
 }
-
 func TestReadTokenFromReader(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -328,7 +304,6 @@ func TestReadTokenFromReader(t *testing.T) {
 		{"empty", "", "", true},
 		{"whitespace only", "  \n", "", true},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := strings.NewReader(tt.input)
@@ -348,11 +323,9 @@ func TestReadTokenFromReader(t *testing.T) {
 		})
 	}
 }
-
 func TestCredentialPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	path, err := credentialPath()
 	if err != nil {
 		t.Fatal(err)
@@ -362,15 +335,12 @@ func TestCredentialPath(t *testing.T) {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }
-
 func TestNonRootSystemUsesCredential(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 1000 }
-
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	credDir := filepath.Join(dir, "docker-helper")
 	if err := os.MkdirAll(credDir, 0700); err != nil {
 		t.Fatal(err)
@@ -379,7 +349,6 @@ func TestNonRootSystemUsesCredential(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(validToken+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-
 	client, err := resolveOperatorClient(operatorClientOptions{
 		System: true,
 	})
@@ -394,15 +363,12 @@ func TestNonRootSystemUsesCredential(t *testing.T) {
 		t.Errorf("token = %q, want %q", gotToken, validToken)
 	}
 }
-
 func TestRootSystemUsesAdminToken(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 0 }
-
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	// Create admin token in a temp system config dir.
 	// We can't write to /etc, so we verify the error mentions admin.token.
 	_, err := resolveOperatorClient(operatorClientOptions{
@@ -415,15 +381,12 @@ func TestRootSystemUsesAdminToken(t *testing.T) {
 		t.Errorf("expected admin.token error, got: %v", err)
 	}
 }
-
 func TestExplicitTokenFileHasPriority(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 1000 }
-
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	// Create credential token.
 	credDir := filepath.Join(dir, "docker-helper")
 	if err := os.MkdirAll(credDir, 0700); err != nil {
@@ -432,13 +395,11 @@ func TestExplicitTokenFileHasPriority(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte("credential-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-
 	// Create explicit token file.
 	tokenFile := filepath.Join(dir, "custom.token")
 	if err := os.WriteFile(tokenFile, []byte("explicit-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-
 	client, err := resolveOperatorClient(operatorClientOptions{
 		System:    true,
 		TokenFile: tokenFile,
@@ -454,16 +415,13 @@ func TestExplicitTokenFileHasPriority(t *testing.T) {
 		t.Errorf("token = %q, want explicit-token", gotToken)
 	}
 }
-
 func TestUserModeUnchanged(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 1000 }
-
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
-
 	// User mode should use admin.token in user config dir.
 	_, err := resolveOperatorClient(operatorClientOptions{})
 	if err == nil {
@@ -473,7 +431,6 @@ func TestUserModeUnchanged(t *testing.T) {
 		t.Error("user mode should not use credential.token")
 	}
 }
-
 func TestEndpointWithoutTokenFileRejected(t *testing.T) {
 	_, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint: "unix:///tmp/test.sock",
@@ -485,15 +442,12 @@ func TestEndpointWithoutTokenFileRejected(t *testing.T) {
 		t.Errorf("expected endpoint error, got: %v", err)
 	}
 }
-
 func TestSafeWriteCredentialAtomic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.token")
-
 	if err := safeWriteCredential(path, []byte("first\n")); err != nil {
 		t.Fatal(err)
 	}
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -501,11 +455,9 @@ func TestSafeWriteCredentialAtomic(t *testing.T) {
 	if string(data) != "first\n" {
 		t.Errorf("content = %q, want first\\n", string(data))
 	}
-
 	if err := safeWriteCredential(path, []byte("second\n")); err != nil {
 		t.Fatal(err)
 	}
-
 	data, err = os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -514,15 +466,12 @@ func TestSafeWriteCredentialAtomic(t *testing.T) {
 		t.Errorf("content = %q, want second\\n", string(data))
 	}
 }
-
 func TestSafeWriteCredentialMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.token")
-
 	if err := safeWriteCredential(path, []byte("test\n")); err != nil {
 		t.Fatal(err)
 	}
-
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -531,20 +480,17 @@ func TestSafeWriteCredentialMode(t *testing.T) {
 		t.Errorf("mode = %o, want 0600", perm)
 	}
 }
-
 func TestSafeWriteCredentialFailureNoTemp(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0555); err != nil {
 		t.Fatal(err)
 	}
 	defer os.Chmod(dir, 0755)
-
 	path := filepath.Join(dir, "test.token")
 	err := safeWriteCredential(path, []byte("test\n"))
 	if err == nil {
 		t.Fatal("expected error for read-only directory")
 	}
-
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -555,14 +501,11 @@ func TestSafeWriteCredentialFailureNoTemp(t *testing.T) {
 		}
 	}
 }
-
 func TestCredentialInstallForceReplace(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	oldToken := "dhc_" + strings.Repeat("a", 64)
 	newToken := "dhc_" + strings.Repeat("b", 64)
-
 	// Install first credential.
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(oldToken),
@@ -571,12 +514,10 @@ func TestCredentialInstallForceReplace(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err != nil {
 		t.Fatalf("first install: %v", err)
 	}
-
 	// Replace with --force while old file is in place.
 	_, err = installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(newToken),
@@ -585,12 +526,10 @@ func TestCredentialInstallForceReplace(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        true,
-		stderr:       nil,
 	})
 	if err != nil {
 		t.Fatalf("force replace: %v", err)
 	}
-
 	credPath, _ := credentialPath()
 	data, err := os.ReadFile(credPath)
 	if err != nil {
@@ -600,14 +539,11 @@ func TestCredentialInstallForceReplace(t *testing.T) {
 		t.Errorf("credential not replaced: %q", string(data))
 	}
 }
-
 func TestCredentialInstallAtomicReplace(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	oldToken := "dhc_" + strings.Repeat("a", 64)
 	newToken := "dhc_" + strings.Repeat("b", 64)
-
 	// Install first credential.
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(oldToken),
@@ -616,24 +552,20 @@ func TestCredentialInstallAtomicReplace(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err != nil {
 		t.Fatalf("first install: %v", err)
 	}
-
 	// Verify old token is installed.
 	credPath, _ := credentialPath()
 	data, _ := os.ReadFile(credPath)
 	if string(data) != oldToken+"\n" {
 		t.Fatalf("expected old token, got: %q", string(data))
 	}
-
 	// Writer that fails — simulates disk full or I/O error.
 	failingWriter := func(path string, data []byte) error {
 		return fmt.Errorf("simulated write failure")
 	}
-
 	// Force replace with failing writer — should fail, old file intact.
 	_, err = installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(newToken),
@@ -642,12 +574,10 @@ func TestCredentialInstallAtomicReplace(t *testing.T) {
 		isTerminal:   func() bool { return false },
 		readPassword: func() (string, error) { return "", nil },
 		force:        true,
-		stderr:       nil,
 	})
 	if err == nil {
 		t.Fatal("expected error for write failure")
 	}
-
 	// Verify old token is still intact.
 	data, err = os.ReadFile(credPath)
 	if err != nil {
@@ -657,13 +587,10 @@ func TestCredentialInstallAtomicReplace(t *testing.T) {
 		t.Errorf("old credential was corrupted: %q", string(data))
 	}
 }
-
 func TestCredentialInstallTTYHiddenInput(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	validToken := "dhc_" + strings.Repeat("d", 64)
-
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(""),
 		writer:       safeWriteCredential,
@@ -671,23 +598,19 @@ func TestCredentialInstallTTYHiddenInput(t *testing.T) {
 		isTerminal:   func() bool { return true },
 		readPassword: func() (string, error) { return validToken, nil },
 		force:        false,
-		stderr:       nil,
 	})
 	if err != nil {
 		t.Fatalf("TTY install: %v", err)
 	}
-
 	credPath, _ := credentialPath()
 	data, _ := os.ReadFile(credPath)
 	if string(data) != validToken+"\n" {
 		t.Errorf("credential = %q, want %q", string(data), validToken+"\n")
 	}
 }
-
 func TestCredentialInstallTTYErrorPropagation(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
-
 	_, err := installCredential(credentialInstallConfig{
 		reader:       strings.NewReader(""),
 		writer:       safeWriteCredential,
@@ -695,7 +618,6 @@ func TestCredentialInstallTTYErrorPropagation(t *testing.T) {
 		isTerminal:   func() bool { return true },
 		readPassword: func() (string, error) { return "", fmt.Errorf("simulated TTY error") },
 		force:        false,
-		stderr:       nil,
 	})
 	if err == nil {
 		t.Fatal("expected error for TTY read failure")
@@ -704,21 +626,17 @@ func TestCredentialInstallTTYErrorPropagation(t *testing.T) {
 		t.Errorf("expected TTY error, got: %v", err)
 	}
 }
-
 func TestEnsureCredentialDirFixesMode(t *testing.T) {
 	dir := t.TempDir()
 	credDir := filepath.Join(dir, "docker-helper")
-
 	// Create directory with wrong mode.
 	if err := os.MkdirAll(credDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-
 	// ensureCredentialDir should fix the mode.
 	if err := ensureCredentialDir(credDir); err != nil {
 		t.Fatal(err)
 	}
-
 	info, err := os.Stat(credDir)
 	if err != nil {
 		t.Fatal(err)

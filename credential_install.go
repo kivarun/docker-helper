@@ -37,8 +37,6 @@ type credentialInstallConfig struct {
 	readPassword func() (string, error)
 	// force replaces an existing credential without error.
 	force bool
-	// stderr receives prompts and messages.
-	stderr io.Writer
 }
 
 // credentialPath returns the user credential file path.
