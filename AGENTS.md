@@ -100,15 +100,30 @@ Architectural principle:
 Standardize contracts where useful; do not create mandatory shared runtime or
 shared libraries merely to make future tools look uniform.
 
-7. Keep future deployment options open.
+7. Keep the current release direction explicit.
 
-Current changes should not unnecessarily prevent:
-- remote/server-side use;
-- multiple simultaneous sessions/agents;
-- optional future control-plane integration.
+Release 2 is the server-side / remote execution release. Do not treat remote
+execution as hypothetical future work or move it back out of scope unless the
+task explicitly changes the roadmap.
 
-But DO NOT design APIs for those future systems until they are actually being
-implemented.
+For Release 2 development, preserve these direction constraints:
+- a remote session must not require a client-side workspace path;
+- remote build accepts a client-provided build context as uploaded/streamed
+  data and executes the build on the remote Docker daemon;
+- build results and cache remain on that helper unless explicitly pushed or
+  exported;
+- remote run is image-based and must work without a client workspace or
+  client-side bind mounts;
+- remote sessions may use build, run, pull/registry authentication, and the
+  existing operation status/logs/cancel lifecycle; do not restrict them to
+  build-only operation semantics;
+- multiple simultaneous sessions/agents must remain possible;
+- future optional control-plane integration must remain possible without
+  becoming a mandatory runtime dependency.
+
+Do not predesign mutable remote workspace synchronization, helper routing,
+helper-to-helper forwarding, or generic orchestration unless a concrete task
+brings one of those capabilities into scope.
 
 # Security
 
@@ -145,16 +160,26 @@ Preserve existing masking/redaction behavior.
 
 # Filesystem policy
 
-10. Preserve canonical-path invariants.
+10. Preserve canonical-path invariants without inventing a workspace where none exists.
 
-Session workspace is canonicalized when the session is created.
+For workspace-backed sessions, the session workspace is canonicalized when the
+session is created.
 
-Mount/build path validation must enforce containment after symlink resolution.
+Mount/build path validation for workspace-backed operations must enforce
+containment after symlink resolution.
 
 Do not duplicate path policy across handlers when an existing invariant already
 guarantees it.
 
 Do not weaken symlink-escape protection.
+
+Remote workspace-free sessions are different by design:
+- do not require or synthesize a client workspace merely to reuse local-session
+  validation paths;
+- remote run must not accept client host paths or client-side bind mounts;
+- a remote build context is uploaded data, not a claim about a path on the
+  client or server filesystem, and must be staged/validated according to the
+  remote build-context contract rather than local workspace containment.
 
 # Database
 
@@ -306,9 +331,8 @@ should remain in code unless there is a concrete operational reason to make
 them configurable.
 
 Release-scoped hard limits may remain implementation constants when they are
-deliberate, documented, and intended to be configurable in a later release.
-Example: the POST /run `shm_size` maximum of 2 GiB is a deliberate Release 1
-limit that will become configurable in Release 2+.
+deliberate and documented. They should become configurable only when a concrete
+operational need justifies it.
 
 Review the final diff for unrelated changes.
 
