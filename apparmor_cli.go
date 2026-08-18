@@ -104,10 +104,6 @@ func runApparmorRootList(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	if err := requireAppArmorActive(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
 
 	mgr := newProductionApparmorManager()
 	roots, err := mgr.listRoots()

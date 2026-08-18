@@ -1434,6 +1434,14 @@ func TestSystemAppArmorProfileFile(t *testing.T) {
 	if !strings.Contains(content, "capability dac_read_search") {
 		t.Error("profile must grant dac_read_search for private workspace traversal")
 	}
+	// AppArmor LSM status: minimal read rules for requireAppArmorActive and
+	// requireAppArmorConfinement.
+	if !strings.Contains(content, "/sys/module/apparmor/parameters/enabled r,") {
+		t.Error("profile must grant read access to AppArmor enabled parameter")
+	}
+	if !strings.Contains(content, "owner @{PROC}/@{pid}/attr/current r,") {
+		t.Error("profile must grant owner read access to proc attr/current for confinement check")
+	}
 	// Named profile, not path-attached.
 	if !strings.Contains(content, "profile docker-helper-system") {
 		t.Error("profile must be named profile docker-helper-system")

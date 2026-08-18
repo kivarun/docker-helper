@@ -150,6 +150,10 @@ func TestRequireAppArmorConfinementWrongProfile(t *testing.T) {
 
 // --- Integration: serve preflight ---
 
+// TestServeSystemModePreflightInactive verifies that the AppArmor preflight
+// runs before loadConfig. It uses a nonexistent config path: if loadConfig
+// were called first, the error would be about missing config, not AppArmor.
+// The "not active" error proves preflight ran before loadConfig.
 func TestServeSystemModePreflightInactive(t *testing.T) {
 	origActive := apparmorLSMActive
 	apparmorLSMActive = func() (bool, error) { return false, nil }
@@ -163,25 +167,27 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
-	allowedRoot := testAllowedRootDir(t)
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.json")
-	configData := fmt.Sprintf(`{"allowed_root":%q,"session_ttl":"12h"}`, allowedRoot)
-	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
-		t.Fatal(err)
-	}
-	getConfigPathFunc = func() string { return configPath }
+	// Nonexistent config path: if loadConfig ran before preflight, the error
+	// would be "configuration not found", not "not active".
+	getConfigPathFunc = func() string { return "/nonexistent/docker-helper/config.json" }
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	if !strings.Contains(stderr.String(), "not active") {
-		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "not active") {
+		t.Errorf("expected 'not active' in stderr, got: %s", stderrStr)
+	}
+	if strings.Contains(stderrStr, "configuration not found") {
+		t.Error("loadConfig must not be called before AppArmor preflight (got config error instead of AppArmor error)")
 	}
 }
 
+// TestServeSystemModePreflightUnconfined verifies that the confinement check
+// runs before loadConfig. It uses a nonexistent config path: if loadConfig
+// were called first, the error would be about missing config, not confinement.
 func TestServeSystemModePreflightUnconfined(t *testing.T) {
 	origActive := apparmorLSMActive
 	origConfinement := apparmorProcessConfinement
@@ -200,22 +206,21 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
-	allowedRoot := testAllowedRootDir(t)
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.json")
-	configData := fmt.Sprintf(`{"allowed_root":%q,"session_ttl":"12h"}`, allowedRoot)
-	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
-		t.Fatal(err)
-	}
-	getConfigPathFunc = func() string { return configPath }
+	// Nonexistent config path: if loadConfig ran before preflight, the error
+	// would be "configuration not found", not "not confined".
+	getConfigPathFunc = func() string { return "/nonexistent/docker-helper/config.json" }
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	if !strings.Contains(stderr.String(), "not confined") {
-		t.Errorf("expected 'not confined' in stderr, got: %s", stderr.String())
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "not confined") {
+		t.Errorf("expected 'not confined' in stderr, got: %s", stderrStr)
+	}
+	if strings.Contains(stderrStr, "configuration not found") {
+		t.Error("loadConfig must not be called before AppArmor preflight (got config error instead of confinement error)")
 	}
 }
 
@@ -299,11 +304,8 @@ func TestApparmorRootListInactive(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"apparmor", "root", "list"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "not active") {
-		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
+	if code != 0 {
+		t.Errorf("expected exit code 0 (list reads managed fragment, does not require active LSM), got %d (stderr: %s)", code, stderr.String())
 	}
 }
 
