@@ -147,9 +147,9 @@ through:
 
 Preserve existing masking/redaction behavior.
 
-# Filesystem policy
+# Filesystem and workspace policy
 
-10. Preserve canonical-path invariants.
+10. Preserve workspace/path invariants.
 
 For workspace-backed sessions, the session workspace is canonicalized when the
 session is created.
@@ -188,7 +188,22 @@ unused physical baggage.
 
 # Tests
 
-12. Tests should protect behavior, not implementation accidents.
+12. Every test must protect an independent observable invariant.
+
+Before adding a test, inspect existing tests for the same behavior.
+
+Do not add a separate test merely because:
+- there is another `if` branch;
+- there is another error return;
+- the task listed another bullet;
+- the same invariant can be exercised with another input.
+
+If an existing test already protects the same failure mode, extend or
+generalize that test instead.
+
+Use table-driven tests when several cases exercise the same invariant.
+
+Test count and test LOC are not goals.
 
 Keep:
 - regression tests for real past bugs;
@@ -200,10 +215,53 @@ Keep:
 Avoid tests whose only purpose is freezing an unnecessary implementation
 detail.
 
-13. Tests must exercise the production path.
+13. A test must prove that it reached the behavior it claims to test.
 
-Do not make a test pass by reimplementing the production behavior inside the
-test, a fake, or a test-only helper.
+A passing negative assertion is not sufficient by itself.
+
+The setup must make the undesired behavior possible and observable.
+
+Examples:
+- To prove "no mutation", mutation must otherwise be possible and the test must
+  be able to observe whether it was attempted. Do not disable the entire
+  database/resource when that independently makes mutation impossible.
+- To prove "no secret leak", inject unique marker values and inspect the raw
+  observable output for those values. Checking only expected field names or
+  schema is insufficient.
+- To prove "no operational ERROR", first prove execution reached the intended
+  runtime/result branch. Do not let authentication, validation, or unrelated
+  setup fail earlier.
+- To prove a stale/concurrent/error branch, arrange the exact state necessary to
+  reach that branch. A different earlier failure does not count.
+
+Fault injection must be as narrow as possible and target the exact operation
+whose failure is being tested.
+
+A test name must not claim more than its assertions prove.
+
+14. Regression tests must discriminate between correct and broken behavior.
+
+For a real bug fix, the regression test should fail against the pre-fix behavior
+whenever practical.
+
+Before considering a new or substantially changed test complete, identify:
+- the exact regression it protects against;
+- the assertion that would fail if that regression returned;
+- the production path that the test exercises.
+
+If you cannot identify all three, strengthen, merge, rename, or remove the test.
+
+A test that would still pass if the claimed branch were never executed is not a
+valid regression test.
+
+When production paths are consolidated, update regression tests to exercise the
+authoritative path. Do not preserve an obsolete implementation merely because a
+test depends on it.
+
+15. Tests must exercise the production path.
+
+Do not make a test pass by reimplementing production behavior inside the test,
+a fake, or a test-only helper.
 
 In particular, do not create a second implementation of:
 - operation lifecycle/state transitions;
@@ -216,6 +274,11 @@ In particular, do not create a second implementation of:
 A fake or seam may replace an external dependency, but the production code
 under test must still own the semantics being asserted.
 
+Prefer handler/lifecycle/audit/logging/auth tests that enter through the real
+production path and assert externally observable results. Direct helper tests
+are appropriate for isolated pure behavior, but do not choose inputs that make
+the expected result true by construction.
+
 When a test needs readiness or synchronization, observe a real state transition,
 process state, channel, callback, or other deterministic signal. Do not use an
 arbitrary `time.Sleep` as synchronization or assume that a fixed delay proves
@@ -227,7 +290,16 @@ API contracts, validation, authentication, audit behavior, or 4xx/5xx semantics
 merely to make such a test pass unless the production behavior is independently
 shown to be wrong.
 
-14. Do not build a test framework.
+16. Keep the test suite economical and explicit.
+
+Merge or delete:
+- duplicate tests for the same invariant;
+- tests superseded by stronger black-box coverage;
+- tests that only restate implementation structure;
+- tests that cannot distinguish the intended bug from an unrelated failure.
+
+When modifying a feature with an established test suite, prefer strengthening
+existing tests over creating a parallel test file.
 
 Extract helpers when setup/behavior is genuinely identical across several
 tests.
@@ -247,19 +319,26 @@ Avoid:
 Explicit setup is preferable when the test is intentionally exceptional.
 
 Use `t.Setenv` for test-scoped environment changes.
-
 Check errors from fixture setup operations.
 
-15. Be careful with global state.
-
 Before adding `t.Parallel()`, inspect whether the test touches package-global
-state such as logging/test seams.
+state such as logging/test seams. Do not assume a test is parallel-safe just
+because it uses `t.Setenv`.
 
-Do not assume a test is parallel-safe just because it uses `t.Setenv`.
+Before declaring a task complete, review every new or substantially changed
+test and answer:
+1. What exact invariant does this test protect?
+2. Is that invariant already protected elsewhere?
+3. Does the test prove the intended branch/path was reached?
+4. Could the test remain green because setup made the bad outcome impossible?
+5. What concrete regression would make this test fail?
 
-# Parallel implementation avoidance
+A green test suite is necessary, not sufficient evidence that new tests are
+meaningful.
 
-16. One production mechanism per responsibility.
+# Production ownership and parallel work
+
+17. One production mechanism per responsibility.
 
 Before adding a new helper, registry, lifecycle abstraction, executor, buffer,
 cleanup path, validation path, or state-transition mechanism, search the current
@@ -283,6 +362,12 @@ A separate implementation is justified only when the semantics or trust
 boundary are genuinely different. Make that distinction explicit in the code
 and tests.
 
+When a regression test depends on an obsolete implementation that is being
+consolidated away, move the test to the authoritative path rather than keeping
+both implementations for the test.
+
+18. Review parallel contributions for duplicate ownership.
+
 When integrating work produced in parallel by multiple agents/contributors,
 review specifically for:
 - duplicate helpers with overlapping purpose;
@@ -291,12 +376,13 @@ review specifically for:
 - slightly different validation/auth/error/audit behavior for the same action;
 - test-only abstractions that duplicate production semantics.
 
-Do not preserve both implementations for convenience. Consolidate on one owner
-unless compatibility requires otherwise.
+When duplicate ownership is discovered, consolidate on one owner unless a
+compatibility contract or genuinely different trust boundary requires otherwise.
+Do not leave both paths merely because both currently pass tests.
 
 # Documentation ownership
 
-17. Keep documentation roles distinct.
+19. Keep documentation roles distinct.
 
 `README.md` owns:
 - project introduction;
@@ -330,7 +416,7 @@ Prefer links to the canonical owner.
 
 # Versioning
 
-18. Version ownership.
+20. Version ownership.
 
 Source default:
 
@@ -343,9 +429,35 @@ source/tag.
 
 Do not manually maintain a release number in source code.
 
+# Operational tunability
+
+21. Make operational policy values configurable when operators need to tune them.
+
+Values such as these should have documented reasonable defaults when they are
+part of operational policy:
+- timeouts;
+- retention periods;
+- resource/count limits;
+- log/output size limits.
+
+This does NOT mean every implementation constant belongs in configuration.
+
+Architectural/protocol invariants and implementation constants such as:
+- HTTP status codes;
+- operation state names;
+- ID formats/internal constants;
+- fixed protocol semantics
+
+should remain in code unless there is a concrete operational reason to make
+them configurable.
+
+Release-scoped hard limits may remain implementation constants when they are
+deliberate and documented. They should become configurable only when a concrete
+operational need justifies it.
+
 # Change procedure
 
-19. Before implementation.
+22. Before implementation.
 
 For non-trivial implementation tasks, inspect and understand the current
 behavior before editing.
@@ -361,7 +473,7 @@ explicitly asks for analysis/review first.
 If the task explicitly asks for analysis, inspection, review, or says not to
 modify code, stop after the analysis and do not edit files or create commits.
 
-20. After implementation run:
+23. After implementation run:
 
     gofmt
     go test ./...
@@ -371,33 +483,13 @@ modify code, stop after the analysis and do not edit files or create commits.
 
 Text files must end with a newline.
 
-Operational policy values must be configurable and have documented
-reasonable defaults when operators reasonably need to tune them.
-
-This applies to values such as:
-- timeouts;
-- retention periods;
-- resource/count limits;
-- log/output size limits.
-
-It does NOT mean every implementation constant belongs in configuration.
-
-Architectural/protocol invariants and implementation constants such as:
-- HTTP status codes;
-- operation state names;
-- ID formats/internal constants;
-- fixed protocol semantics
-
-should remain in code unless there is a concrete operational reason to make
-them configurable.
-
-Release-scoped hard limits may remain implementation constants when they are
-deliberate and documented. They should become configurable only when a concrete
-operational need justifies it.
-
 Review the final diff for unrelated changes.
 
-21. Commits.
+If tests were added or substantially changed, review them against the proof and
+independence requirements in the `# Tests` section before considering the task
+complete. Passing commands alone are not sufficient.
+
+24. Commits.
 
 Keep commits focused.
 
@@ -405,18 +497,17 @@ Commit messages must describe the code that is actually in the commit.
 
 Do not leave stale commit-message claims after amending implementation.
 
-22. GitHub.
+25. GitHub.
 
 When the task explicitly requests push:
-- push to the existing `github` remote;
-- use current `main` unless instructed otherwise;
+- push the current working branch unless the task explicitly names another;
 - never use plain `--force`;
 - use `--force-with-lease` only when history was intentionally amended.
 
 Do not push merely because implementation is complete unless the task requests
 it.
 
-23. Architecture cleanup after feature blocks.
+26. Architecture cleanup after feature blocks.
 
 After a significant feature block (multiple commits adding new capabilities),
 before starting the next major phase, do an architecture cleanup/review:
