@@ -304,6 +304,15 @@ func TestConfigUnsetHTTPAddress(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("config unset exited %d: %s", code, stderr.String())
 	}
+	if strings.Contains(stdout.String(), "updated") {
+		t.Error("must not print 'updated' on unset")
+	}
+	if !strings.Contains(stdout.String(), "unset http_address") {
+		t.Errorf("expected 'unset http_address' in stdout, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "restart required") {
+		t.Errorf("expected 'restart required' in stdout, got: %s", stdout.String())
+	}
 
 	// Verify the value was removed.
 	raw, err := os.ReadFile(configPath)

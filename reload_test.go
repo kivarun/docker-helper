@@ -1845,8 +1845,8 @@ func TestConfigSetRollbackRereloadFail(t *testing.T) {
 	if !strings.Contains(stderr.String(), "rolled back") {
 		t.Errorf("expected 'rolled back' in stderr, got: %s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "re-reload") {
-		t.Errorf("expected 're-reload' in stderr, got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "re-reload rejected") {
+		t.Errorf("expected 're-reload rejected' in stderr, got: %s", stderr.String())
 	}
 }
 
@@ -2009,13 +2009,19 @@ func TestConfigSetRollbackWriteFail(t *testing.T) {
 		return safeWriteConfig(path, data)
 	})
 
-	// Override the config writer atomically.
-	prev := getConfigWriter()
-	configWriterAtomic.Store(failingWriter)
-	defer func() { configWriterAtomic.Store(prev) }()
-
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
+	code := applyConfigChangeTransactionally(
+		configOpSet,
+		"log_level",
+		"debug",
+		json.RawMessage(`"debug"`),
+		func(raw map[string]json.RawMessage) {
+			raw["log_level"] = json.RawMessage(`"debug"`)
+		},
+		failingWriter,
+		&stdout,
+		&stderr,
+	)
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d", code)
 	}

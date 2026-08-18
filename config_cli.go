@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -25,19 +24,6 @@ const (
 // configWriter abstracts the atomic file write so tests can inject
 // failure scenarios (e.g., rollback write failure).
 type configWriter func(path string, data []byte) error
-
-// configWriterAtomic holds the current config writer, allowing tests to
-// swap it atomically without races.
-var configWriterAtomic atomic.Value
-
-func init() {
-	configWriterAtomic.Store(configWriter(safeWriteConfig))
-}
-
-// getConfigWriter returns the current config writer.
-func getConfigWriter() configWriter {
-	return configWriterAtomic.Load().(configWriter)
-}
 
 var configCommand = &Command{
 	Name:    "config",
@@ -636,7 +622,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		func(raw map[string]json.RawMessage) {
 			raw[field] = newValue
 		},
-		getConfigWriter(),
+		safeWriteConfig,
 		stdout,
 		stderr,
 	)
@@ -668,7 +654,7 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		func(raw map[string]json.RawMessage) {
 			delete(raw, field)
 		},
-		getConfigWriter(),
+		safeWriteConfig,
 		stdout,
 		stderr,
 	)
@@ -726,6 +712,22 @@ func formatReloadError(r reloadOutcome) string {
 		return "daemon not running"
 	default:
 		return "reload failed"
+	}
+}
+
+// formatReReloadError returns a human-readable description of a re-reload
+// failure. Unlike formatReloadError, it does not include the "reload" prefix
+// to avoid "re-reload reload rejected" redundancy.
+func formatReReloadError(r reloadOutcome) string {
+	switch r.result {
+	case reloadRejected:
+		return fmt.Sprintf("rejected: %v", r.err)
+	case reloadTransportError:
+		return fmt.Sprintf("transport error: %v", r.err)
+	case reloadDaemonNotRunning:
+		return "daemon not running"
+	default:
+		return "failed"
 	}
 }
 
@@ -869,7 +871,7 @@ func applyConfigChangeTransactionally(
 		reOutcome := attemptReload()
 		if reOutcome.result != reloadSuccess {
 			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReloadError(reOutcome))
+			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReReloadError(reOutcome))
 			return 1
 		}
 
