@@ -394,6 +394,8 @@ operational experience justifies it.
 - Provide at least:
   - `docker-helper(1)`;
   - `docker-helper-config(5)`.
+- Add Bash completion for commands, subcommands, and flags, and ship it with
+  native packages and generic release artifacts.
 - Add package/service upgrade tests, including an existing Release 1 user-mode
   installation on the same machine.
 

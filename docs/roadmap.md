@@ -320,6 +320,8 @@ Accepted direction:
 - package repositories and update channels are deferred until after package
   lifecycle acceptance or a later distribution workstream;
 - provide at least `docker-helper(1)` and `docker-helper-config(5)` manual pages;
+- add Bash completion for commands, subcommands, and flags, and ship it with
+  native packages and generic release artifacts;
 
 **Remote execution** is part of Release 2:
 
