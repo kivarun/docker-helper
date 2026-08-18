@@ -40,10 +40,11 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 MemoryDenyWriteExecute=true
 LockPersonality=true
 PrivateTmp=false
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
+# Filesystem-namespace hardening (ProtectKernelTunables, ProtectKernelModules,
+# ProtectKernelLogs, ProtectControlGroups, ProtectSystem, ProtectHome,
+# PrivateDevices, etc.) is intentionally omitted: any directive that creates a
+# separate mount namespace hides mount pins from dockerd. Access to kernel and
+# cgroup paths is restricted by the AppArmor default-deny policy instead.
 ProtectClock=true
 ProtectHostname=true
 

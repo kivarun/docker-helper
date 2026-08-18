@@ -1279,6 +1279,75 @@ func TestSystemUnitFile(t *testing.T) {
 	}
 }
 
+// TestSystemUnitNoMountNamespace verifies that the system unit does not
+// enable any directive that creates a separate mount namespace. A separate
+// mount namespace hides mount pins created by docker-helper from dockerd,
+// causing "Permission denied" on bind mounts.
+func TestSystemUnitNoMountNamespace(t *testing.T) {
+	path := "packaging/systemd/system/docker-helper.service"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("system unit %s not found: %v", path, err)
+	}
+	content := string(data)
+
+	// Directives that create a mount namespace when active.
+	namespaceDirectives := []string{
+		"ProtectKernelTunables=",
+		"ProtectKernelModules=",
+		"ProtectKernelLogs=",
+		"ProtectControlGroups=",
+		"ProtectSystem=",
+		"ProtectHome=",
+		"PrivateDevices=",
+		"PrivateMounts=",
+		"PrivateTmp=",
+		"ReadWritePaths=",
+		"ReadOnlyPaths=",
+		"InaccessiblePaths=",
+		"TemporaryFileSystem=",
+		"ExecPaths=",
+		"NoExecPaths=",
+		"BindPaths=",
+		"BindReadOnlyPaths=",
+	}
+
+	trueValues := map[string]bool{
+		"true": true, "yes": true, "on": true, "1": true,
+	}
+
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, directive := range namespaceDirectives {
+			if !strings.HasPrefix(trimmed, directive) {
+				continue
+			}
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, directive))
+			// Empty value or false-equivalent is acceptable (directive present
+			// but disabled). Non-empty value that is not "false" creates a
+			// mount namespace.
+			if value == "" {
+				continue
+			}
+			lower := strings.ToLower(value)
+			if lower == "false" || lower == "no" || lower == "off" || lower == "0" {
+				continue
+			}
+			// PrivateTmp= and PrivateMounts= with "false" are OK.
+			// All other active values create a mount namespace.
+			if trueValues[lower] {
+				t.Errorf("system unit must not enable %s%s (creates mount namespace, hides mount pins from dockerd)", directive, value)
+				continue
+			}
+			// Non-boolean values (paths, mount specs) are always active.
+			t.Errorf("system unit must not enable %s%s (creates mount namespace, hides mount pins from dockerd)", directive, value)
+		}
+	}
+}
+
 // TestUnitNoRestrictSUIDSGID verifies that neither shipped systemd unit
 // contains an active RestrictSUIDSGID directive that would enable the
 // restriction. Any active directive with a true-equivalent value (true, yes,
