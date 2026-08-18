@@ -2,18 +2,27 @@
 
 ## Goal
 
-Release 2 adds a normally installable multi-user system deployment while
-preserving the existing per-user deployment.
+Release 2 adds a normally installable multi-user system deployment with remote
+access while preserving the existing per-user deployment.
 
 The same `docker-helper` binary supports two deployment profiles:
 
 - **user mode** — Release 1 style: daemon runs as the user, uses XDG paths, and
   listens on that user's Unix socket;
 - **system mode** — daemon runs as root, uses system paths, serves multiple
-  principals, and exposes both a system Unix socket and loopback HTTP.
+  principals, and exposes both a system Unix socket and HTTP (loopback or
+  non-loopback with TLS).
 
-Release 2 remains local-only. Remote/non-loopback access and TLS are Release 3
-work.
+Remote execution is part of Release 2:
+
+- remote sessions do not require a client-side workspace;
+- remote build accepts an uploaded or streamed build context;
+- remote run is image-based without client-side bind mounts;
+- existing session lifecycle (status, logs, cancel) is preserved for remote
+  sessions;
+
+Mutable workspace synchronization, helper routing, and control-plane
+integration are explicitly deferred.
 
 The HTTP API remains the capability contract. CLI commands are reference clients
 of that API and must not bypass the daemon by editing SQLite state directly for
@@ -416,10 +425,10 @@ manual pages with the implemented behavior before creating `release/2.0`.
 
 ## Explicitly deferred beyond Release 2
 
-- remote or non-loopback access;
-- TLS configuration and certificate lifecycle;
-- remote build-context upload or mutable workspace synchronization;
-- multiple helper contexts, routing, or helper-to-helper forwarding;
+- mutable remote workspace delivery and synchronization;
+- remote runs coupled to a synchronized mutable workspace;
+- multiple helper contexts, target routing, or helper-to-helper forwarding;
+- host port publishing and generic Docker network configuration;
 - durable operation recovery across daemon restarts;
 - immediate re-evaluation or termination of already-issued sessions when a
   principal's `allowed_roots` changes;

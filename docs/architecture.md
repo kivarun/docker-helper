@@ -86,7 +86,8 @@ daemon restart to take effect.
 One handler/API/auth policy on both transports. Transport does not
 determine identity or authorization.
 
-Loopback HTTP in Release 2 is local-only, no TLS, no non-loopback bind.
+Release 2 adds TLS and non-loopback listener configuration for remote access.
+Loopback HTTP remains the default; non-loopback requires explicit configuration.
 
 The launcher creates a session and passes the client token to the agent.
 It is not a mandatory daemon or control plane component.

@@ -267,15 +267,12 @@ Do not design their APIs here.
 
 ## 2.0
 
-### Main goal: multi-user system service and distribution
+### Main goal: server-side execution with remote access
 
-Release 2 adds a normally installable multi-user **system mode** while preserving
+Release 2 adds a server-side deployment with remote access while preserving
 the existing Release 1 **user mode**. Both deployment profiles use the same
 binary and share the same HTTP capability API and operation/session semantics
 where practical.
-
-Release 2 remains local-only. Remote/non-loopback access and TLS are outside this
-release.
 
 The Release 2 architecture review is complete and the binding implementation
 plan is [`docs/release-2-plan.md`](release-2-plan.md).
@@ -322,16 +319,25 @@ Accepted direction:
   committed;
 - package repositories and update channels are deferred until after package
   lifecycle acceptance or a later distribution workstream;
-- provide at least `docker-helper(1)` and `docker-helper-config(5)` manual pages.
+- provide at least `docker-helper(1)` and `docker-helper-config(5)` manual pages;
+
+**Remote execution** is part of Release 2:
+
+- remote sessions do not require a client-side workspace;
+- remote build accepts an uploaded or streamed build context;
+- remote run is image-based without client-side bind mounts;
+- existing session lifecycle (status, logs, cancel) is preserved for remote
+  sessions;
+- TLS and non-loopback listener configuration are required for remote access;
+- the same principal/credential/authorization model applies to both local and
+  remote clients;
 
 Explicitly outside Release 2:
 
-- remote or non-loopback access;
-- TLS configuration and certificate lifecycle;
-- remote build-context upload or workspace synchronization;
-- attached/bidirectional streaming execution for long-lived processes;
+- mutable remote workspace delivery and synchronization;
+- remote runs coupled to a synchronized mutable workspace;
+- multiple helper contexts, target routing, or helper-to-helper forwarding;
 - host port publishing and generic Docker network configuration;
-- multiple helper contexts, routing, or helper-to-helper forwarding;
 - durable operation recovery across daemon restarts;
 - dynamic revocation/re-evaluation of existing sessions after principal policy
   changes;
@@ -342,72 +348,26 @@ Explicitly outside Release 2:
 
 ## 3.0
 
-### Main goal: authenticated remote access over TLS
-
-Release 3 exposes docker-helper remotely over HTTPS after the local multi-user
-identity and authorization model is established in Release 2.
-
-Remote access must reuse the same principal, credential, authorization, and
-operation-lifecycle concepts rather than introducing a parallel "remote
-session" model or a mandatory control plane.
-
-Expected scope:
-
-- add an explicitly configured non-loopback network listener protected by TLS;
-- require normal certificate and hostname validation; do not add an
-  insecure-TLS mode;
-- reuse the Release 2 identity/authorization model for both local and remote
-  clients and enforce route authorization on the server;
-- define remote build semantics for client-side build contexts without turning
-  the helper into a distributed mutable workspace;
-- support image-based remote run without host mounts from the client machine;
-- add generic attached execution for long-lived interactive/stdio processes:
-  bidirectional stdin/stdout/stderr streaming, transport-compatible with both
-  local Unix HTTP and remote TLS, with disconnect/helper shutdown terminating
-  and removing the attached container; protocol/API details remain deferred;
-- keep protocol-specific integrations such as MCP adapters outside the core
-  capability, while leaving room for future secret injection that does not
-  expose secret values to the agent;
-- add controlled host port publishing for container services, sufficient for
-  workloads such as OpenBao, under explicit server-side policy; this is not a
-  commitment to generic Docker network management and API details remain
-  deferred;
-- preserve existing async status, logs, result, and cancellation semantics
-  where practical;
-- keep resulting images and build cache on the selected helper unless the user
-  explicitly pushes or exports them.
-
-Explicitly outside Release 3:
-
-- mutable remote workspace synchronization;
-- remote runs coupled to a synchronized mutable workspace;
-- multiple helper contexts, target routing, or helper-to-helper forwarding;
-- generic Docker network management beyond the controlled port-publishing
-  capability above;
-- a mandatory shared runtime or control plane;
-- durable operation recovery across daemon restarts unless real use justifies
-  pulling it forward.
-
-## 4.0
-
 ### Main goal: full remote environment
 
-Release 4 is the earliest stage for capabilities that turn remote Docker
+Release 3 is the earliest stage for capabilities that turn remote Docker
 execution into a full remote working environment:
 
 - mutable remote workspace delivery and synchronization;
 - remote runs coupled to a delivered workspace;
 - multiple helper contexts and target selection;
 - routing or optional helper-to-helper integration;
-- richer asynchronous upload/job protocols if the Release 3 remote-build path
+- richer asynchronous upload/job protocols if the Release 2 remote-build path
   proves insufficient;
 - cancellation and recovery across interrupted uploads, connections, or daemon
   restarts;
 - durable operation state and other deferred operational capabilities justified
-  by real use.
+  by real use;
+- host port publishing for container services under explicit server-side policy,
+  if not pulled forward from real use in Release 2;
 
-Keep Release 4 use-case driven. Do not predesign these APIs while implementing
-Release 2 or Release 3.
+Keep Release 3 use-case driven. Do not predesign these APIs while implementing
+Release 2.
 
 ## Architectural constraints
 
