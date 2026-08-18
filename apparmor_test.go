@@ -2035,15 +2035,29 @@ func TestSystemProfileContainsDockerBuildx(t *testing.T) {
 	}
 	content := string(data)
 
-	buildxPaths := []string{
-		"/usr/local/lib/docker/cli-plugins/docker-buildx ix,",
-		"/usr/local/libexec/docker/cli-plugins/docker-buildx ix,",
-		"/usr/lib/docker/cli-plugins/docker-buildx ix,",
-		"/usr/libexec/docker/cli-plugins/docker-buildx ix,",
+	// Binary rules must use rix (read + inherit + execute) for plugin discovery.
+	buildxBinaries := []string{
+		"/usr/local/lib/docker/cli-plugins/docker-buildx rix,",
+		"/usr/local/libexec/docker/cli-plugins/docker-buildx rix,",
+		"/usr/lib/docker/cli-plugins/docker-buildx rix,",
+		"/usr/libexec/docker/cli-plugins/docker-buildx rix,",
 	}
-	for _, p := range buildxPaths {
+	for _, p := range buildxBinaries {
 		if !strings.Contains(content, p) {
-			t.Errorf("system profile missing buildx path: %s", p)
+			t.Errorf("system profile missing buildx binary rule: %s", p)
+		}
+	}
+
+	// Directory read rules are required for Docker CLI plugin discovery.
+	buildxDirs := []string{
+		"/usr/local/lib/docker/cli-plugins/ r,",
+		"/usr/local/libexec/docker/cli-plugins/ r,",
+		"/usr/lib/docker/cli-plugins/ r,",
+		"/usr/libexec/docker/cli-plugins/ r,",
+	}
+	for _, p := range buildxDirs {
+		if !strings.Contains(content, p) {
+			t.Errorf("system profile missing buildx directory rule: %s", p)
 		}
 	}
 
@@ -2115,15 +2129,29 @@ func TestUserProfileContainsDockerBuildx(t *testing.T) {
 	}
 	content := string(data)
 
-	buildxPaths := []string{
-		"/usr/local/lib/docker/cli-plugins/docker-buildx ix,",
-		"/usr/local/libexec/docker/cli-plugins/docker-buildx ix,",
-		"/usr/lib/docker/cli-plugins/docker-buildx ix,",
-		"/usr/libexec/docker/cli-plugins/docker-buildx ix,",
+	// Binary rules must use rix (read + inherit + execute) for plugin discovery.
+	buildxBinaries := []string{
+		"/usr/local/lib/docker/cli-plugins/docker-buildx rix,",
+		"/usr/local/libexec/docker/cli-plugins/docker-buildx rix,",
+		"/usr/lib/docker/cli-plugins/docker-buildx rix,",
+		"/usr/libexec/docker/cli-plugins/docker-buildx rix,",
 	}
-	for _, p := range buildxPaths {
+	for _, p := range buildxBinaries {
 		if !strings.Contains(content, p) {
-			t.Errorf("user profile missing buildx path: %s", p)
+			t.Errorf("user profile missing buildx binary rule: %s", p)
+		}
+	}
+
+	// Directory read rules are required for Docker CLI plugin discovery.
+	buildxDirs := []string{
+		"/usr/local/lib/docker/cli-plugins/ r,",
+		"/usr/local/libexec/docker/cli-plugins/ r,",
+		"/usr/lib/docker/cli-plugins/ r,",
+		"/usr/libexec/docker/cli-plugins/ r,",
+	}
+	for _, p := range buildxDirs {
+		if !strings.Contains(content, p) {
+			t.Errorf("user profile missing buildx directory rule: %s", p)
 		}
 	}
 
@@ -2163,5 +2191,114 @@ func TestApparmorUserProfileParserValidation(t *testing.T) {
 	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", profilePath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("user profile parser validation failed: %v\n%s", err, out)
+	}
+}
+
+func TestBuildxDirectoryRulesHaveRead(t *testing.T) {
+	profiles := map[string]string{
+		"system": "packaging/apparmor/docker-helper-system",
+		"user":   "packaging/apparmor/docker-helper",
+	}
+
+	for name, path := range profiles {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Skipf("profile not found: %v", err)
+			}
+			content := string(data)
+
+			dirs := []string{
+				"/usr/local/lib/docker/cli-plugins/",
+				"/usr/local/libexec/docker/cli-plugins/",
+				"/usr/lib/docker/cli-plugins/",
+				"/usr/libexec/docker/cli-plugins/",
+			}
+			for _, dir := range dirs {
+				rule := dir + " r,"
+				if !strings.Contains(content, rule) {
+					t.Errorf("profile missing directory read rule: %s", rule)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildxBinaryRulesHaveRix(t *testing.T) {
+	profiles := map[string]string{
+		"system": "packaging/apparmor/docker-helper-system",
+		"user":   "packaging/apparmor/docker-helper",
+	}
+
+	for name, path := range profiles {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Skipf("profile not found: %v", err)
+			}
+			content := string(data)
+
+			binaries := []string{
+				"/usr/local/lib/docker/cli-plugins/docker-buildx",
+				"/usr/local/libexec/docker/cli-plugins/docker-buildx",
+				"/usr/lib/docker/cli-plugins/docker-buildx",
+				"/usr/libexec/docker/cli-plugins/docker-buildx",
+			}
+			for _, bin := range binaries {
+				rule := bin + " rix,"
+				if !strings.Contains(content, rule) {
+					t.Errorf("profile missing binary rix rule: %s", rule)
+				}
+
+				// Must not have bare ix (missing read permission needed for discovery).
+				badRule := bin + " ix,"
+				if strings.Contains(content, badRule) {
+					t.Errorf("profile has bare ix instead of rix: %s", badRule)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildxNoBroadWildcard(t *testing.T) {
+	profiles := map[string]string{
+		"system": "packaging/apparmor/docker-helper-system",
+		"user":   "packaging/apparmor/docker-helper",
+	}
+
+	for name, path := range profiles {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Skipf("profile not found: %v", err)
+			}
+			content := string(data)
+
+			// Must not grant broad cli-plugins wildcard execute.
+			if strings.Contains(content, "cli-plugins/**") {
+				t.Error("profile must not grant broad cli-plugins/** execute")
+			}
+
+			// Must not grant broad /usr/libexec wildcard execute.
+			for _, bad := range []string{
+				"/usr/libexec/** ix",
+				"/usr/libexec/**rix",
+				"/usr/libexec/** rix",
+			} {
+				if strings.Contains(content, bad) {
+					t.Errorf("profile must not grant broad libexec wildcard: %s", bad)
+				}
+			}
+
+			// Must not grant arbitrary plugin execute (only docker-buildx).
+			for _, bad := range []string{
+				"cli-plugins/* ix",
+				"cli-plugins/* rix",
+			} {
+				if strings.Contains(content, bad) {
+					t.Errorf("profile must not grant arbitrary plugin execute: %s", bad)
+				}
+			}
+		})
 	}
 }

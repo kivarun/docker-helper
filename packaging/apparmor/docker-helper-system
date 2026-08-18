@@ -51,10 +51,15 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	#include <abstractions/openssl>
 
 	# Docker Buildx CLI plugin (required by `docker build`).
-	/usr/local/lib/docker/cli-plugins/docker-buildx ix,
-	/usr/local/libexec/docker/cli-plugins/docker-buildx ix,
-	/usr/lib/docker/cli-plugins/docker-buildx ix,
-	/usr/libexec/docker/cli-plugins/docker-buildx ix,
+	# Directory read is required for Docker CLI plugin discovery.
+	/usr/local/lib/docker/cli-plugins/ r,
+	/usr/local/libexec/docker/cli-plugins/ r,
+	/usr/lib/docker/cli-plugins/ r,
+	/usr/libexec/docker/cli-plugins/ r,
+	/usr/local/lib/docker/cli-plugins/docker-buildx rix,
+	/usr/local/libexec/docker/cli-plugins/docker-buildx rix,
+	/usr/lib/docker/cli-plugins/docker-buildx rix,
+	/usr/libexec/docker/cli-plugins/docker-buildx rix,
 
 	# Docker helper binary itself.
 	/usr/bin/docker-helper r,
