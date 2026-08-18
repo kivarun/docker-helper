@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -25,8 +26,18 @@ const (
 // failure scenarios (e.g., rollback write failure).
 type configWriter func(path string, data []byte) error
 
-// defaultConfigWriter is the production writer backed by safeWriteConfig.
-var defaultConfigWriter configWriter = safeWriteConfig
+// configWriterAtomic holds the current config writer, allowing tests to
+// swap it atomically without races.
+var configWriterAtomic atomic.Value
+
+func init() {
+	configWriterAtomic.Store(configWriter(safeWriteConfig))
+}
+
+// getConfigWriter returns the current config writer.
+func getConfigWriter() configWriter {
+	return configWriterAtomic.Load().(configWriter)
+}
 
 var configCommand = &Command{
 	Name:    "config",
@@ -625,7 +636,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		func(raw map[string]json.RawMessage) {
 			raw[field] = newValue
 		},
-		defaultConfigWriter,
+		getConfigWriter(),
 		stdout,
 		stderr,
 	)
@@ -657,7 +668,7 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		func(raw map[string]json.RawMessage) {
 			delete(raw, field)
 		},
-		defaultConfigWriter,
+		getConfigWriter(),
 		stdout,
 		stderr,
 	)

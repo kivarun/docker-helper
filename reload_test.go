@@ -2001,18 +2001,18 @@ func TestConfigSetRollbackWriteFail(t *testing.T) {
 
 	// Inject a writer that fails on the second call (rollback).
 	writeCount := 0
-	failingWriter := func(path string, data []byte) error {
+	failingWriter := configWriter(func(path string, data []byte) error {
 		writeCount++
 		if writeCount == 2 {
 			return fmt.Errorf("simulated write failure")
 		}
 		return safeWriteConfig(path, data)
-	}
+	})
 
-	// Override the default writer temporarily.
-	prev := defaultConfigWriter
-	defaultConfigWriter = failingWriter
-	defer func() { defaultConfigWriter = prev }()
+	// Override the config writer atomically.
+	prev := getConfigWriter()
+	configWriterAtomic.Store(failingWriter)
+	defer func() { configWriterAtomic.Store(prev) }()
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "log_level", "debug"}, &stdout, &stderr)
