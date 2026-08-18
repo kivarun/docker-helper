@@ -2,11 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 )
 
 var principalCommand = &Command{
@@ -512,62 +511,18 @@ With --force, an existing credential is replaced atomically.`,
 
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				// Reject root.
-				if EffectiveUID() == 0 {
-					fmt.Fprintln(stderr, "error: credential install must not be run as root")
-					fmt.Fprintln(stderr, "This command is for principal users, not the operator.")
-					return 1
-				}
-
-				// Prompt for token.
-				var reader io.Reader
-				if isStdinTTY() {
-					fmt.Fprint(stderr, "Credential token: ")
-					reader = os.Stdin
-				} else {
-					reader = os.Stdin
-				}
-
-				token, err := readTokenFromReader(reader)
+				credPath, err := installCredentialWithIO(*force, stderr)
 				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				// Validate token format.
-				if err := validateCredentialToken(token); err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				// Resolve credential path.
-				credPath, err := credentialPath()
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				// Check if credential already exists.
-				if info, err := os.Stat(credPath); err == nil {
-					if !info.IsDir() && !*force {
-						fmt.Fprintf(stderr, "error: credential already exists at %s\n", credPath)
+					if errors.Is(err, ErrCredentialInstallAsRoot) {
+						fmt.Fprintln(stderr, "error: credential install must not be run as root")
+						fmt.Fprintln(stderr, "This command is for principal users, not the operator.")
+						return 1
+					}
+					if errors.Is(err, ErrCredentialAlreadyExists) {
+						fmt.Fprintf(stderr, "error: credential already installed\n")
 						fmt.Fprintln(stderr, "Use --force to replace it.")
 						return 1
 					}
-				}
-
-				// Create directory with mode 0700.
-				dir := filepath.Dir(credPath)
-				if err := os.MkdirAll(dir, 0700); err != nil {
-					fmt.Fprintf(stderr, "error: cannot create credential directory: %v\n", err)
-					return 1
-				}
-
-				// Write token with trailing newline.
-				data := append([]byte(token), '\n')
-
-				// Atomic write with mode 0600.
-				if err := safeWriteCredential(credPath, data); err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}

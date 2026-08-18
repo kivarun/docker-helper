@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 const credentialTokenPrefix = "dhc_"
@@ -23,14 +25,14 @@ var (
 
 // credentialInstallConfig holds the injectable dependencies for installCredential.
 type credentialInstallConfig struct {
-	// reader provides the raw input (stdin or TTY).
+	// reader provides the raw input (stdin for non-TTY).
 	reader io.Reader
 	// writer performs the atomic file write.
 	writer func(path string, data []byte) error
-	// isTTY is true when stdin is a terminal.
-	isTTY bool
 	// uid returns the effective UID of the process.
 	uid func() int
+	// isTerminal checks if stdin is a terminal.
+	isTerminal func() bool
 }
 
 // credentialPath returns the user credential file path.
@@ -83,6 +85,22 @@ func readTokenFromReader(r io.Reader) (string, error) {
 	return token, nil
 }
 
+// readTokenHidden reads a token from the terminal with hidden input.
+// Uses golang.org/x/term to disable echo.
+func readTokenHidden(prompt string, stderr io.Writer) (string, error) {
+	fmt.Fprint(stderr, prompt)
+	byteToken, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(stderr)
+	if err != nil {
+		return "", fmt.Errorf("error reading token: %w", err)
+	}
+	token := strings.TrimSpace(string(byteToken))
+	if token == "" {
+		return "", fmt.Errorf("empty input: provide a credential token")
+	}
+	return token, nil
+}
+
 // installCredential performs the credential installation.
 // Returns the credential path on success.
 func installCredential(cfg credentialInstallConfig) (string, error) {
@@ -92,7 +110,14 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 	}
 
 	// Read token.
-	token, err := readTokenFromReader(cfg.reader)
+	var token string
+	if cfg.isTerminal() {
+		// TTY: use hidden input.
+		return "", fmt.Errorf("TTY input requires stderr writer: use installCredentialWithIO")
+	}
+	// Non-TTY: read from stdin.
+	var err error
+	token, err = readTokenFromReader(cfg.reader)
 	if err != nil {
 		return "", err
 	}
@@ -108,10 +133,65 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 		return "", err
 	}
 
+	// Create directory with mode 0700.
+	dir := filepath.Dir(credPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("cannot create credential directory: %w", ErrCredentialDirectoryMissing)
+	}
+
+	// Write token with trailing newline.
+	data := append([]byte(token), '\n')
+
+	// Atomic write with mode 0600.
+	if err := cfg.writer(credPath, data); err != nil {
+		return "", err
+	}
+
+	return credPath, nil
+}
+
+// installCredentialWithIO is the full install flow with TTY support.
+// It handles root check, token input (hidden for TTY), validation,
+// --force check, and atomic write.
+func installCredentialWithIO(force bool, stderr io.Writer) (string, error) {
+	// Reject root.
+	if EffectiveUID() == 0 {
+		return "", ErrCredentialInstallAsRoot
+	}
+
+	// Read token.
+	var token string
+	if isStdinTTY() {
+		// TTY: use hidden input.
+		var err error
+		token, err = readTokenHidden("Credential token: ", stderr)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		// Non-TTY: read from stdin.
+		var err error
+		token, err = readTokenFromReader(os.Stdin)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	// Validate token format.
+	if err := validateCredentialToken(token); err != nil {
+		return "", err
+	}
+
+	// Resolve credential path.
+	credPath, err := credentialPath()
+	if err != nil {
+		return "", err
+	}
+
 	// Check if credential already exists.
 	if info, err := os.Stat(credPath); err == nil {
-		if !info.IsDir() {
-			return "", fmt.Errorf("credential already exists at %s: use --force to replace: %w", credPath, ErrCredentialAlreadyExists)
+		if !info.IsDir() && !force {
+			return "", fmt.Errorf("credential already exists: use --force to replace: %w", ErrCredentialAlreadyExists)
 		}
 	}
 
@@ -125,7 +205,7 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 	data := append([]byte(token), '\n')
 
 	// Atomic write with mode 0600.
-	if err := cfg.writer(credPath, data); err != nil {
+	if err := safeWriteCredential(credPath, data); err != nil {
 		return "", err
 	}
 
@@ -171,23 +251,4 @@ func isStdinTTY() bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
-}
-
-// readTokenTTY reads a token from TTY with hidden input.
-func readTokenTTY(prompt string) (string, error) {
-	// Use syscall to read from /dev/tty with echo disabled.
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		// Fallback to stdin if /dev/tty is not available.
-		return readTokenFromReader(os.Stdin)
-	}
-	defer tty.Close()
-
-	// Disable echo on the TTY fd.
-	// This is a simplified approach; on Linux we can use ioctl.
-	// For portability, we just read from /dev/tty.
-	fmt.Print(prompt)
-	token, err := readTokenFromReader(tty)
-	fmt.Println()
-	return token, err
 }
