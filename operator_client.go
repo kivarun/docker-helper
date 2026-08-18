@@ -71,7 +71,17 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	socketPath := filepath.Join(systemRuntimeDir, "docker-helper.sock")
 	tokenPath := opts.TokenFile
 	if tokenPath == "" {
-		tokenPath = filepath.Join(systemConfigDir, "admin.token")
+		// Non-root users read the credential token from the user config directory.
+		// Root users read the admin token from the system config directory.
+		if EffectiveUID() == 0 {
+			tokenPath = filepath.Join(systemConfigDir, "admin.token")
+		} else {
+			credPath, err := credentialPath()
+			if err != nil {
+				return nil, fmt.Errorf("cannot determine credential path: %w", err)
+			}
+			tokenPath = credPath
+		}
 	}
 
 	token, err := readTokenFile(tokenPath)

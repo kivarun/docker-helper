@@ -119,15 +119,16 @@ func TestResolveSystemDefaultTokenPath(t *testing.T) {
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 1000 }
 
-	// No token file provided, should use system default.
+	// Non-root: no token file provided, should use credential path.
 	_, err := resolveOperatorClient(operatorClientOptions{
 		System: true,
 	})
 	if err == nil {
-		t.Fatal("expected error when system token file doesn't exist")
+		t.Fatal("expected error when credential file doesn't exist")
 	}
-	if !strings.Contains(err.Error(), systemConfigDir) {
-		t.Errorf("error should mention system config dir: %v", err)
+	// The error should mention the credential path, not systemConfigDir.
+	if strings.Contains(err.Error(), systemConfigDir+"/admin.token") {
+		t.Error("non-root should not use system admin.token path")
 	}
 }
 

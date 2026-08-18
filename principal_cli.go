@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 )
 
 var principalCommand = &Command{
@@ -26,6 +28,7 @@ var credentialCommand = &Command{
 		credentialCreateCommand,
 		credentialListCommand,
 		credentialRevokeCommand,
+		credentialInstallCommand,
 	},
 }
 
@@ -389,6 +392,10 @@ var credentialCreateCommand = &Command{
 				fmt.Fprintf(stdout, "  Token: %s\n", result.Token)
 				fmt.Fprintln(stdout, "")
 				fmt.Fprintln(stdout, "IMPORTANT: Save the token now. It will not be shown again.")
+				fmt.Fprintln(stdout, "")
+				fmt.Fprintln(stdout, "Give this token securely to the principal.")
+				fmt.Fprintln(stdout, "The principal installs it with:")
+				fmt.Fprintln(stdout, "  docker-helper credential install")
 				return 0
 			},
 		}
@@ -475,6 +482,97 @@ var credentialRevokeCommand = &Command{
 				if result.Message == "unchanged" {
 					fmt.Fprintln(stdout, "(was already revoked)")
 				}
+				return 0
+			},
+		}
+	},
+}
+
+var credentialInstallCommand = &Command{
+	Name:       "install",
+	Summary:    "Install a principal credential token",
+	Usage:      "docker-helper credential install [--force]",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	Help: `Install a credential token for use with docker-helper --system.
+
+Reads the token from stdin (hidden input when connected to a terminal).
+Stores the token at:
+  ${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token
+
+This command must NOT be run as root. It is intended for principal users
+who received a token from the operator.
+
+The token is validated for format before storage. It is written atomically
+with mode 0600. The directory is created with mode 0700 if it does not exist.
+
+With --force, an existing credential is replaced atomically.`,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		force := fs.Bool("force", false, "Replace existing credential")
+
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				// Reject root.
+				if EffectiveUID() == 0 {
+					fmt.Fprintln(stderr, "error: credential install must not be run as root")
+					fmt.Fprintln(stderr, "This command is for principal users, not the operator.")
+					return 1
+				}
+
+				// Prompt for token.
+				var reader io.Reader
+				if isStdinTTY() {
+					fmt.Fprint(stderr, "Credential token: ")
+					reader = os.Stdin
+				} else {
+					reader = os.Stdin
+				}
+
+				token, err := readTokenFromReader(reader)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				// Validate token format.
+				if err := validateCredentialToken(token); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				// Resolve credential path.
+				credPath, err := credentialPath()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				// Check if credential already exists.
+				if info, err := os.Stat(credPath); err == nil {
+					if !info.IsDir() && !*force {
+						fmt.Fprintf(stderr, "error: credential already exists at %s\n", credPath)
+						fmt.Fprintln(stderr, "Use --force to replace it.")
+						return 1
+					}
+				}
+
+				// Create directory with mode 0700.
+				dir := filepath.Dir(credPath)
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					fmt.Fprintf(stderr, "error: cannot create credential directory: %v\n", err)
+					return 1
+				}
+
+				// Write token with trailing newline.
+				data := append([]byte(token), '\n')
+
+				// Atomic write with mode 0600.
+				if err := safeWriteCredential(credPath, data); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				fmt.Fprintf(stdout, "installed credential at %s\n", credPath)
 				return 0
 			},
 		}
