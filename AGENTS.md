@@ -100,30 +100,19 @@ Architectural principle:
 Standardize contracts where useful; do not create mandatory shared runtime or
 shared libraries merely to make future tools look uniform.
 
-7. Keep the current release direction explicit.
+7. Keep release scope out of this file.
 
-Release 2 is the server-side / remote execution release. Do not treat remote
-execution as hypothetical future work or move it back out of scope unless the
-task explicitly changes the roadmap.
+`AGENTS.md` contains long-lived development rules, not the state of the current
+release.
 
-For Release 2 development, preserve these direction constraints:
-- a remote session must not require a client-side workspace path;
-- remote build accepts a client-provided build context as uploaded/streamed
-  data and executes the build on the remote Docker daemon;
-- build results and cache remain on that helper unless explicitly pushed or
-  exported;
-- remote run is image-based and must work without a client workspace or
-  client-side bind mounts;
-- remote sessions may use build, run, pull/registry authentication, and the
-  existing operation status/logs/cancel lifecycle; do not restrict them to
-  build-only operation semantics;
-- multiple simultaneous sessions/agents must remain possible;
-- future optional control-plane integration must remain possible without
-  becoming a mandatory runtime dependency.
+Before release-specific work, read the current roadmap and active release plan.
+Use the architecture documentation for accepted design and runtime semantics.
 
-Do not predesign mutable remote workspace synchronization, helper routing,
-helper-to-helper forwarding, or generic orchestration unless a concrete task
-brings one of those capabilities into scope.
+Do not:
+- encode the current release number or milestone here;
+- duplicate release-specific feature lists here;
+- move features between releases unless the task explicitly changes the roadmap;
+- infer future API or architecture merely from a roadmap item.
 
 # Security
 
@@ -160,7 +149,7 @@ Preserve existing masking/redaction behavior.
 
 # Filesystem policy
 
-10. Preserve canonical-path invariants without inventing a workspace where none exists.
+10. Preserve canonical-path invariants.
 
 For workspace-backed sessions, the session workspace is canonicalized when the
 session is created.
@@ -173,13 +162,9 @@ guarantees it.
 
 Do not weaken symlink-escape protection.
 
-Remote workspace-free sessions are different by design:
-- do not require or synthesize a client workspace merely to reuse local-session
-  validation paths;
-- remote run must not accept client host paths or client-side bind mounts;
-- a remote build context is uploaded data, not a claim about a path on the
-  client or server filesystem, and must be staged/validated according to the
-  remote build-context contract rather than local workspace containment.
+When a deployment mode or operation intentionally has no local workspace, follow
+the architecture and release-plan contract for that mode instead of inventing a
+synthetic workspace merely to reuse local validation code.
 
 # Database
 
@@ -319,18 +304,26 @@ unless compatibility requires otherwise.
 - common operator workflows;
 - concise command examples.
 
+`docs/roadmap.md` owns:
+- release sequence;
+- release scope;
+- planned work and explicit deferrals.
+
+`docs/release-*.md` owns:
+- the binding implementation plan for a specific release when such a plan exists.
+
 `docs/architecture.md` owns:
-- detailed architecture;
+- current architecture and invariants;
 - trust/security model;
 - lifecycle semantics;
 - detailed API/CLI behavior;
-- design decisions and future work.
+- design rationale.
 
 `.claude/skills/docker-helper/SKILL.md` owns:
 - canonical reusable instructions for agents USING docker-helper.
 
 `AGENTS.md` owns:
-- instructions for agents DEVELOPING docker-helper.
+- long-lived instructions for agents DEVELOPING docker-helper.
 
 Do not duplicate large reference sections between documents.
 Prefer links to the canonical owner.
@@ -438,8 +431,3 @@ before starting the next major phase, do an architecture cleanup/review:
 Do not require cleanup after every small commit.
 
 Focus on deletion and simplification over new abstractions.
-
-24. shm_size 2 GiB limit.
-
-The POST /run `shm_size` maximum of 2 GiB is a deliberate Release 1
-limit. Whether it becomes configurable in a later release is not committed.
