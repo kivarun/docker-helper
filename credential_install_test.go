@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,12 +223,21 @@ func TestCredentialInstallWriterFailure(t *testing.T) {
 func TestCredentialInstallTokenNotInOutput(t *testing.T) {
 	validToken := "dhc_" + strings.Repeat("a", 64)
 
+	// Pipe a real token via stdin and verify it doesn't appear in output.
+	r, w, _ := os.Pipe()
+	go func() {
+		fmt.Fprintln(w, validToken)
+		w.Close()
+	}()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"credential", "install", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("help exited %d", code)
-	}
-	// Help output must not contain the token.
+	code := runCommandWithWriters([]string{"credential", "install"}, &stdout, &stderr)
+	// May fail if running as root or credential already exists,
+	// but token must never appear in output.
+	_ = code
 	if strings.Contains(stdout.String(), validToken) {
 		t.Error("token must not appear in stdout")
 	}
@@ -250,30 +262,56 @@ func TestCredentialInstallHelp(t *testing.T) {
 }
 
 func TestCredentialCreateShowsNextStep(t *testing.T) {
-	// Verify that credential create output includes the next step.
-	// The output should include "docker-helper credential install"
-	// and should NOT include the actual token in the command.
-	// We check the command's Run function output format by inspecting
-	// the actual output lines in principal_cli.go.
+	// Set up a test server that serves POST /principals/{username}/credentials.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /principals/alice/credentials", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(createCredentialResponse{
+			OK: true,
+			Credential: credentialJSON{
+				ID:        "dhcr_test123",
+				Principal: "alice",
+				Name:      "laptop",
+				CreatedAt: "2024-01-01T00:00:00Z",
+			},
+			Token: "dhc_" + strings.Repeat("a", 64),
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
 
-	// The credential create command prints:
-	// "Give this token securely to the principal."
-	// "The principal installs it with:"
-	// "  docker-helper credential install"
-	// This is verified by checking the command definition includes
-	// the expected text and does NOT include a token placeholder.
+	// Create a token file for authentication.
+	tokenDir := t.TempDir()
+	tokenPath := filepath.Join(tokenDir, "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
-	// Static check: verify the credential install command has help text
-	// that describes the principal workflow.
-	installHelp := credentialInstallCommand.Help
-	if installHelp == "" {
-		t.Fatal("credential install command should have help text")
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"credential", "create",
+		"--endpoint", server.URL,
+		"--token-file", tokenPath,
+		"--name", "laptop",
+		"alice",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
 	}
-	if !strings.Contains(installHelp, "principal") {
-		t.Error("help should mention principal users")
+
+	out := stdout.String()
+	// Verify the output includes the next step.
+	if !strings.Contains(out, "docker-helper credential install") {
+		t.Error("output must include 'docker-helper credential install' as next step")
 	}
-	if !strings.Contains(installHelp, "--system") {
-		t.Error("help should mention --system mode")
+	// Verify the output includes the warning.
+	if !strings.Contains(out, "Save the token now") {
+		t.Error("output must include 'Save the token now' warning")
+	}
+	// Verify the token appears in output (it's shown once).
+	if !strings.Contains(out, "dhc_"+strings.Repeat("a", 64)) {
+		t.Error("output must include the token")
 	}
 }
 
