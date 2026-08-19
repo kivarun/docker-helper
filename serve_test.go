@@ -56,7 +56,8 @@ func TestSecondLaunchDoesNotDeleteSocket(t *testing.T) {
 		t.Fatalf("net.Listen() error: %v", err)
 	}
 
-	exists := fileExists(socketPath)
+	_, statErr := os.Stat(socketPath)
+	exists := statErr == nil
 	if !exists {
 		listener.Close()
 		f1.Close()
@@ -70,7 +71,8 @@ func TestSecondLaunchDoesNotDeleteSocket(t *testing.T) {
 		t.Fatal("expected error when acquiring second lock")
 	}
 
-	exists = fileExists(socketPath)
+	_, statErr = os.Stat(socketPath)
+	exists = statErr == nil
 	if !exists {
 		listener.Close()
 		f1.Close()
@@ -668,11 +670,6 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 		t.Fatalf("stat %s: %v", path, err)
 	}
 	return info
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // --- Graceful shutdown tests ---

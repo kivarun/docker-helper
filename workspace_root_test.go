@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -78,7 +79,7 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 				t.Errorf("isForbiddenWorkspaceRoot(%q) = %v, want nil", tt.path, err)
 			}
 			if tt.wantErr && tt.errSub != "" && err != nil {
-				if !contains(err.Error(), tt.errSub) {
+				if !strings.Contains(err.Error(), tt.errSub) {
 					t.Errorf("isForbiddenWorkspaceRoot(%q) error = %q, want contains %q", tt.path, err.Error(), tt.errSub)
 				}
 			}
@@ -197,19 +198,4 @@ func TestCanonicalizeWorkspaceRootTildeExpansion(t *testing.T) {
 	if canonical != expected {
 		t.Errorf("canonicalizeWorkspaceRootForAdd(%q) = %q, want %q", tildePath, canonical, expected)
 	}
-}
-
-// contains is a helper for checking if a string contains a substring.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && indexOf(s, substr) >= 0))
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }

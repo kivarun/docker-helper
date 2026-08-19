@@ -135,13 +135,3 @@ func makeIgnoringSignalCmd(t *testing.T, readyFile string) func(context.Context,
 		return cmd
 	}
 }
-
-// makeBlockingCmd returns an ExecCommandContext that blocks on blockCh
-// before returning the command. This allows tests to control when cmd
-// creation completes relative to shutdown.
-func makeBlockingCmd(blockCh chan struct{}) func(context.Context, string, ...string) *exec.Cmd {
-	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		<-blockCh
-		return exec.CommandContext(ctx, "/bin/sleep", "60")
-	}
-}
