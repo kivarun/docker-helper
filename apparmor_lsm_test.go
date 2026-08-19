@@ -407,14 +407,9 @@ func TestInitUserModeNoAppArmorCheck(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
-	// No system daemon, Docker accessible → standalone user init.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	defer func() { systemSocketExists = origSocket }()
-
-	origDockerAccess := checkDockerAccess
-	checkDockerAccess = func() error { return nil }
-	defer func() { checkDockerAccess = origDockerAccess }()
+	// Standalone user init (no system daemon, Docker accessible).
+	restore := mockStandaloneUserInit()
+	defer restore()
 
 	rootDir := testAllowedRootDir(t)
 	configDir := t.TempDir()

@@ -469,14 +469,9 @@ func TestInitUserModeNoAppArmor(t *testing.T) {
 	EffectiveUID = func() int { return 1000 }
 	defer func() { EffectiveUID = origUID }()
 
-	// No system daemon, no Docker access → skip init.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	defer func() { systemSocketExists = origSocket }()
-
-	origDockerAccess := checkDockerAccess
-	checkDockerAccess = func() error { return nil }
-	defer func() { checkDockerAccess = origDockerAccess }()
+	// Standalone user init (no system daemon, Docker accessible).
+	restore := mockStandaloneUserInit()
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	err := runInit(rootDir, &stdout, &stderr)
@@ -509,14 +504,9 @@ func TestInitUserModeNoAppArmorRestrictions(t *testing.T) {
 	EffectiveUID = func() int { return 1000 }
 	defer func() { EffectiveUID = origUID }()
 
-	// No system daemon, no Docker access → skip init.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	defer func() { systemSocketExists = origSocket }()
-
-	origDockerAccess := checkDockerAccess
-	checkDockerAccess = func() error { return nil }
-	defer func() { checkDockerAccess = origDockerAccess }()
+	// Standalone user init (no system daemon, Docker accessible).
+	restore := mockStandaloneUserInit()
+	defer restore()
 
 	var stdout, stderr bytes.Buffer
 	err := runInit(rootDir, &stdout, &stderr)

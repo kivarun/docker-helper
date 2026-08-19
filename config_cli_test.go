@@ -1144,14 +1144,9 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 	// 1) Run init - should create files at DOCKER_HELPER_CONFIG, not XDG_CONFIG_HOME
 	allowedRoot := testAllowedRootDir(t)
 
-	// No system daemon, Docker accessible → standalone user init.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	defer func() { systemSocketExists = origSocket }()
-
-	origDockerAccess := checkDockerAccess
-	checkDockerAccess = func() error { return nil }
-	defer func() { checkDockerAccess = origDockerAccess }()
+	// Standalone user init (no system daemon, Docker accessible).
+	restore := mockStandaloneUserInit()
+	defer restore()
 
 	if err := runInit(allowedRoot, io.Discard, io.Discard); err != nil {
 		t.Fatalf("init failed: %v", err)

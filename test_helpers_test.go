@@ -278,3 +278,17 @@ func testWorkspaceDir(t *testing.T, allowedRoot string) string {
 	}
 	return dir
 }
+
+// mockStandaloneUserInit mocks systemSocketExists and checkDockerAccess so
+// that runInit takes the "standalone user init" path (no system daemon,
+// Docker accessible). Returns a restore function that should be deferred.
+func mockStandaloneUserInit() func() {
+	origSocket := systemSocketExists
+	origDockerAccess := checkDockerAccess
+	systemSocketExists = func() bool { return false }
+	checkDockerAccess = func() error { return nil }
+	return func() {
+		systemSocketExists = origSocket
+		checkDockerAccess = origDockerAccess
+	}
+}
