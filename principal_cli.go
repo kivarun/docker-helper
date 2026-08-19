@@ -19,6 +19,7 @@ var principalCommand = &Command{
 		principalListCommand,
 		principalShowCommand,
 		principalSetCommand,
+		principalDeleteCommand,
 		principalAllowedRootCommand,
 	},
 }
@@ -252,6 +253,41 @@ var principalSetCommand = &Command{
 				if result.Message == "unchanged" {
 					fmt.Fprintln(stdout, "(unchanged)")
 				}
+				return 0
+			},
+		}
+	},
+}
+
+var principalDeleteCommand = &Command{
+	Name:       "delete",
+	Summary:    "Delete a principal",
+	Usage:      "docker-helper principal delete [--system] [--endpoint ENDPOINT] [--token-file PATH] USER",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				args := fs.Args()
+				username := args[0]
+
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				if err := client.deletePrincipal(username); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+
+				fmt.Fprintf(stdout, "deleted principal %s\n", username)
 				return 0
 			},
 		}

@@ -204,6 +204,7 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("GET /principals", app.handleListPrincipals)
 	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
 	mux.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
+	mux.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
 	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
 	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)

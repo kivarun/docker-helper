@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -235,17 +236,38 @@ func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) (bool, er
 		return false, nil
 	}
 
+	tx, err := db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("cannot begin transaction: %w", err)
+	}
+
 	newEnabled := 0
 	if enabled {
 		newEnabled = 1
 	}
 
-	_, err = db.Exec(
+	_, err = tx.Exec(
 		`UPDATE principals SET enabled = ? WHERE id = ?`,
 		newEnabled, principalID,
 	)
 	if err != nil {
+		tx.Rollback()
 		return false, fmt.Errorf("cannot update principal enabled: %w", err)
+	}
+
+	if !enabled {
+		_, err = tx.Exec(
+			`DELETE FROM sessions WHERE principal_id = ?`,
+			principalID,
+		)
+		if err != nil {
+			tx.Rollback()
+			return false, fmt.Errorf("cannot delete principal sessions: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("cannot commit enabled change: %w", err)
 	}
 
 	return true, nil
@@ -359,4 +381,99 @@ func listPrincipalSummaries(db *sql.DB) ([]principalSummary, error) {
 	}
 
 	return summaries, nil
+}
+
+// cleanupPrincipalRuntimeDirs removes runtime directories for all sessions
+// of a principal. Returns accumulated errors but does not fail on individual
+// directory removal failures.
+func cleanupPrincipalRuntimeDirs(db *sql.DB, runtimeDir, username string) error {
+	principalID, err := findPrincipalIDByUserName(db, username)
+	if err != nil {
+		return err
+	}
+
+	rows, err := db.Query(
+		`SELECT id FROM sessions WHERE principal_id = ?`,
+		principalID,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot query principal sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var errs []error
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return fmt.Errorf("cannot scan session id: %w", err)
+		}
+		if err := cleanupSessionRuntimeDir(runtimeDir, sessionID); err != nil {
+			slog.Warn("failed to clean up session runtime directory",
+				slog.String("session", sessionID),
+				slog.String("error", err.Error()),
+			)
+			errs = append(errs, err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate sessions: %w", err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to clean up %d session runtime directories", len(errs))
+	}
+	return nil
+}
+
+// deletePrincipal removes a principal and all its sessions in a single transaction.
+// Credentials and allowed roots are removed via FK ON DELETE CASCADE.
+// Returns the principal's username on success.
+func deletePrincipal(db *sql.DB, username string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("cannot begin transaction: %w", err)
+	}
+
+	principalID, err := findPrincipalIDByUserNameInTx(tx, username)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	// Delete all sessions for this principal.
+	// Not relying on FK cascade — sessions.principal_id has no ON DELETE CASCADE.
+	_, err = tx.Exec(`DELETE FROM sessions WHERE principal_id = ?`, principalID)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("cannot delete principal sessions: %w", err)
+	}
+
+	// Delete the principal.
+	// Credentials and allowed roots are removed via FK ON DELETE CASCADE.
+	_, err = tx.Exec(`DELETE FROM principals WHERE id = ?`, principalID)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("cannot delete principal: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cannot commit deletion: %w", err)
+	}
+
+	return nil
+}
+
+func findPrincipalIDByUserNameInTx(tx *sql.Tx, username string) (int, error) {
+	var id int
+	err := tx.QueryRow(
+		`SELECT id FROM principals WHERE username = ?`,
+		username,
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrPrincipalNotFound
+		}
+		return 0, fmt.Errorf("cannot find principal: %w", err)
+	}
+	return id, nil
 }

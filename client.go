@@ -585,3 +585,17 @@ func (c *apiClient) rotateAdminToken() (*rotateAdminTokenResponse, error) {
 	}
 	return &result, nil
 }
+
+func (c *apiClient) deletePrincipal(username string) error {
+	resp, err := c.doAuthenticatedRequest("DELETE", "/principals/"+url.PathEscape(username), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return parseApiError(resp.StatusCode, body)
+	}
+	return nil
+}

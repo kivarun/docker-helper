@@ -240,14 +240,14 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := principalChangedResponse{
-		OK:       true,
-		Username: username,
-		Field:    "enabled",
-		Changed:  changed,
-	}
-	if !changed {
-		resp.Message = "unchanged"
+	if !*req.Enabled {
+		if err := cleanupPrincipalRuntimeDirs(a.DB, a.Config.RuntimeDir, username); err != nil {
+			opLog(ctx).Warn("failed to clean up principal runtime directories",
+				slog.String("operation", "principal_disable"),
+				slog.String("principal", username),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{
@@ -258,7 +258,18 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		Duration:         duration,
 	})
 
-	writeJSONRaw(ctx, w, http.StatusOK, resp)
+	writeJSONRaw(ctx, w, http.StatusOK, principalChangedResponse{
+		OK:       true,
+		Username: username,
+		Field:    "enabled",
+		Changed:  changed,
+		Message: func() string {
+			if !changed {
+				return "unchanged"
+			}
+			return ""
+		}(),
+	})
 }
 
 func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
@@ -731,4 +742,72 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
+}
+
+func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+
+	if !a.requireAdmin(w, r) {
+		return
+	}
+
+	ctx := r.Context()
+
+	username := r.PathValue("username")
+	if username == "" {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeAuditWithRequestID(ctx, auditRecord{
+			Event:    "principal.delete",
+			Result:   "missing_username",
+			Duration: duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest, "missing_username", "username is required")
+		return
+	}
+
+	err := deletePrincipal(a.DB, username)
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if err != nil {
+		if isErrPrincipalNotFound(err) {
+			writeAuditWithRequestID(ctx, auditRecord{
+				Event:         "principal.delete",
+				PrincipalName: username,
+				Result:        "not_found",
+				Duration:      duration,
+			})
+			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+		} else {
+			writeAuditWithRequestID(ctx, auditRecord{
+				Event:         "principal.delete",
+				PrincipalName: username,
+				Result:        "database_error",
+				Duration:      duration,
+			})
+			opLog(ctx).Error("principal delete failed",
+				slog.String("operation", "principal_delete"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	// Best-effort cleanup of runtime directories for deleted principal's sessions.
+	if err := cleanupPrincipalRuntimeDirs(a.DB, a.Config.RuntimeDir, username); err != nil {
+		opLog(ctx).Warn("failed to clean up principal runtime directories",
+			slog.String("operation", "principal_delete"),
+			slog.String("principal", username),
+			slog.String("error", err.Error()),
+		)
+	}
+
+	writeAuditWithRequestID(ctx, auditRecord{
+		Event:         "principal.delete",
+		PrincipalName: username,
+		Result:        "success",
+		Duration:      duration,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
 }

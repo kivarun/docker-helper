@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -189,7 +190,7 @@ func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 	}
 }
 
-func TestDisabledPrincipalSessionStillRuns(t *testing.T) {
+func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "disabledexecuser")
@@ -236,22 +237,13 @@ func TestDisabledPrincipalSessionStillRuns(t *testing.T) {
 		t.Fatalf("updatePrincipalEnabled() error: %v", err)
 	}
 
-	// Session should still be usable.
-	session, err := app.findSessionByToken(resp.Token)
-	if err != nil {
-		t.Fatalf("findSessionByToken() error after disable: %v", err)
+	// Session should be invalidated after disable.
+	_, err = app.findSessionByToken(resp.Token)
+	if err == nil {
+		t.Fatal("findSessionByToken() should fail after principal disable")
 	}
-
-	// Identity resolution should still work.
-	uid, gid, err := resolveSessionExecutionIdentity(app.DB, session)
-	if err != nil {
-		t.Fatalf("resolveSessionExecutionIdentity() error after disable: %v", err)
-	}
-	if uid != 4001 {
-		t.Errorf("UID = %d, want 4001", uid)
-	}
-	if gid != 4001 {
-		t.Errorf("GID = %d, want 4001", gid)
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("expected ErrSessionNotFound, got: %v", err)
 	}
 }
 

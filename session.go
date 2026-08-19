@@ -346,6 +346,7 @@ func (a *App) findSessionByToken(token string) (*Session, error) {
 		 FROM sessions s
 		 LEFT JOIN principals p ON p.id = s.principal_id
 		 WHERE s.token_hash = ? AND s.expires_at > ?
+		 AND (s.principal_id IS NULL OR p.enabled = 1)
 		 LIMIT 1`,
 		tokenHashHex,
 		now,

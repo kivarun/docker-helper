@@ -933,7 +933,7 @@ func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
 	}
 }
 
-func TestSessionTokenSurvivesPrincipalDisable(t *testing.T) {
+func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "survivedisuser")
@@ -981,13 +981,13 @@ func TestSessionTokenSurvivesPrincipalDisable(t *testing.T) {
 		t.Fatalf("updatePrincipalEnabled() error: %v", err)
 	}
 
-	// Session token should still work.
-	session, err := app.findSessionByToken(sessionToken)
-	if err != nil {
-		t.Fatalf("findSessionByToken() error after principal disable: %v", err)
+	// Session token should be invalidated.
+	_, err = app.findSessionByToken(sessionToken)
+	if err == nil {
+		t.Fatal("findSessionByToken() should fail after principal disable")
 	}
-	if session.ID != resp.Session.ID {
-		t.Errorf("session ID mismatch: got %q, want %q", session.ID, resp.Session.ID)
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("expected ErrSessionNotFound, got: %v", err)
 	}
 }
 
