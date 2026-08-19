@@ -852,6 +852,45 @@ User mode does not use AppArmor confinement by default. The release tarball
 includes an optional user-mode AppArmor profile template that can be
 installed manually.
 
+### AppArmor-confined curl
+
+On some distributions (openSUSE, Ubuntu with `apparmor-profiles`),
+`/usr/bin/curl` is confined by its own AppArmor profile. This prevents
+curl from connecting to docker-helper sockets, even though
+docker-helper itself is working correctly.
+
+**Symptom:** curl fails with `Permission denied` when connecting to the
+socket, while the `docker-helper` CLI works normally. The denial applies
+to the `curl` AppArmor profile, not to the socket permissions.
+
+**Fix:** add the bundled AppArmor compatibility snippet to the curl
+profile's local include directory, then reload the curl profile.
+
+For a native package installation, the snippet is at
+`/usr/share/docker-helper/apparmor/local/curl`. For a release tarball,
+it is at `apparmor/local/curl`.
+
+```bash
+# Append the snippet to the curl local profile
+sudo sh -c 'cat /usr/share/docker-helper/apparmor/local/curl >> /etc/apparmor.d/local/curl'
+
+# Reload the curl profile
+sudo apparmor_parser -r /etc/apparmor.d/curl
+```
+
+The snippet covers both user-mode and system-mode sockets:
+
+```
+# docker-helper user mode
+owner /run/user/*/docker-helper/docker-helper.sock rw,
+
+# docker-helper system mode
+/run/docker-helper/docker-helper.sock rw,
+```
+
+Allowing socket access does not bypass docker-helper authorization.
+API requests still require a valid session token or admin credential.
+
 ## Workspace root policy
 
 A new workspace root (config `allowed_root`, principal allowed roots, or

@@ -1,0 +1,21 @@
+# docker-helper AppArmor rules for curl.
+#
+# On some distributions (openSUSE, Ubuntu with apparmor-profiles),
+# /usr/bin/curl is confined by its own AppArmor profile. This prevents
+# curl from connecting to docker-helper sockets unless the curl profile
+# explicitly allows them.
+#
+# To enable curl as a docker-helper HTTP API client, append the rules
+# below to /etc/apparmor.d/local/curl, then reload the curl profile:
+#
+#   sudo sh -c 'cat /path/to/curl >> /etc/apparmor.d/local/curl'
+#   sudo apparmor_parser -r /etc/apparmor.d/curl
+#
+# Allowing socket access does NOT bypass docker-helper authorization.
+# API requests still require a valid session token or admin credential.
+
+# docker-helper user mode socket
+owner /run/user/*/docker-helper/docker-helper.sock rw,
+
+# docker-helper system mode socket
+/run/docker-helper/docker-helper.sock rw,

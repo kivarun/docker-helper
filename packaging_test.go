@@ -320,6 +320,11 @@ func TestInstallScriptNoSudo(t *testing.T) {
 		if strings.HasPrefix(trimmed, "#") {
 			continue
 		}
+		// Lines that are purely informational output (info/warn/error calls)
+		// may reference sudo as user instructions without executing it.
+		if strings.HasPrefix(trimmed, "info ") || strings.HasPrefix(trimmed, "warn ") || strings.HasPrefix(trimmed, "error ") {
+			continue
+		}
 		if strings.Contains(trimmed, "sudo") {
 			t.Error("install.sh must not execute sudo: " + trimmed)
 		}
@@ -575,6 +580,7 @@ func TestBuildBundleScriptContent(t *testing.T) {
 		"docker-helper", "install.sh", "uninstall.sh", "install-system.sh", "uninstall-system.sh",
 		"systemd/user", "systemd/user/docker-helper.service", "systemd/system/docker-helper.service",
 		"apparmor", "apparmor/docker-helper", "apparmor/docker-helper-system", "apparmor/docker-helper.d/managed-roots",
+		"apparmor/local/curl",
 		"SKILL.md", "README.release.md", "LICENSE",
 	} {
 		if !strings.Contains(content, s) {
@@ -2445,6 +2451,7 @@ func TestNfpmConfigFile(t *testing.T) {
 		"/usr/lib/systemd/system/docker-helper.service",
 		"/etc/apparmor.d/docker-helper-system",
 		"/etc/apparmor.d/docker-helper.d/managed-roots",
+		"/usr/share/docker-helper/apparmor/local/curl",
 	} {
 		if !strings.Contains(content, path) {
 			t.Errorf("nfpm.yaml missing required destination: %s", path)
@@ -2838,6 +2845,7 @@ func verifyPackageContents(t *testing.T, format, contents string) {
 		"/usr/lib/systemd/system/docker-helper.service",
 		"/etc/apparmor.d/docker-helper-system",
 		"/etc/apparmor.d/docker-helper.d/managed-roots",
+		"/usr/share/docker-helper/apparmor/local/curl",
 	} {
 		if !strings.Contains(contents, path) {
 			t.Errorf("%s missing required path: %s", format, path)
@@ -2880,7 +2888,8 @@ func verifyPackageModes(t *testing.T, format, contents string) {
 			}
 		case "usr/lib/systemd/system/docker-helper.service",
 			"etc/apparmor.d/docker-helper-system",
-			"etc/apparmor.d/docker-helper.d/managed-roots":
+			"etc/apparmor.d/docker-helper.d/managed-roots",
+			"usr/share/docker-helper/apparmor/local/curl":
 			if mode != "-rw-r--r--" {
 				t.Errorf("%s: %s mode = %s, want -rw-r--r-- (0644)", format, path, mode)
 			}
@@ -2906,7 +2915,8 @@ func verifyRPMModesPerms(t *testing.T, modeOutput string) {
 			}
 		case "usr/lib/systemd/system/docker-helper.service",
 			"etc/apparmor.d/docker-helper-system",
-			"etc/apparmor.d/docker-helper.d/managed-roots":
+			"etc/apparmor.d/docker-helper.d/managed-roots",
+			"usr/share/docker-helper/apparmor/local/curl":
 			if mode != "-rw-r--r--" {
 				t.Errorf("RPM: %s mode = %s, want -rw-r--r--", path, mode)
 			}
@@ -4229,5 +4239,125 @@ func TestReleaseReadmeNoR3Features(t *testing.T) {
 		if strings.Contains(content, feature) {
 			t.Errorf("README must not reference R3 feature: %s", feature)
 		}
+	}
+}
+
+// TestAppArmorCurlSnippet verifies the curl AppArmor compatibility snippet
+// exists and contains the required socket rules for both deployment modes.
+func TestAppArmorCurlSnippet(t *testing.T) {
+	path := "packaging/apparmor/local/curl"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("AppArmor curl snippet %s not found: %v", path, err)
+	}
+	content := string(data)
+
+	// Must contain user-mode socket rule.
+	if !strings.Contains(content, "/run/user/*/docker-helper/docker-helper.sock rw") {
+		t.Error("snippet must contain user-mode socket rule")
+	}
+	// Must contain system-mode socket rule.
+	if !strings.Contains(content, "/run/docker-helper/docker-helper.sock rw") {
+		t.Error("snippet must contain system-mode socket rule")
+	}
+	// Must not contain executable or capability grants.
+	for _, s := range []string{"rix", "ix", "capability"} {
+		if strings.Contains(content, s) {
+			t.Errorf("snippet must not contain %q (only socket access rules)", s)
+		}
+	}
+}
+
+// TestBuildBundleIncludesCurlSnippet verifies build-bundle.sh copies the
+// curl AppArmor snippet into the tarball and verifies its presence.
+func TestBuildBundleIncludesCurlSnippet(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must copy the snippet into the bundle.
+	if !strings.Contains(content, "apparmor/local/curl") {
+		t.Error("build-bundle.sh must copy apparmor/local/curl into the bundle")
+	}
+	// EXPECTED_PATHS must include the snippet.
+	if idx := strings.Index(content, "EXPECTED_PATHS="); idx < 0 {
+		t.Fatal("EXPECTED_PATHS not found")
+	} else if endIdx := strings.Index(content[idx:], ")"); endIdx >= 0 {
+		if !strings.Contains(content[idx:idx+endIdx], "apparmor/local/curl") {
+			t.Error("EXPECTED_PATHS must include apparmor/local/curl")
+		}
+	}
+}
+
+// TestNfpmConfigIncludesCurlSnippet verifies nfpm.yaml includes the curl
+// AppArmor snippet in the package contents.
+func TestNfpmConfigIncludesCurlSnippet(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "packaging/apparmor/local/curl") {
+		t.Error("nfpm.yaml must include packaging/apparmor/local/curl source")
+	}
+	if !strings.Contains(content, "/usr/share/docker-helper/apparmor/local/curl") {
+		t.Error("nfpm.yaml must install snippet to /usr/share/docker-helper/apparmor/local/curl")
+	}
+}
+
+// TestInstallScriptAppArmorCurlWarning verifies install.sh contains the
+// warn_apparmor_confined_curl function that checks for /etc/apparmor.d/curl
+// and prints a hint without modifying system AppArmor policy.
+func TestInstallScriptAppArmorCurlWarning(t *testing.T) {
+	data, err := os.ReadFile("packaging/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must contain the warning function.
+	if !strings.Contains(content, "warn_apparmor_confined_curl") {
+		t.Error("install.sh must contain warn_apparmor_confined_curl function")
+	}
+	// Must check for /etc/apparmor.d/curl.
+	if !strings.Contains(content, "/etc/apparmor.d/curl") {
+		t.Error("install.sh must check for /etc/apparmor.d/curl")
+	}
+	// Must reference the bundled snippet path.
+	if !strings.Contains(content, "apparmor/local/curl") {
+		t.Error("install.sh must reference the bundled snippet path")
+	}
+	// Must not modify system AppArmor policy outside of informational messages.
+	// Check non-info/warn/error lines for automatic modifications.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "info ") || strings.HasPrefix(trimmed, "warn ") ||
+			strings.HasPrefix(trimmed, "error ") {
+			continue
+		}
+		if strings.Contains(trimmed, ">> /etc/apparmor.d/local/curl") {
+			t.Error("install.sh must not modify /etc/apparmor.d/local/curl automatically: " + trimmed)
+		}
+		if strings.Contains(trimmed, "apparmor_parser") {
+			t.Error("install.sh must not call apparmor_parser: " + trimmed)
+		}
+	}
+}
+
+// TestReleaseReadmeIncludesCurlSnippet verifies the release README lists
+// the curl AppArmor snippet in the contents.
+func TestReleaseReadmeIncludesCurlSnippet(t *testing.T) {
+	data, err := os.ReadFile("packaging/README.release.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "apparmor/local/curl") {
+		t.Error("release README must list apparmor/local/curl in contents")
 	}
 }

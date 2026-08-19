@@ -65,3 +65,8 @@ contents:
     dst: /usr/share/doc/docker-helper/LICENSE
     file_info:
       mode: 0644
+
+  - src: packaging/apparmor/local/curl
+    dst: /usr/share/docker-helper/apparmor/local/curl
+    file_info:
+      mode: 0644

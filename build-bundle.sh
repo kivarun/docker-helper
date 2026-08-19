@@ -28,6 +28,8 @@
 #       docker-helper-system
 #       docker-helper.d/
 #         managed-roots
+#       local/
+#         curl
 #     skills/
 #       docker-helper/
 #         SKILL.md
@@ -95,12 +97,15 @@ cp "$SCRIPT_DIR/packaging/systemd/system/docker-helper.service" \
 
 # AppArmor profiles
 mkdir -p "$BUNDLE_DIR/apparmor/docker-helper.d"
+mkdir -p "$BUNDLE_DIR/apparmor/local"
 cp "$SCRIPT_DIR/packaging/apparmor/docker-helper" \
    "$BUNDLE_DIR/apparmor/docker-helper"
 cp "$SCRIPT_DIR/packaging/apparmor/docker-helper-system" \
    "$BUNDLE_DIR/apparmor/docker-helper-system"
 cp "$SCRIPT_DIR/packaging/apparmor/docker-helper.d/managed-roots" \
    "$BUNDLE_DIR/apparmor/docker-helper.d/managed-roots"
+cp "$SCRIPT_DIR/packaging/apparmor/local/curl" \
+   "$BUNDLE_DIR/apparmor/local/curl"
 
 # Agent skill
 mkdir -p "$BUNDLE_DIR/skills/docker-helper"
@@ -175,6 +180,7 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-system"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper.d/managed-roots"
+  "docker-helper-${VERSION}-linux-amd64/apparmor/local/curl"
   "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper.1.gz"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper-config.5.gz"

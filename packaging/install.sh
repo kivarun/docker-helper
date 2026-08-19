@@ -269,6 +269,26 @@ enable_service() {
 	info "View logs with:     journalctl --user -u $UNIT_NAME"
 }
 
+warn_apparmor_confined_curl() {
+	if [[ ! -f /etc/apparmor.d/curl ]]; then
+		return
+	fi
+
+	local snippet_path="$script_dir/apparmor/local/curl"
+	info ""
+	info "Note: curl is confined by AppArmor on this system."
+	info "curl cannot connect to the docker-helper socket without an"
+	info "additional AppArmor rule. The docker-helper CLI is unaffected."
+	info ""
+	info "To enable curl as an HTTP API client:"
+	info "  sudo sh -c 'cat $snippet_path >> /etc/apparmor.d/local/curl'"
+	info "  sudo apparmor_parser -r /etc/apparmor.d/curl"
+	info ""
+	info "This does not bypass docker-helper authorization."
+	info "API requests still require a valid session token."
+	info ""
+}
+
 # --- Main ---
 
 main() {
@@ -314,6 +334,7 @@ main() {
 
 	info ""
 	info "Installation complete."
+	warn_apparmor_confined_curl
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

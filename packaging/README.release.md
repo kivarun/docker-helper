@@ -15,6 +15,7 @@ accompanying installation artifacts.
 - `apparmor/docker-helper` — user-mode AppArmor profile template (manual install)
 - `apparmor/docker-helper-system` — system-mode AppArmor profile
 - `apparmor/docker-helper.d/managed-roots` — managed workspace roots fragment
+- `apparmor/local/curl` — AppArmor local-profile snippet for curl
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
 - `man/docker-helper.1.gz` — command reference man page (compressed)
 - `man/docker-helper-config.5.gz` — configuration file format man page (compressed)
@@ -162,6 +163,26 @@ AppArmor profile. It is **not** installed by `install.sh`. To install it manuall
 
 This is a system-level operation that requires sudo and should be performed
 by an administrator.
+
+### AppArmor-confined curl
+
+On some distributions, `/usr/bin/curl` is confined by its own AppArmor
+profile, preventing curl from connecting to docker-helper sockets. The
+`docker-helper` CLI works normally; only curl is affected.
+
+The bundled snippet `apparmor/local/curl` contains the rules needed.
+To enable curl as a docker-helper HTTP API client:
+
+```bash
+sudo sh -c 'cat apparmor/local/curl >> /etc/apparmor.d/local/curl'
+sudo apparmor_parser -r /etc/apparmor.d/curl
+```
+
+For a native package installation, the snippet is at
+`/usr/share/docker-helper/apparmor/local/curl`.
+
+Allowing socket access does not bypass docker-helper authorization.
+API requests still require a valid session token or admin credential.
 
 ## Agent-side artifacts
 
