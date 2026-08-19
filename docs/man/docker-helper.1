@@ -110,6 +110,13 @@ List credentials for a principal.
 .TP
 .B docker-helper credential revoke [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] CREDENTIAL_ID
 Revoke a credential.
+.TP
+.B docker-helper credential install [\-\-force]
+Install a credential token for use with docker-helper \-\-system.
+Reads the token from stdin (hidden input on terminal) and stores it
+at ${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token
+with mode 0600. Must not be run as root.
+With \-\-force, replaces an existing credential atomically.
 .SS Admin Commands
 .TP
 .B docker-helper admin token rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]

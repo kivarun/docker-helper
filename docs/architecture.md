@@ -396,7 +396,7 @@ for full syntax:
 - `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
   `set`, `delete`, `allowed-root`.
 - `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
-  `revoke`.
+  `revoke`, `install`.
 - `admin` — Administrative operations. Subcommand: `token rotate` (rotate
   the admin token; requires the current token, new token shown once, old
   token invalid immediately, no restart).
