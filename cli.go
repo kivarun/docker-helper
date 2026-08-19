@@ -379,7 +379,8 @@ If --allowed-root is provided, it is used directly.
 
 Without --allowed-root and when running interactively (stdin is a
 terminal), you will be prompted for the allowed root directory.
-The current working directory is used as the default.
+The user's home directory is used as the default.
+For root, /home is used as the default.
 
 In non-interactive mode (stdin is not a terminal), --allowed-root
 is required.
@@ -425,6 +426,7 @@ User mode (non-root):
 // If flagValue is provided, it is validated and returned.
 // If not provided and isTerminal is true, the user is prompted interactively.
 // If not provided and isTerminal is false, an error is returned.
+// The prompt default is /home for root, or the user's home directory otherwise.
 func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writer, isTerminal bool) (string, error) {
 	if flagValue != "" {
 		return resolveAllowedRoot(flagValue)
@@ -434,17 +436,27 @@ func resolveAllowedRootForInit(flagValue string, stdin io.Reader, stderr io.Writ
 		return "", errors.New("--allowed-root is required in non-interactive mode")
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine current working directory: %w", err)
-	}
+	defaultPath := getInitDefaultRoot()
 
-	input, err := promptAllowedRoot(cwd, stdin, stderr)
+	input, err := promptAllowedRoot(defaultPath, stdin, stderr)
 	if err != nil {
 		return "", err
 	}
 
 	return resolveAllowedRoot(input)
+}
+
+// getInitDefaultRoot returns the default path for the init prompt.
+// Root gets /home; non-root gets the user's home directory.
+func getInitDefaultRoot() string {
+	if EffectiveUID() == 0 {
+		return "/home"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }
 
 var versionCommand = &Command{

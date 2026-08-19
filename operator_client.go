@@ -47,24 +47,52 @@ func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	if err := validateOperatorEndpoint(opts.Endpoint); err != nil {
 		return nil, err
 	}
-	if opts.TokenFile == "" {
-		return nil, fmt.Errorf("--endpoint requires --token-file")
-	}
 
-	token, err := readTokenFile(opts.TokenFile)
-	if err != nil {
-		return nil, err
-	}
-	tokenSource := func() (string, error) { return token, nil }
+	var socketPath string
+	var isUnix bool
 
 	if strings.HasPrefix(opts.Endpoint, "unix://") {
-		path := strings.TrimPrefix(opts.Endpoint, "unix://")
-		return newUnixAPIClient(path, tokenSource, nil), nil
+		socketPath = strings.TrimPrefix(opts.Endpoint, "unix://")
+		isUnix = true
+	} else if strings.HasPrefix(opts.Endpoint, "/") {
+		// Plain absolute path — treat as unix socket.
+		socketPath = opts.Endpoint
+		isUnix = true
+	} else {
+		// http://127.0.0.1:port
+		socketPath = strings.TrimPrefix(opts.Endpoint, "http://")
+		isUnix = false
 	}
 
-	// http://127.0.0.1:port
-	addr := strings.TrimPrefix(opts.Endpoint, "http://")
-	return newHTTPAPIClient(addr, tokenSource, nil), nil
+	var tokenSource func() (string, error)
+
+	if isUnix {
+		// Auto-resolve token for unix sockets.
+		tokenPath := opts.TokenFile
+		if tokenPath == "" {
+			tokenPath = resolveSystemModeTokenPath()
+		}
+		token, err := readTokenFile(tokenPath)
+		if err != nil {
+			return nil, err
+		}
+		tokenSource = func() (string, error) { return token, nil }
+	} else {
+		// HTTP always requires explicit token.
+		if opts.TokenFile == "" {
+			return nil, fmt.Errorf("--endpoint requires --token-file for http endpoints")
+		}
+		token, err := readTokenFile(opts.TokenFile)
+		if err != nil {
+			return nil, err
+		}
+		tokenSource = func() (string, error) { return token, nil }
+	}
+
+	if isUnix {
+		return newUnixAPIClient(socketPath, tokenSource, nil), nil
+	}
+	return newHTTPAPIClient(socketPath, tokenSource, nil), nil
 }
 
 func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
@@ -88,13 +116,24 @@ func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
+	userSocketPath := filepath.Join(runtimeDir, "docker-helper.sock")
+	systemSocketPath := filepath.Join(systemRuntimeDir, "docker-helper.sock")
+
+	userSocketExists := func() bool {
+		_, err := os.Stat(userSocketPath)
+		return err == nil
+	}
+
+	// Determine which socket to use.
+	// If user socket exists, use it. Otherwise fall back to system socket.
+	socketPath := userSocketPath
+	if !userSocketExists() && systemSocketExists() {
+		socketPath = systemSocketPath
+	}
+
 	tokenPath := opts.TokenFile
 	if tokenPath == "" {
-		// If the system daemon socket exists, the system daemon is the
-		// authoritative target — resolve the token for system mode.
-		// Otherwise this is a user-mode daemon and only admin.token applies.
-		if systemSocketExists() {
+		if socketPath == systemSocketPath {
 			tokenPath = resolveSystemModeTokenPath()
 		} else {
 			tokenPath = filepath.Join(getConfigDir(), "admin.token")
@@ -137,7 +176,7 @@ func validateOperatorEndpoint(endpoint string) error {
 	if strings.HasPrefix(endpoint, "unix://") {
 		path := strings.TrimPrefix(endpoint, "unix://")
 		if !strings.HasPrefix(path, "/") {
-			return fmt.Errorf("unix endpoint: path must be absolute: %s", strings.TrimPrefix(path, "/"))
+			return fmt.Errorf("unix endpoint: path must be absolute: %s", path)
 		}
 		if len(path) == 1 {
 			return fmt.Errorf("unix endpoint: path is empty")
@@ -145,8 +184,16 @@ func validateOperatorEndpoint(endpoint string) error {
 		return nil
 	}
 
+	// Plain absolute path — treat as unix socket.
+	if strings.HasPrefix(endpoint, "/") {
+		if len(endpoint) == 1 {
+			return fmt.Errorf("unix endpoint: path is empty")
+		}
+		return nil
+	}
+
 	if !strings.HasPrefix(endpoint, "http://") {
-		return fmt.Errorf("unsupported endpoint scheme (expected unix:// or http://)")
+		return fmt.Errorf("unsupported endpoint scheme (expected unix:///path, /path, or http://127.0.0.1:port)")
 	}
 
 	addr := strings.TrimPrefix(endpoint, "http://")
@@ -210,7 +257,7 @@ func newHTTPAPIClient(address string, tokenSource func() (string, error), timeou
 // given FlagSet and returns pointers to the flag values.
 func registerOperatorFlags(fs *flag.FlagSet) (system *bool, endpoint *string, tokenFile *string) {
 	system = fs.Bool("system", false, "Connect to system daemon")
-	endpoint = fs.String("endpoint", "", "Explicit endpoint (unix:///path or http://127.0.0.1:port)")
-	tokenFile = fs.String("token-file", "", "Token file path")
+	endpoint = fs.String("endpoint", "", "Explicit endpoint (/path/to/socket, unix:///path, or http://127.0.0.1:port)")
+	tokenFile = fs.String("token-file", "", "Token file path (auto-resolved for unix sockets)")
 	return
 }

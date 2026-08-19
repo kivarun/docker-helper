@@ -8,6 +8,10 @@ import (
 )
 
 func TestIsForbiddenWorkspaceRoot(t *testing.T) {
+	// The admin bypass for wide namespaces depends on EffectiveUID.
+	// Capture the real uid so we can adjust expectations.
+	isRoot := EffectiveUID() == 0
+
 	tests := []struct {
 		name    string
 		path    string
@@ -45,14 +49,15 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 		{"under proc", "/proc/1", true, "under forbidden system directory"},
 		{"under sys", "/sys/kernel", true, "under forbidden system directory"},
 
-		// Forbidden wide namespaces (exact match only)
-		{"wide namespace home", "/home", true, "too broad"},
-		{"wide namespace opt", "/opt", true, "too broad"},
+		// Forbidden wide namespaces (exact match only) — /home and /opt
+		// are exempted for root via admin bypass.
+		{"wide namespace home", "/home", !isRoot, "too broad"},
+		{"wide namespace opt", "/opt", !isRoot, "too broad"},
 		{"wide namespace srv", "/srv", true, "too broad"},
 		{"wide namespace mnt", "/mnt", true, "too broad"},
 		{"wide namespace media", "/media", true, "too broad"},
 
-		// Subdirectories of wide namespaces are allowed
+		// Subdirectories of wide namespaces are always allowed
 		{"sub of home", "/home/user", false, ""},
 		{"sub of home deep", "/home/user/workspaces", false, ""},
 		{"sub of opt", "/opt/project", false, ""},
@@ -88,6 +93,8 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 }
 
 func TestValidateWorkspaceRootPolicy(t *testing.T) {
+	isRoot := EffectiveUID() == 0
+
 	tests := []struct {
 		name    string
 		path    string
@@ -101,7 +108,7 @@ func TestValidateWorkspaceRootPolicy(t *testing.T) {
 		{"forbidden root", "/", true},
 		{"forbidden system", "/etc", true},
 		{"forbidden under system", "/etc/passwd", true},
-		{"forbidden wide ns", "/home", true},
+		{"forbidden wide ns", "/home", !isRoot},
 		{"forbidden tmp", "/tmp", true},
 		{"forbidden under tmp", "/tmp/work", true},
 	}
@@ -198,4 +205,63 @@ func TestCanonicalizeWorkspaceRootTildeExpansion(t *testing.T) {
 	if canonical != expected {
 		t.Errorf("canonicalizeWorkspaceRootForAdd(%q) = %q, want %q", tildePath, canonical, expected)
 	}
+}
+
+func TestAdminWideNamespaceBypass(t *testing.T) {
+	original := EffectiveUID
+	defer func() { EffectiveUID = original }()
+
+	t.Run("root allowed home", func(t *testing.T) {
+		EffectiveUID = func() int { return 0 }
+		if err := isForbiddenWorkspaceRoot("/home"); err != nil {
+			t.Errorf("root /home should be allowed, got: %v", err)
+		}
+	})
+
+	t.Run("root allowed opt", func(t *testing.T) {
+		EffectiveUID = func() int { return 0 }
+		if err := isForbiddenWorkspaceRoot("/opt"); err != nil {
+			t.Errorf("root /opt should be allowed, got: %v", err)
+		}
+	})
+
+	t.Run("root still blocked srv", func(t *testing.T) {
+		EffectiveUID = func() int { return 0 }
+		err := isForbiddenWorkspaceRoot("/srv")
+		if err == nil {
+			t.Error("root /srv should still be blocked")
+		}
+	})
+
+	t.Run("root still blocked mnt", func(t *testing.T) {
+		EffectiveUID = func() int { return 0 }
+		err := isForbiddenWorkspaceRoot("/mnt")
+		if err == nil {
+			t.Error("root /mnt should still be blocked")
+		}
+	})
+
+	t.Run("root still blocked media", func(t *testing.T) {
+		EffectiveUID = func() int { return 0 }
+		err := isForbiddenWorkspaceRoot("/media")
+		if err == nil {
+			t.Error("root /media should still be blocked")
+		}
+	})
+
+	t.Run("non-root blocked home", func(t *testing.T) {
+		EffectiveUID = func() int { return 1000 }
+		err := isForbiddenWorkspaceRoot("/home")
+		if err == nil {
+			t.Error("non-root /home should be blocked")
+		}
+	})
+
+	t.Run("non-root blocked opt", func(t *testing.T) {
+		EffectiveUID = func() int { return 1000 }
+		err := isForbiddenWorkspaceRoot("/opt")
+		if err == nil {
+			t.Error("non-root /opt should be blocked")
+		}
+	})
 }

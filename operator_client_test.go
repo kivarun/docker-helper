@@ -90,6 +90,39 @@ func TestResolveDefaultEndpointRoot(t *testing.T) {
 	_ = client // client is configured for system socket
 }
 
+func TestResolveDefaultEndpointFallsBackToSystem(t *testing.T) {
+	orig := EffectiveUID
+	defer func() { EffectiveUID = orig }()
+	EffectiveUID = func() int { return 1000 }
+
+	dir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	// Don't create user socket.
+
+	// Mock systemSocketExists to return true.
+	origSystemSocket := systemSocketExists
+	systemSocketExists = func() bool { return true }
+	defer func() { systemSocketExists = origSystemSocket }()
+
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
+	tokenPath := filepath.Join(dir, "xdg_config", "docker-helper", "credential.token")
+	tokenDir := filepath.Dir(tokenPath)
+	os.MkdirAll(tokenDir, 0755)
+	writeTestTokenFile(t, tokenPath, "test-token")
+
+	// Should fall back to system socket since user socket doesn't exist.
+	client, err := resolveOperatorClient(operatorClientOptions{})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient: %v", err)
+	}
+
+	// The baseURL should be http://localhost (Unix transport).
+	if client.baseURL != "http://localhost" {
+		t.Errorf("baseURL = %q, want http://localhost", client.baseURL)
+	}
+	_ = client
+}
+
 func TestResolveSystemEndpointNonRoot(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
@@ -144,7 +177,7 @@ func TestResolveSystemNoFallsBackToUser(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 
-	// Create a working user daemon socket — should NOT be used.
+	// Create a working user daemon socket — should NOT be used with --system.
 	userSocket := filepath.Join(dir, "docker-helper.sock")
 	userListener, err := net.Listen("unix", userSocket)
 	if err != nil {
@@ -153,13 +186,6 @@ func TestResolveSystemNoFallsBackToUser(t *testing.T) {
 	defer userListener.Close()
 
 	// --system should try system socket, not user socket.
-	_, err = resolveOperatorClient(operatorClientOptions{
-		System:    true,
-		Endpoint:  "unix:///" + filepath.Join(systemRuntimeDir, "docker-helper.sock"),
-		TokenFile: "",
-	})
-	// This should fail because --endpoint requires --token-file.
-	// Let's test differently: use --system with a non-existent token.
 	_, err = resolveOperatorClient(operatorClientOptions{
 		System: true,
 	})
@@ -178,6 +204,9 @@ func TestValidateEndpointValid(t *testing.T) {
 	validEndpoints := []string{
 		"unix:///absolute/path/to/socket.sock",
 		"unix:///path/with spaces/socket.sock",
+		"/absolute/path/to/socket.sock",
+		"/path/with spaces/socket.sock",
+		"/var/run/docker-helper/docker-helper.sock",
 		"http://127.0.0.1:8080",
 		"http://127.0.0.1:1",
 		"http://127.0.0.1:65535",
@@ -196,6 +225,7 @@ func TestValidateEndpointReject(t *testing.T) {
 	}{
 		{"unix://relative/path", "relative Unix path (no leading /)"},
 		{"unix:///", "empty Unix path"},
+		{"/", "empty plain path"},
 		{"http://0.0.0.0:8080", "0.0.0.0"},
 		{"http://192.168.1.1:8080", "external IP"},
 		{"http://localhost:8080", "hostname"},
@@ -209,6 +239,8 @@ func TestValidateEndpointReject(t *testing.T) {
 		{"http://127.0.0.1:99999", "port > 65535"},
 		{"http://127.0.0.1", "no port"},
 		{"http://127.0.0.1:abc", "non-numeric port"},
+		{"relative/path", "relative path without scheme"},
+		{"", "empty string"},
 	}
 	for _, tc := range rejectEndpoints {
 		if err := validateOperatorEndpoint(tc.endpoint); err == nil {
@@ -217,7 +249,24 @@ func TestValidateEndpointReject(t *testing.T) {
 	}
 }
 
+func TestValidateEndpointUnixRelativeErrorMessage(t *testing.T) {
+	err := validateOperatorEndpoint("unix://relative/path")
+	if err == nil {
+		t.Fatal("expected error for relative unix path")
+	}
+	msg := err.Error()
+	// The error message should contain the actual relative path, not a mangled one.
+	if !strings.Contains(msg, "relative/path") {
+		t.Errorf("error message should contain 'relative/path', got: %s", msg)
+	}
+	// Regression: previously strings.TrimPrefix(path, "/") would produce "arrelative/path".
+	if strings.Contains(msg, "arrelative") {
+		t.Errorf("error message should not mangle the path, got: %s", msg)
+	}
+}
+
 func TestResolveEndpointRequiresTokenFile(t *testing.T) {
+	// HTTP endpoints still require --token-file.
 	_, err := resolveOperatorClient(operatorClientOptions{
 		Endpoint: "http://127.0.0.1:8080",
 	})
@@ -226,6 +275,97 @@ func TestResolveEndpointRequiresTokenFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--endpoint requires --token-file") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveEndpointPlainPathUnixSocket(t *testing.T) {
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	defer os.Remove(socketPath)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+
+	// Plain absolute path should work as unix socket.
+	tokenPath := filepath.Join(dir, "token")
+	writeTestTokenFile(t, tokenPath, "test-token")
+
+	client, err := resolveOperatorClient(operatorClientOptions{
+		Endpoint:  socketPath,
+		TokenFile: tokenPath,
+	})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient with plain path = %v", err)
+	}
+
+	resp, err := client.doAuthenticatedRequest("GET", "/health", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestResolveEndpointPlainPathNoTokenFile(t *testing.T) {
+	orig := EffectiveUID
+	defer func() { EffectiveUID = orig }()
+	EffectiveUID = func() int { return 1000 }
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	defer os.Remove(socketPath)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+
+	// Auto-resolved token for unix endpoint (non-root uses credential.token).
+	// resolveSystemModeTokenPath for non-root returns credentialPath() which is
+	// $XDG_CONFIG_HOME/docker-helper/credential.token.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
+	tokenPath := filepath.Join(dir, "xdg_config", "docker-helper", "credential.token")
+	tokenDir := filepath.Dir(tokenPath)
+	os.MkdirAll(tokenDir, 0755)
+	writeTestTokenFile(t, tokenPath, "test-token")
+
+	// No TokenFile — should auto-resolve via resolveSystemModeTokenPath.
+	client, err := resolveOperatorClient(operatorClientOptions{
+		Endpoint: socketPath,
+	})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient with plain path, no token = %v", err)
+	}
+
+	resp, err := client.doAuthenticatedRequest("GET", "/health", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -308,6 +448,54 @@ func TestUnixEndpointMakesRequest(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("resolveOperatorClient: %v", err)
+	}
+
+	resp, err := client.doAuthenticatedRequest("GET", "/health", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestUnixEndpointAutoToken(t *testing.T) {
+	orig := EffectiveUID
+	defer func() { EffectiveUID = orig }()
+	EffectiveUID = func() int { return 1000 }
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "test.sock")
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	defer os.Remove(socketPath)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+
+	// Auto-resolved token for unix:// scheme (non-root uses credential.token).
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
+	tokenPath := filepath.Join(dir, "xdg_config", "docker-helper", "credential.token")
+	tokenDir := filepath.Dir(tokenPath)
+	os.MkdirAll(tokenDir, 0755)
+	writeTestTokenFile(t, tokenPath, "test-token")
+
+	// No TokenFile — should auto-resolve via resolveSystemModeTokenPath.
+	client, err := resolveOperatorClient(operatorClientOptions{
+		Endpoint: "unix:///" + socketPath,
+	})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient with unix://, no token = %v", err)
 	}
 
 	resp, err := client.doAuthenticatedRequest("GET", "/health", nil)

@@ -39,11 +39,29 @@ var forbiddenWideNamespaces = []string{
 	"/media",
 }
 
+// adminWideNamespaceOverrides are wide namespaces that root (uid 0) may use
+// as workspace roots. Non-root users are still blocked.
+var adminWideNamespaceOverrides = []string{
+	"/home",
+	"/opt",
+}
+
+func isAdminWideNamespaceOverride(ns string) bool {
+	for _, allowed := range adminWideNamespaceOverrides {
+		if ns == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 // isForbiddenWorkspaceRoot returns true if the canonical path is a forbidden
 // system tree or a forbidden wide namespace. It does NOT reject subdirectories
 // of wide namespaces (e.g., /home/user is allowed, /home is not).
 // It DOES reject system trees and everything under them (e.g., /var/lib/foo is
 // rejected because /var is a system tree).
+// When running as root (uid 0), certain wide namespaces (/home, /opt) are
+// permitted as workspace roots.
 func isForbiddenWorkspaceRoot(canonical string) error {
 	if canonical == "/" {
 		return fmt.Errorf("workspace root cannot be the filesystem root /")
@@ -62,9 +80,12 @@ func isForbiddenWorkspaceRoot(canonical string) error {
 	}
 
 	// Check against forbidden wide namespaces: reject only the namespace itself,
-	// not its subdirectories.
+	// not its subdirectories. Root (uid 0) is exempt for admin-approved namespaces.
 	for _, ns := range forbiddenWideNamespaces {
 		if canonical == ns {
+			if EffectiveUID() == 0 && isAdminWideNamespaceOverride(ns) {
+				continue
+			}
 			return fmt.Errorf("workspace root %s is too broad; use a subdirectory such as %s/<user-or-project>", ns, ns)
 		}
 	}

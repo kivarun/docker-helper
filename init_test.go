@@ -117,7 +117,7 @@ func TestInitHelpDescribesInteractiveBehavior(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		"prompted",
-		"current working directory",
+		"home directory",
 		"default",
 		"non-interactive",
 	} {
@@ -303,21 +303,17 @@ func TestResolveAllowedRootForInitNoFlagNonTerminal(t *testing.T) {
 }
 
 func TestResolveAllowedRootForInitNoFlagTerminal(t *testing.T) {
-	dir := testAllowedRootDir(t)
-	cwd, _ := os.Getwd()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(cwd)
-
 	input := strings.NewReader("\n")
 	var buf bytes.Buffer
 	resolved, err := resolveAllowedRootForInit("", input, &buf, true)
 	if err != nil {
 		t.Fatalf("resolveAllowedRootForInit = error: %v", err)
 	}
-	if resolved != dir {
-		t.Errorf("resolveAllowedRootForInit = %q, want %q (CWD default)", resolved, dir)
+
+	// The default should be the user's home directory (non-root) or /home (root).
+	expected := getInitDefaultRoot()
+	if resolved != expected {
+		t.Errorf("resolveAllowedRootForInit = %q, want %q (init default)", resolved, expected)
 	}
 }
 
@@ -336,4 +332,26 @@ func TestResolveAllowedRootForInitTerminalCustomInput(t *testing.T) {
 	if resolved != allowedRoot {
 		t.Errorf("resolveAllowedRootForInit = %q, want %q", resolved, allowedRoot)
 	}
+}
+
+func TestGetInitDefaultRoot(t *testing.T) {
+	original := EffectiveUID
+	defer func() { EffectiveUID = original }()
+
+	t.Run("root gets /home", func(t *testing.T) {
+		EffectiveUID = func() int { return 0 }
+		got := getInitDefaultRoot()
+		if got != "/home" {
+			t.Errorf("getInitDefaultRoot() = %q, want /home (root)", got)
+		}
+	})
+
+	t.Run("non-root gets home dir", func(t *testing.T) {
+		EffectiveUID = func() int { return 1000 }
+		got := getInitDefaultRoot()
+		home, _ := os.UserHomeDir()
+		if got != home {
+			t.Errorf("getInitDefaultRoot() = %q, want %q (home dir)", got, home)
+		}
+	})
 }
