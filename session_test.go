@@ -12,49 +12,6 @@ import (
 	"time"
 )
 
-func newTestApp(t *testing.T) *App {
-	t.Helper()
-	dir := t.TempDir()
-
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := openDatabase(dbPath)
-	if err != nil {
-		t.Fatalf("openDatabase() error: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	if err := initializeDatabase(db); err != nil {
-		t.Fatalf("initializeDatabase() error: %v", err)
-	}
-
-	// Use a non-forbidden allowed_root. /tmp is forbidden by the workspace
-	// root security policy; the helper returns the canonical form.
-	allowedRoot := testAllowedRootDir(t)
-
-	runtimeDir := filepath.Join(dir, "runtime")
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
-		t.Fatalf("cannot create runtime dir: %v", err)
-	}
-	cfg := &Config{
-		AllowedRoot:           allowedRoot,
-		SessionTTL:            24 * time.Hour,
-		SocketPath:            filepath.Join(dir, "test.sock"),
-		StateDir:              dir,
-		RuntimeDir:            runtimeDir,
-		DatabasePath:          dbPath,
-		AdminTokenPath:        filepath.Join(dir, "admin.token"),
-		ShutdownTimeout:       30 * time.Second,
-		OperationRetentionTTL: 10 * time.Minute,
-		OperationMaxCompleted: 200,
-		OperationLogMaxBytes:  4 * 1024 * 1024,
-	}
-
-	return &App{
-		Config: cfg,
-		DB:     db,
-	}
-}
-
 func TestCreateSession(t *testing.T) {
 	app := newTestApp(t)
 	workspace := app.Config.AllowedRoot

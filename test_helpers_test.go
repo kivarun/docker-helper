@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,4 +203,65 @@ func writeTestTokenFile(t *testing.T, path, token string) {
 	if err := os.WriteFile(path, []byte(token), 0600); err != nil {
 		t.Fatalf("cannot write token file %s: %v", path, err)
 	}
+}
+
+// testAdminToken is the admin token used in unit tests.
+const testAdminToken = "dht_test_admin_token"
+
+// newTestApp creates a minimal *App with an in-memory SQLite database,
+// a valid allowed root, and a runtime directory. It does not set
+// AdminTokenHash; use newTestAppWithAuth for tests that require admin auth.
+func newTestApp(t *testing.T) *App {
+	t.Helper()
+	dir := t.TempDir()
+
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+
+	allowedRoot := testAllowedRootDir(t)
+
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("cannot create runtime dir: %v", err)
+	}
+	cfg := &Config{
+		AllowedRoot:           allowedRoot,
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
+	}
+
+	return &App{
+		Config: cfg,
+		DB:     db,
+	}
+}
+
+// newTestAppWithAuth creates a test app with admin token hash set.
+func newTestAppWithAuth(t *testing.T) *App {
+	t.Helper()
+	app := newTestApp(t)
+	hash := sha256.Sum256([]byte(testAdminToken))
+	app.AdminTokenHash = hash
+	return app
+}
+
+// withAuth sets the Authorization header on a request using the test admin token.
+func withAuth(r *http.Request) {
+	r.Header.Set("Authorization", "Bearer "+testAdminToken)
 }

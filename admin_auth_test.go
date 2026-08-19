@@ -2,26 +2,11 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
-
-const testAdminToken = "dht_test_admin_token"
-
-func newTestAppWithAuth(t *testing.T) *App {
-	t.Helper()
-	app := newTestApp(t)
-	hash := sha256.Sum256([]byte(testAdminToken))
-	app.AdminTokenHash = hash
-	return app
-}
-
-func withAuth(r *http.Request) {
-	r.Header.Set("Authorization", "Bearer "+testAdminToken)
-}
 
 func TestAdminAuthValidTokenCreateSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
