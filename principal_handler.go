@@ -217,8 +217,9 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, err := updatePrincipalEnabled(a.DB, username, *req.Enabled)
+	sessionIDs, err := updatePrincipalEnabled(a.DB, username, *req.Enabled)
 	duration := time.Since(started).Round(time.Millisecond).String()
+	changed := sessionIDs != nil && err == nil
 
 	if err != nil {
 		writeAuditWithRequestID(ctx, auditRecord{
@@ -240,13 +241,15 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !*req.Enabled {
-		if err := cleanupPrincipalRuntimeDirs(a.DB, a.Config.RuntimeDir, username); err != nil {
-			opLog(ctx).Warn("failed to clean up principal runtime directories",
-				slog.String("operation", "principal_disable"),
-				slog.String("principal", username),
-				slog.String("error", err.Error()),
-			)
+	if !*req.Enabled && len(sessionIDs) > 0 {
+		for _, sessionID := range sessionIDs {
+			if err := cleanupSessionRuntimeDir(a.Config.RuntimeDir, sessionID); err != nil {
+				opLog(ctx).Warn("failed to clean up session runtime directory",
+					slog.String("operation", "principal_disable"),
+					slog.String("session", sessionID),
+					slog.String("error", err.Error()),
+				)
+			}
 		}
 	}
 
@@ -765,7 +768,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := deletePrincipal(a.DB, username)
+	sessionIDs, err := deletePrincipal(a.DB, username)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -793,13 +796,15 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort cleanup of runtime directories for deleted principal's sessions.
-	if err := cleanupPrincipalRuntimeDirs(a.DB, a.Config.RuntimeDir, username); err != nil {
-		opLog(ctx).Warn("failed to clean up principal runtime directories",
-			slog.String("operation", "principal_delete"),
-			slog.String("principal", username),
-			slog.String("error", err.Error()),
-		)
+	// Best-effort cleanup of runtime directories for deleted sessions.
+	for _, sessionID := range sessionIDs {
+		if err := cleanupSessionRuntimeDir(a.Config.RuntimeDir, sessionID); err != nil {
+			opLog(ctx).Warn("failed to clean up session runtime directory",
+				slog.String("operation", "principal_delete"),
+				slog.String("session", sessionID),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	writeAuditWithRequestID(ctx, auditRecord{

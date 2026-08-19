@@ -61,7 +61,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	if err := deletePrincipal(app.DB, "deluser"); err != nil {
+	if _, err := deletePrincipal(app.DB, "deluser"); err != nil {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestPrincipalDeleteSessionTokenInvalidated(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	if err := deletePrincipal(app.DB, "deltokenuser"); err != nil {
+	if _, err := deletePrincipal(app.DB, "deltokenuser"); err != nil {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestPrincipalDeleteCredentialTokenInvalidated(t *testing.T) {
 		t.Fatalf("createCredential: %v", err)
 	}
 
-	if err := deletePrincipal(app.DB, "delcreduser"); err != nil {
+	if _, err := deletePrincipal(app.DB, "delcreduser"); err != nil {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "deladminuser"); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
-	if err := deletePrincipal(app.DB, "deladminuser"); err != nil {
+	if _, err := deletePrincipal(app.DB, "deladminuser"); err != nil {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
@@ -264,7 +264,7 @@ func TestPrincipalDeleteRuntimeDirsCleaned(t *testing.T) {
 		t.Fatalf("cleanup runtime dirs: %v", err)
 	}
 
-	if err := deletePrincipal(app.DB, "delruntimeuser"); err != nil {
+	if _, err := deletePrincipal(app.DB, "delruntimeuser"); err != nil {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
@@ -346,20 +346,20 @@ func TestPrincipalDisableIdempotent(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	changed, err := updatePrincipalEnabled(app.DB, "disidempuser", false)
+	sessionIDs, err := updatePrincipalEnabled(app.DB, "disidempuser", false)
 	if err != nil {
 		t.Fatalf("first disable: %v", err)
 	}
-	if !changed {
-		t.Error("first disable should report changed")
+	if sessionIDs == nil {
+		t.Error("first disable should report changed (non-nil sessionIDs)")
 	}
 
-	changed, err = updatePrincipalEnabled(app.DB, "disidempuser", false)
+	sessionIDs, err = updatePrincipalEnabled(app.DB, "disidempuser", false)
 	if err != nil {
 		t.Fatalf("second disable: %v", err)
 	}
-	if changed {
-		t.Error("second disable should report unchanged")
+	if sessionIDs != nil {
+		t.Error("second disable should report unchanged (nil sessionIDs)")
 	}
 
 	p, err := findPrincipalByUserName(app.DB, "disidempuser")
@@ -888,7 +888,7 @@ func TestPrincipalDeleteMultipleSessions(t *testing.T) {
 		sessionTokens = append(sessionTokens, resp.Token)
 	}
 
-	if err := deletePrincipal(app.DB, "delsessuser"); err != nil {
+	if _, err := deletePrincipal(app.DB, "delsessuser"); err != nil {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
@@ -949,7 +949,7 @@ func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
 		t.Fatalf("expire session: %v", err)
 	}
 
-	if err := deletePrincipal(app.DB, "delexpuser"); err != nil {
+	if _, err := deletePrincipal(app.DB, "delexpuser"); err != nil {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 

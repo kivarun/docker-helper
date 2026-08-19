@@ -221,24 +221,24 @@ func findPrincipalByUserName(db *sql.DB, username string) (*PrincipalWithRoots, 
 	}, nil
 }
 
-func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) (bool, error) {
+func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) ([]string, error) {
 	principalID, err := findPrincipalIDByUserName(db, username)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	p, err := findPrincipalByID(db, principalID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	if p.Enabled == enabled {
-		return false, nil
+		return nil, nil
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return false, fmt.Errorf("cannot begin transaction: %w", err)
+		return nil, fmt.Errorf("cannot begin transaction: %w", err)
 	}
 
 	newEnabled := 0
@@ -252,25 +252,49 @@ func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) (bool, er
 	)
 	if err != nil {
 		tx.Rollback()
-		return false, fmt.Errorf("cannot update principal enabled: %w", err)
+		return nil, fmt.Errorf("cannot update principal enabled: %w", err)
 	}
 
+	// Return empty slice (not nil) to indicate the change was made.
+	sessionIDs := []string{}
 	if !enabled {
+		// Collect session IDs before deletion for runtime cleanup.
+		rows, err := tx.Query(`SELECT id FROM sessions WHERE principal_id = ?`, principalID)
+		if err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("cannot query principal sessions: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				tx.Rollback()
+				return nil, fmt.Errorf("cannot scan session id: %w", err)
+			}
+			sessionIDs = append(sessionIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			tx.Rollback()
+			return nil, fmt.Errorf("iterate sessions: %w", err)
+		}
+		rows.Close()
+
 		_, err = tx.Exec(
 			`DELETE FROM sessions WHERE principal_id = ?`,
 			principalID,
 		)
 		if err != nil {
 			tx.Rollback()
-			return false, fmt.Errorf("cannot delete principal sessions: %w", err)
+			return nil, fmt.Errorf("cannot delete principal sessions: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("cannot commit enabled change: %w", err)
+		return nil, fmt.Errorf("cannot commit enabled change: %w", err)
 	}
 
-	return true, nil
+	return sessionIDs, nil
 }
 
 func addAllowedRoot(db *sql.DB, username string, rootPath string) (changed bool, canonicalPath string, err error) {
@@ -427,25 +451,47 @@ func cleanupPrincipalRuntimeDirs(db *sql.DB, runtimeDir, username string) error 
 
 // deletePrincipal removes a principal and all its sessions in a single transaction.
 // Credentials and allowed roots are removed via FK ON DELETE CASCADE.
-// Returns the principal's username on success.
-func deletePrincipal(db *sql.DB, username string) error {
+// Returns the session IDs that were deleted, for runtime directory cleanup.
+func deletePrincipal(db *sql.DB, username string) ([]string, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("cannot begin transaction: %w", err)
+		return nil, fmt.Errorf("cannot begin transaction: %w", err)
 	}
 
 	principalID, err := findPrincipalIDByUserNameInTx(tx, username)
 	if err != nil {
 		tx.Rollback()
-		return err
+		return nil, err
 	}
+
+	// Collect session IDs before deletion for runtime cleanup.
+	rows, err := tx.Query(`SELECT id FROM sessions WHERE principal_id = ?`, principalID)
+	if err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("cannot query principal sessions: %w", err)
+	}
+	var sessionIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			tx.Rollback()
+			return nil, fmt.Errorf("cannot scan session id: %w", err)
+		}
+		sessionIDs = append(sessionIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("iterate sessions: %w", err)
+	}
+	rows.Close()
 
 	// Delete all sessions for this principal.
 	// Not relying on FK cascade — sessions.principal_id has no ON DELETE CASCADE.
 	_, err = tx.Exec(`DELETE FROM sessions WHERE principal_id = ?`, principalID)
 	if err != nil {
 		tx.Rollback()
-		return fmt.Errorf("cannot delete principal sessions: %w", err)
+		return nil, fmt.Errorf("cannot delete principal sessions: %w", err)
 	}
 
 	// Delete the principal.
@@ -453,14 +499,14 @@ func deletePrincipal(db *sql.DB, username string) error {
 	_, err = tx.Exec(`DELETE FROM principals WHERE id = ?`, principalID)
 	if err != nil {
 		tx.Rollback()
-		return fmt.Errorf("cannot delete principal: %w", err)
+		return nil, fmt.Errorf("cannot delete principal: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("cannot commit deletion: %w", err)
+		return nil, fmt.Errorf("cannot commit deletion: %w", err)
 	}
 
-	return nil
+	return sessionIDs, nil
 }
 
 func findPrincipalIDByUserNameInTx(tx *sql.Tx, username string) (int, error) {
