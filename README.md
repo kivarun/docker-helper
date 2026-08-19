@@ -125,7 +125,8 @@ Uses the current user's home directory as the default allowed root.
 ```bash
 docker-helper init
 systemctl --user enable --now docker-helper
-docker-helper session create --workspace $HOME
+mkdir -p ~/myproject
+docker-helper session create --workspace ~/myproject
 ```
 
 The `init` command prints a session token. Assign it:
@@ -153,7 +154,8 @@ as root):
 
 ```bash
 docker-helper credential install
-docker-helper session create --workspace $HOME
+mkdir -p ~/myproject
+docker-helper session create --workspace ~/myproject
 ```
 
 `credential install` reads the token from stdin and stores it for
