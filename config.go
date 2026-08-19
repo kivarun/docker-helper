@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +23,11 @@ const (
 	ModeUser   DeploymentMode = "user"
 	ModeSystem DeploymentMode = "system"
 )
+
+// systemUserUnitPath is the system-wide location of the user systemd unit
+// installed by the RPM/DEB package. The init command copies this file to
+// the user's ~/.config/systemd/user/ directory on first initialization.
+const systemUserUnitPath = "/usr/lib/systemd/user/docker-helper.service"
 
 // EffectiveUID returns the effective UID of the process.
 // Can be replaced in tests.
@@ -508,6 +514,55 @@ func parseSessionTTL(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// installUserSystemdUnit copies the system-wide user systemd unit to the
+// user's ~/.config/systemd/user/ directory and runs daemon-reload.
+// It is a no-op if the user unit already exists or the system unit is not found.
+// Can be replaced in tests.
+var installUserSystemdUnit = func(stdout, stderr io.Writer) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	userUnitDir := filepath.Join(home, ".config", "systemd", "user")
+	userUnitPath := filepath.Join(userUnitDir, "docker-helper.service")
+
+	// Do not overwrite an existing user unit.
+	if _, err := os.Stat(userUnitPath); err == nil {
+		return
+	}
+
+	// Source unit must exist (RPM/DEB install).
+	data, err := os.ReadFile(systemUserUnitPath)
+	if err != nil {
+		return
+	}
+
+	if err := os.MkdirAll(userUnitDir, 0700); err != nil {
+		fmt.Fprintf(stderr, "warning: cannot create systemd user directory: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(userUnitPath, data, 0644); err != nil {
+		fmt.Fprintf(stderr, "warning: cannot install systemd user unit: %v\n", err)
+		return
+	}
+
+	fmt.Fprintln(stdout, "Systemd user unit installed at:")
+	fmt.Fprintln(stdout, userUnitPath)
+
+	// Best-effort daemon-reload.
+	if err := exec.Command("systemctl", "--user", "daemon-reload").Run(); err != nil {
+		fmt.Fprintf(stderr, "warning: systemctl --user daemon-reload failed: %v\n", err)
+		fmt.Fprintf(stdout, "\n")
+		fmt.Fprintf(stdout, "To start the service:\n")
+		fmt.Fprintf(stdout, "  systemctl --user daemon-reload\n")
+		fmt.Fprintf(stdout, "  systemctl --user enable --now docker-helper\n")
+	} else {
+		fmt.Fprintf(stdout, "\n")
+		fmt.Fprintf(stdout, "To start the service:\n")
+		fmt.Fprintf(stdout, "  systemctl --user enable --now docker-helper\n")
+	}
+}
+
 // initCoreResult is the result of running the core init logic.
 type initCoreResult struct {
 	allowedRoot    string
@@ -590,6 +645,10 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Configuration:")
 	fmt.Fprintln(stdout, configPath)
+
+	if mode == ModeUser {
+		installUserSystemdUnit(stdout, stderr)
+	}
 
 	return &initCoreResult{
 		allowedRoot:    allowedRoot,

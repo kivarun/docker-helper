@@ -119,6 +119,9 @@ func TestResolveSystemDefaultTokenPath(t *testing.T) {
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 1000 }
 
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
+
 	// Non-root: no token file provided, should use credential path.
 	_, err := resolveOperatorClient(operatorClientOptions{
 		System: true,
@@ -139,6 +142,7 @@ func TestResolveSystemNoFallsBackToUser(t *testing.T) {
 
 	dir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg_config"))
 
 	// Create a working user daemon socket — should NOT be used.
 	userSocket := filepath.Join(dir, "docker-helper.sock")

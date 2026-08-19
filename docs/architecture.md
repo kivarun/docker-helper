@@ -615,10 +615,16 @@ user. It is not run as root.
 - Root invocation rejected with clear message.
 
 Token resolution for `--system` mode:
-1. `--token-file` — explicit path, always wins.
-2. Non-root `--system` — credential.token from `credentialPath()`.
-3. Root `--system` — `/etc/docker-helper/admin.token`.
-4. User mode — admin.token in user config dir (unchanged).
+ 1. `--token-file` — explicit path, always wins.
+ 2. Non-root `--system` — credential.token from `credentialPath()`.
+ 3. Root `--system` — `/etc/docker-helper/admin.token`.
+
+Token resolution for default (no `--system`) mode:
+ 1. `--token-file` — explicit path, always wins.
+ 2. System socket present (`/run/docker-helper/docker-helper.sock`) —
+    non-root: credential.token from `credentialPath()`,
+    root: `/etc/docker-helper/admin.token`.
+ 3. System socket absent (user daemon) — admin.token in user config dir.
 
 ### Session token
 

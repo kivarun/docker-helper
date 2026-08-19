@@ -71,17 +71,7 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	socketPath := filepath.Join(systemRuntimeDir, "docker-helper.sock")
 	tokenPath := opts.TokenFile
 	if tokenPath == "" {
-		// Non-root users read the credential token from the user config directory.
-		// Root users read the admin token from the system config directory.
-		if EffectiveUID() == 0 {
-			tokenPath = filepath.Join(systemConfigDir, "admin.token")
-		} else {
-			credPath, err := credentialPath()
-			if err != nil {
-				return nil, fmt.Errorf("cannot determine credential path: %w", err)
-			}
-			tokenPath = credPath
-		}
+		tokenPath = resolveSystemModeTokenPath()
 	}
 
 	token, err := readTokenFile(tokenPath)
@@ -101,7 +91,14 @@ func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
 	tokenPath := opts.TokenFile
 	if tokenPath == "" {
-		tokenPath = filepath.Join(getConfigDir(), "admin.token")
+		// If the system daemon socket exists, the system daemon is the
+		// authoritative target — resolve the token for system mode.
+		// Otherwise this is a user-mode daemon and only admin.token applies.
+		if systemSocketExists() {
+			tokenPath = resolveSystemModeTokenPath()
+		} else {
+			tokenPath = filepath.Join(getConfigDir(), "admin.token")
+		}
 	}
 
 	token, err := readTokenFile(tokenPath)
@@ -111,6 +108,28 @@ func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	tokenSource := func() (string, error) { return token, nil }
 
 	return newUnixAPIClient(socketPath, tokenSource, nil), nil
+}
+
+// systemSocketExists reports whether the system daemon socket is present.
+// Can be replaced in tests.
+var systemSocketExists = func() bool {
+	_, err := os.Stat(filepath.Join(systemRuntimeDir, "docker-helper.sock"))
+	return err == nil
+}
+
+// resolveSystemModeTokenPath returns the token file path for system daemon
+// authentication: non-root users use credential.token, root uses admin.token.
+func resolveSystemModeTokenPath() string {
+	if EffectiveUID() == 0 {
+		return filepath.Join(systemConfigDir, "admin.token")
+	}
+	// credentialPath can fail only if HOME is unreadable; fall back to
+	// admin.token in the user config directory rather than returning an error.
+	credPath, err := credentialPath()
+	if err == nil {
+		return credPath
+	}
+	return filepath.Join(getConfigDir(), "admin.token")
 }
 
 // validateOperatorEndpoint validates an explicit endpoint URL.

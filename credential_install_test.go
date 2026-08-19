@@ -415,20 +415,139 @@ func TestExplicitTokenFileHasPriority(t *testing.T) {
 		t.Errorf("token = %q, want explicit-token", gotToken)
 	}
 }
-func TestUserModeUnchanged(t *testing.T) {
-	orig := EffectiveUID
-	defer func() { EffectiveUID = orig }()
+func TestDefaultEndpointSystemSocketUsesCredentialToken(t *testing.T) {
+	origUID := EffectiveUID
+	origSocket := systemSocketExists
+	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
 	EffectiveUID = func() int { return 1000 }
+	systemSocketExists = func() bool { return true }
+
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
-	// User mode should use admin.token in user config dir.
+	credDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(credDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	validToken := "dhc_" + strings.Repeat("b", 64)
+	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(validToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := resolveOperatorClient(operatorClientOptions{})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient: %v", err)
+	}
+	gotToken, err := client.tokenSource()
+	if err != nil {
+		t.Fatalf("tokenSource: %v", err)
+	}
+	if gotToken != validToken {
+		t.Errorf("token = %q, want %q", gotToken, validToken)
+	}
+}
+func TestDefaultEndpointUserSocketUsesAdminToken(t *testing.T) {
+	origUID := EffectiveUID
+	origSocket := systemSocketExists
+	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	EffectiveUID = func() int { return 1000 }
+	systemSocketExists = func() bool { return false }
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	dhDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(dhDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	adminToken := "admin-token-usermode"
+	if err := os.WriteFile(filepath.Join(dhDir, "admin.token"), []byte(adminToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := resolveOperatorClient(operatorClientOptions{})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient: %v", err)
+	}
+	gotToken, err := client.tokenSource()
+	if err != nil {
+		t.Fatalf("tokenSource: %v", err)
+	}
+	if gotToken != adminToken {
+		t.Errorf("token = %q, want %q", gotToken, adminToken)
+	}
+}
+func TestDefaultEndpointUserSocketIgnoresCredentialToken(t *testing.T) {
+	origUID := EffectiveUID
+	origSocket := systemSocketExists
+	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	EffectiveUID = func() int { return 1000 }
+	systemSocketExists = func() bool { return false }
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	dhDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(dhDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Both tokens exist — user socket must use admin.token, not credential.token.
+	if err := os.WriteFile(filepath.Join(dhDir, "credential.token"), []byte("dhc_"+strings.Repeat("c", 64)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	adminToken := "admin-token-wins"
+	if err := os.WriteFile(filepath.Join(dhDir, "admin.token"), []byte(adminToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := resolveOperatorClient(operatorClientOptions{})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient: %v", err)
+	}
+	gotToken, err := client.tokenSource()
+	if err != nil {
+		t.Fatalf("tokenSource: %v", err)
+	}
+	if gotToken != adminToken {
+		t.Errorf("token = %q, want admin.token %q (credential.token must not be used for user socket)", gotToken, adminToken)
+	}
+}
+func TestDefaultEndpointNoTokensFails(t *testing.T) {
+	origUID := EffectiveUID
+	origSocket := systemSocketExists
+	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	EffectiveUID = func() int { return 1000 }
+	systemSocketExists = func() bool { return false }
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_RUNTIME_DIR", dir)
 	_, err := resolveOperatorClient(operatorClientOptions{})
 	if err == nil {
-		t.Fatal("expected error when user admin.token doesn't exist")
+		t.Fatal("expected error when no token files exist")
 	}
-	if strings.Contains(err.Error(), "credential.token") {
-		t.Error("user mode should not use credential.token")
+}
+func TestDefaultEndpointRootUsesAdminToken(t *testing.T) {
+	origUID := EffectiveUID
+	origSocket := systemSocketExists
+	defer func() { EffectiveUID = origUID; systemSocketExists = origSocket }()
+	EffectiveUID = func() int { return 0 }
+	systemSocketExists = func() bool { return false }
+
+	dir := t.TempDir()
+	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(dir, "config.json"))
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	adminToken := "root-admin-token"
+	if err := os.WriteFile(filepath.Join(dir, "admin.token"), []byte(adminToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := resolveOperatorClient(operatorClientOptions{})
+	if err != nil {
+		t.Fatalf("resolveOperatorClient: %v", err)
+	}
+	gotToken, err := client.tokenSource()
+	if err != nil {
+		t.Fatalf("tokenSource: %v", err)
+	}
+	if gotToken != adminToken {
+		t.Errorf("token = %q, want %q", gotToken, adminToken)
 	}
 }
 func TestEndpointWithoutTokenFileRejected(t *testing.T) {

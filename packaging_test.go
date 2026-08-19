@@ -2463,8 +2463,8 @@ func TestNfpmConfigFile(t *testing.T) {
 		}
 	}
 
-	// Must not ship user-mode or installer artifacts.
-	for _, s := range []string{"systemd/user", "SKILL.md"} {
+	// Must not ship installer artifacts.
+	for _, s := range []string{"SKILL.md"} {
 		if strings.Contains(content, s) {
 			t.Errorf("nfpm.yaml must not include: %s", s)
 		}

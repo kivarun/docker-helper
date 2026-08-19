@@ -35,6 +35,11 @@ contents:
     file_info:
       mode: 0644
 
+  - src: packaging/systemd/user/docker-helper.service
+    dst: /usr/lib/systemd/user/docker-helper.service
+    file_info:
+      mode: 0644
+
   - src: packaging/apparmor/docker-helper-system
     dst: /etc/apparmor.d/docker-helper-system
     file_info:

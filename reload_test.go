@@ -26,6 +26,7 @@ func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPa
 	tokenPath = filepath.Join(dir, "admin.token")
 	runtimeDir := filepath.Join(dir, "xdg_runtime")
 	stateHome := filepath.Join(dir, "xdg_state")
+	configHome := filepath.Join(dir, "xdg_config")
 	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
 	stateSubDir := filepath.Join(stateHome, "docker-helper")
 	socketPath = filepath.Join(runtimeSubDir, "docker-helper.sock")
@@ -60,14 +61,17 @@ func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPa
 	oldConfig := os.Getenv("DOCKER_HELPER_CONFIG")
 	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
 	oldState := os.Getenv("XDG_STATE_HOME")
+	oldConfigHome := os.Getenv("XDG_CONFIG_HOME")
 	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	os.Setenv("XDG_STATE_HOME", stateHome)
+	os.Setenv("XDG_CONFIG_HOME", configHome)
 
 	cleanup = func() {
 		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
 		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
 		os.Setenv("XDG_STATE_HOME", oldState)
+		os.Setenv("XDG_CONFIG_HOME", oldConfigHome)
 	}
 
 	return configPath, tokenPath, socketPath, lockPath, cleanup
@@ -980,6 +984,7 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	runtimeDir := filepath.Join(dir, "runtime")
+	configHome := filepath.Join(dir, "xdg_config")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -995,6 +1000,7 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 	// No admin.token file created
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
 
 	original, err := os.ReadFile(configPath)
 	if err != nil {
