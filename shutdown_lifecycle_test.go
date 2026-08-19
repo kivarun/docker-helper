@@ -15,7 +15,7 @@ import (
 // the operation's forceDeadline is non-zero and equal to the root shutdown deadline.
 // Old code failed this because it used time.Now().Add(defaultForceCleanupTimeout).
 func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 
 	readyFile := filepath.Join(app.Config.AllowedRoot, ".lifecycle_ready")
 	defer os.Remove(readyFile)
@@ -58,7 +58,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

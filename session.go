@@ -108,9 +108,13 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 		return nil, fmt.Errorf("no allowed roots configured: %w", ErrInvalidWorkspace)
 	}
 
-	// Check workspace is inside at least one allowed root.
+	// Check workspace is inside at least one allowed root and is a proper
+	// subdirectory (not the root itself).
 	inside := false
 	for _, root := range p.AllowedRoots {
+		if absWorkspace == root {
+			continue
+		}
 		if isInside(root, absWorkspace) {
 			inside = true
 			break

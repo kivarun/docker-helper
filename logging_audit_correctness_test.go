@@ -458,7 +458,7 @@ func TestPullNonZeroNoOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestPullStartFailureOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +556,7 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +594,7 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatal(err)
 	}

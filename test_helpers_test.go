@@ -265,3 +265,16 @@ func newTestAppWithAuth(t *testing.T) *App {
 func withAuth(r *http.Request) {
 	r.Header.Set("Authorization", "Bearer "+testAdminToken)
 }
+
+// testWorkspaceDir creates a subdirectory inside the allowed root that can
+// be used as a session workspace. The allowed root itself is no longer a
+// valid workspace (must be a proper subdirectory). The created directory is
+// cleaned up when the allowed root is cleaned up by testAllowedRootDir.
+func testWorkspaceDir(t *testing.T, allowedRoot string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatalf("cannot create workspace dir: %v", err)
+	}
+	return dir
+}

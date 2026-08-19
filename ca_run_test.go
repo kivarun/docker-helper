@@ -35,7 +35,7 @@ func setupRunTestApp(t *testing.T) (*App, string) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}

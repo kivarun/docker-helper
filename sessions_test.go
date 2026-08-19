@@ -12,7 +12,7 @@ import (
 func TestHTTPCreateSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -75,7 +75,7 @@ func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
 func TestHTTPListSessions(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	_, err := app.createSession(app.Config.AllowedRoot)
+	_, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestHTTPListSessions(t *testing.T) {
 func TestHTTPDeleteSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestHTTPDeleteSessionNotFound(t *testing.T) {
 func TestHTTPCreateSessionRFC3339(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))

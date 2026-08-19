@@ -21,7 +21,7 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -45,15 +45,15 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	// Create a symlink inside workspace that points to the workspace root.
-	linkPath := filepath.Join(app.Config.AllowedRoot, "self-link")
-	if err := os.Symlink(app.Config.AllowedRoot, linkPath); err != nil {
-		t.Skipf("cannot create symlink: %v", err)
-	}
-
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
+	}
+
+	// Create a symlink inside workspace that points to the workspace root.
+	linkPath := filepath.Join(result.Session.Workspace, "self-link")
+	if err := os.Symlink(result.Session.Workspace, linkPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -74,12 +74,12 @@ func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -116,12 +116,12 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	filePath := filepath.Join(app.Config.AllowedRoot, "testfile.txt")
+	filePath := filepath.Join(result.Session.Workspace, "testfile.txt")
 	if err := os.WriteFile(filePath, []byte("data"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -149,12 +149,12 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -186,12 +186,12 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -226,13 +226,13 @@ func TestRunSecondPinError(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir1 := filepath.Join(app.Config.AllowedRoot, "subdir1")
-	subdir2 := filepath.Join(app.Config.AllowedRoot, "subdir2")
+	subdir1 := filepath.Join(result.Session.Workspace, "subdir1")
+	subdir2 := filepath.Join(result.Session.Workspace, "subdir2")
 	if err := os.MkdirAll(subdir1, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -301,12 +301,12 @@ func TestRunRegistryShuttingDown(t *testing.T) {
 	reg.setShuttingDown()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -363,12 +363,12 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	app.Config.RuntimeDir = ""
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -421,13 +421,13 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
-	srcFile := filepath.Join(app.Config.AllowedRoot, "srcfile.txt")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
+	srcFile := filepath.Join(result.Session.Workspace, "srcfile.txt")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +489,7 @@ func TestRunUserModeDoesNotCallPinMount(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -527,12 +527,12 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -583,12 +583,12 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -638,14 +638,14 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir1 := filepath.Join(app.Config.AllowedRoot, "subdir1")
-	subdir2 := filepath.Join(app.Config.AllowedRoot, "subdir2")
-	subdir3 := filepath.Join(app.Config.AllowedRoot, "subdir3")
+	subdir1 := filepath.Join(result.Session.Workspace, "subdir1")
+	subdir2 := filepath.Join(result.Session.Workspace, "subdir2")
+	subdir3 := filepath.Join(result.Session.Workspace, "subdir3")
 	for _, d := range []string{subdir1, subdir2, subdir3} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			t.Fatal(err)
@@ -710,12 +710,12 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -771,12 +771,12 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}

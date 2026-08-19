@@ -248,7 +248,7 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	// Actual session token.
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -698,6 +698,7 @@ func TestAdminTokenRotateCLIAuthFailure(t *testing.T) {
 // a data race on AdminTokenHash.
 func TestAdminTokenRotationConcurrentSessionAuth(t *testing.T) {
 	app := newTestAppWithAuth(t)
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoot)
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -719,7 +720,7 @@ func TestAdminTokenRotationConcurrentSessionAuth(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for i := 0; i < 50; i++ {
-			reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+			reqBody := map[string]string{"workspace": workspace}
 			body, _ := json.Marshal(reqBody)
 			req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
 			req.Header.Set("Authorization", "Bearer "+testAdminToken)

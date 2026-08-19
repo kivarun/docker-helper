@@ -12,7 +12,7 @@ import (
 // SIGTERM to a running build process, and if the process exits after
 // the signal, force kill is not needed.
 func TestShutdownGracefulSignalsBuild(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
 	op := startBuild(t, app, token)
@@ -41,7 +41,7 @@ func TestShutdownGracefulSignalsBuild(t *testing.T) {
 // TestShutdownForceKillsIgnoringSignal tests that a process ignoring
 // graceful SIGTERM is force-killed within the shutdown deadline.
 func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 
 	// Use a readiness marker so we know the trap is installed.
 	readyFile := filepath.Join(app.Config.AllowedRoot, ".process_ready")
@@ -79,7 +79,7 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 // completion goroutine properly reaps the process and closes op.done
 // even after force kill.
 func TestShutdownOperationCompletionGoroutineReaps(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
 	op := startBuild(t, app, token)

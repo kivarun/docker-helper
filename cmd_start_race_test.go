@@ -13,7 +13,7 @@ import (
 // This is deterministic: the handler blocks on op.mu while terminateAll
 // sets terminated=true, then the handler sees terminated and aborts.
 func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 
 	// Block the handler at the point where it holds op.mu about to call Start().
 	cmdBlocked := make(chan struct{})
@@ -58,7 +58,7 @@ func TestCmdStartRaceShutdownBeforeStart(t *testing.T) {
 // completes before shutdown acquires the boundary, the process is
 // properly terminated via graceful SIGTERM.
 func TestCmdStartRaceStartBeforeShutdown(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
 	op := startBuild(t, app, token)

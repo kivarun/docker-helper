@@ -205,7 +205,8 @@ func TestSessionCreateAuditSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoot)
+	reqBody := map[string]string{"workspace": workspace}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -238,8 +239,8 @@ func TestSessionCreateAuditSuccess(t *testing.T) {
 	if m["session_id"] != resp.Session.ID {
 		t.Errorf("session_id: expected %q, got %v", resp.Session.ID, m["session_id"])
 	}
-	if m["workspace"] != app.Config.AllowedRoot {
-		t.Errorf("workspace: expected %q, got %v", app.Config.AllowedRoot, m["workspace"])
+	if m["workspace"] != workspace {
+		t.Errorf("workspace: expected %q, got %v", workspace, m["workspace"])
 	}
 	if _, ok := m["duration"]; !ok {
 		t.Error("expected duration in audit record")
@@ -321,7 +322,7 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 	app.DB = newFailExecDB(t, dbPath, errMockCreateDB)
 	defer app.DB.Close()
 
-	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -402,7 +403,8 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoot)
+	result, err := app.createSession(workspace)
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -435,8 +437,8 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 	if m["session_id"] != result.Session.ID {
 		t.Errorf("session_id: expected %q, got %v", result.Session.ID, m["session_id"])
 	}
-	if m["workspace"] != app.Config.AllowedRoot {
-		t.Errorf("workspace: expected %q, got %v", app.Config.AllowedRoot, m["workspace"])
+	if m["workspace"] != workspace {
+		t.Errorf("workspace: expected %q, got %v", workspace, m["workspace"])
 	}
 	if _, ok := m["duration"]; !ok {
 		t.Error("expected duration in audit record")
@@ -488,7 +490,8 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoot)
+	result, err := app.createSession(workspace)
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -522,8 +525,8 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 		t.Errorf("result: expected 'database_error', got %v", m["result"])
 	}
 	// workspace must be present because SELECT succeeded.
-	if m["workspace"] != app.Config.AllowedRoot {
-		t.Errorf("workspace: expected %q, got %v", app.Config.AllowedRoot, m["workspace"])
+	if m["workspace"] != workspace {
+		t.Errorf("workspace: expected %q, got %v", workspace, m["workspace"])
 	}
 	if _, ok := m["duration"]; !ok {
 		t.Error("expected duration in audit record")

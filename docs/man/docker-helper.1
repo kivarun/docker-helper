@@ -102,8 +102,8 @@ Add an allowed root for a principal.
 Remove an allowed root from a principal.
 .SS Credential Commands
 .TP
-.B docker-helper credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-name NAME USER
-Create a new credential for a principal.
+.B docker-helper credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER
+Create a new credential for a principal. If \-\-name is not specified, defaults to "default".
 .TP
 .B docker-helper credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
 List credentials for a principal.

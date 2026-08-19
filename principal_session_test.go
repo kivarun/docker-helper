@@ -20,7 +20,7 @@ func TestCredentialAuthValid(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "authuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,7 +71,7 @@ func TestCredentialAuthRevoked(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "revokeduser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,7 +112,7 @@ func TestCredentialAuthDisabledPrincipal(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "disableduser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,7 +165,7 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "sessuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,7 +184,7 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -222,7 +222,7 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -304,7 +304,7 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 	home := filepath.Join(app.Config.AllowedRoot, "home", "wsuser2")
 	secondRoot := filepath.Join(app.Config.AllowedRoot, "second")
 	subdir := filepath.Join(secondRoot, "subdir")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -354,7 +354,7 @@ func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
 	home := filepath.Join(app.Config.AllowedRoot, "home", "wsuser3")
 	outsideRoot := filepath.Join(app.Config.AllowedRoot, "outside")
 	subdir := filepath.Join(outsideRoot, "subdir")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -399,10 +399,10 @@ func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 
 	home1 := filepath.Join(app.Config.AllowedRoot, "home", "owner1")
 	home2 := filepath.Join(app.Config.AllowedRoot, "home", "owner2")
-	if err := os.MkdirAll(home1, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home1, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(home2, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home2, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -435,7 +435,7 @@ func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 	}
 
 	// owner1 creates a session.
-	reqBody := map[string]string{"workspace": home1}
+	reqBody := map[string]string{"workspace": filepath.Join(home1, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -451,7 +451,7 @@ func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 	}
 
 	// owner2 creates a session.
-	reqBody2 := map[string]string{"workspace": home2}
+	reqBody2 := map[string]string{"workspace": filepath.Join(home2, "proj")}
 	body2, _ := json.Marshal(reqBody2)
 	req = httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body2))
 	req.Header.Set("Authorization", "Bearer "+token2)
@@ -483,7 +483,7 @@ func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "legacyuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -534,7 +534,7 @@ func TestAdminSeesAllSessions(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "adminseesuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -561,7 +561,7 @@ func TestAdminSeesAllSessions(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -599,7 +599,7 @@ func TestPrincipalDeletesOwnSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "delownuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -618,7 +618,7 @@ func TestPrincipalDeletesOwnSession(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -654,10 +654,10 @@ func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
 
 	home1 := filepath.Join(app.Config.AllowedRoot, "home", "delother1")
 	home2 := filepath.Join(app.Config.AllowedRoot, "home", "delother2")
-	if err := os.MkdirAll(home1, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home1, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(home2, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home2, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -690,7 +690,7 @@ func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
 	}
 
 	// delother2 creates a session.
-	reqBody := map[string]string{"workspace": home2}
+	reqBody := map[string]string{"workspace": filepath.Join(home2, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -725,7 +725,7 @@ func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "dellegacyuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -768,7 +768,7 @@ func TestAdminDeletesAnySession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "admindeluser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -787,7 +787,7 @@ func TestAdminDeletesAnySession(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -823,7 +823,7 @@ func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "surviveuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -842,7 +842,7 @@ func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -881,7 +881,7 @@ func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
 	app := newTestApp(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "concurrentuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -937,7 +937,7 @@ func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "survivedisuser")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -956,7 +956,7 @@ func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -1092,7 +1092,7 @@ func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "noadminfail")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1111,7 +1111,7 @@ func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -1139,7 +1139,7 @@ func TestInvalidCredentialSingleAuthFailure(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	reqBody := map[string]string{"workspace": app.Config.AllowedRoot}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -1188,7 +1188,7 @@ func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "principalresp")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1207,7 +1207,7 @@ func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 		t.Fatalf("createCredential() error: %v", err)
 	}
 
-	reqBody := map[string]string{"workspace": home}
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
@@ -1240,7 +1240,7 @@ func TestCredentialSessionListAudit(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoot, "home", "listaudit")
-	if err := os.MkdirAll(home, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
 

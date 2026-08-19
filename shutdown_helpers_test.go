@@ -13,18 +13,18 @@ import (
 )
 
 // setupBuildTest creates an app, registry, session and Dockerfile for build tests.
-func setupBuildTest(t *testing.T) (*App, *operationRegistry, string) {
+func setupBuildTest(t *testing.T) (*App, *operationRegistry, *CreatedSession, string) {
 	t.Helper()
 	app := newTestAppWithAuth(t)
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0o644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -32,7 +32,7 @@ func setupBuildTest(t *testing.T) (*App, *operationRegistry, string) {
 	// Default staging seam: create a minimal staging directory with the Dockerfile.
 	setupStagingSeam(t, app)
 
-	return app, reg, result.Token
+	return app, reg, result, result.Token
 }
 
 // startBuild starts a build request and returns the operation.

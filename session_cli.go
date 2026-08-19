@@ -48,7 +48,13 @@ var sessionCreateCommand = &Command{
 					return 1
 				}
 
-				result, err := client.createSession(*workspace)
+				absWorkspace, err := filepath.Abs(*workspace)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: cannot resolve workspace path: %v\n", err)
+					return 1
+				}
+
+				result, err := client.createSession(absWorkspace)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

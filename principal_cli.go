@@ -386,20 +386,14 @@ var principalAllowedRootRemoveCommand = &Command{
 var credentialCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new credential for a principal",
-	Usage:      "docker-helper credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] --name NAME USER",
+	Usage:      "docker-helper credential create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--name NAME] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		name := fs.String("name", "", "Credential name")
+		name := fs.String("name", "default", "Credential name")
 
 		return Invocation{
-			Validate: func() error {
-				if *name == "" {
-					return fmt.Errorf("--name is required")
-				}
-				return nil
-			},
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				if len(args) == 0 || args[0] == "" {

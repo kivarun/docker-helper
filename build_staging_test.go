@@ -21,7 +21,7 @@ import (
 // TestBuildDockerReceivesStagedPaths verifies Docker gets staged paths,
 // not workspace paths.
 func TestBuildDockerReceivesStagedPaths(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, result, token := setupBuildTest(t)
 
 	var capturedArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -54,7 +54,7 @@ func TestBuildDockerReceivesStagedPaths(t *testing.T) {
 	if fileArg == "" {
 		t.Fatal("--file not found in args")
 	}
-	if fileArg == filepath.Join(app.Config.AllowedRoot, "Dockerfile") {
+	if fileArg == filepath.Join(result.Session.Workspace, "Dockerfile") {
 		t.Error("Docker should receive staged Dockerfile path, not workspace path")
 	}
 
@@ -68,7 +68,7 @@ func TestBuildDockerReceivesStagedPaths(t *testing.T) {
 // TestBuildStagingErrorDoesNotRunDocker verifies that a staging error
 // prevents Docker from running and does not register an operation.
 func TestBuildStagingErrorDoesNotRunDocker(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
 		return nil, os.ErrInvalid
 	}
@@ -98,7 +98,7 @@ func TestBuildStagingErrorDoesNotRunDocker(t *testing.T) {
 // TestBuildTryCreateRejectCleansStaging verifies that when tryCreate
 // rejects the operation, the staging directory is cleaned up.
 func TestBuildTryCreateRejectCleansStaging(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -152,7 +152,7 @@ func TestBuildTryCreateRejectCleansStaging(t *testing.T) {
 // TestBuildStartErrorCleansStaging verifies that a Docker start error
 // triggers staging cleanup.
 func TestBuildStartErrorCleansStaging(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -218,7 +218,7 @@ func TestBuildStartErrorCleansStaging(t *testing.T) {
 // TestBuildSuccessCleansStaging verifies that successful build completion
 // triggers staging cleanup.
 func TestBuildSuccessCleansStaging(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -275,7 +275,7 @@ func TestBuildSuccessCleansStaging(t *testing.T) {
 // TestBuildWaitErrorCleansStaging verifies that a Docker wait error
 // triggers staging cleanup.
 func TestBuildWaitErrorCleansStaging(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -332,7 +332,7 @@ func TestBuildWaitErrorCleansStaging(t *testing.T) {
 // TestBuildShutdownCleansStaging verifies that shutdown/cancellation
 // triggers staging cleanup.
 func TestBuildShutdownCleansStaging(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -417,7 +417,7 @@ func TestBuildShutdownCleansStaging(t *testing.T) {
 // TestBuildStagedPathsContainContext verifies staged paths contain the
 // expected staging directory structure.
 func TestBuildStagedPathsContainContext(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 
 	var capturedArgs []string
 	var capturedOpDir string
@@ -493,7 +493,7 @@ func TestBuildStagedPathsContainContext(t *testing.T) {
 // TestBuildLifecycleWithStaging verifies the full build lifecycle
 // (running -> succeeded) works correctly with staging.
 func TestBuildLifecycleWithStaging(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "/bin/true")
@@ -541,12 +541,7 @@ func TestBuildLifecycleWithStaging(t *testing.T) {
 func TestBuildAuditWithStaging(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app, _, _ := setupBuildTest(t)
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
+	app, _, result, token := setupBuildTest(t)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "/bin/true")
@@ -556,7 +551,7 @@ func TestBuildAuditWithStaging(t *testing.T) {
 		"context":    ".",
 		"dockerfile": "Dockerfile",
 		"image":      "example:test",
-	}, result.Token)
+	}, token)
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
@@ -597,7 +592,7 @@ func TestBuildAuditWithStaging(t *testing.T) {
 // TestBuildStagingErrorNoOperationRegistered verifies that when staging
 // fails, no operation is registered in the registry.
 func TestBuildStagingErrorNoOperationRegistered(t *testing.T) {
-	app, reg, token := setupBuildTest(t)
+	app, reg, _, token := setupBuildTest(t)
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
 		return nil, os.ErrInvalid
 	}
@@ -633,7 +628,7 @@ func TestBuildStagingErrorNoOperationRegistered(t *testing.T) {
 // TestBuildDockerfileDotSlash verifies that "./Dockerfile" is normalized
 // to "Dockerfile" and passed correctly to staging.
 func TestBuildDockerfileDotSlash(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 
 	var capture capturedStaging
 	app.StageBuildContextFn = stagingSeamWithCapture(t, &capture)
@@ -682,14 +677,14 @@ func TestBuildDockerfileDotSlash(t *testing.T) {
 // TestBuildDockerfileDotDotPath verifies that a path with normalizable ".."
 // inside context (e.g., "subdir/../Dockerfile") is resolved correctly.
 func TestBuildDockerfileDotDotPath(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, result, token := setupBuildTest(t)
 
 	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
 	if err := os.MkdirAll(subdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Create the Dockerfile at the workspace root, reference via subdir/../Dockerfile.
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -724,17 +719,17 @@ func TestBuildDockerfileDotDotPath(t *testing.T) {
 // TestBuildDockerfileSymlink verifies that a symlink Dockerfile pointing
 // to a regular file inside context is resolved correctly.
 func TestBuildDockerfileSymlink(t *testing.T) {
-	app, _, token := setupBuildTest(t)
+	app, _, result, token := setupBuildTest(t)
 
 	// Remove the default Dockerfile so we can create our symlink.
-	os.Remove(filepath.Join(app.Config.AllowedRoot, "Dockerfile"))
+	os.Remove(filepath.Join(result.Session.Workspace, "Dockerfile"))
 
 	// Create a real Dockerfile and a symlink to it.
-	realDockerfile := filepath.Join(app.Config.AllowedRoot, "real.Dockerfile")
+	realDockerfile := filepath.Join(result.Session.Workspace, "real.Dockerfile")
 	if err := os.WriteFile(realDockerfile, []byte("FROM alpine"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	symlinkDockerfile := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	symlinkDockerfile := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.Symlink("real.Dockerfile", symlinkDockerfile); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
 	}
@@ -826,7 +821,7 @@ func TestStagedCleanupConcurrentExactlyOnce(t *testing.T) {
 func TestStagedCleanupErrorLogged(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -872,7 +867,7 @@ func TestStagedCleanupErrorLogged(t *testing.T) {
 func TestBuildCleanupOnErrorPreservesSemantics(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -925,7 +920,7 @@ func TestBuildCleanupOnErrorPreservesSemantics(t *testing.T) {
 func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	syncDir := t.TempDir()
@@ -996,7 +991,7 @@ func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 	_, opLogBuf := setupTestLogging(t)
 
-	app, _, token := setupBuildTest(t)
+	app, _, _, token := setupBuildTest(t)
 	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelCleanupErr)
 
 	syncDir := t.TempDir()

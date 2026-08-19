@@ -14,7 +14,7 @@ import (
 
 func TestCreateSession(t *testing.T) {
 	app := newTestApp(t)
-	workspace := app.Config.AllowedRoot
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoot)
 
 	result, err := app.createSession(workspace)
 	if err != nil {
@@ -53,7 +53,7 @@ func TestCreateSessionCanonicalWorkspace(t *testing.T) {
 func TestCreateSessionIDPrefix(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestCreateSessionIDPrefix(t *testing.T) {
 func TestCreateSessionTokenPrefix(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestCreateSessionTokenPrefix(t *testing.T) {
 func TestTokenNotStoredInDatabase(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestTokenNotStoredInDatabase(t *testing.T) {
 func TestTokenHashIsSHA256(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestTokenHashIsSHA256(t *testing.T) {
 func TestExpiresAtMatchesSessionTTL(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestExpiresAtMatchesSessionTTL(t *testing.T) {
 func TestFindSessionByToken(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestFindSessionByTokenNotFound(t *testing.T) {
 func TestListSessionsReturnsActive(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestListSessionsReturnsActive(t *testing.T) {
 func TestListSessionsExcludesExpired(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestListSessionsExcludesExpired(t *testing.T) {
 func TestDeleteSession(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestDeleteSessionNotFound(t *testing.T) {
 func TestDeleteSessionRepeatedReturnsError(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -300,12 +300,12 @@ func TestWorkspaceSymlinkEscapeRejected(t *testing.T) {
 func TestCreateSessionUniqueIDs(t *testing.T) {
 	app := newTestApp(t)
 
-	result1, err := app.createSession(app.Config.AllowedRoot)
+	result1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("first createSession() error: %v", err)
 	}
 
-	result2, err := app.createSession(app.Config.AllowedRoot)
+	result2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("second createSession() error: %v", err)
 	}

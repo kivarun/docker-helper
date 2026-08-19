@@ -35,7 +35,7 @@ func TestRegistryLoginMissingSession(t *testing.T) {
 func TestRegistryLoginInvalidJSON(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestRegistryLoginInvalidJSON(t *testing.T) {
 func TestRegistryLoginMissingFields(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestRegistryLoginSuccess(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRegistryLoginSuccess(t *testing.T) {
 func TestRegistryLoginFailure(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestRegistryLoginFailure(t *testing.T) {
 func TestRegistryLoginSessionDockerDirCreated(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestRegistryLoginNilExecCommandContext(t *testing.T) {
 	// (the production default). It must use the real exec.CommandContext fallback.
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

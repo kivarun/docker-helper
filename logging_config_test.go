@@ -485,7 +485,7 @@ func TestDebugRequestLogNoSessionIDLeak(t *testing.T) {
 
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestDebugRequestLogParameterizedRoute(t *testing.T) {
 
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

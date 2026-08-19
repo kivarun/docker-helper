@@ -22,12 +22,12 @@ func TestBuildTailOutputNotLost(t *testing.T) {
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}

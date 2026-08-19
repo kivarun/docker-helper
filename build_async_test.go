@@ -18,12 +18,12 @@ func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -75,12 +75,12 @@ func TestBuildLiveOutput(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -170,12 +170,12 @@ func TestBuildSuccessTransition(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -224,12 +224,12 @@ func TestBuildNonZeroExitTransition(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -278,12 +278,12 @@ func TestAuditFinishEmittedOnce(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -327,12 +327,12 @@ func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}

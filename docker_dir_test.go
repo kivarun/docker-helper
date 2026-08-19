@@ -64,13 +64,14 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	// Create a session.
-	result, err := app.createSession(allowedRoot)
+	workspace := testWorkspaceDir(t, allowedRoot)
+	result, err := app.createSession(workspace)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
 	// Create a minimal build context and Dockerfile.
-	ctxDir := filepath.Join(allowedRoot, "buildctx")
+	ctxDir := filepath.Join(workspace, "buildctx")
 	if err := os.MkdirAll(ctxDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,8 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	// Create a session.
-	result, err := app.createSession(allowedRoot)
+	workspace2 := testWorkspaceDir(t, allowedRoot)
+	result, err := app.createSession(workspace2)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -258,7 +260,7 @@ func TestPullEnsureSessionDockerDirFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

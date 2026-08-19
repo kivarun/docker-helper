@@ -982,6 +982,17 @@ func TestCredentialCLICreateSyntaxRegression(t *testing.T) {
 	}
 }
 
+func TestCredentialCLICreateDefaultName(t *testing.T) {
+	// Verify that --name is optional and defaults to "default".
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"credential", "create", "testuser"}, &stdout, &stderr)
+	// Should fail with missing admin token or connection error, not validation error.
+	errOut := stderr.String()
+	if strings.Contains(errOut, "--name is required") {
+		t.Fatalf("--name should be optional: exit=%d stderr=%s", code, errOut)
+	}
+}
+
 func TestCredentialHTTPRevokeDBError(t *testing.T) {
 	app := newTestAppWithAuth(t)
 

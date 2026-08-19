@@ -32,12 +32,12 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -140,12 +140,12 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -234,14 +234,14 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
-	if err := os.MkdirAll(subdir, 0755); err != nil {
-		t.Fatalf("cannot create subdir: %v", err)
-	}
-
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
+	}
+
+	subdir := filepath.Join(result.Session.Workspace, "subdir")
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		t.Fatalf("cannot create subdir: %v", err)
 	}
 
 	dockerfilePath := filepath.Join(subdir, "Dockerfile")
@@ -328,7 +328,7 @@ func TestBuildContextOutsideAllowedRootRejected(t *testing.T) {
 
 	escapeDir := t.TempDir()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -446,12 +446,12 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -500,12 +500,12 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -532,12 +532,12 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 func TestBuildContextErrorContainsCode(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -646,12 +646,12 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(app.Config.AllowedRoot)
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	dockerfilePath := filepath.Join(app.Config.AllowedRoot, "Dockerfile")
+	dockerfilePath := filepath.Join(result.Session.Workspace, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM alpine"), 0644); err != nil {
 		t.Fatalf("cannot create Dockerfile: %v", err)
 	}
