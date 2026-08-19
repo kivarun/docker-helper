@@ -241,13 +241,13 @@ than 200ms to make its next request, the test would pass falsely.
 
 ## Deferred (Phase 4 — App Init Consolidation)
 
-The following is deferred for separate discussion:
+**COMPLETED** — `7630582`
 
-- Consolidate 4 `*App` initialization paths (`newTestApp`,
-  `newTestAppWithAuth`, `newTestAppWithAuthAndStaging`, `setupReloadApp`)
-  into a single helper in `test_helpers_test.go`.
-
-**Risk:** High. Touches many test files. Requires careful migration.
+- `newTestApp` moved from `session_test.go` → `test_helpers_test.go`
+- `newTestAppWithAuth`, `withAuth`, `testAdminToken` moved from
+  `admin_auth_test.go` → `test_helpers_test.go`
+- `setupReloadApp` remains in `logging_audit_correctness_test.go`
+  (serves a different purpose: file-based config loading for reload tests)
 
 ---
 
