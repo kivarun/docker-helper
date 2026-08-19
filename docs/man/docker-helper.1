@@ -26,7 +26,7 @@ Single-user deployment. No root required after package installation.
 .nf
 docker-helper init
 systemctl --user enable --now docker-helper
-docker-helper session create --workspace ~/myproject
+docker-helper session create --workspace $HOME
 .fi
 .RE
 .PP
@@ -38,8 +38,8 @@ Multi-user deployment. Requires root for initial setup.
 .nf
 sudo docker-helper init
 sudo systemctl enable --now docker-helper
-sudo docker-helper principal create --system alice
-sudo docker-helper credential create --system alice
+sudo docker-helper principal create alice
+sudo docker-helper credential create alice
 .fi
 .RE
 .PP
@@ -48,13 +48,13 @@ On alice's machine (not as root):
 .RS 4
 .nf
 docker-helper credential install
-docker-helper session create --system --workspace ~/myproject
+docker-helper session create --workspace $HOME
 .fi
 .RE
 .PP
 \fBcredential install\fR reads the token from stdin and stores it for
-subsequent use. After installation, \fBdocker-helper --system\fR commands
-use the credential automatically.
+subsequent use. After installation, \fBdocker-helper\fR commands use the
+credential and connect to the correct daemon automatically.
 .SH DEPLOYMENT MODES
 .SS User Mode
 Runs as the current user. Configuration at

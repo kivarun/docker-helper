@@ -125,7 +125,7 @@ Uses the current user's home directory as the default allowed root.
 ```bash
 docker-helper init
 systemctl --user enable --now docker-helper
-docker-helper session create --workspace ~/myproject
+docker-helper session create --workspace $HOME
 ```
 
 The `init` command prints a session token. Assign it:
@@ -144,8 +144,8 @@ Multi-user deployment. Requires root for initial setup.
 ```bash
 sudo docker-helper init
 sudo systemctl enable --now docker-helper
-sudo docker-helper principal create --system alice
-sudo docker-helper credential create --system alice
+sudo docker-helper principal create alice
+sudo docker-helper credential create alice
 ```
 
 The `credential create` command prints a token. On alice's machine (not
@@ -153,12 +153,12 @@ as root):
 
 ```bash
 docker-helper credential install
-docker-helper session create --system --workspace ~/myproject
+docker-helper session create --workspace $HOME
 ```
 
 `credential install` reads the token from stdin and stores it for
-subsequent use. After installation, `docker-helper --system` commands
-use the credential automatically.
+subsequent use. After installation, `docker-helper` commands use the
+credential and connect to the correct daemon automatically.
 
 For more on principals, allowed roots, and AppArmor confinement, see
 below.
