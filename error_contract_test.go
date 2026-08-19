@@ -741,6 +741,24 @@ func TestDockerErrorLogPull(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handlePull(w, req)
 
+	// Client response — prove we reached the error path before checking logs.
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", w.Code)
+	}
+	if resp.Code != "docker_pull_failed" {
+		t.Fatalf("expected code 'docker_pull_failed', got %q", resp.Code)
+	}
+	if resp.Message != "docker pull failed" {
+		t.Fatalf("unexpected message: %q", resp.Message)
+	}
+	if resp.Output != dockerOutput+"\n" {
+		t.Fatalf("expected output preserved, got %q", resp.Output)
+	}
+
 	raw := opBuf.String()
 
 	// Non-zero exit is a workload result, not an operational error.
@@ -755,24 +773,6 @@ func TestDockerErrorLogPull(t *testing.T) {
 	// Token not logged
 	if strings.Contains(raw, result.Token) {
 		t.Error("session token must not appear in log")
-	}
-
-	// Client response
-	var resp response
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected status 500, got %d", w.Code)
-	}
-	if resp.Code != "docker_pull_failed" {
-		t.Errorf("expected code 'docker_pull_failed', got %q", resp.Code)
-	}
-	if resp.Message != "docker pull failed" {
-		t.Errorf("unexpected message: %q", resp.Message)
-	}
-	if resp.Output != dockerOutput+"\n" {
-		t.Errorf("expected output preserved, got %q", resp.Output)
 	}
 }
 
