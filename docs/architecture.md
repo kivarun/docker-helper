@@ -367,8 +367,8 @@ for full syntax:
 
 ```
 --system              connect to system daemon (Unix socket)
---endpoint ENDPOINT   explicit endpoint (unix:///path or http://127.0.0.1:port)
---token-file PATH     token file path
+--endpoint ENDPOINT   explicit endpoint (/path, unix:///path, or http://127.0.0.1:port)
+--token-file PATH     token file path (auto-resolved for Unix sockets)
 ```
 
 ## CLI reference

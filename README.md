@@ -245,8 +245,8 @@ Creates configuration and state directories, writes `config.json` with
 token is printed once and stored beside the config file.
 
 If running interactively and `--allowed-root` is not provided, you will
-be prompted for the allowed root directory. The current working directory
-is used as the default.
+be prompted for the allowed root directory. The user's home directory is
+used as the default. For root, `/home` is used as the default.
 
 ```bash
 docker-helper init --allowed-root /path/to/workspaces
@@ -874,6 +874,9 @@ The following namespaces are forbidden at the root but permit descendants:
     /opt/projects     (allowed)
     /mnt/data         (allowed)
     /media/backup     (allowed)
+
+When running as root (uid 0), `/home` and `/opt` are permitted as workspace
+roots. Non-root users cannot use these namespaces directly.
 
 Other non-system absolute paths such as `/data/workspaces` or `/workspace`
 are allowed if otherwise valid.

@@ -156,15 +156,14 @@ For reload, session, principal, and credential commands, select the target daemo
 .IP \(bu 4
 \fB\-\-system\fR: Connect to system daemon (default for system mode)
 .IP \(bu 4
-\fB\-\-endpoint URL\fR: Explicit endpoint: \fIunix:///absolute/path\fR or \fIhttp://127.0.0.1:PORT\fR (HTTP is loopback only; requires \fB\-\-token-file\fR)
+\fB\-\-endpoint URL\fR: Explicit endpoint: \fI/absolute/path\fR, \fIunix:///absolute/path\fR, or \fIhttp://127.0.0.1:PORT\fR (HTTP is loopback only; requires \fB\-\-token-file\fR; Unix sockets auto-resolve token)
 .IP \(bu 4
-\fB\-\-token-file FILE\fR: Read authentication token from file
+\fB\-\-token-file FILE\fR: Read authentication token from file (optional for Unix sockets)
 .PP
 \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
-\fB\-\-endpoint\fR requires \fB\-\-token-file\fR.
 \fB\-\-system\fR may use \fB\-\-token-file\fR for authentication.
-Without explicit endpoint selection, a deterministic default is used.
-No fallback occurs after connection failure.
+Without explicit endpoint selection, a deterministic default is used:
+user socket first, then system socket as fallback.
 .PP
 Local system mode uses Unix socket + loopback HTTP (127.0.0.1:52375 default).
 No remote or TLS support in Release 2.

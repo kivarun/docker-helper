@@ -56,6 +56,9 @@ The following namespaces are forbidden at the root but permit descendants:
 .br
 /srv /opt /mnt /media (e.g., /srv/workspaces is allowed)
 .PP
+When running as root (uid 0), /home and /opt are permitted as workspace
+roots. Non-root users cannot use these namespaces directly.
+.PP
 A symlink whose canonical target enters a forbidden namespace is rejected.
 .PP
 New workspace roots are resolved to their canonical path through symlink
