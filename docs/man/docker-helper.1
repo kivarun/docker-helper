@@ -18,6 +18,43 @@ Deployment mode is determined by effective UID:
 \fIUser mode\fR (non-root): Private Unix socket, per-user configuration
 .IP \(bu 4
 \fISystem mode\fR (root): System Unix socket + loopback HTTP, system-wide configuration
+.SH QUICK START
+.SS User mode
+Single-user deployment. No root required after package installation.
+.PP
+.RS 4
+.nf
+docker-helper init
+systemctl --user enable --now docker-helper
+docker-helper session create --workspace ~/myproject
+.fi
+.RE
+.PP
+User mode does not require principals or credentials.
+.SS System mode
+Multi-user deployment. Requires root for initial setup.
+.PP
+.RS 4
+.nf
+sudo docker-helper init
+sudo systemctl enable --now docker-helper
+sudo docker-helper principal create --system alice
+sudo docker-helper credential create --system alice
+.fi
+.RE
+.PP
+On alice's machine (not as root):
+.PP
+.RS 4
+.nf
+docker-helper credential install
+docker-helper session create --system --workspace ~/myproject
+.fi
+.RE
+.PP
+\fBcredential install\fR reads the token from stdin and stores it for
+subsequent use. After installation, \fBdocker-helper --system\fR commands
+use the credential automatically.
 .SH DEPLOYMENT MODES
 .SS User Mode
 Runs as the current user. Configuration at

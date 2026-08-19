@@ -113,57 +113,75 @@ Principals do NOT need direct docker.sock access or membership in the
 
 ## Installation
 
-### Quick start (release tarball)
+Install the package or extract the release tarball. Both DEB and RPM
+packages support user mode and system mode. The release tarball supports
+both modes via `install.sh` (user) and `install-system.sh` (system).
 
-Download the release tarball for your platform, extract it, and run the
-installer:
+### Quick start: user mode
 
-```bash
-tar xzf docker-helper-*.tar.gz
-cd docker-helper-*
-./install.sh
-```
-
-The installer:
-
-- copies the binary to `~/.local/bin/docker-helper`;
-- installs the systemd user unit to `~/.config/systemd/user/`;
-- optionally installs an AppArmor profile (requires sudo for this step only);
-- prompts to run `docker-helper init` and enable+start the user service.
-
-For a fully non-interactive installation:
+Single-user deployment. No root required after package installation.
+Uses the current user's home directory as the default allowed root.
 
 ```bash
-./install.sh --yes
+docker-helper init
+systemctl --user enable --now docker-helper
+docker-helper session create --workspace ~/myproject
 ```
 
-### Native packages — system mode
+The `init` command prints a session token. Assign it:
 
-Native packages install docker-helper as a system service with AppArmor
-confinement. They install the binary, systemd unit, AppArmor profile, and
-man pages. On a live system the package postinstall loads or replaces the
-`docker-helper-system` AppArmor profile and runs daemon-reload; it does
-not start an inactive service. They do NOT run `docker-helper init`,
-generate config/token/state, or automatically enable/start a previously
-inactive service.
+```bash
+export DOCKER_HELPER_SESSION_TOKEN='dht_...'
+```
 
-After package installation, run init then enable/start:
+User mode does not require principals or credentials. The current user
+creates sessions directly.
+
+### Quick start: system mode
+
+Multi-user deployment. Requires root for initial setup.
+
+```bash
+sudo docker-helper init
+sudo systemctl enable --now docker-helper
+sudo docker-helper principal create --system alice
+sudo docker-helper credential create --system alice
+```
+
+The `credential create` command prints a token. On alice's machine (not
+as root):
+
+```bash
+docker-helper credential install
+docker-helper session create --system --workspace ~/myproject
+```
+
+`credential install` reads the token from stdin and stores it for
+subsequent use. After installation, `docker-helper --system` commands
+use the credential automatically.
+
+For more on principals, allowed roots, and AppArmor confinement, see
+below.
+
+### Package installation
+
+Install the package for your distribution:
 
 **Ubuntu / DEB:**
 
 ```bash
 sudo apt install ./docker-helper_*.deb
-sudo docker-helper init --allowed-root /srv/workspaces
-sudo systemctl enable --now docker-helper
 ```
 
 **openSUSE / RPM:**
 
 ```bash
 sudo zypper install ./docker-helper-*.rpm
-sudo docker-helper init --allowed-root /srv/workspaces
-sudo systemctl enable --now docker-helper
 ```
+
+The package installs the binary, systemd units (system and user), the
+AppArmor system profile, and man pages. It does NOT run `init`,
+generate configuration, or start the service.
 
 Package installation paths:
 
@@ -175,23 +193,45 @@ Package installation paths:
 | `/var/lib/docker-helper/docker-helper.db` | State database (created by init) |
 | `/run/docker-helper/docker-helper.sock` | Unix socket (created at runtime) |
 
-#### Native package removal
+#### Package removal
 
 **DEB:**
 
-- `apt remove docker-helper` stops/disables the service and removes packaged
-  assets; config and state are preserved.
-- `apt purge docker-helper` additionally removes docker-helper config, state,
-  and runtime data.
+- `apt remove docker-helper` stops/disables the service and removes
+  packaged assets; config and state are preserved.
+- `apt purge docker-helper` additionally removes config, state, and
+  runtime data.
 
 **RPM:**
 
 - Final erase stops/disables the service and removes packaged assets;
   persistent config and state are preserved.
-- Modified managed-roots follows native RPM `%config(noreplace)` semantics.
+- Modified managed-roots follows native RPM `%config(noreplace)`
+  semantics.
 
-Package repositories are not yet available; standalone native artifacts are
-published per release.
+### Release tarball
+
+Download the release tarball, extract it, and run the installer:
+
+```bash
+tar xzf docker-helper-*.tar.gz
+cd docker-helper-*
+./install.sh
+```
+
+The installer copies the binary to `~/.local/bin/docker-helper`,
+installs the systemd user unit, and optionally installs the agent
+skill. For non-interactive installation:
+
+```bash
+./install.sh --yes
+```
+
+For system mode from a tarball:
+
+```bash
+sudo ./install-system.sh --yes --allowed-root /srv/workspaces
+```
 
 ### Manual installation
 
@@ -1029,8 +1069,8 @@ The release tarball includes compressed man pages in the `man/` directory.
 Each release publishes:
 
 - `docker-helper-<version>-linux-amd64.tar.gz` — static binary + install scripts
-- one `.deb` — native DEB package (system mode)
-- one `.rpm` — native RPM package (system mode)
+- one `.deb` — native DEB package
+- one `.rpm` — native RPM package
 - `SHA256SUMS` — SHA-256 checksums for the three artifacts above
 
 Verify downloaded artifacts:
