@@ -129,10 +129,12 @@ mkdir -p ~/myproject
 docker-helper session create --workspace ~/myproject
 ```
 
-The `init` command prints a session token. Assign it:
+Export the `TOKEN` printed by `session create` (starts with `dht_...`):
 
 ```bash
 export DOCKER_HELPER_SESSION_TOKEN='dht_...'
+docker-helper pull alpine:3.24
+docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
 ```
 
 User mode does not require principals or credentials. The current user
@@ -156,6 +158,14 @@ as root):
 docker-helper credential install
 mkdir -p ~/myproject
 docker-helper session create --workspace ~/myproject
+```
+
+Export the `TOKEN` printed by `session create` (starts with `dht_...`):
+
+```bash
+export DOCKER_HELPER_SESSION_TOKEN='dht_...'
+docker-helper pull alpine:3.24
+docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
 ```
 
 `credential install` reads the token from stdin and stores it for

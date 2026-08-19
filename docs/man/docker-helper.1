@@ -31,6 +31,16 @@ docker-helper session create --workspace ~/myproject
 .fi
 .RE
 .PP
+Export the \fBTOKEN\fR printed by \fBsession create\fR (starts with \fIdht_...\fR):
+.PP
+.RS 4
+.nf
+export DOCKER_HELPER_SESSION_TOKEN='dht_...'
+docker-helper pull alpine:3.24
+docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
+.fi
+.RE
+.PP
 User mode does not require principals or credentials.
 .SS System mode
 Multi-user deployment. Requires root for initial setup.
@@ -51,6 +61,16 @@ On alice's machine (not as root):
 docker-helper credential install
 mkdir \-p ~/myproject
 docker-helper session create --workspace ~/myproject
+.fi
+.RE
+.PP
+Export the \fBTOKEN\fR printed by \fBsession create\fR (starts with \fIdht_...\fR):
+.PP
+.RS 4
+.nf
+export DOCKER_HELPER_SESSION_TOKEN='dht_...'
+docker-helper pull alpine:3.24
+docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
 .fi
 .RE
 .PP
