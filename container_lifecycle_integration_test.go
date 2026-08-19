@@ -311,7 +311,7 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 
 	// Create a readiness marker directory inside the session workspace
 	// so it can be bind-mounted into the container.
-	readyDir := filepath.Join(app.Config.AllowedRoot, "test_ready")
+	readyDir := filepath.Join(result.Session.Workspace, "test_ready")
 	if err := os.MkdirAll(readyDir, 0755); err != nil {
 		t.Fatalf("cannot create ready dir: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestContainerLifecycleForcedCancel(t *testing.T) {
 
 	// Create a readiness marker directory inside the session workspace
 	// so it can be bind-mounted into the container.
-	readyDir := filepath.Join(app.Config.AllowedRoot, "test_cancel_ready")
+	readyDir := filepath.Join(result.Session.Workspace, "test_cancel_ready")
 	if err := os.MkdirAll(readyDir, 0755); err != nil {
 		t.Fatalf("cannot create ready dir: %v", err)
 	}
