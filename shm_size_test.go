@@ -100,16 +100,13 @@ func TestValidateShmSizeOverLimit(t *testing.T) {
 }
 
 func TestValidateShmSizeZero(t *testing.T) {
-	_, err := validateShmSize("0")
-	if err == nil {
-		t.Error("expected error for 0")
-	}
-}
-
-func TestValidateShmSizeZeroWithUnit(t *testing.T) {
-	_, err := validateShmSize("0m")
-	if err == nil {
-		t.Error("expected error for 0m")
+	for _, tc := range []string{"0", "0m"} {
+		t.Run(tc, func(t *testing.T) {
+			_, err := validateShmSize(tc)
+			if err == nil {
+				t.Errorf("expected error for %q", tc)
+			}
+		})
 	}
 }
 

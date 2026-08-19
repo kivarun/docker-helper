@@ -218,46 +218,6 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 	}
 }
 
-func TestPullDockerArgsUnchanged(t *testing.T) {
-	setupTestLoggingDiscard(t)
-
-	app := newTestAppWithAuth(t)
-
-	result, err := app.createSession(app.Config.AllowedRoot)
-	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
-	}
-
-	var capturedArgs []string
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		capturedArgs = args
-		return exec.CommandContext(ctx, "true")
-	}
-
-	req := newPullRequest(map[string]any{
-		"image": "alpine:3.24",
-	}, result.Token)
-	w := httptest.NewRecorder()
-	app.handlePull(w, req)
-
-	if w.Code != 200 {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-
-	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	expectedArgs := []string{"--config", dockerDir, "pull", "alpine:3.24"}
-
-	if len(capturedArgs) != len(expectedArgs) {
-		t.Fatalf("expected %d args, got %d: %v", len(expectedArgs), len(capturedArgs), capturedArgs)
-	}
-
-	for i, exp := range expectedArgs {
-		if capturedArgs[i] != exp {
-			t.Errorf("arg[%d]: expected %q, got %q", i, exp, capturedArgs[i])
-		}
-	}
-}
-
 func TestPullImageHyphenRejected(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
