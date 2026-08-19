@@ -92,6 +92,9 @@ Show principal details.
 .B docker-helper principal set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER FIELD VALUE
 Modify principal settings.
 .TP
+.B docker-helper principal delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
+Delete a principal and all its sessions, credentials, and allowed roots.
+.TP
 .B docker-helper principal allowed-root add [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Add an allowed root for a principal.
 .TP

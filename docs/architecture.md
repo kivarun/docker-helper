@@ -184,6 +184,14 @@ POST /principals/{username}/credentials  (admin token)
     ├── stores SHA-256 hash in database
     └── returns credential + token (one-time)
     │
+DELETE /principals/{username}  (admin token)
+    │
+    ├── collects session IDs for runtime cleanup
+    ├── deletes sessions (no FK cascade on sessions.principal_id)
+    ├── deletes principal (credentials/roots via FK ON DELETE CASCADE)
+    ├── commits transaction
+    └── best-effort cleanup of session runtime directories
+    │
 POST /sessions  (launcher credential)
     │
     ├── validates credential
@@ -198,6 +206,24 @@ POST /build or POST /run  (session token)
     ├── resolves principal_id from session
     ├── execution identity = principal.uid:principal.gid
     └── audit record contains principal_name
+```
+
+### Principal lifecycle
+
+```
+PATCH /principals/{username}  (admin token, body: {"enabled": false})
+    │
+    ├── collects session IDs for runtime cleanup
+    ├── deletes all sessions for the principal (no FK cascade)
+    ├── sets principal.enabled = 0
+    ├── commits transaction
+    └── best-effort cleanup of session runtime directories
+    │
+    Subsequent session token lookup:
+    │
+    ├── findSessionByToken checks AND (s.principal_id IS NULL OR p.enabled = 1)
+    ├── principal-owned sessions of disabled principal are rejected
+    └── legacy sessions (NULL principal_id) are unaffected
 ```
 
 ### Shared session capability lifecycle
@@ -368,7 +394,7 @@ for full syntax:
 - `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
   `unset`.
 - `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
-  `set`, `allowed-root`.
+  `set`, `delete`, `allowed-root`.
 - `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
   `revoke`.
 - `admin` — Administrative operations. Subcommand: `token rotate` (rotate
@@ -1334,6 +1360,48 @@ Result codes:
 | `not_found` | no session with the given ID |
 | `database_error` | SQLite failure during delete |
 | `unknown_error` | unexpected error not classified above |
+
+#### principal.delete
+
+Emitted for every `DELETE /principals/{username}` request after authentication.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `principal_name` | string | principal username from the URL |
+| `result` | string | outcome code |
+| `duration` | string | request wall-clock time |
+
+Result codes:
+
+| Code | Condition |
+|------|-----------|
+| `success` | principal deleted |
+| `missing_username` | username is empty in the URL |
+| `not_found` | no principal with the given username |
+| `database_error` | SQLite failure during delete |
+
+#### principal.enabled_change
+
+Emitted for every `PATCH /principals/{username}` request that changes the
+`enabled` field, after authentication.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `principal_name` | string | principal username from the URL |
+| `result` | string | outcome code |
+| `duration` | string | request wall-clock time |
+
+Result codes:
+
+| Code | Condition |
+|------|-----------|
+| `success` | enabled changed |
+| `unchanged` | enabled already at requested value |
+| `missing_username` | username is empty in the URL |
+| `missing_enabled` | enabled field not present in request body |
+| `invalid_json` | request body is not valid JSON |
+| `not_found` | no principal with the given username |
+| `error` | database failure during update |
 
 #### run.start
 

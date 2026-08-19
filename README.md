@@ -934,7 +934,24 @@ they may remove it before provisioning AppArmor:
 ```bash
 sudo docker-helper principal allowed-root remove \
     --system alice /home/alice
+
+To remove a principal and all associated sessions, credentials, and allowed
+roots:
+
+```bash
+sudo docker-helper principal delete --system alice
 ```
+
+The delete operation is transactional: sessions are deleted first (not relying
+on FK cascade), then the principal record is removed (credentials and allowed
+roots are cleaned up via FK cascade). Session runtime directories are cleaned
+up best-effort after the transaction commits.
+
+Disabling a principal (`principal set alice enabled false`) has a narrower
+effect: it deletes all active sessions and rejects future authentication for
+any session token belonging to that principal. The principal record,
+credentials, and allowed roots are preserved and can be restored by re-enabling
+the principal.
 
 ### Principal: install the credential
 
