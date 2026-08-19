@@ -24,29 +24,33 @@ var errMockDeleteDB = errors.New("mock_delete_db_error")
 
 // --- DB wrapper for controlled error injection ---
 
-// failExecDriver wraps the real sqlite3 driver and fails Exec with a given error.
-type failExecDriver struct {
-	fail error // non-nil → ExecContext returns this error
+// failDriver wraps the real sqlite3 driver and optionally fails ExecContext
+// and/or QueryContext with given errors.
+type failDriver struct {
+	failExec  error // non-nil → ExecContext returns this error
+	failQuery error // non-nil → QueryContext returns this error
 }
 
-func (d *failExecDriver) Open(dsn string) (driver.Conn, error) {
+func (d *failDriver) Open(dsn string) (driver.Conn, error) {
 	realConn, db, err := openRealSQLiteConn(dsn)
 	if err != nil {
 		return nil, err
 	}
-	return &failExecConn{Conn: realConn, fail: d.fail, db: db}, nil
+	return &failConn{Conn: realConn, failExec: d.failExec, failQuery: d.failQuery, db: db}, nil
 }
 
-// failExecConn wraps a real sqlite3 connection; ExecContext may fail.
-type failExecConn struct {
+// failConn wraps a real sqlite3 connection; ExecContext and/or QueryContext
+// may fail depending on the driver configuration.
+type failConn struct {
 	driver.Conn
-	fail error
-	db   *sql.DB // kept open so the underlying conn stays valid
+	failExec  error
+	failQuery error
+	db        *sql.DB // kept open so the underlying conn stays valid
 }
 
-func (c *failExecConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	if c.fail != nil {
-		return nil, c.fail
+func (c *failConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if c.failExec != nil {
+		return nil, c.failExec
 	}
 	if execer, ok := c.Conn.(driver.ExecerContext); ok {
 		return execer.ExecContext(ctx, query, args)
@@ -54,7 +58,17 @@ func (c *failExecConn) ExecContext(ctx context.Context, query string, args []dri
 	return nil, driver.ErrSkip
 }
 
-func (c *failExecConn) Close() error {
+func (c *failConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.failQuery != nil {
+		return nil, c.failQuery
+	}
+	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
+		return queryer.QueryContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func (c *failConn) Close() error {
 	c.db.Close()
 	return c.Conn.Close()
 }
@@ -101,7 +115,7 @@ func openRealSQLiteConn(dsn string) (driver.Conn, *sql.DB, error) {
 func newFailExecDB(t *testing.T, dbPath string, failErr error) *sql.DB {
 	t.Helper()
 	name := nextMockDriverName("fe")
-	sql.Register(name, &failExecDriver{fail: failErr})
+	sql.Register(name, &failDriver{failExec: failErr})
 
 	db, err := sql.Open(name, dbPath)
 	if err != nil {

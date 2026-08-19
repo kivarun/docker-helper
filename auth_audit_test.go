@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,45 +19,11 @@ import (
 
 var errMockQueryFail = errors.New("mock_query_injection_error_for_testing")
 
-// --- failQueryDriver: wraps sqlite3 and fails QueryContext ---
-
-type failQueryDriver struct {
-	fail error
-}
-
-func (d *failQueryDriver) Open(dsn string) (driver.Conn, error) {
-	realConn, db, err := openRealSQLiteConn(dsn)
-	if err != nil {
-		return nil, err
-	}
-	return &failQueryConn{Conn: realConn, fail: d.fail, db: db}, nil
-}
-
-type failQueryConn struct {
-	driver.Conn
-	fail error
-	db   *sql.DB
-}
-
-func (c *failQueryConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if c.fail != nil {
-		return nil, c.fail
-	}
-	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
-		return queryer.QueryContext(ctx, query, args)
-	}
-	return nil, driver.ErrSkip
-}
-
-func (c *failQueryConn) Close() error {
-	c.db.Close()
-	return c.Conn.Close()
-}
-
+// newFailQueryDB opens the same SQLite file with a driver that fails QueryContext.
 func newFailQueryDB(t *testing.T, dbPath string, failErr error) *sql.DB {
 	t.Helper()
 	name := nextMockDriverName("fq")
-	sql.Register(name, &failQueryDriver{fail: failErr})
+	sql.Register(name, &failDriver{failQuery: failErr})
 
 	db, err := sql.Open(name, dbPath)
 	if err != nil {

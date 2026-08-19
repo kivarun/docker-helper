@@ -345,7 +345,7 @@ func TestAuditDockerError(t *testing.T) {
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", "exit 7")
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' 'docker not found'; exit 125")
 	}
 
 	req := newRunRequest(map[string]any{
