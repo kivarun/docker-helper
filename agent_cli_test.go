@@ -1065,8 +1065,14 @@ func TestSignalNoOrphanGoroutine(t *testing.T) {
 
 	<-done
 
-	// Give a moment for any orphan goroutine to make a request.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for any orphan request with a bounded observation window.
+	observeDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(observeDeadline) {
+		if atomic.LoadInt32(&requestAfterCancel) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	if atomic.LoadInt32(&requestAfterCancel) > 0 {
 		t.Errorf("expected no HTTP requests after signal, got %d", atomic.LoadInt32(&requestAfterCancel))

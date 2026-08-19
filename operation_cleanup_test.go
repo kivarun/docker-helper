@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -106,6 +107,7 @@ func TestCleanupConcurrency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
+	var cleanerCount int64
 
 	// Spawner: continuously create and complete operations.
 	wg.Add(1)
@@ -143,6 +145,7 @@ func TestCleanupConcurrency(t *testing.T) {
 			default:
 			}
 			reg.cleanup(50*time.Millisecond, 50)
+			atomic.AddInt64(&cleanerCount, 1)
 		}
 	}()
 
@@ -150,5 +153,7 @@ func TestCleanupConcurrency(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	// No panic, no deadlock, no race.
+	if cleanerCount == 0 {
+		t.Error("cleaner goroutine did not execute")
+	}
 }

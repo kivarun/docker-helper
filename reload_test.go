@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1144,6 +1145,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 	// Concurrently do logging, audit writes, and reloads
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	var logCount, auditCount, reloadCount int64
 
 	// Goroutine 1: continuous logging
 	wg.Add(1)
@@ -1157,6 +1159,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 				l := logging.snapshotLogger()
 				if l != nil {
 					l.Info("concurrent log")
+					atomic.AddInt64(&logCount, 1)
 				}
 			}
 		}
@@ -1172,6 +1175,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 				return
 			default:
 				writeAudit(auditRecord{Event: "concurrent.audit"})
+				atomic.AddInt64(&auditCount, 1)
 			}
 		}
 	}()
@@ -1200,6 +1204,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 				if err == nil {
 					resp.Body.Close()
 				}
+				atomic.AddInt64(&reloadCount, 1)
 				time.Sleep(time.Millisecond)
 			}
 		}
@@ -1209,6 +1214,17 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+
+	// Prove all three goroutines executed concurrently.
+	if atomic.LoadInt64(&logCount) == 0 {
+		t.Error("logging goroutine did not execute")
+	}
+	if atomic.LoadInt64(&auditCount) == 0 {
+		t.Error("audit goroutine did not execute")
+	}
+	if atomic.LoadInt64(&reloadCount) == 0 {
+		t.Error("reload goroutine did not execute")
+	}
 }
 
 // TestReloadInvalidConfigNoLeak verifies that when loadConfig fails during
