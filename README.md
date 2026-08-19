@@ -546,7 +546,7 @@ Assign the printed token to an environment variable for use in later
 examples:
 
 ```bash
-export SESSION_TOKEN='dht_...'
+export DOCKER_HELPER_SESSION_TOKEN='dht_...'
 ```
 
 ### List sessions
@@ -588,9 +588,8 @@ support explicit endpoint selection:
 --token-file PATH     token file path
 ```
 
-Default behavior depends on the effective UID:
-- non-root: user daemon (Unix socket)
-- root: system daemon (Unix socket)
+Default behavior: check user socket existence, fall back to system
+socket.
 
 `--endpoint` requires `--token-file`. `--system` and `--endpoint` are
 mutually exclusive. There is no fallback: if the chosen endpoint is

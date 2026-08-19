@@ -171,7 +171,7 @@ List credentials for a principal.
 Revoke a credential.
 .TP
 .B docker-helper credential install [\-\-force]
-Install a credential token for use with docker-helper \-\-system.
+Install a credential token for system-mode authentication.
 Reads the token from stdin (hidden input on terminal) and stores it
 at ${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token
 with mode 0600. Must not be run as root.
@@ -223,9 +223,6 @@ For reload, session, principal, and credential commands, select the target daemo
 \fB\-\-system\fR may use \fB\-\-token-file\fR for authentication.
 Without explicit endpoint selection, a deterministic default is used:
 user socket first, then system socket as fallback.
-.PP
-Local system mode uses Unix socket + loopback HTTP (127.0.0.1:52375 default).
-No remote or TLS support in Release 2.
 .SH EXIT STATUS
 .TP
 .B 0
