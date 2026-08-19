@@ -292,6 +292,15 @@ func TestInitUserModeStoresCanonicalAllowedRoot(t *testing.T) {
 	EffectiveUID = func() int { return 1000 }
 	defer func() { EffectiveUID = origUID }()
 
+	// No system daemon, Docker accessible → standalone user init.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	defer func() { systemSocketExists = origSocket }()
+
+	origDockerAccess := checkDockerAccess
+	checkDockerAccess = func() error { return nil }
+	defer func() { checkDockerAccess = origDockerAccess }()
+
 	base := testAllowedRootDir(t)
 	target := filepath.Join(base, "target")
 	if err := os.MkdirAll(target, 0755); err != nil {

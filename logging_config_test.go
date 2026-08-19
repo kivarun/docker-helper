@@ -276,6 +276,15 @@ func TestInitOmitsAuditEnabled(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
 
+	// No system daemon, Docker accessible → standalone user init.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	defer func() { systemSocketExists = origSocket }()
+
+	origDockerAccess := checkDockerAccess
+	checkDockerAccess = func() error { return nil }
+	defer func() { checkDockerAccess = origDockerAccess }()
+
 	if err := runInit(dir, io.Discard, io.Discard); err != nil {
 		t.Fatalf("runInit: %v", err)
 	}

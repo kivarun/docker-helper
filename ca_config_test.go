@@ -319,10 +319,18 @@ func TestCAInitNoInjectionDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// No system daemon, Docker accessible → standalone user init.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	defer func() { systemSocketExists = origSocket }()
+
+	origDockerAccess := checkDockerAccess
+	checkDockerAccess = func() error { return nil }
+	defer func() { checkDockerAccess = origDockerAccess }()
+
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--allowed-root", allowedRoot}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("init exited %d, stderr: %s", code, stderr.String())
+	if err := runInit(allowedRoot, &stdout, &stderr); err != nil {
+		t.Fatalf("init failed: %v, stderr: %s", err, stderr.String())
 	}
 
 	data, err := os.ReadFile(configPath)

@@ -72,6 +72,24 @@ func validateCredentialToken(token string) error {
 	return nil
 }
 
+// verifyCredentialToken checks if a credential token is already installed.
+// Returns nil if no credential exists or if the token matches the installed one.
+// Returns an error if a different credential is already installed.
+func verifyCredentialToken(token string) error {
+	credPath, err := credentialPath()
+	if err != nil {
+		return nil
+	}
+	existing, err := os.ReadFile(credPath)
+	if err != nil {
+		return nil // no existing credential
+	}
+	if strings.TrimSpace(string(existing)) == token {
+		return nil // same token, OK
+	}
+	return fmt.Errorf("different credential already installed at %s: use --force to replace", credPath)
+}
+
 // readTokenFromReader reads a single token line from the reader.
 // Trims trailing newline/carriage return.
 func readTokenFromReader(r io.Reader) (string, error) {

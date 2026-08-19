@@ -407,15 +407,23 @@ func TestInitUserModeNoAppArmorCheck(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
+	// No system daemon, Docker accessible → standalone user init.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	defer func() { systemSocketExists = origSocket }()
+
+	origDockerAccess := checkDockerAccess
+	checkDockerAccess = func() error { return nil }
+	defer func() { checkDockerAccess = origDockerAccess }()
+
 	rootDir := testAllowedRootDir(t)
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "config.json")
 	getConfigPathFunc = func() string { return configPath }
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--allowed-root", rootDir}, &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
+	if err := runInit(rootDir, &stdout, &stderr); err != nil {
+		t.Errorf("runInit failed: %v", err)
 	}
 	if strings.Contains(stderr.String(), "AppArmor LSM") {
 		t.Errorf("user mode init should not check AppArmor LSM, got: %s", stderr.String())

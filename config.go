@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // DeploymentMode represents the deployment mode of the daemon.
@@ -771,7 +773,15 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	mode := resolveDeploymentMode()
 
 	if mode == ModeUser {
-		// User mode: no AppArmor integration.
+		// User mode: check if system daemon is running.
+		if systemSocketExists() {
+			return initUserWithSystemDaemon(stdout, stderr)
+		}
+		// No system daemon: check Docker access.
+		if err := checkDockerAccess(); err != nil {
+			return fmt.Errorf("no system daemon and cannot connect to Docker daemon: %w", err)
+		}
+		// Docker accessible: standalone user init with admin token.
 		_, err := initCore(allowedRoot, stdout, stderr)
 		return err
 	}
@@ -788,6 +798,76 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 			return err
 		},
 	)
+}
+
+// checkDockerAccess checks if the Docker daemon is reachable by connecting
+// to its Unix socket directly. Returns nil if Docker is accessible.
+// Can be replaced in tests.
+var checkDockerAccess = func() error {
+	paths := []string{"/run/docker.sock", "/var/run/docker.sock"}
+	if host := os.Getenv("DOCKER_HOST"); strings.HasPrefix(host, "unix://") {
+		paths = []string{strings.TrimPrefix(host, "unix://")}
+	}
+	for _, p := range paths {
+		conn, err := net.DialTimeout("unix", p, time.Second)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+	}
+	return errors.New("cannot connect to Docker daemon")
+}
+
+// initUserWithSystemDaemon prompts for a credential token and installs it
+// for use with the system daemon. This is used when the user runs init
+// but the system daemon is already running.
+func initUserWithSystemDaemon(stdout, stderr io.Writer) error {
+	fmt.Fprintln(stderr, "System daemon detected.")
+	fmt.Fprintln(stderr, "Enter credential token provided by the admin:")
+
+	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
+	var token string
+	var err error
+	if isTerminal {
+		token, err = readTokenHidden("Credential token: ", stderr)
+	} else {
+		token, err = readTokenFromReader(os.Stdin)
+	}
+	if err != nil {
+		return err
+	}
+
+	if err := validateCredentialToken(token); err != nil {
+		return err
+	}
+
+	// Check if same token is already installed.
+	if verifyCredentialToken(token) == nil {
+		fmt.Fprintln(stdout, "Credential already installed.")
+		return nil
+	}
+
+	// Install credential.
+	credPath, err := installCredential(credentialInstallConfig{
+		reader:     strings.NewReader(token),
+		writer:     safeWriteCredential,
+		uid:        EffectiveUID,
+		isTerminal: func() bool { return isTerminal },
+		readPassword: func() (string, error) {
+			return token, nil
+		},
+		force: false,
+	})
+	if err != nil {
+		if errors.Is(err, ErrCredentialAlreadyExists) {
+			fmt.Fprintln(stderr, "Use --force to replace the existing credential.")
+		}
+		return err
+	}
+
+	fmt.Fprintln(stdout, "Credential installed successfully.")
+	fmt.Fprintf(stdout, "Stored at: %s\n", credPath)
+	return nil
 }
 
 // appArmorAddRoot and appArmorRemoveRoot are injectable production seams
