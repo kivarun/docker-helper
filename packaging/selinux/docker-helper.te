@@ -32,6 +32,7 @@ require {
 	class dir { getattr search read open write add_name remove_name };
 	class sock_file { create setattr unlink };
 	class tcp_socket { create setopt bind node_bind listen accept getattr read write };
+	class process { transition };
 }
 
 # Domain definition
@@ -56,6 +57,9 @@ allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entr
 
 # systemd (init_t) needs to execute the binary (from live AVC evidence)
 allow init_t docker_helper_exec_t:file { read open execute };
+
+# systemd (init_t) -> docker_helper_t explicit transition (from live AVC evidence)
+allow init_t docker_helper_t:process { transition };
 
 # Config (from live AVC evidence)
 allow docker_helper_t docker_helper_config_t:dir { search };
