@@ -74,7 +74,7 @@ allow docker_helper_t docker_helper_config_t:file { read open getattr };
 
 # Runtime (from live AVC evidence)
 allow docker_helper_t docker_helper_runtime_t:dir { getattr search write add_name remove_name };
-allow docker_helper_t docker_helper_runtime_t:file { read write open lock };
+allow docker_helper_t docker_helper_runtime_t:file { create read write open lock };
 allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
 
 # State (from live AVC evidence)
