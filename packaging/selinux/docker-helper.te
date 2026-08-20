@@ -22,6 +22,8 @@ require {
 
 	role unconfined_r;
 
+	type security_t;
+
 	class file { read open execute getattr entrypoint create write setattr lock unlink };
 	class dir { getattr search read open write add_name remove_name };
 	class sock_file { create setattr unlink };
@@ -56,3 +58,6 @@ allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink 
 # State (from live AVC evidence)
 allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name };
 allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink };
+
+# /sys/fs/selinux/enforce (from live AVC evidence)
+allow docker_helper_t security_t:file { read };
