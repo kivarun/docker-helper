@@ -29,7 +29,7 @@ require {
 	role system_r;
 
 	class file { read open execute getattr entrypoint create write setattr lock unlink };
-	class dir { getattr search read open write add_name remove_name };
+	class dir { getattr search read open write add_name remove_name create };
 	class sock_file { create setattr unlink };
 	class tcp_socket { create setopt bind node_bind listen accept getattr read write };
 	class process { transition };
@@ -60,6 +60,9 @@ allow init_t docker_helper_exec_t:file { read open execute };
 
 # systemd (init_t) -> docker_helper_t explicit transition (from live AVC evidence)
 allow init_t docker_helper_t:process { transition };
+
+# systemd (init_t) needs to create RuntimeDirectory (from live AVC evidence)
+allow init_t docker_helper_runtime_t:dir { create };
 
 # Config (from live AVC evidence)
 allow docker_helper_t docker_helper_config_t:dir { search };
