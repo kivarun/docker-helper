@@ -20,8 +20,6 @@ require {
 	attribute file_type;
 	attribute exec_type;
 
-	role unconfined_r;
-
 	type security_t;
 	type node_t;
 	type init_t;
@@ -38,9 +36,6 @@ require {
 
 # Domain definition
 type docker_helper_t, domain;
-
-# Allow unconfined_r role to transition into docker_helper_t (live-test only)
-role unconfined_r types docker_helper_t;
 
 # Allow system_r role to transition into docker_helper_t (systemd integration)
 role system_r types docker_helper_t;
