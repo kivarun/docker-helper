@@ -150,10 +150,10 @@ func TestRequireAppArmorConfinementWrongProfile(t *testing.T) {
 
 // --- Integration: serve preflight ---
 
-// TestServeSystemModePreflightInactive verifies that the AppArmor preflight
+// TestServeSystemModePreflightInactive verifies that the MAC backend preflight
 // runs before loadConfig. It uses a nonexistent config path: if loadConfig
-// were called first, the error would be about missing config, not AppArmor.
-// The "not active" error proves preflight ran before loadConfig.
+// were called first, the error would be about missing config, not MAC backend.
+// The "MAC backend" error proves preflight ran before loadConfig.
 func TestServeSystemModePreflightInactive(t *testing.T) {
 	origActive := apparmorLSMActive
 	apparmorLSMActive = func() (bool, error) { return false, nil }
@@ -168,7 +168,7 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 	}()
 
 	// Nonexistent config path: if loadConfig ran before preflight, the error
-	// would be "configuration not found", not "not active".
+	// would be "configuration not found", not "MAC backend".
 	getConfigPathFunc = func() string { return "/nonexistent/docker-helper/config.json" }
 
 	var stdout, stderr bytes.Buffer
@@ -177,11 +177,11 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
 	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "not active") {
-		t.Errorf("expected 'not active' in stderr, got: %s", stderrStr)
+	if !strings.Contains(stderrStr, "MAC backend") {
+		t.Errorf("expected 'MAC backend' in stderr, got: %s", stderrStr)
 	}
 	if strings.Contains(stderrStr, "configuration not found") {
-		t.Error("loadConfig must not be called before AppArmor preflight (got config error instead of AppArmor error)")
+		t.Error("loadConfig must not be called before MAC preflight (got config error instead of MAC backend error)")
 	}
 }
 
@@ -289,8 +289,8 @@ func TestInitSystemModePreflightInactive(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	if !strings.Contains(stderr.String(), "not active") {
-		t.Errorf("expected 'not active' in stderr, got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "MAC backend") {
+		t.Errorf("expected 'MAC backend' in stderr, got: %s", stderr.String())
 	}
 }
 

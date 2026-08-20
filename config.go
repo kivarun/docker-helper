@@ -786,9 +786,9 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	// System mode: integrate with AppArmor.
-	if err := requireAppArmorActive(); err != nil {
-		return fmt.Errorf("system mode requires active AppArmor LSM: %w", err)
+	// System mode: require an active MAC backend.
+	if err := requireMACBackend(); err != nil {
+		return fmt.Errorf("system mode requires an active MAC backend: %w", err)
 	}
 	return initSystemWithAppArmor(allowedRoot, stdout, stderr,
 		getAppArmorAddRoot(),

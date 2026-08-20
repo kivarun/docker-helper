@@ -217,11 +217,11 @@ func runServe(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
 	initLoggers(stderr, stdout, slog.LevelInfo, false)
 
-	// System mode requires AppArmor confinement. Check before loadConfig()
+	// System mode requires MAC confinement. Check before loadConfig()
 	// to avoid side effects (runtime directory creation) when confinement
 	// is not satisfied.
 	if resolveDeploymentMode() == ModeSystem {
-		if err := requireAppArmorConfinement(); err != nil {
+		if err := requireMACConfinement(); err != nil {
 			serveStartupError(err, "")
 			return err
 		}
