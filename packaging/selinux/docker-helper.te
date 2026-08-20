@@ -65,6 +65,9 @@ allow init_t docker_helper_config_t:dir { create write add_name remove_name sear
 # systemd needs to execute the binary
 allow init_t docker_helper_exec_t:file { read open execute getattr execute_no_trans };
 
+# systemd needs to read config files
+allow init_t docker_helper_config_t:file { read open getattr };
+
 # systemd needs to set its own SELinux context (for SELinuxContext= directive)
 allow init_t self:process setcurrent;
 
