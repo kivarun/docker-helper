@@ -53,6 +53,6 @@ allow init_t docker_helper_state_t:dir { create write add_name remove_name searc
 allow init_t docker_helper_config_t:dir { create write add_name remove_name search open getattr setattr rmdir };
 
 # systemd needs to execute the binary (domain transition via entrypoint)
-allow init_t docker_helper_exec_t:file { read open execute getattr entrypoint };
+allow init_t docker_helper_exec_t:file { read open execute getattr execute_no_trans };
 allow init_t docker_helper_t:process transition;
 allow init_t self:process setcurrent;
