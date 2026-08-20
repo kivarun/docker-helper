@@ -253,7 +253,7 @@ func TestCAPreflightAutoOpenSSLInvalidOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d", code)
+		t.Fatalf("set path: expected 0, got %d stdout: %q stderr: %q", code, stdout.String(), stderr.String())
 	}
 
 	// Save original config bytes.
@@ -293,13 +293,13 @@ func TestCAPreflightReplacePathInvalidWhileAuto(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d", code)
+		t.Fatalf("set path: expected 0, got %d stdout: %q stderr: %q", code, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
 	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
+		t.Fatalf("set auto: expected 0, got %d stdout: %q stderr: %q", code, stdout.String(), stderr.String())
 	}
 
 	// Save original config bytes after setup.
@@ -433,13 +433,13 @@ func TestCAPreflightUnchangedWithBrokenCA(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d", code)
+		t.Fatalf("set path: expected 0, got %d stdout: %q stderr: %q", code, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
 	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
+		t.Fatalf("set auto: expected 0, got %d stdout: %q stderr: %q", code, stdout.String(), stderr.String())
 	}
 
 	// Save original config bytes.

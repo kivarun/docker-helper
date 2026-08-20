@@ -917,5 +917,6 @@ func isDaemonNotRunning(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "no such file") ||
-		strings.Contains(msg, "no such file or directory")
+		strings.Contains(msg, "no such file or directory") ||
+		strings.Contains(msg, "invalid argument")
 }
