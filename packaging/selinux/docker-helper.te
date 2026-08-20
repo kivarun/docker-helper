@@ -22,7 +22,9 @@ require {
 
 	role unconfined_r;
 
-	class file { read open execute getattr entrypoint };
+	class file { read open execute getattr entrypoint create write setattr lock unlink };
+	class dir { getattr search read open write add_name remove_name };
+	class sock_file { create setattr unlink };
 }
 
 # Domain definition
@@ -41,3 +43,16 @@ type docker_helper_runtime_t, file_type;
 
 # Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
+
+# Config (from live AVC evidence)
+allow docker_helper_t docker_helper_config_t:dir { search };
+allow docker_helper_t docker_helper_config_t:file { read open getattr };
+
+# Runtime (from live AVC evidence)
+allow docker_helper_t docker_helper_runtime_t:dir { getattr search write add_name remove_name };
+allow docker_helper_t docker_helper_runtime_t:file { read write open lock };
+allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
+
+# State (from live AVC evidence)
+allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name };
+allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink };
