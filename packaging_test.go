@@ -1283,10 +1283,16 @@ func TestSystemUnitFile(t *testing.T) {
 	if !strings.Contains(content, "TimeoutStopSec=") {
 		t.Error("unit must contain bounded TimeoutStopSec")
 	}
-	// ConditionSecurity=apparmor prevents systemd from starting the unit
-	// when AppArmor LSM is not active, providing a first-layer guard.
-	if !strings.Contains(content, "ConditionSecurity=apparmor") {
-		t.Error("system unit must contain ConditionSecurity=apparmor")
+	// Dual-LSM contract: ConditionSecurity=|apparmor and ConditionSecurity=|selinux
+	// provide OR semantics — unit starts when either backend is active.
+	if !strings.Contains(content, "ConditionSecurity=|apparmor") {
+		t.Error("system unit must contain ConditionSecurity=|apparmor")
+	}
+	if !strings.Contains(content, "ConditionSecurity=|selinux") {
+		t.Error("system unit must contain ConditionSecurity=|selinux")
+	}
+	if !strings.Contains(content, "SELinuxContext=system_u:system_r:docker_helper_t:s0") {
+		t.Error("system unit must contain SELinuxContext=system_u:system_r:docker_helper_t:s0")
 	}
 	// RestrictRealtime must be present; RestrictRTP is invalid.
 	if !strings.Contains(content, "RestrictRealtime=true") {
