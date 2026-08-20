@@ -32,6 +32,11 @@ func setupConfigTestWithData(t *testing.T, data []byte) string {
 	writeTestTokenFile(t, filepath.Join(dir, "admin.token"), "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 
+	// Isolate from host XDG_RUNTIME_DIR so tests cannot reach a real
+	// user-mode docker-helper socket. Tests that need XDG_RUNTIME_DIR
+	// empty must set it AFTER calling this helper.
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+
 	// Prevent tests from reaching a real system daemon.
 	origSocket := systemSocketExists
 	systemSocketExists = func() bool { return false }
@@ -732,8 +737,8 @@ func TestConfigShowRuntimeDependentNoRuntimeDir(t *testing.T) {
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
 }`
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	setupConfigTestWithData(t, []byte(cfg))
+	t.Setenv("XDG_RUNTIME_DIR", "")
 
 	for _, field := range []string{"runtime_dir", "socket_path", "lock_path"} {
 		t.Run(field, func(t *testing.T) {
@@ -756,8 +761,8 @@ func TestConfigShowRuntimeDependentWithRuntimeDir(t *testing.T) {
   "session_ttl": "12h"
 }`
 	runtimeDir := "/tmp/test-runtime"
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	setupConfigTestWithData(t, []byte(cfg))
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 
 	stdout, _ := runConfigCLI(t, 0, "config", "show", "runtime_dir")
 	if stdout != filepath.Join(runtimeDir, "docker-helper")+"\n" {
@@ -776,8 +781,8 @@ func TestConfigShowAllNoRuntimeDir(t *testing.T) {
   "allowed_root": "/home/user/work",
   "session_ttl": "12h"
 }`
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	setupConfigTestWithData(t, []byte(cfg))
+	t.Setenv("XDG_RUNTIME_DIR", "")
 	stdout, _ := runConfigCLI(t, 0, "config", "show")
 	var result map[string]any
 	json.Unmarshal([]byte(stdout), &result)
@@ -799,8 +804,8 @@ func TestConfigShowAllWithRuntimeDir(t *testing.T) {
   "session_ttl": "12h"
 }`
 	runtimeDir := "/tmp/test-runtime"
-	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	setupConfigTestWithData(t, []byte(cfg))
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	stdout, _ := runConfigCLI(t, 0, "config", "show")
 	var result map[string]any
 	json.Unmarshal([]byte(stdout), &result)
