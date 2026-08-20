@@ -142,10 +142,6 @@ func requireMACBackend() error {
 // requireMACConfinement checks that the process is confined under the
 // active MAC backend. Returns nil if properly confined, or a descriptive
 // error otherwise.
-//
-// During live SELinux policy development, set DH_SELINUX_TEST=1 to skip
-// the SELinux confinement check (the process may run as init_t while
-// AVCs are being collected).
 func requireMACConfinement() error {
 	backend, err := detectLSM()
 	if err != nil {
@@ -159,9 +155,6 @@ func requireMACConfinement() error {
 	case LSMAppArmor:
 		return requireAppArmorConfinement()
 	case LSMSelinux:
-		if os.Getenv("DH_SELINUX_TEST") == "1" {
-			return nil // skip confinement check during live policy development
-		}
 		return requireSELinuxConfinement()
 	default:
 		return fmt.Errorf("unknown MAC backend: %s", backend)

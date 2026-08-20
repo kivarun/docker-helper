@@ -5,8 +5,7 @@ StartLimitIntervalSec=60s
 StartLimitBurst=3
 After=network-online.target docker.socket apparmor.service
 Wants=network-online.target
-ConditionSecurity=|apparmor
-ConditionSecurity=|selinux
+ConditionSecurity=apparmor
 
 [Service]
 Type=exec
@@ -25,9 +24,6 @@ RuntimeDirectory=docker-helper
 RuntimeDirectoryMode=0755
 
 AppArmorProfile=docker-helper-system
-# SELinuxContext= requires base-policy transition rules for init_t -> docker_helper_t
-# which we cannot add from a loadable module. Domain transition via entrypoint
-# is used instead (see packaging/selinux/docker-helper.te).
 
 StandardOutput=journal
 StandardError=journal
