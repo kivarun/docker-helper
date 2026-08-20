@@ -20,7 +20,7 @@ require {
 	attribute file_type;
 	attribute exec_type;
 
-	type init_t;
+	type systemd;
 	type container_var_run_t;
 	type container_runtime_t;
 	type bin_t;
@@ -46,7 +46,7 @@ require {
 	class capability { net_bind_service net_admin };
 }
 
-# Domain transition: init_t -> docker_helper_t via docker_helper_exec_t
+# Domain transition: systemd -> docker_helper_t via docker_helper_exec_t
 type docker_helper_t, domain;
 type docker_helper_exec_t, file_type, exec_type;
 
@@ -55,21 +55,21 @@ type docker_helper_config_t, file_type;
 type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
 
-# ===== systemd (init_t) permissions =====
+# ===== systemd (systemd) permissions =====
 
 # systemd needs to create/manage RuntimeDirectory, StateDirectory, ConfigurationDirectory
-allow init_t docker_helper_runtime_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-allow init_t docker_helper_state_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-allow init_t docker_helper_config_t:dir { create write add_name remove_name search open getattr setattr rmdir };
+allow systemd docker_helper_runtime_t:dir { create write add_name remove_name search open getattr setattr rmdir };
+allow systemd docker_helper_state_t:dir { create write add_name remove_name search open getattr setattr rmdir };
+allow systemd docker_helper_config_t:dir { create write add_name remove_name search open getattr setattr rmdir };
 
 # systemd needs to execute the binary
-allow init_t docker_helper_exec_t:file { read open execute getattr execute_no_trans };
+allow systemd docker_helper_exec_t:file { read open execute getattr execute_no_trans };
 
 # systemd needs to read config files
-allow init_t docker_helper_config_t:file { read open getattr };
+allow systemd docker_helper_config_t:file { read open getattr };
 
 # systemd needs to set its own SELinux context (for SELinuxContext= directive)
-allow init_t self:process setcurrent;
+allow systemd self:process setcurrent;
 
 # ===== docker_helper_t: own binary =====
 
