@@ -23,11 +23,12 @@ require {
 	role unconfined_r;
 
 	type security_t;
+	type node_t;
 
 	class file { read open execute getattr entrypoint create write setattr lock unlink };
 	class dir { getattr search read open write add_name remove_name };
 	class sock_file { create setattr unlink };
-	class tcp_socket { create setopt bind };
+	class tcp_socket { create setopt bind node_bind };
 }
 
 # Domain definition
@@ -65,3 +66,6 @@ allow docker_helper_t security_t:file { read open };
 
 # TCP listener socket (from live AVC evidence)
 allow docker_helper_t self:tcp_socket { create setopt bind };
+
+# Bind TCP listener to local node (from live AVC evidence)
+allow docker_helper_t node_t:tcp_socket { node_bind };
