@@ -25,7 +25,9 @@ RuntimeDirectory=docker-helper
 RuntimeDirectoryMode=0755
 
 AppArmorProfile=docker-helper-system
-SELinuxContext=system_u:system_r:docker_helper_t:s0
+# SELinuxContext= requires base-policy transition rules for init_t -> docker_helper_t
+# which we cannot add from a loadable module. Domain transition via entrypoint
+# is used instead (see packaging/selinux/docker-helper.te).
 
 StandardOutput=journal
 StandardError=journal
