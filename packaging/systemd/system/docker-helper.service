@@ -5,7 +5,8 @@ StartLimitIntervalSec=60s
 StartLimitBurst=3
 After=network-online.target docker.socket apparmor.service
 Wants=network-online.target
-ConditionSecurity=apparmor
+ConditionSecurity=|apparmor
+ConditionSecurity=|selinux
 
 [Service]
 Type=exec
@@ -24,6 +25,7 @@ RuntimeDirectory=docker-helper
 RuntimeDirectoryMode=0755
 
 AppArmorProfile=docker-helper-system
+SELinuxContext=system_u:system_r:docker_helper_t:s0
 
 StandardOutput=journal
 StandardError=journal
