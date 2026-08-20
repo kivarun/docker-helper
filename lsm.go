@@ -22,10 +22,24 @@ const (
 	dockerHelperType   = "docker_helper_t"
 )
 
+// parseSELinuxEnforceValue parses the content of /sys/fs/selinux/enforce.
+// Returns (true, nil) for "1", (false, nil) for "0", error otherwise.
+func parseSELinuxEnforceValue(data []byte) (enforcing bool, err error) {
+	mode := strings.TrimSpace(string(data))
+	switch mode {
+	case "1":
+		return true, nil
+	case "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected SELinux enforce value %q (expected 0 or 1)", mode)
+	}
+}
+
 // selinuxEnabled checks whether the SELinux filesystem is mounted and
 // reads the current mode. Returns (true, enforcing) when the file exists
 // and contains "1". Returns (true, false) when the file exists and
-// contains "0". Returns (false, false) when the file is missing.
+// contains "0". Returns (false, false, nil) when the file is missing.
 // Returns an error on malformed content or unexpected I/O failures.
 // The function is a test seam.
 var selinuxEnabled = func() (bool, bool, error) {
@@ -36,15 +50,11 @@ var selinuxEnabled = func() (bool, bool, error) {
 		}
 		return false, false, fmt.Errorf("cannot read %s: %w", selinuxEnforcePath, err)
 	}
-	mode := strings.TrimSpace(string(data))
-	switch mode {
-	case "1":
-		return true, true, nil
-	case "0":
-		return true, false, nil
-	default:
-		return false, false, fmt.Errorf("unexpected SELinux enforce value %q (expected 0 or 1)", mode)
+	enforcing, err := parseSELinuxEnforceValue(data)
+	if err != nil {
+		return false, false, err
 	}
+	return true, enforcing, nil
 }
 
 // selinuxProcessContext reads the current SELinux security context of this process.

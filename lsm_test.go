@@ -531,56 +531,26 @@ func TestRequireSELinuxConfinementProcessContextReadError(t *testing.T) {
 
 // --- SELinux enforce value parsing ---
 
-func TestSELinuxEnforceValueParsing(t *testing.T) {
+func TestParseSELinuxEnforceValue(t *testing.T) {
 	tests := []struct {
 		name          string
-		fileContent   string
-		wantActive    bool
+		data          []byte
 		wantEnforcing bool
 		wantErr       bool
 		errContains   string
 	}{
-		{"enforcing", "1", true, true, false, ""},
-		{"permissive", "0", true, false, false, ""},
-		{"enforcing with newline", "1\n", true, true, false, ""},
-		{"permissive with newline", "0\n", true, false, false, ""},
-		{"malformed value 2", "2", false, false, true, "unexpected SELinux enforce"},
-		{"malformed string", "yes", false, false, true, "unexpected SELinux enforce"},
-		{"empty", "", false, false, true, "unexpected SELinux enforce"},
+		{"enforcing", []byte("1"), true, false, ""},
+		{"permissive", []byte("0"), false, false, ""},
+		{"enforcing with newline", []byte("1\n"), true, false, ""},
+		{"permissive with newline", []byte("0\n"), false, false, ""},
+		{"malformed value 2", []byte("2"), false, true, "unexpected SELinux enforce"},
+		{"malformed string", []byte("yes"), false, true, "unexpected SELinux enforce"},
+		{"empty", []byte(""), false, true, "unexpected SELinux enforce"},
 	}
-
-	origSEL := selinuxEnabled
-	defer func() { selinuxEnabled = origSEL }()
-
-	tmpDir := t.TempDir()
-	enforcePath := filepath.Join(tmpDir, "enforce")
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := os.WriteFile(enforcePath, []byte(tc.fileContent), 0644); err != nil {
-				t.Fatal(err)
-			}
-
-			selinuxEnabled = func() (bool, bool, error) {
-				data, err := os.ReadFile(enforcePath)
-				if err != nil {
-					if os.IsNotExist(err) {
-						return false, false, nil
-					}
-					return false, false, fmt.Errorf("cannot read %s: %w", enforcePath, err)
-				}
-				mode := strings.TrimSpace(string(data))
-				switch mode {
-				case "1":
-					return true, true, nil
-				case "0":
-					return true, false, nil
-				default:
-					return false, false, fmt.Errorf("unexpected SELinux enforce value %q (expected 0 or 1)", mode)
-				}
-			}
-
-			active, enforcing, err := selinuxEnabled()
+			enforcing, err := parseSELinuxEnforceValue(tc.data)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -592,9 +562,6 @@ func TestSELinuxEnforceValueParsing(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
-			}
-			if active != tc.wantActive {
-				t.Errorf("active: got %v, want %v", active, tc.wantActive)
 			}
 			if enforcing != tc.wantEnforcing {
 				t.Errorf("enforcing: got %v, want %v", enforcing, tc.wantEnforcing)
