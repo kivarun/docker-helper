@@ -1,6 +1,6 @@
-# docker-helper SELinux policy — minimal bootstrap for live testing
+# docker-helper SELinux policy — bootstrap for live testing
 #
-# Milestone: establish docker_helper_t domain
+# Milestone: docker_helper_t domain + dedicated file types from live AVCs
 # NOT for production. Only for collecting actual AVCs.
 #
 # Build:
@@ -33,6 +33,11 @@ role unconfined_r types docker_helper_t;
 
 # Executable type for /usr/bin/docker-helper
 type docker_helper_exec_t, file_type, exec_type;
+
+# Dedicated file types for docker-helper-owned paths (from live AVC evidence)
+type docker_helper_config_t, file_type;
+type docker_helper_state_t, file_type;
+type docker_helper_runtime_t, file_type;
 
 # Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
