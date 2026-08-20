@@ -38,8 +38,8 @@ Source files: `packaging/selinux/docker-helper.te`, `packaging/selinux/docker-he
 
 ```bash
 cd packaging/selinux
-checkmodule -M -m -o docker-helper.tmp docker-helper.te
-semodule_package -o docker-helper.pp -m docker-helper.tmp -f docker-helper.fc
+checkmodule -M -m -o docker_helper.tmp docker-helper.te
+semodule_package -o docker-helper.pp -m docker_helper.tmp -f docker-helper.fc
 ```
 
 ### Install / remove

@@ -4,8 +4,8 @@
 # NOT final packaging policy. Do not use in production until reviewed.
 #
 # Build:
-#   checkmodule -M -m -o docker-helper.tmp docker-helper.te
-#   semodule_package -o docker-helper.pp -m docker-helper.tmp -f docker-helper.fc
+#   checkmodule -M -m -o docker_helper.tmp docker-helper.te
+#   semodule_package -o docker-helper.pp -m docker_helper.tmp -f docker-helper.fc
 #
 # Install:
 #   sudo semodule -i docker-helper.pp
