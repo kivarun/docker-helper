@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -179,9 +180,13 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// Use a nonexistent runtime dir so the daemon-not-running path is taken
-	// (empty XDG_RUNTIME_DIR causes getRuntimeDir error, not daemon-not-running).
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "nonexistent_runtime"))
+	// Use a short, unique nonexistent runtime dir so the final socket path
+	// stays below the Unix-domain socket pathname limit (~108 bytes on Linux).
+	// t.TempDir() paths can be long; a long socket path causes EINVAL,
+	// not ENOENT, and would not be recognized as daemon-not-running.
+	shortRuntime := filepath.Join(os.TempDir(), fmt.Sprintf("dh-ca-%d", os.Getpid()))
+	t.Setenv("XDG_RUNTIME_DIR", shortRuntime)
+	t.Cleanup(func() { os.RemoveAll(shortRuntime) })
 
 	// Prevent tests from reaching a real system daemon.
 	origSocket := systemSocketExists
