@@ -22,7 +22,7 @@ require {
 
 	role unconfined_r;
 
-	class file { read open execute getattr };
+	class file { read open execute getattr entrypoint };
 }
 
 # Domain definition
@@ -35,4 +35,4 @@ role unconfined_r types docker_helper_t;
 type docker_helper_exec_t, file_type, exec_type;
 
 # Binary needs to be readable/executable by the domain itself
-allow docker_helper_t docker_helper_exec_t:file { read open execute getattr };
+allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
