@@ -1,11 +1,4 @@
-# docker-helper file contexts (experimental / live-test)
-#
-# Apply after policy install:
-#   sudo restorecon /usr/bin/docker-helper
-#
-# Do NOT recursively restorecon workspace paths.
+# docker-helper file contexts — minimal bootstrap
+# Only the binary label for now. Other paths added later from AVC evidence.
 
 /usr/bin/docker-helper    --  system_u:object_r:docker_helper_exec_t:s0
-/etc/docker-helper(/.*)?         system_u:object_r:docker_helper_config_t:s0
-/var/lib/docker-helper(/.*)?     system_u:object_r:docker_helper_state_t:s0
-/run/docker-helper(/.*)?         system_u:object_r:docker_helper_runtime_t:s0

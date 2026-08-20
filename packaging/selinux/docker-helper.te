@@ -1,7 +1,7 @@
-# docker-helper SELinux policy (experimental / live-test)
+# docker-helper SELinux policy — minimal bootstrap for live testing
 #
-# This is development policy for live AVC collection on openSUSE Tumbleweed.
-# NOT final packaging policy. Do not use in production until reviewed.
+# Milestone: establish docker_helper_t domain
+# NOT for production. Only for collecting actual AVCs.
 #
 # Build:
 #   checkmodule -M -m -o docker_helper.tmp docker-helper.te
@@ -20,117 +20,17 @@ require {
 	attribute file_type;
 	attribute exec_type;
 
-	type systemd;
-	type container_var_run_t;
-	type container_runtime_t;
-	type bin_t;
-	type etc_t;
-	type certs_t;
-	type net_conf_t;
-	type passwd_file_t;
-	type proc_t;
-	type sysfs_t;
-	type tmp_t;
-	type unreserved_port_t;
-	type reserved_port_t;
-	type ld_so_t;
-	type lib_t;
-
-	class file { read open execute getattr entrypoint execute_no_trans write create unlink setattr lock append };
-	class dir { create write add_name remove_name search open getattr setattr rmdir };
-	class sock_file { write create unlink getattr open };
-	class tcp_socket { name_connect };
-	class unix_stream_socket { connectto };
-	class process { signal sigkill transition setcurrent };
-	class lnk_file { read getattr };
-	class capability { net_bind_service net_admin };
+	class file { read open execute getattr };
 }
 
-# Domain transition: systemd -> docker_helper_t via docker_helper_exec_t
+# Domain definition
 type docker_helper_t, domain;
+
+# Allow unconfined_r role to transition into docker_helper_t (live-test only)
+role unconfined_r types docker_helper_t;
+
+# Executable type for /usr/bin/docker-helper
 type docker_helper_exec_t, file_type, exec_type;
 
-# File types for docker-helper-owned paths
-type docker_helper_config_t, file_type;
-type docker_helper_state_t, file_type;
-type docker_helper_runtime_t, file_type;
-
-# ===== systemd (systemd) permissions =====
-
-# systemd needs to create/manage RuntimeDirectory, StateDirectory, ConfigurationDirectory
-allow systemd docker_helper_runtime_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-allow systemd docker_helper_state_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-allow systemd docker_helper_config_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-
-# systemd needs to execute the binary
-allow systemd docker_helper_exec_t:file { read open execute getattr execute_no_trans };
-
-# systemd needs to read config files
-allow systemd docker_helper_config_t:file { read open getattr };
-
-# systemd needs to set its own SELinux context (for SELinuxContext= directive)
-allow systemd self:process setcurrent;
-
-# ===== docker_helper_t: own binary =====
-
+# Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr };
-
-# ===== docker_helper_t: own config =====
-
-allow docker_helper_t docker_helper_config_t:dir { search open getattr };
-allow docker_helper_t docker_helper_config_t:file { read open getattr };
-
-# ===== docker_helper_t: own state (SQLite database) =====
-
-allow docker_helper_t docker_helper_state_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-allow docker_helper_t docker_helper_state_t:file { read open getattr write create unlink setattr lock append };
-
-# ===== docker_helper_t: own runtime (socket, session data, lock) =====
-
-allow docker_helper_t docker_helper_runtime_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-allow docker_helper_t docker_helper_runtime_t:file { read open getattr write create unlink setattr lock append };
-allow docker_helper_t docker_helper_runtime_t:sock_file { write create unlink getattr open };
-
-# ===== docker_helper_t: Docker socket =====
-
-allow docker_helper_t container_var_run_t:sock_file { write open getattr };
-allow docker_helper_t container_var_run_t:dir { search };
-
-# ===== docker_helper_t: system files =====
-
-# Shared libraries
-allow docker_helper_t bin_t:file { read open execute getattr };
-allow docker_helper_t lib_t:file { read open execute getattr };
-allow docker_helper_t ld_so_t:file { read open execute getattr };
-
-# System config
-allow docker_helper_t etc_t:file { read open getattr };
-allow docker_helper_t etc_t:dir { search open getattr };
-allow docker_helper_t certs_t:file { read open getattr };
-allow docker_helper_t certs_t:dir { search open getattr };
-allow docker_helper_t net_conf_t:file { read open getattr };
-allow docker_helper_t net_conf_t:dir { search open getattr };
-allow docker_helper_t passwd_file_t:file { read open getattr };
-
-# /proc and /sys (LSM detection, /proc/self)
-allow docker_helper_t proc_t:file { read open getattr };
-allow docker_helper_t proc_t:dir { search open getattr };
-allow docker_helper_t sysfs_t:file { read open getattr };
-allow docker_helper_t sysfs_t:dir { search open getattr };
-
-# /tmp
-allow docker_helper_t tmp_t:dir { create write add_name remove_name search open getattr setattr rmdir };
-allow docker_helper_t tmp_t:file { read open getattr write create unlink setattr };
-
-# ===== docker_helper_t: networking =====
-
-# HTTP server — bind to loopback port
-allow docker_helper_t self:capability net_bind_service;
-
-# ===== docker_helper_t: process =====
-
-allow docker_helper_t self:process { signal sigkill };
-
-# ===== docker_helper_t: symlinks =====
-
-allow docker_helper_t self:lnk_file { read getattr };
