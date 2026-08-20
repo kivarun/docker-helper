@@ -60,4 +60,4 @@ allow docker_helper_t docker_helper_state_t:dir { getattr search read open write
 allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink };
 
 # /sys/fs/selinux/enforce (from live AVC evidence)
-allow docker_helper_t security_t:file { read };
+allow docker_helper_t security_t:file { read open };
