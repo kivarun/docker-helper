@@ -20,8 +20,11 @@ require {
 	attribute file_type;
 	attribute exec_type;
 
+	type init_t;
+
 	class file { read open execute getattr entrypoint };
-	class process { signal sigkill };
+	class dir { write add_name remove_name search open getattr };
+	class process { signal sigkill transition };
 }
 
 # Domain transition: unconfined_t -> docker_helper_t via docker_helper_exec_t
@@ -41,3 +44,9 @@ allow docker_helper_t docker_helper_exec_t:file { read open execute getattr };
 
 # Basic domain permissions (process self-management)
 allow docker_helper_t self:process { signal sigkill };
+
+# systemd (init_t) needs to create/manage RuntimeDirectory and StateDirectory
+# before the service starts. These are created by systemd, not the confined
+# process itself.
+allow init_t docker_helper_runtime_t:dir { write add_name remove_name search open getattr };
+allow init_t docker_helper_state_t:dir { write add_name remove_name search open getattr };
