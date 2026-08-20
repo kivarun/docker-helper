@@ -23,7 +23,6 @@ require {
 	type init_t;
 	type container_var_run_t;
 	type container_runtime_t;
-	type node_t;
 	type bin_t;
 	type etc_t;
 	type certs_t;
@@ -34,10 +33,8 @@ require {
 	type tmp_t;
 	type unreserved_port_t;
 	type reserved_port_t;
-	type kernel_t;
 	type ld_so_t;
 	type lib_t;
-	type shell_exec_t;
 
 	class file { read open execute getattr entrypoint execute_no_trans write create unlink setattr lock append };
 	class dir { create write add_name remove_name search open getattr setattr rmdir };
@@ -45,8 +42,8 @@ require {
 	class tcp_socket { name_connect };
 	class unix_stream_socket { connectto };
 	class process { signal sigkill transition setcurrent };
-	class node { recvfrom sendto };
 	class lnk_file { read getattr };
+	class capability { net_bind_service net_admin };
 }
 
 # Domain transition: init_t -> docker_helper_t via docker_helper_exec_t
@@ -77,7 +74,7 @@ allow docker_helper_t docker_helper_exec_t:file { read open execute getattr };
 
 # ===== docker_helper_t: own config =====
 
-allow docker_helper_t docker_helper_config_t:dir { search open getattr read };
+allow docker_helper_t docker_helper_config_t:dir { search open getattr };
 allow docker_helper_t docker_helper_config_t:file { read open getattr };
 
 # ===== docker_helper_t: own state (SQLite database) =====
@@ -93,7 +90,7 @@ allow docker_helper_t docker_helper_runtime_t:sock_file { write create unlink ge
 
 # ===== docker_helper_t: Docker socket =====
 
-allow docker_helper_t container_var_run_t:sock_file { read open getattr };
+allow docker_helper_t container_var_run_t:sock_file { write open getattr };
 allow docker_helper_t container_var_run_t:dir { search };
 
 # ===== docker_helper_t: system files =====
@@ -124,10 +121,8 @@ allow docker_helper_t tmp_t:file { read open getattr write create unlink setattr
 
 # ===== docker_helper_t: networking =====
 
-# HTTP server (bind to ports)
-allow docker_helper_t self:tcp_socket { create bind listen accept read write };
-allow docker_helper_t unreserved_port_t:tcp_socket name_connect;
-allow docker_helper_t reserved_port_t:tcp_socket name_connect;
+# HTTP server — bind to loopback port
+allow docker_helper_t self:capability net_bind_service;
 
 # ===== docker_helper_t: process =====
 
