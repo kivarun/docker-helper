@@ -110,6 +110,19 @@ Acceptance pending:
 - coexistence with user-mode installation;
 - full Release 2 acceptance matrix.
 
+### SELinux backend
+
+SELinux support for system mode is planned. See
+[docs/selinux-support-plan.md](selinux-support-plan.md) for the complete
+design, security contract, and implementation phases.
+
+Current status: design complete; Phase 1 (backend-neutral LSM abstraction)
+may proceed; Phase 2+ require live enforcing-system policy testing.
+
+Key decision: SELinux confines the daemon but does not provide per-path
+workspace isolation. This is an intentional documented difference from the
+AppArmor backend.
+
 ### Completion criteria
 
 Accepted Release 2 decisions:
