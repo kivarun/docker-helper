@@ -23,13 +23,18 @@ require {
 	type security_t;
 	type node_t;
 	type init_t;
+	type container_runtime_exec_t;
+	type container_runtime_t;
+	type passwd_file_t;
+	type container_var_run_t;
 
 	role system_r;
 
-	class file { read open execute getattr entrypoint create write setattr lock unlink };
+	class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans };
 	class dir { getattr search read open write add_name remove_name create rmdir };
-	class sock_file { create setattr unlink };
+	class sock_file { create setattr unlink write };
 	class tcp_socket { create setopt bind node_bind listen accept getattr read write };
+	class unix_stream_socket { connectto };
 	class process { transition };
 	class process2 { nnp_transition };
 }
@@ -71,8 +76,8 @@ allow docker_helper_t docker_helper_config_t:dir { search };
 allow docker_helper_t docker_helper_config_t:file { read open getattr };
 
 # Runtime (from live AVC evidence)
-allow docker_helper_t docker_helper_runtime_t:dir { getattr search write add_name remove_name };
-allow docker_helper_t docker_helper_runtime_t:file { create read write open lock };
+allow docker_helper_t docker_helper_runtime_t:dir { getattr search write add_name remove_name create };
+allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink };
 allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
 
 # State (from live AVC evidence)
@@ -87,3 +92,14 @@ allow docker_helper_t self:tcp_socket { create setopt bind listen accept getattr
 
 # Bind TCP listener to local node (from live AVC evidence)
 allow docker_helper_t node_t:tcp_socket { node_bind };
+
+# Docker CLI execution (from live AVC evidence)
+# /usr/bin/docker must remain in docker_helper_t (execute_no_trans, not transition)
+allow docker_helper_t container_runtime_exec_t:file { getattr execute read open execute_no_trans };
+
+# Docker reads /etc/passwd for user resolution
+allow docker_helper_t passwd_file_t:file { read open getattr };
+
+# Docker socket access
+allow docker_helper_t container_var_run_t:sock_file { write };
+allow docker_helper_t container_runtime_t:unix_stream_socket { connectto };
