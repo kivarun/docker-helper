@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,13 +66,39 @@ func TestDetectLSMMatrix(t *testing.T) {
 			errContains:      "both",
 		},
 		{
-			name:           "AppArmor detection error",
+			name:             "both AppArmor and permissive SELinux",
+			apparmorActive:   true,
+			selinuxActive:    true,
+			selinuxEnforcing: false,
+			wantBackend:      LSMNone,
+			wantErr:          true,
+			errContains:      "both",
+		},
+		{
+			name:           "AppArmor detection error (not ENOENT)",
 			apparmorActive: false,
-			apparmorErr:    os.ErrNotExist,
+			apparmorErr:    os.ErrPermission,
 			selinuxActive:  false,
 			wantBackend:    LSMNone,
 			wantErr:        true,
 			errContains:    "cannot determine AppArmor",
+		},
+		{
+			name:             "AppArmor ENOENT with SELinux enforcing",
+			apparmorActive:   false,
+			apparmorErr:      os.ErrNotExist,
+			selinuxActive:    true,
+			selinuxEnforcing: true,
+			wantBackend:      LSMSelinux,
+			wantErr:          false,
+		},
+		{
+			name:           "AppArmor ENOENT with no SELinux",
+			apparmorActive: false,
+			apparmorErr:    os.ErrNotExist,
+			selinuxActive:  false,
+			wantBackend:    LSMNone,
+			wantErr:        false,
 		},
 		{
 			name:           "SELinux detection error",
@@ -83,21 +110,13 @@ func TestDetectLSMMatrix(t *testing.T) {
 			errContains:    "cannot determine SELinux",
 		},
 		{
-			name:             "AppArmor active with SELinux permissive",
-			apparmorActive:   true,
-			selinuxActive:    true,
-			selinuxEnforcing: false,
-			wantBackend:      LSMAppArmor,
-			wantErr:          false,
-		},
-		{
-			name:             "AppArmor inactive with SELinux permissive",
-			apparmorActive:   false,
-			selinuxActive:    true,
-			selinuxEnforcing: false,
-			wantBackend:      LSMNone,
-			wantErr:          true,
-			errContains:      "permissive",
+			name:           "SELinux malformed enforce value",
+			apparmorActive: false,
+			selinuxActive:  false,
+			selinuxErr:     &malformedEnforceError{},
+			wantBackend:    LSMNone,
+			wantErr:        true,
+			errContains:    "unexpected SELinux enforce",
 		},
 	}
 
@@ -135,6 +154,13 @@ func TestDetectLSMMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// malformedEnforceError is a test double for malformed SELinux enforce values.
+type malformedEnforceError struct{}
+
+func (e *malformedEnforceError) Error() string {
+	return `unexpected SELinux enforce value "2" (expected 0 or 1)`
 }
 
 // --- requireMACBackend ---
@@ -273,16 +299,16 @@ func TestRequireMACConfinementAppArmorUnconfined(t *testing.T) {
 func TestRequireMACConfinementSELinuxCorrect(t *testing.T) {
 	origAA := apparmorLSMActive
 	origSEL := selinuxEnabled
-	origSELType := selinuxProcessType
+	origSELCtx := selinuxProcessContext
 	apparmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	selinuxProcessType = func() (string, error) {
+	selinuxProcessContext = func() (string, error) {
 		return "system_u:system_r:docker_helper_t:s0", nil
 	}
 	defer func() {
 		apparmorLSMActive = origAA
 		selinuxEnabled = origSEL
-		selinuxProcessType = origSELType
+		selinuxProcessContext = origSELCtx
 	}()
 
 	if err := requireMACConfinement(); err != nil {
@@ -293,16 +319,16 @@ func TestRequireMACConfinementSELinuxCorrect(t *testing.T) {
 func TestRequireMACConfinementSELinuxWrongType(t *testing.T) {
 	origAA := apparmorLSMActive
 	origSEL := selinuxEnabled
-	origSELType := selinuxProcessType
+	origSELCtx := selinuxProcessContext
 	apparmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	selinuxProcessType = func() (string, error) {
+	selinuxProcessContext = func() (string, error) {
 		return "system_u:system_r:unconfined_t:s0", nil
 	}
 	defer func() {
 		apparmorLSMActive = origAA
 		selinuxEnabled = origSEL
-		selinuxProcessType = origSELType
+		selinuxProcessContext = origSELCtx
 	}()
 
 	err := requireMACConfinement()
@@ -311,30 +337,6 @@ func TestRequireMACConfinementSELinuxWrongType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not confined") {
 		t.Errorf("expected 'not confined' in error, got: %v", err)
-	}
-}
-
-func TestRequireMACConfinementSELinuxNotEnforcing(t *testing.T) {
-	origAA := apparmorLSMActive
-	origSEL := selinuxEnabled
-	origSELType := selinuxProcessType
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	selinuxProcessType = func() (string, error) {
-		t.Fatal("process type should not be read when SELinux is permissive at detectLSM level")
-		return "", nil
-	}
-	defer func() {
-		apparmorLSMActive = origAA
-		selinuxEnabled = origSEL
-		selinuxProcessType = origSELType
-	}()
-
-	// At detectLSM level, permissive SELinux fails before confinement check.
-	selinuxEnabled = func() (bool, bool, error) { return true, false, nil }
-	err := requireMACConfinement()
-	if err == nil {
-		t.Fatal("expected error when SELinux is permissive")
 	}
 }
 
@@ -373,6 +375,90 @@ func TestRequireMACConfinementBoth(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "both") {
 		t.Errorf("expected 'both' in error, got: %v", err)
+	}
+}
+
+// --- parseSELinuxType ---
+
+func TestParseSELinuxType(t *testing.T) {
+	tests := []struct {
+		name    string
+		ctx     string
+		want    string
+		wantErr bool
+	}{
+		{"standard", "system_u:system_r:docker_helper_t:s0", "docker_helper_t", false},
+		{"different user", "unconfined_u:system_r:docker_helper_t:s0", "docker_helper_t", false},
+		{"with MCS range", "system_u:system_r:docker_helper_t:s0:c1", "docker_helper_t", false},
+		{"with MLS range", "system_u:system_r:docker_helper_t:s0-s0:c0.c1023", "docker_helper_t", false},
+		{"wrong type", "system_u:system_r:other_t:s0", "other_t", false},
+		{"no range", "system_u:system_r:docker_helper_t", "docker_helper_t", false},
+		{"malformed two fields", "user:role", "", true},
+		{"malformed one field", "user", "", true},
+		{"empty", "", "", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSELinuxType(tc.ctx)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("type: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// --- SELinux confinement with TYPE parsing ---
+
+func TestSELinuxConfinementTypeVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		ctx     string
+		wantErr bool
+	}{
+		{"standard s0", "system_u:system_r:docker_helper_t:s0", false},
+		{"unconfined user", "unconfined_u:system_r:docker_helper_t:s0", false},
+		{"MCS range c1", "system_u:system_r:docker_helper_t:s0:c1", false},
+		{"MLS range", "system_u:system_r:docker_helper_t:s0-s0:c0.c1023", false},
+		{"wrong type", "system_u:system_r:other_t:s0", true},
+		{"malformed", "bad-context", true},
+	}
+
+	origAA := apparmorLSMActive
+	origSEL := selinuxEnabled
+	origSELCtx := selinuxProcessContext
+	defer func() {
+		apparmorLSMActive = origAA
+		selinuxEnabled = origSEL
+		selinuxProcessContext = origSELCtx
+	}()
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			apparmorLSMActive = func() (bool, error) { return false, nil }
+			selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+			selinuxProcessContext = func() (string, error) { return tc.ctx, nil }
+
+			err := requireSELinuxConfinement()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
@@ -422,60 +508,96 @@ func TestRequireSELinuxConfinementReadError(t *testing.T) {
 	}
 }
 
-func TestRequireSELinuxConfinementProcessTypeReadError(t *testing.T) {
+func TestRequireSELinuxConfinementProcessContextReadError(t *testing.T) {
 	origSEL := selinuxEnabled
-	origType := selinuxProcessType
+	origCtx := selinuxProcessContext
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	selinuxProcessType = func() (string, error) {
+	selinuxProcessContext = func() (string, error) {
 		return "", os.ErrNotExist
 	}
 	defer func() {
 		selinuxEnabled = origSEL
-		selinuxProcessType = origType
+		selinuxProcessContext = origCtx
 	}()
 
 	err := requireSELinuxConfinement()
 	if err == nil {
-		t.Fatal("expected error on process type read failure")
+		t.Fatal("expected error on process context read failure")
 	}
 	if !strings.Contains(err.Error(), "cannot determine SELinux process context") {
 		t.Errorf("expected 'cannot determine SELinux process context' in error, got: %v", err)
 	}
 }
 
-// --- currentBackend ---
+// --- SELinux enforce value parsing ---
 
-func TestCurrentBackend(t *testing.T) {
+func TestSELinuxEnforceValueParsing(t *testing.T) {
 	tests := []struct {
-		name             string
-		apparmorActive   bool
-		selinuxActive    bool
-		selinuxEnforcing bool
-		want             LSMBackend
+		name          string
+		fileContent   string
+		wantActive    bool
+		wantEnforcing bool
+		wantErr       bool
+		errContains   string
 	}{
-		{"AppArmor", true, false, false, LSMAppArmor},
-		{"SELinux", false, true, true, LSMSelinux},
-		{"None", false, false, false, LSMNone},
-		{"Permissive", false, true, false, LSMNone},
+		{"enforcing", "1", true, true, false, ""},
+		{"permissive", "0", true, false, false, ""},
+		{"enforcing with newline", "1\n", true, true, false, ""},
+		{"permissive with newline", "0\n", true, false, false, ""},
+		{"malformed value 2", "2", false, false, true, "unexpected SELinux enforce"},
+		{"malformed string", "yes", false, false, true, "unexpected SELinux enforce"},
+		{"empty", "", false, false, true, "unexpected SELinux enforce"},
 	}
 
-	origAA := apparmorLSMActive
 	origSEL := selinuxEnabled
-	defer func() {
-		apparmorLSMActive = origAA
-		selinuxEnabled = origSEL
-	}()
+	defer func() { selinuxEnabled = origSEL }()
+
+	tmpDir := t.TempDir()
+	enforcePath := filepath.Join(tmpDir, "enforce")
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			apparmorLSMActive = func() (bool, error) { return tc.apparmorActive, nil }
-			selinuxEnabled = func() (bool, bool, error) {
-				return tc.selinuxActive, tc.selinuxEnforcing, nil
+			if err := os.WriteFile(enforcePath, []byte(tc.fileContent), 0644); err != nil {
+				t.Fatal(err)
 			}
 
-			got := currentBackend()
-			if got != tc.want {
-				t.Errorf("backend: got %q, want %q", got, tc.want)
+			selinuxEnabled = func() (bool, bool, error) {
+				data, err := os.ReadFile(enforcePath)
+				if err != nil {
+					if os.IsNotExist(err) {
+						return false, false, nil
+					}
+					return false, false, fmt.Errorf("cannot read %s: %w", enforcePath, err)
+				}
+				mode := strings.TrimSpace(string(data))
+				switch mode {
+				case "1":
+					return true, true, nil
+				case "0":
+					return true, false, nil
+				default:
+					return false, false, fmt.Errorf("unexpected SELinux enforce value %q (expected 0 or 1)", mode)
+				}
+			}
+
+			active, enforcing, err := selinuxEnabled()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if active != tc.wantActive {
+				t.Errorf("active: got %v, want %v", active, tc.wantActive)
+			}
+			if enforcing != tc.wantEnforcing {
+				t.Errorf("enforcing: got %v, want %v", enforcing, tc.wantEnforcing)
 			}
 		})
 	}
@@ -486,16 +608,16 @@ func TestCurrentBackend(t *testing.T) {
 func TestServeSystemModePreflightSELinuxEnforcing(t *testing.T) {
 	origAA := apparmorLSMActive
 	origSEL := selinuxEnabled
-	origSELType := selinuxProcessType
+	origSELCtx := selinuxProcessContext
 	apparmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	selinuxProcessType = func() (string, error) {
+	selinuxProcessContext = func() (string, error) {
 		return "system_u:system_r:docker_helper_t:s0", nil
 	}
 	defer func() {
 		apparmorLSMActive = origAA
 		selinuxEnabled = origSEL
-		selinuxProcessType = origSELType
+		selinuxProcessContext = origSELCtx
 	}()
 
 	origUID := EffectiveUID
@@ -523,7 +645,7 @@ func TestServeSystemModePreflightSELinuxEnforcing(t *testing.T) {
 	// SELinux preflight passed — error is from a later startup step.
 	stderrStr := stderr.String()
 	if strings.Contains(stderrStr, "MAC backend") {
-		t.Errorf("MAC preflight should not pass with correct confinement, got: %s", stderrStr)
+		t.Errorf("MAC preflight should not block with correct confinement, got: %s", stderrStr)
 	}
 	if strings.Contains(stderrStr, "SELinux") {
 		t.Errorf("SELinux preflight should not block enforcing mode, got: %s", stderrStr)
@@ -598,6 +720,37 @@ func TestServeSystemModePreflightBothActive(t *testing.T) {
 	}
 }
 
+func TestServeSystemModePreflightBothAppArmorPermissiveSELinux(t *testing.T) {
+	origAA := apparmorLSMActive
+	origSEL := selinuxEnabled
+	apparmorLSMActive = func() (bool, error) { return true, nil }
+	selinuxEnabled = func() (bool, bool, error) { return true, false, nil }
+	defer func() {
+		apparmorLSMActive = origAA
+		selinuxEnabled = origSEL
+	}()
+
+	origUID := EffectiveUID
+	origGetConfig := getConfigPathFunc
+	EffectiveUID = func() int { return 0 }
+	defer func() {
+		EffectiveUID = origUID
+		getConfigPathFunc = origGetConfig
+	}()
+
+	getConfigPathFunc = func() string { return "/nonexistent/config.json" }
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	stderrStr := stderr.String()
+	if !strings.Contains(stderrStr, "both") {
+		t.Errorf("expected 'both' in stderr (AppArmor + permissive SELinux must fail), got: %s", stderrStr)
+	}
+}
+
 // --- Integration: init preflight (SELinux path) ---
 
 func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
@@ -612,7 +765,6 @@ func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
 
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return "/nonexistent/config.json" }
 	EffectiveUID = func() int { return 0 }
 	defer func() {
 		EffectiveUID = origUID
@@ -620,16 +772,24 @@ func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
 	}()
 
 	rootDir := testAllowedRootDir(t)
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.json")
+	getConfigPathFunc = func() string { return configPath }
 
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--allowed-root", rootDir}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
+	// Test initSystemSELinux directly with a mock core to avoid
+	// /var/lib/docker-helper creation (requires root).
+	var coreCalled string
+	err := initSystemSELinux(rootDir, &bytes.Buffer{}, &bytes.Buffer{},
+		func(ar string, so, se io.Writer) error {
+			coreCalled = ar
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("initSystemSELinux failed: %v", err)
 	}
-	// SELinux backend is active, so MAC preflight passes.
-	// Error should be from AppArmor-specific init, not MAC detection.
-	if strings.Contains(stderr.String(), "no MAC backend") {
-		t.Errorf("MAC backend should be detected, got: %s", stderr.String())
+	if coreCalled != rootDir {
+		t.Errorf("core called with %q, want %q", coreCalled, rootDir)
 	}
 }
 

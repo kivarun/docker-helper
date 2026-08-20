@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,13 +19,14 @@ const (
 const (
 	selinuxEnforcePath = "/sys/fs/selinux/enforce"
 	selinuxAttrPath    = "/proc/self/attr/current"
-	dockerHelperType   = "system_u:system_r:docker_helper_t:s0"
+	dockerHelperType   = "docker_helper_t"
 )
 
 // selinuxEnabled checks whether the SELinux filesystem is mounted and
 // reads the current mode. Returns (true, enforcing) when the file exists
-// and is readable. Returns (false, false) when the file is missing.
-// Returns an error only on unexpected I/O failures.
+// and contains "1". Returns (true, false) when the file exists and
+// contains "0". Returns (false, false) when the file is missing.
+// Returns an error on malformed content or unexpected I/O failures.
 // The function is a test seam.
 var selinuxEnabled = func() (bool, bool, error) {
 	data, err := os.ReadFile(selinuxEnforcePath)
@@ -35,19 +37,36 @@ var selinuxEnabled = func() (bool, bool, error) {
 		return false, false, fmt.Errorf("cannot read %s: %w", selinuxEnforcePath, err)
 	}
 	mode := strings.TrimSpace(string(data))
-	enforcing := mode == "1"
-	return true, enforcing, nil
+	switch mode {
+	case "1":
+		return true, true, nil
+	case "0":
+		return true, false, nil
+	default:
+		return false, false, fmt.Errorf("unexpected SELinux enforce value %q (expected 0 or 1)", mode)
+	}
 }
 
-// selinuxProcessType reads the current SELinux security context of this process.
+// selinuxProcessContext reads the current SELinux security context of this process.
 // Returns the context string (e.g., "system_u:system_r:docker_helper_t:s0").
 // The function is a test seam.
-var selinuxProcessType = func() (string, error) {
+var selinuxProcessContext = func() (string, error) {
 	data, err := os.ReadFile(selinuxAttrPath)
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s: %w", selinuxAttrPath, err)
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// parseSELinuxType extracts the TYPE component from a SELinux security context.
+// Context format: USER:ROLE:TYPE:RANGE
+// Returns an error if the context is malformed (fewer than 3 colon-separated fields).
+func parseSELinuxType(ctx string) (string, error) {
+	parts := strings.SplitN(ctx, ":", 4)
+	if len(parts) < 3 {
+		return "", fmt.Errorf("malformed SELinux context %q (expected USER:ROLE:TYPE[:RANGE])", ctx)
+	}
+	return parts[2], nil
 }
 
 // detectLSM determines which MAC backend is active on the host.
@@ -56,15 +75,20 @@ var selinuxProcessType = func() (string, error) {
 //   - (LSMAppArmor, nil) when only AppArmor is active
 //   - (LSMSelinux, nil) when only enforcing SELinux is active
 //   - (LSMNone, nil) when no supported backend is active
-//   - (LSMNone, error) when both backends are active (unsupported) or
-//     SELinux is permissive (not equivalent to enforce mode)
-//   - (LSMNone, error) when detection itself fails (read error)
+//   - (LSMNone, error) when both backends are active (unsupported),
+//     SELinux is permissive, SELinux enforce value is malformed,
+//     or a real I/O error occurs during detection
 //
+// ENOENT for an individual backend marker means that backend is not active.
 // Detection errors must not silently downgrade security.
 func detectLSM() (LSMBackend, error) {
 	appArmorActive, err := apparmorLSMActive()
 	if err != nil {
-		return LSMNone, fmt.Errorf("cannot determine AppArmor LSM status: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			appArmorActive = false
+		} else {
+			return LSMNone, fmt.Errorf("cannot determine AppArmor LSM status: %w", err)
+		}
 	}
 
 	selinuxActive, selinuxEnforcing, err := selinuxEnabled()
@@ -72,8 +96,8 @@ func detectLSM() (LSMBackend, error) {
 		return LSMNone, fmt.Errorf("cannot determine SELinux status: %w", err)
 	}
 
-	if appArmorActive && selinuxActive && selinuxEnforcing {
-		return LSMNone, fmt.Errorf("both AppArmor and enforcing SELinux are active (unsupported configuration)")
+	if appArmorActive && selinuxActive {
+		return LSMNone, fmt.Errorf("both AppArmor and SELinux are active (unsupported configuration)")
 	}
 
 	if appArmorActive {
@@ -146,20 +170,18 @@ func requireSELinuxConfinement() error {
 		return fmt.Errorf("SELinux is not in enforcing mode (system mode requires enforcing SELinux)")
 	}
 
-	ctx, err := selinuxProcessType()
+	ctx, err := selinuxProcessContext()
 	if err != nil {
 		return fmt.Errorf("cannot determine SELinux process context: %w", err)
 	}
 
-	if ctx != dockerHelperType {
-		return fmt.Errorf("process not confined in expected SELinux type: want %q, got %q", dockerHelperType, ctx)
+	typ, err := parseSELinuxType(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot parse SELinux process context: %w", err)
+	}
+
+	if typ != dockerHelperType {
+		return fmt.Errorf("process not confined in expected SELinux type: want %q, got %q (full context: %s)", dockerHelperType, typ, ctx)
 	}
 	return nil
-}
-
-// currentBackend returns the active MAC backend without failing.
-// Returns LSMNone when no backend is active or detection failed.
-func currentBackend() LSMBackend {
-	backend, _ := detectLSM()
-	return backend
 }

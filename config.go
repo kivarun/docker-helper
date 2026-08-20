@@ -760,6 +760,79 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 	return nil
 }
 
+// initSystemSELinux performs system-mode initialization under SELinux
+// without AppArmor root management. It performs the same preflight checks
+// as initSystemWithAppArmor but skips the AppArmor-specific steps.
+// core is the file-based init function (injectable for testing).
+func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
+	core func(string, io.Writer, io.Writer) error,
+) error {
+	configPath := getConfigPathFunc()
+	configDir := filepath.Dir(configPath)
+	adminTokenPath := filepath.Join(configDir, "admin.token")
+
+	// Preflight 1: check existing admin.token.
+	if _, err := os.Stat(adminTokenPath); err == nil {
+		fmt.Fprintln(stderr, "admin.token already exists at:")
+		fmt.Fprintln(stderr, adminTokenPath)
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "Will not overwrite. Use `docker-helper admin token rotate` to replace it.")
+		return errors.New("admin.token already exists")
+	}
+
+	// Preflight 2: read existing config if present to check for mismatch.
+	var existingAllowedRoot string
+	configExists := false
+
+	if stat, err := os.Stat(configPath); err == nil {
+		if stat.IsDir() {
+			return fmt.Errorf("configuration path is a directory: %s", configPath)
+		}
+		configExists = true
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			return fmt.Errorf("cannot read existing configuration: %w", err)
+		}
+
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("cannot parse existing configuration: %w", err)
+		}
+		if err := validateRawConfig(raw); err != nil {
+			return fmt.Errorf("existing configuration is invalid: %w", err)
+		}
+
+		var fc fileConfig
+		if err := json.Unmarshal(data, &fc); err != nil {
+			return fmt.Errorf("cannot decode existing configuration: %w", err)
+		}
+
+		existingAllowedRoot = fc.AllowedRoot
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("cannot stat existing configuration: %w", err)
+	}
+
+	// Canonicalize the allowed root for comparison.
+	effectiveAllowedRoot, err := resolveAllowedRoot(allowedRoot)
+	if err != nil {
+		return err
+	}
+
+	// Preflight 3: check for mismatch with existing config.
+	if configExists && existingAllowedRoot != "" {
+		existingCanonical, err := resolveAllowedRoot(existingAllowedRoot)
+		if err != nil {
+			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
+		}
+		if existingCanonical != effectiveAllowedRoot {
+			return &inputError{msg: fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", existingCanonical, effectiveAllowedRoot)}
+		}
+	}
+
+	// Run core init.
+	return core(allowedRoot, stdout, stderr)
+}
+
 // runInit orchestrates the initialization process based on deployment mode.
 func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	if allowedRoot == "" {
@@ -786,18 +859,35 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	// System mode: require an active MAC backend.
-	if err := requireMACBackend(); err != nil {
+	// System mode: dispatch by MAC backend.
+	backend, err := detectLSM()
+	if err != nil {
 		return fmt.Errorf("system mode requires an active MAC backend: %w", err)
 	}
-	return initSystemWithAppArmor(allowedRoot, stdout, stderr,
-		getAppArmorAddRoot(),
-		getAppArmorRemoveRoot(),
-		func(ar string, so, se io.Writer) error {
-			_, err := initCore(ar, so, se)
-			return err
-		},
-	)
+	if backend == LSMNone {
+		return fmt.Errorf("no MAC backend active (system mode requires AppArmor or enforcing SELinux)")
+	}
+
+	switch backend {
+	case LSMAppArmor:
+		return initSystemWithAppArmor(allowedRoot, stdout, stderr,
+			getAppArmorAddRoot(),
+			getAppArmorRemoveRoot(),
+			func(ar string, so, se io.Writer) error {
+				_, err := initCore(ar, so, se)
+				return err
+			},
+		)
+	case LSMSelinux:
+		return initSystemSELinux(allowedRoot, stdout, stderr,
+			func(ar string, so, se io.Writer) error {
+				_, err := initCore(ar, so, se)
+				return err
+			},
+		)
+	default:
+		return fmt.Errorf("unknown MAC backend: %s", backend)
+	}
 }
 
 // checkDockerAccess checks if the Docker daemon is reachable by connecting
