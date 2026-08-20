@@ -20,6 +20,8 @@ require {
 	attribute file_type;
 	attribute exec_type;
 
+	role unconfined_r;
+
 	class file { read open execute getattr };
 }
 
