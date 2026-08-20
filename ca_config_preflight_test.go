@@ -398,6 +398,11 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", nonexistentState)
 	t.Setenv("PATH", emptyBin)
 
+	// Prevent reaching a real system daemon.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	t.Cleanup(func() { systemSocketExists = origSocket })
+
 	// Point to a non-existent CA path while injection is disabled.
 	badPath := filepath.Join(dir, "nonexistent.crt")
 

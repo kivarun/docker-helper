@@ -159,6 +159,8 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 	apparmorLSMActive = func() (bool, error) { return false, nil }
 	defer func() { apparmorLSMActive = origActive }()
 
+	mockSELinuxInactive(t)
+
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
 	EffectiveUID = func() int { return 0 }
@@ -197,6 +199,8 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 		apparmorLSMActive = origActive
 		apparmorProcessConfinement = origConfinement
 	}()
+
+	mockSELinuxInactive(t)
 
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
@@ -240,6 +244,8 @@ func TestServeSystemModePreflightEnforce(t *testing.T) {
 		apparmorProcessConfinement = origConfinement
 	}()
 
+	mockSELinuxInactive(t)
+
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
 	EffectiveUID = func() int { return 0 }
@@ -272,6 +278,7 @@ func TestServeSystemModePreflightEnforce(t *testing.T) {
 
 func TestInitSystemModePreflightInactive(t *testing.T) {
 	mockApparmorActive(t, false)
+	mockSELinuxInactive(t)
 
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc

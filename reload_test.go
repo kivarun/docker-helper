@@ -67,11 +67,16 @@ func setupReloadTestEnv(t *testing.T) (configPath, tokenPath, socketPath, lockPa
 	os.Setenv("XDG_STATE_HOME", stateHome)
 	os.Setenv("XDG_CONFIG_HOME", configHome)
 
+	// Prevent tests from reaching a real system daemon.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+
 	cleanup = func() {
 		os.Setenv("DOCKER_HELPER_CONFIG", oldConfig)
 		os.Setenv("XDG_RUNTIME_DIR", oldRuntime)
 		os.Setenv("XDG_STATE_HOME", oldState)
 		os.Setenv("XDG_CONFIG_HOME", oldConfigHome)
+		systemSocketExists = origSocket
 	}
 
 	return configPath, tokenPath, socketPath, lockPath, cleanup

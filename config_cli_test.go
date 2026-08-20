@@ -31,6 +31,12 @@ func setupConfigTestWithData(t *testing.T, data []byte) string {
 	}
 	writeTestTokenFile(t, filepath.Join(dir, "admin.token"), "dht_testtoken123\n")
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+
+	// Prevent tests from reaching a real system daemon.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	t.Cleanup(func() { systemSocketExists = origSocket })
+
 	return configPath
 }
 
@@ -643,6 +649,11 @@ func TestConfigSetUnsetNoDirCreation(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	// Prevent reaching a real system daemon.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	t.Cleanup(func() { systemSocketExists = origSocket })
 
 	runConfigCLI(t, 0, "config", "set", "log_level", "debug")
 

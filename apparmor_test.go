@@ -70,6 +70,15 @@ func mockApparmorActive(t *testing.T, active bool) {
 	t.Cleanup(func() { apparmorLSMActive = saved })
 }
 
+// mockSELinuxInactive disables SELinux detection for tests that target
+// AppArmor-only scenarios, preventing host SELinux state from leaking in.
+func mockSELinuxInactive(t *testing.T) {
+	t.Helper()
+	saved := selinuxEnabled
+	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
+	t.Cleanup(func() { selinuxEnabled = saved })
+}
+
 // --- Command registration and help ---
 
 // TestApparmorHelpOutput verifies help dispatch for every apparmor command

@@ -682,6 +682,9 @@ func TestInitCLIAppArmorOperationalErrorExit1(t *testing.T) {
 
 	rootDir := testAllowedRootDir(t)
 
+	mockApparmorActive(t, true)
+	mockSELinuxInactive(t)
+
 	// Mock system mode, config path, and inject fake AppArmor that returns operational error
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc

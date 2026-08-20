@@ -142,6 +142,11 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir
 	t.Setenv("XDG_STATE_HOME", stateHome)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	// Prevent tests from reaching a real system daemon.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	t.Cleanup(func() { systemSocketExists = origSocket })
+
 	return configPath, caPath, runtimeDir, fakeBinDir
 }
 
@@ -173,6 +178,15 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Use a nonexistent runtime dir so the daemon-not-running path is taken
+	// (empty XDG_RUNTIME_DIR causes getRuntimeDir error, not daemon-not-running).
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "nonexistent_runtime"))
+
+	// Prevent tests from reaching a real system daemon.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	t.Cleanup(func() { systemSocketExists = origSocket })
 
 	return configPath, caPath, fakeBinDir
 }
