@@ -68,6 +68,9 @@ allow init_t docker_helper_t:process2 { nnp_transition };
 # systemd (init_t) needs to create/cleanup RuntimeDirectory (from live AVC evidence)
 allow init_t docker_helper_runtime_t:dir { create rmdir write remove_name };
 
+# systemd (init_t) needs to unlink socket lock file (from live AVC evidence)
+allow init_t docker_helper_runtime_t:file { unlink };
+
 # Config (from live AVC evidence)
 allow docker_helper_t docker_helper_config_t:dir { search };
 allow docker_helper_t docker_helper_config_t:file { read open getattr };
