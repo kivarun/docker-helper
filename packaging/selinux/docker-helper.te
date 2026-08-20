@@ -24,6 +24,7 @@ require {
 
 	type security_t;
 	type node_t;
+	type init_t;
 
 	class file { read open execute getattr entrypoint create write setattr lock unlink };
 	class dir { getattr search read open write add_name remove_name };
@@ -47,6 +48,9 @@ type docker_helper_runtime_t, file_type;
 
 # Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
+
+# systemd (init_t) needs to execute the binary (from live AVC evidence)
+allow init_t docker_helper_exec_t:file { execute };
 
 # Config (from live AVC evidence)
 allow docker_helper_t docker_helper_config_t:dir { search };
