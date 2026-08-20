@@ -23,7 +23,7 @@ require {
 	type init_t;
 
 	class file { read open execute getattr entrypoint };
-	class dir { write add_name remove_name search open getattr };
+	class dir { write add_name remove_name search open getattr setattr rmdir };
 	class process { signal sigkill transition };
 }
 
