@@ -26,6 +26,8 @@ require {
 	type node_t;
 	type init_t;
 
+	role system_r;
+
 	class file { read open execute getattr entrypoint create write setattr lock unlink };
 	class dir { getattr search read open write add_name remove_name };
 	class sock_file { create setattr unlink };
@@ -37,6 +39,9 @@ type docker_helper_t, domain;
 
 # Allow unconfined_r role to transition into docker_helper_t (live-test only)
 role unconfined_r types docker_helper_t;
+
+# Allow system_r role to transition into docker_helper_t (systemd integration)
+role system_r types docker_helper_t;
 
 # Executable type for /usr/bin/docker-helper
 type docker_helper_exec_t, file_type, exec_type;
@@ -50,7 +55,7 @@ type docker_helper_runtime_t, file_type;
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
 
 # systemd (init_t) needs to execute the binary (from live AVC evidence)
-allow init_t docker_helper_exec_t:file { execute };
+allow init_t docker_helper_exec_t:file { read open execute };
 
 # Config (from live AVC evidence)
 allow docker_helper_t docker_helper_config_t:dir { search };
