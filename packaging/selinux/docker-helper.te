@@ -15,29 +15,35 @@
 
 module docker_helper 1.0;
 
-require {
-	attribute domain;
-	attribute file_type;
-	attribute exec_type;
+	require {
+		attribute domain;
+		attribute file_type;
+		attribute exec_type;
+		attribute user_home_type;
+		attribute container_file_type;
 
-	type security_t;
-	type node_t;
-	type init_t;
-	type container_runtime_exec_t;
-	type container_runtime_t;
-	type passwd_file_t;
-	type container_var_run_t;
+		type security_t;
+		type node_t;
+		type init_t;
+		type container_runtime_exec_t;
+		type container_runtime_t;
+		type passwd_file_t;
+		type container_var_run_t;
+		type user_home_dir_t;
+		type fs_t;
 
-	role system_r;
+		role system_r;
 
-	class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans };
-	class dir { getattr search read open write add_name remove_name create rmdir };
-	class sock_file { create setattr unlink write };
-	class tcp_socket { create setopt bind node_bind listen accept getattr read write };
-	class unix_stream_socket { connectto };
-	class process { transition };
-	class process2 { nnp_transition };
-}
+		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton };
+		class dir { getattr search read open write add_name remove_name create rmdir mounton };
+		class sock_file { create setattr unlink write };
+		class tcp_socket { create setopt bind node_bind listen accept getattr read write };
+		class unix_stream_socket { connectto };
+		class filesystem { unmount };
+		class capability { dac_read_search sys_admin };
+		class process { transition };
+		class process2 { nnp_transition };
+	}
 
 # Domain definition
 type docker_helper_t, domain;
@@ -52,6 +58,11 @@ type docker_helper_exec_t, file_type, exec_type;
 type docker_helper_config_t, file_type;
 type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
+
+# Workspace type for bind-mounted agent workspaces (proven in enforcing UAT)
+type docker_helper_workspace_t, file_type;
+typeattribute docker_helper_workspace_t user_home_type;
+typeattribute docker_helper_workspace_t container_file_type;
 
 # Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
@@ -76,8 +87,8 @@ allow docker_helper_t docker_helper_config_t:dir { search };
 allow docker_helper_t docker_helper_config_t:file { read open getattr };
 
 # Runtime (from live AVC evidence)
-allow docker_helper_t docker_helper_runtime_t:dir { getattr search write add_name remove_name create };
-allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink };
+allow docker_helper_t docker_helper_runtime_t:dir { getattr search write add_name remove_name create mounton rmdir };
+allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink mounton };
 allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
 
 # State (from live AVC evidence)
@@ -103,3 +114,16 @@ allow docker_helper_t passwd_file_t:file { read open getattr };
 # Docker socket access
 allow docker_helper_t container_var_run_t:sock_file { write };
 allow docker_helper_t container_runtime_t:unix_stream_socket { connectto };
+
+# Workspace (proven in enforcing UAT)
+allow docker_helper_t docker_helper_workspace_t:dir { getattr search };
+allow docker_helper_t docker_helper_workspace_t:file { getattr };
+
+# Home directory traversal (proven in enforcing UAT)
+allow docker_helper_t user_home_dir_t:dir { getattr search };
+
+# Capabilities for workspace access and mount-pin (proven in enforcing UAT)
+allow docker_helper_t self:capability { dac_read_search sys_admin };
+
+# Mount-pin: unmount filesystem (proven in enforcing UAT)
+allow docker_helper_t fs_t:filesystem { unmount };

@@ -88,6 +88,26 @@ security boundary.
 SELinux may grant only the minimum workspace file types required for
 supported workspace locations, providing type-level defense-in-depth.
 
+#### Enforcing UAT: docker_helper_workspace_t
+
+Live enforcing testing on openSUSE Tumbleweed has proven that explicit
+`docker_helper_workspace_t` labeling is viable:
+
+- `docker_helper_workspace_t` carries both `user_home_type` and
+  `container_file_type` attributes.
+- Ordinary user access works after relabel (user_home_type).
+- SELinux-confined Docker containers can read/write the bind-mounted
+  workspace (container_file_type).
+- Files created by the container inherit `docker_helper_workspace_t`.
+- Directory bind mounts work.
+- Regular-file bind mounts work.
+- Host and container read/write both succeeded.
+- Only remaining AVCs were intentionally ignored cgroup_t/sysctl_net_t
+  probes.
+
+Automatic recursive workspace relabeling is NOT implemented or approved.
+Build staging workspace data permissions remain untested and incomplete.
+
 ## 4. LSM Abstraction
 
 Planned backend-neutral detection and confinement layer:
