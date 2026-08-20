@@ -27,7 +27,7 @@ require {
 	class file { read open execute getattr entrypoint create write setattr lock unlink };
 	class dir { getattr search read open write add_name remove_name };
 	class sock_file { create setattr unlink };
-	class tcp_socket { create };
+	class tcp_socket { create setopt };
 }
 
 # Domain definition
@@ -64,4 +64,4 @@ allow docker_helper_t docker_helper_state_t:file { create read write open getatt
 allow docker_helper_t security_t:file { read open };
 
 # TCP listener socket (from live AVC evidence)
-allow docker_helper_t self:tcp_socket { create };
+allow docker_helper_t self:tcp_socket { create setopt };
