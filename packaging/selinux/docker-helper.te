@@ -1,0 +1,32 @@
+# docker-helper SELinux policy (experimental / live-test)
+#
+# This is development policy for live AVC collection on openSUSE Tumbleweed.
+# NOT final packaging policy. Do not use in production until reviewed.
+#
+# Build:
+#   checkmodule -M -m -o docker-helper.tmp docker-helper.te
+#   semodule_package -o docker-helper.pp -m docker-helper.tmp -f docker-helper.fc
+#
+# Install:
+#   sudo semodule -i docker-helper.pp
+#
+# Remove:
+#   sudo semodule -r docker_helper
+
+# Domain transition: unconfined_t -> docker_helper_t via docker_helper_exec_t
+type docker_helper_t, domain;
+type docker_helper_exec_t, file_type, exec_type;
+
+# File types for docker-helper-owned paths
+type docker_helper_config_t, file_type;
+type docker_helper_state_t, file_type;
+type docker_helper_runtime_t, file_type;
+
+# Domain transition rule
+allow docker_helper_t docker_helper_exec_t:file entrypoint;
+
+# Allow the domain to execute its own binary
+allow docker_helper_t docker_helper_exec_t:file { read open execute getattr };
+
+# Basic domain permissions (process self-management)
+allow docker_helper_t self:process { signal sigkill };
