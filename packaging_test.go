@@ -2513,7 +2513,7 @@ func TestPackageMetadataIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a dummy SELinux policy module (required by nfpm.yaml).
+	// Create a dummy SELinux policy module (required by RPM nfpm config).
 	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
 	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
 		t.Fatal(err)
@@ -2526,7 +2526,7 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	}
 	// Replace dist/docker-helper with the dummy binary path.
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
-	// Replace dist/docker-helper.pp with the dummy PP path.
+	// Replace dist/docker-helper.pp with the dummy PP path (RPM-only section).
 	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
 	// Replace ${VERSION} with test version.
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
@@ -2591,6 +2591,132 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	} else {
 		t.Log("rpm not available, skipping RPM verification")
 	}
+}
+
+// TestPackageSELinuxPayloadSeparation verifies that the SELinux policy module
+// is included in the RPM but NOT in the DEB (DEB is AppArmor-only).
+func TestPackageSELinuxPayloadSeparation(t *testing.T) {
+	if _, err := exec.LookPath("nfpm"); err != nil {
+		t.Skip("nfpm not installed, skipping SELinux payload separation test")
+	}
+
+	testVersion := "0.0.0"
+	tmpDir := t.TempDir()
+
+	// Create a dummy binary for packaging.
+	dummyBin := filepath.Join(tmpDir, "docker-helper")
+	if err := os.WriteFile(dummyBin, []byte("dummy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a dummy SELinux policy module (required by RPM nfpm config).
+	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a temporary nFPM config.
+	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
+
+	configFile := filepath.Join(tmpDir, "nfpm.yaml")
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build DEB.
+	debCmd := exec.Command("nfpm", "package",
+		"--config", configFile,
+		"--packager", "deb",
+		"--target", tmpDir,
+	)
+	debCmd.Env = append(os.Environ(), "VERSION="+testVersion)
+	if out, err := debCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm DEB build failed: %v\n%s", err, out)
+	}
+
+	// Build RPM.
+	rpmCmd := exec.Command("nfpm", "package",
+		"--config", configFile,
+		"--packager", "rpm",
+		"--target", tmpDir,
+	)
+	rpmCmd.Env = append(os.Environ(), "VERSION="+testVersion)
+	if out, err := rpmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm RPM build failed: %v\n%s", err, out)
+	}
+
+	debFile := filepath.Join(tmpDir, "docker-helper_"+testVersion+"_amd64.deb")
+	rpmFile := filepath.Join(tmpDir, "docker-helper-"+testVersion+"-1.x86_64.rpm")
+
+	// Verify DEB does NOT contain SELinux policy.
+	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+		cmd := exec.Command(dpkgDeb, "--contents", debFile)
+		out, _ := cmd.CombinedOutput()
+		if strings.Contains(string(out), "/usr/share/selinux/docker-helper.pp") {
+			t.Error("DEB must NOT contain /usr/share/selinux/docker-helper.pp (DEB is AppArmor-only)")
+		}
+	} else {
+		t.Log("dpkg-deb not available, skipping DEB SELinux payload check")
+	}
+
+	// Verify RPM DOES contain SELinux policy.
+	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+		cmd := exec.Command(rpmPath, "-qpl", rpmFile)
+		out, _ := cmd.CombinedOutput()
+		if !strings.Contains(string(out), "/usr/share/selinux/docker-helper.pp") {
+			t.Error("RPM must contain /usr/share/selinux/docker-helper.pp")
+		}
+	} else {
+		t.Log("rpm not available, skipping RPM SELinux payload check")
+	}
+}
+
+// TestRPMSelinuxDependencies verifies that the RPM depends on packages
+// providing semodule and restorecon (libselinux-utils on openSUSE).
+func TestRPMSelinuxDependencies(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Find the rpm overrides section.
+	rpmIdx := strings.Index(content, "  rpm:")
+	if rpmIdx < 0 {
+		t.Fatal("rpm overrides section not found")
+	}
+
+	// Find the depends section within rpm (look for "    depends:" after rpm:).
+	afterRpm := content[rpmIdx:]
+	dependsIdx := strings.Index(afterRpm, "    depends:")
+	if dependsIdx < 0 {
+		t.Fatal("rpm depends section not found")
+	}
+	dependsSection := afterRpm[dependsIdx:]
+
+	// Find the end of depends section (next top-level key or contents).
+	contentsIdx := strings.Index(dependsSection, "\n    contents:")
+	if contentsIdx > 0 {
+		dependsSection = dependsSection[:contentsIdx]
+	}
+
+	// RPM postinstall uses semodule (from libselinux-utils on openSUSE).
+	// The dependency ensures semodule is available before scriptlet runs.
+	if !strings.Contains(dependsSection, "libselinux-utils") {
+		t.Error("RPM depends must include libselinux-utils (provides semodule)")
+	}
+
+	// restorecon is also from libselinux-utils on openSUSE.
+	// Context restoration is best-effort; fresh install works even without it
+	// because the binary is installed with default context and systemd handles
+	// the runtime directory. restorecon improves correctness but is not
+	// strictly required for first-run functionality.
 }
 
 func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {

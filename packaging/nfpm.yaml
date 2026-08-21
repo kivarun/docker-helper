@@ -19,10 +19,17 @@ overrides:
     depends:
       - systemd
       - apparmor-parser
+      - libselinux-utils
     scripts:
       postinstall: packaging/scripts/rpm/postinstall.sh
       preremove: packaging/scripts/rpm/preremove.sh
       postremove: packaging/scripts/rpm/postremove.sh
+    contents:
+      # SELinux policy module — RPM only (DEB is AppArmor-only)
+      - src: dist/docker-helper.pp
+        dst: /usr/share/selinux/docker-helper.pp
+        file_info:
+          mode: 0644
 
 contents:
   - src: dist/docker-helper
@@ -68,10 +75,5 @@ contents:
 
   - src: packaging/apparmor/local/curl
     dst: /usr/share/docker-helper/apparmor/local/curl
-    file_info:
-      mode: 0644
-
-  - src: dist/docker-helper.pp
-    dst: /usr/share/selinux/docker-helper.pp
     file_info:
       mode: 0644
