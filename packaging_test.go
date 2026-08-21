@@ -2678,7 +2678,7 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 }
 
 // TestRPMSelinuxDependencies verifies that the RPM depends on packages
-// providing semodule and restorecon (libselinux-utils on openSUSE).
+// providing semodule and restorecon (policycoreutils on openSUSE).
 func TestRPMSelinuxDependencies(t *testing.T) {
 	data, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -2700,23 +2700,23 @@ func TestRPMSelinuxDependencies(t *testing.T) {
 	}
 	dependsSection := afterRpm[dependsIdx:]
 
-	// Find the end of depends section (next top-level key or contents).
-	contentsIdx := strings.Index(dependsSection, "\n    contents:")
-	if contentsIdx > 0 {
-		dependsSection = dependsSection[:contentsIdx]
+	// Find the end of depends section (next top-level key or scripts).
+	nextKeyIdx := strings.Index(dependsSection, "\n    scripts:")
+	if nextKeyIdx > 0 {
+		dependsSection = dependsSection[:nextKeyIdx]
 	}
 
-	// RPM postinstall uses semodule (from libselinux-utils on openSUSE).
+	// RPM postinstall uses semodule (from policycoreutils on openSUSE).
 	// The dependency ensures semodule is available before scriptlet runs.
-	if !strings.Contains(dependsSection, "libselinux-utils") {
-		t.Error("RPM depends must include libselinux-utils (provides semodule)")
+	if !strings.Contains(dependsSection, "policycoreutils") {
+		t.Error("RPM depends must include policycoreutils (provides semodule and restorecon)")
 	}
 
-	// restorecon is also from libselinux-utils on openSUSE.
-	// Context restoration is best-effort; fresh install works even without it
-	// because the binary is installed with default context and systemd handles
-	// the runtime directory. restorecon improves correctness but is not
-	// strictly required for first-run functionality.
+	// policycoreutils provides both semodule and restorecon on openSUSE.
+	// With this hard dependency, both tools are guaranteed present.
+	// restorecon failures remain best-effort because context restoration
+	// is not strictly required for first-run functionality: the binary is
+	// installed with default context and systemd handles the runtime directory.
 }
 
 func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
