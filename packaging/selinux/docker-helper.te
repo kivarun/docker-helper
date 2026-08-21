@@ -75,7 +75,7 @@ module docker_helper 1.0;
 		class fifo_file { append create getattr ioctl read watch write };
 		class filesystem { mount remount unmount };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
-		class unix_stream_socket { connectto };
+		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
 		class capability { dac_read_search sys_admin };
 		class process { transition };
@@ -129,6 +129,11 @@ allow init_t docker_helper_runtime_t:dir { create rmdir write remove_name };
 
 # systemd (init_t) needs to unlink socket lock file (from live AVC evidence)
 allow init_t docker_helper_runtime_t:file { unlink };
+
+# journald: docker_helper_t reads the inherited systemd stream socket
+# for stdout/stderr (StandardOutput=journal, StandardError=journal).
+# Equivalent to init_rw_inherited_stream_socket(docker_helper_t).
+allow docker_helper_t init_t:unix_stream_socket { getattr ioctl read write };
 
 # Config (from live AVC evidence)
 allow docker_helper_t docker_helper_config_t:dir { search };
