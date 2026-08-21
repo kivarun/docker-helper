@@ -46,3 +46,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y checkpolicy semodule-utils
           scripts/check-selinux-policy.sh
+
+      - name: Integration tests
+        run: |
+          sudo apt-get install -y musl-tools
+          go test -tags=integration ./...
