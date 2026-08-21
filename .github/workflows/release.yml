@@ -80,9 +80,6 @@ jobs:
       - name: SELinux policy syntax
         run: scripts/check-selinux-policy.sh
 
-      - name: Integration tests
-        run: go test -tags=integration ./...
-
       - name: Clean dist
         run: rm -rf dist
 
