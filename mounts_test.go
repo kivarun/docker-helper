@@ -524,6 +524,151 @@ func TestDockerSecurityOpt(t *testing.T) {
 	}
 }
 
+func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.Config.Mode = ModeSystem
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	// Mock SELinux enforcing
+	origSEL := selinuxEnabled
+	origAA := apparmorLSMActive
+	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+	apparmorLSMActive = func() (bool, error) { return false, nil }
+	t.Cleanup(func() {
+		selinuxEnabled = origSEL
+		apparmorLSMActive = origAA
+	})
+
+	reqBody := map[string]any{"image": "alpine:latest"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--security-opt" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "label=type:docker_helper_container_t" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected --security-opt label=type:docker_helper_container_t in args %v", capturedArgs)
+	}
+}
+
+func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.Config.Mode = ModeSystem
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	var capturedArgs []string
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		capturedArgs = args
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	// Mock AppArmor active, SELinux inactive
+	origSEL := selinuxEnabled
+	origAA := apparmorLSMActive
+	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
+	apparmorLSMActive = func() (bool, error) { return true, nil }
+	t.Cleanup(func() {
+		selinuxEnabled = origSEL
+		apparmorLSMActive = origAA
+	})
+
+	reqBody := map[string]any{"image": "alpine:latest"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	found := false
+	for i, arg := range capturedArgs {
+		if arg == "--security-opt" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "label=disable" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected --security-opt label=disable for AppArmor in args %v", capturedArgs)
+	}
+}
+
+func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.Config.Mode = ModeSystem
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	dockerInvoked := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerInvoked = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	// Mock LSM detection error
+	origSEL := selinuxEnabled
+	origAA := apparmorLSMActive
+	selinuxEnabled = func() (bool, bool, error) { return false, false, fmt.Errorf("test error") }
+	apparmorLSMActive = func() (bool, error) { return false, nil }
+	t.Cleanup(func() {
+		selinuxEnabled = origSEL
+		apparmorLSMActive = origAA
+	})
+
+	reqBody := map[string]any{"image": "alpine:latest"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if dockerInvoked {
+		t.Error("Docker must not be invoked when LSM detection fails")
+	}
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+	}
+}
+
 func TestDockerUser(t *testing.T) {
 	app := newTestAppWithAuth(t)
 

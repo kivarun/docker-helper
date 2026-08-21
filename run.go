@@ -474,9 +474,18 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Container MAC backend selection:
 	// - System mode + SELinux enforcing: custom container type for workspace access
-	// - All other modes: disable SELinux labels (existing behavior)
+	// - System mode + AppArmor: disable SELinux labels (existing behavior)
+	// - User mode: disable SELinux labels (existing behavior)
 	if cfg.Mode == ModeSystem {
-		backend, _ := detectLSM()
+		backend, err := detectLSM()
+		if err != nil {
+			opLog(ctx).Error("cannot determine MAC backend",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
 		if backend == LSMSelinux {
 			args = append(args, "--security-opt", "label=type:docker_helper_container_t")
 		} else {

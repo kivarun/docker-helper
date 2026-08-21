@@ -3,6 +3,10 @@
 # Model: docker-helper validates and accesses workspaces that retain their
 # normal host labels (user_home_type). No workspace relabeling required.
 #
+# docker_helper_container_t is a real container domain that inherits
+# container-selinux confinement via the container_domain attribute, with
+# additional user_home_type access for session-mounted workspaces.
+#
 # Build:
 #   checkmodule -M -m -o docker_helper.tmp docker-helper.te
 #   semodule_package -o docker-helper.pp -m docker_helper.tmp -f docker-helper.fc
@@ -21,6 +25,7 @@ module docker_helper 1.0;
 		attribute exec_type;
 		attribute user_home_type;
 		attribute container_file_type;
+		attribute container_domain;
 
 		type security_t;
 		type node_t;
@@ -35,10 +40,68 @@ module docker_helper 1.0;
 		type net_conf_t;
 		type http_port_t;
 		type cert_t;
-		type container_t;
 		type container_file_t;
+		type container_log_t;
+		type container_share_t;
+		type container_storage_t;
+		type container_tmp_t;
+		type container_var_lib_t;
+		type container_etc_t;
+		type container_ro_file_t;
+		type bin_t;
+		type lib_t;
+		type ld_so_t;
+		type proc_t;
+		type sysfs_t;
+		type tmpfs_t;
+		type devpts_t;
+		type fuse_device_t;
+		type fusefs_t;
+		type shm_t;
+		type kerneloops_device_t;
+		type netif_var_run_t;
+		type port_t;
+		type unreserved_port_t;
+		type node_port_t;
+		type dns_port_t;
+		type ntalk_port_t;
+		type nntps_port_t;
+		type pop3s_port_t;
+		type imaps_port_t;
+		type ldaps_port_t;
+		type https_port_t;
+		type http_cache_port_t;
+		type cifs_port_t;
+		type nbd_port_t;
+		type ceph_port_t;
+		type glusterfs_port_t;
+		type smb_port_t;
+		type nfs_port_t;
+		type rpc_port_t;
+		type gsshttp_port_t;
+		type xmpp_port_t;
+		type ntp_port_t;
+		type syslog_port_t;
+		type snmp_port_t;
+		type snmptrap_port_t;
+		type radius_port_t;
+		type radius_accounting_port_t;
+		type ntp_port_t;
+		type syslog_tls_port_t;
+		type snmp_tls_port_t;
+		type snmptrap_tls_port_t;
+		type radius_tls_port_t;
+		type radius_accounting_tls_port_t;
+		type ntp_tls_port_t;
+		type syslog_tls_port_t;
+		type snmp_tls_port_t;
+		type snmptrap_tls_port_t;
+		type radius_tls_port_t;
+		type radius_accounting_tls_port_t;
+		type ntp_tls_port_t;
 
 		role system_r;
+		role container_r;
 
 		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton rename };
 		class dir { getattr search read open write add_name remove_name create rmdir mounton setattr };
@@ -49,9 +112,8 @@ module docker_helper 1.0;
 		class udp_socket { create setopt connect getattr read write };
 		class filesystem { unmount };
 		class capability { dac_read_search sys_admin };
-		class process { transition };
+		class process { transition dyntransition };
 		class process2 { nnp_transition };
-		class dyntransition { transition };
 	}
 
 # Domain definition
@@ -68,12 +130,16 @@ type docker_helper_config_t, file_type;
 type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
 
-# Custom container type for docker-helper containers.
-# Allows access to user_home_type workspaces without relabeling.
+# Custom container domain for docker-helper containers.
+# Inherits container-selinux confinement via container_domain attribute.
+# Additional user_home_type access for session-mounted workspaces.
 type docker_helper_container_t, domain;
+typeattribute docker_helper_container_t container_domain;
 type docker_helper_container_file_t, file_type;
+typeattribute docker_helper_container_file_t container_file_type;
 
 role system_r types docker_helper_container_t;
+role container_r types docker_helper_container_t;
 
 # Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
@@ -182,26 +248,14 @@ allow docker_helper_t cert_t:file { read open getattr };
 
 # docker_helper_t can transition to docker_helper_container_t via Docker
 allow docker_helper_t docker_helper_container_t:process { transition dyntransition };
-
-# docker_helper_container_t inherits basic container confinement from container_t
-allow docker_helper_container_t container_file_t:file { read open getattr };
+allow docker_helper_t docker_helper_container_t:process2 { nnp_transition };
 
 # docker_helper_container_t can access user_home_type workspaces (bind-mounted)
+# This is the ONLY extra permission beyond standard container-selinux policy.
 allow docker_helper_container_t user_home_type:dir { getattr search read open write add_name remove_name create rmdir };
 allow docker_helper_container_t user_home_type:file { read open getattr create write setattr lock unlink rename };
 allow docker_helper_container_t user_home_type:lnk_file { read create unlink };
 
-# docker_helper_container_t can access docker_helper_container_file_t (container-owned files)
+# docker_helper_container_t can access its own file type
 allow docker_helper_container_t docker_helper_container_file_t:file { read open getattr create write setattr lock unlink };
 allow docker_helper_container_t docker_helper_container_file_t:dir { getattr search read open write add_name remove_name create rmdir };
-
-# docker_helper_container_t network access
-allow docker_helper_container_t self:tcp_socket { create setopt bind listen accept getattr read write connect getopt };
-allow docker_helper_container_t self:udp_socket { create setopt connect getattr read write };
-allow docker_helper_container_t node_t:tcp_socket { node_bind };
-allow docker_helper_container_t http_port_t:tcp_socket { name_connect };
-
-# docker_helper_container_t can read certificates
-allow docker_helper_container_t cert_t:dir { search read open };
-allow docker_helper_container_t cert_t:lnk_file { read };
-allow docker_helper_container_t cert_t:file { read open getattr };
