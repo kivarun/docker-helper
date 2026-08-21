@@ -41,13 +41,33 @@ jobs:
       - name: Whitespace errors
         run: git diff --check
 
+  selinux-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+
       - name: SELinux policy syntax
         run: |
           sudo apt-get update
           sudo apt-get install -y checkpolicy semodule-utils
           scripts/check-selinux-policy.sh
 
+  static-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Static build integration
         run: |
+          sudo apt-get update
           sudo apt-get install -y musl-tools
           scripts/check-static-build.sh

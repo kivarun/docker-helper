@@ -9,7 +9,53 @@ permissions:
   contents: write
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf 'Files requiring gofmt:\n%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Tests
+        run: go test ./...
+
+      - name: Race tests
+        run: go test -race ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Whitespace errors
+        run: git diff --check
+
+  selinux-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: SELinux policy syntax
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y checkpolicy semodule-utils
+          scripts/check-selinux-policy.sh
+
   release:
+    needs: [checks, selinux-policy]
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -55,30 +101,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools checkpolicy semodule-utils
-
-      - name: Formatting
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            printf 'Files requiring gofmt:\n%s\n' "$unformatted"
-            exit 1
-          fi
-
-      - name: Tests
-        run: go test ./...
-
-      - name: Race tests
-        run: go test -race ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Whitespace errors
-        run: git diff --check
-
-      - name: SELinux policy syntax
-        run: scripts/check-selinux-policy.sh
+          sudo apt-get install -y musl-tools
 
       - name: Clean dist
         run: rm -rf dist

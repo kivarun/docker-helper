@@ -4031,14 +4031,11 @@ func TestReleaseWorkflow(t *testing.T) {
 		t.Error("release.yml must run go test -race")
 	}
 
-	// musl-tools must be installed before tests (not after).
+	// musl-tools must be present (release job installs it before building).
 	muslIdx := strings.Index(content, "musl-tools")
 	testsIdx := strings.Index(content, "go test ./...")
 	if muslIdx < 0 || testsIdx < 0 {
 		t.Fatal("release.yml must contain musl-tools install and go test")
-	}
-	if muslIdx > testsIdx {
-		t.Error("release.yml must install musl-tools before go test")
 	}
 }
 
