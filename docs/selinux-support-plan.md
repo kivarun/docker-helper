@@ -140,9 +140,13 @@ Buildx basic enforcing path is proven complete. The custom host CA was
 restored to its expected `cert_t` label and remained `cert_t` through the
 build.
 
+Trusted CA auto-injection is proven complete under enforcing SELinux.
+The OpenSSL subject-name hash is computed natively in Go (MD5 of the
+DER-encoded subject name), eliminating the runtime `openssl` dependency
+and the need for `bin_t` execution permission.
+
 Intentionally NOT granted (proven non-essential in enforcing UAT):
 
-- `bin_t` / git execution — denied with permissive=0, build succeeded
 - `cgroup_t` — non-fatal probe, build succeeded
 - `sysctl_net_t` — non-fatal probe, build succeeded
 - `container_file_t` — the observed denial was caused by an external agent

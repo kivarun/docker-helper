@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -9,9 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -30,9 +29,6 @@ const trustedCAEnvSSLDirValue = "/run/docker-helper/trusted-ca:/etc/ssl/certs:/e
 
 // trustedCAEnvNodeExtraValue is the injected NODE_EXTRA_CA_CERTS value.
 const trustedCAEnvNodeExtraValue = "/run/docker-helper/trusted-ca/ca.pem"
-
-// opensslHashPattern validates the output of `openssl x509 -hash -noout`.
-var opensslHashPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}$`)
 
 // readValidatedCAFile opens the file at caPath, verifies it is a regular file,
 // reads its contents, and validates them as a single PEM-encoded X.509 CA
@@ -112,23 +108,12 @@ func validateCAPEM(data []byte) (*x509.Certificate, error) {
 	return cert, nil
 }
 
-// computeOpenSSLHash runs `openssl x509 -hash -noout` with the CA certificate
-// passed via stdin. It uses exec.Command (no shell).
-// Returns the 8-character hex hash, or an error if openssl is missing, the
-// command fails, or the output does not match the expected format.
-func computeOpenSSLHash(caData []byte) (string, error) {
-	cmd := exec.Command("openssl", "x509", "-hash", "-noout")
-	cmd.Stdin = bytes.NewReader(caData)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("openssl x509 -hash failed")
-	}
-
-	hash := strings.TrimSpace(string(out))
-	if !opensslHashPattern.MatchString(hash) {
-		return "", fmt.Errorf("openssl x509 -hash output is invalid")
-	}
-	return hash, nil
+// computeOpenSSLHash computes the OpenSSL-compatible subject-name hash for
+// the given certificate. The algorithm matches `openssl x509 -hash -noout`:
+// MD5 of the DER-encoded subject name, formatted as 8 lowercase hex characters.
+func computeOpenSSLHash(cert *x509.Certificate) string {
+	h := md5.Sum(cert.RawSubject)
+	return fmt.Sprintf("%08x", uint32(h[0])<<24|uint32(h[1])<<16|uint32(h[2])<<8|uint32(h[3]))
 }
 
 // fingerprintDir returns the path to the fingerprint directory for a given
@@ -155,11 +140,14 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 		return "", err
 	}
 
-	// Compute openssl hash from the same snapshot.
-	hash, err := computeOpenSSLHash(caData)
+	// Parse certificate to compute the openssl-compatible hash.
+	cert, err := validateCAPEM(caData)
 	if err != nil {
 		return "", err
 	}
+
+	// Compute openssl hash from the parsed certificate.
+	hash := computeOpenSSLHash(cert)
 
 	// Determine fingerprint directory.
 	fpDir := fingerprintDir(runtimeDir, caData)

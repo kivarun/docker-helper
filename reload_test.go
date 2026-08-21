@@ -229,9 +229,6 @@ func TestConfigSetHelpReloadMention(t *testing.T) {
 	if !strings.Contains(output, "daemon") {
 		t.Fatalf("expected config set help to mention daemon, got: %s", output)
 	}
-	if !strings.Contains(output, "openssl") {
-		t.Fatalf("expected config set help to mention openssl, got: %s", output)
-	}
 	if !strings.Contains(output, "set trusted_ca_path first, then set trusted_ca_injection to auto") {
 		t.Fatalf("expected config set help to explain CA enablement order, got: %s", output)
 	}

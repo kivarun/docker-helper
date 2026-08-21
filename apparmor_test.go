@@ -2036,21 +2036,6 @@ func TestApparmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
 
 // --- Shipped profile regression tests ---
 
-func TestSystemProfileContainsOpenSSL(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
-	if err != nil {
-		t.Skipf("system profile not found: %v", err)
-	}
-	content := string(data)
-
-	if !strings.Contains(content, "/usr/bin/openssl ix,") {
-		t.Error("system profile must permit /usr/bin/openssl with inherited confinement")
-	}
-	if !strings.Contains(content, "#include <abstractions/openssl>") {
-		t.Error("system profile must include abstractions/openssl")
-	}
-}
-
 func TestSystemProfileContainsDockerBuildx(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
@@ -2127,21 +2112,6 @@ func TestSystemProfileSocketLockFileLocking(t *testing.T) {
 				t.Errorf("system profile must not grant k on /run/docker-helper/** (found: %s)", trimmed)
 			}
 		}
-	}
-}
-
-func TestUserProfileContainsOpenSSL(t *testing.T) {
-	data, err := os.ReadFile("packaging/apparmor/docker-helper")
-	if err != nil {
-		t.Skipf("user profile not found: %v", err)
-	}
-	content := string(data)
-
-	if !strings.Contains(content, "/usr/bin/openssl ix,") {
-		t.Error("user profile must permit /usr/bin/openssl with inherited confinement")
-	}
-	if !strings.Contains(content, "#include <abstractions/openssl>") {
-		t.Error("user profile must include abstractions/openssl")
 	}
 }
 

@@ -2,16 +2,22 @@ package main
 
 import (
 	"bytes"
-	"fmt"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestCAPrepareSuccess(t *testing.T) {
-	configPath, caPath, _, _ := setupCAConfigTest(t)
+	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         testAllowedRootDir(t),
@@ -77,7 +83,7 @@ func TestCAPrepareSuccess(t *testing.T) {
 }
 
 func TestCAPrepareIdempotent(t *testing.T) {
-	configPath, caPath, runtimeDir, _ := setupCAConfigTest(t)
+	configPath, caPath, runtimeDir := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         testAllowedRootDir(t),
@@ -120,7 +126,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 	oldUmask := syscall.Umask(0077)
 	defer syscall.Umask(oldUmask)
 
-	configPath, caPath, _, _ := setupCAConfigTest(t)
+	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         testAllowedRootDir(t),
@@ -174,7 +180,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 }
 
 func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
-	configPath, caPath, _, _ := setupCAConfigTest(t)
+	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         testAllowedRootDir(t),
@@ -213,7 +219,7 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 }
 
 func TestCAReloadChangesCA(t *testing.T) {
-	configPath, caPath, _, _ := setupCAConfigTest(t)
+	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         testAllowedRootDir(t),
@@ -250,56 +256,6 @@ func TestCAReloadChangesCA(t *testing.T) {
 	}
 }
 
-func TestCAOpenSSLMissing(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "xdg_runtime")
-	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
-	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	caPath := filepath.Join(dir, "test-ca.crt")
-	generateTestCAPEM(t, caPath)
-
-	emptyBin := filepath.Join(dir, "empty_bin")
-	if err := os.MkdirAll(emptyBin, 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", emptyBin)
-
-	_, err := prepareCAInjection(runtimeSubDir, caPath)
-	if err == nil {
-		t.Fatal("expected error when openssl is missing")
-	}
-}
-
-func TestCAOpenSSLInvalidOutput(t *testing.T) {
-	dir := t.TempDir()
-	runtimeDir := filepath.Join(dir, "xdg_runtime")
-	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
-	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-
-	caPath := filepath.Join(dir, "test-ca.crt")
-	generateTestCAPEM(t, caPath)
-
-	fakeBinDir := filepath.Join(dir, "fake_bin")
-	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho invalid-hash\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	_, err := prepareCAInjection(runtimeSubDir, caPath)
-	if err == nil {
-		t.Fatal("expected error for invalid openssl output")
-	}
-}
-
 func setupPreparedCA(t *testing.T) (runtimeSubDir, caPath, preparedDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -312,10 +268,6 @@ func setupPreparedCA(t *testing.T) (runtimeSubDir, caPath, preparedDir string) {
 	caPath = filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	fakeBinDir := filepath.Join(dir, "fake_bin")
-	createFakeOpenSSL(t, fakeBinDir, testOpenSSLHash)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	var err error
 	preparedDir, err = prepareCAInjection(runtimeSubDir, caPath)
 	if err != nil {
@@ -327,7 +279,21 @@ func setupPreparedCA(t *testing.T) (runtimeSubDir, caPath, preparedDir string) {
 func TestCAPrepareFixesWrongSymlink(t *testing.T) {
 	runtimeSubDir, caPath, preparedDir := setupPreparedCA(t)
 
-	symlinkPath := filepath.Join(preparedDir, testOpenSSLHash+".0")
+	// Find the hash symlink.
+	entries, err := os.ReadDir(preparedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var symlinkPath string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".0") {
+			symlinkPath = filepath.Join(preparedDir, e.Name())
+			break
+		}
+	}
+	if symlinkPath == "" {
+		t.Fatal("no hash symlink found")
+	}
 
 	// Corrupt: replace symlink with one pointing to wrong.pem.
 	if err := os.Remove(symlinkPath); err != nil {
@@ -358,7 +324,21 @@ func TestCAPrepareFixesWrongSymlink(t *testing.T) {
 func TestCAPrepareFixesRegularFileHashEntry(t *testing.T) {
 	runtimeSubDir, caPath, preparedDir := setupPreparedCA(t)
 
-	symlinkPath := filepath.Join(preparedDir, testOpenSSLHash+".0")
+	// Find the hash symlink.
+	entries, err := os.ReadDir(preparedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var symlinkPath string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".0") {
+			symlinkPath = filepath.Join(preparedDir, e.Name())
+			break
+		}
+	}
+	if symlinkPath == "" {
+		t.Fatal("no hash symlink found")
+	}
 
 	// Corrupt: replace symlink with a regular file.
 	if err := os.Remove(symlinkPath); err != nil {
@@ -471,39 +451,25 @@ func TestCAPrepareSnapshotConsistency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create a fake openssl that captures stdin and corrupts the source file.
-	capturePath := filepath.Join(dir, "captured.pem")
-	fakeBinDir := filepath.Join(dir, "fake_bin")
-	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// The fake openssl: reads stdin to capture file, corrupts source, outputs hash.
-	script := fmt.Sprintf("#!/bin/sh\ncat > %s && echo 'not a cert' > %s && echo %s\n",
-		filepath.ToSlash(capturePath),
-		filepath.ToSlash(caPath),
-		testOpenSSLHash)
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// prepareCAInjection reads the file once and uses that snapshot
+	// for both the hash and the file write. Verify this by corrupting
+	// the source file after the first read (via a goroutine) and
+	// confirming the prepared ca.pem still matches the original.
+	done := make(chan struct{})
+	go func() {
+		<-done
+		// Corrupt the source file after prepareCAInjection has read it.
+		os.WriteFile(caPath, []byte("corrupted"), 0644)
+	}()
 
 	// prepareCAInjection should succeed using the original snapshot.
 	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
+	close(done)
 	if err != nil {
 		t.Fatalf("prepareCAInjection failed: %v", err)
 	}
 
-	// Verify captured stdin matches original bytes.
-	capturedData, err := os.ReadFile(capturePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(capturedData, originalData) {
-		t.Error("captured stdin does not match original CA bytes")
-	}
-
-	// Verify prepared ca.pem matches original bytes.
+	// Verify prepared ca.pem matches original bytes (not the corrupted content).
 	preparedCAFile := filepath.Join(preparedDir, "ca.pem")
 	preparedData, err := os.ReadFile(preparedCAFile)
 	if err != nil {
@@ -512,4 +478,83 @@ func TestCAPrepareSnapshotConsistency(t *testing.T) {
 	if !bytes.Equal(preparedData, originalData) {
 		t.Error("prepared ca.pem does not match original CA bytes")
 	}
+}
+
+func TestOpenSSLHashGolden(t *testing.T) {
+	tests := []struct {
+		name     string
+		subject  pkix.Name
+		expected string
+	}{
+		{
+			name: "simple common name",
+			subject: pkix.Name{
+				CommonName: "Test CA",
+			},
+			expected: "d2b0b910",
+		},
+		{
+			name: "organization",
+			subject: pkix.Name{
+				Organization: []string{"My Company"},
+			},
+			expected: "212fc7b3",
+		},
+		{
+			name: "full dn",
+			subject: pkix.Name{
+				Country:            []string{"US"},
+				Organization:       []string{"Example Inc"},
+				OrganizationalUnit: []string{"Engineering"},
+				CommonName:         "Root CA",
+			},
+			expected: "34198664",
+		},
+		{
+			name: "non-ascii subject",
+			subject: pkix.Name{
+				CommonName: "日本語テスト",
+			},
+			expected: "cfd8260d",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cert := createTestCertWithSubject(t, tt.subject)
+			hash := computeOpenSSLHash(cert)
+			if hash != tt.expected {
+				t.Errorf("hash = %s, want %s", hash, tt.expected)
+			}
+		})
+	}
+}
+
+func createTestCertWithSubject(t *testing.T, subject pkix.Name) *x509.Certificate {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               subject,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
 }

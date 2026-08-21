@@ -94,23 +94,8 @@ func generateTestCASecondPEMBlock(t *testing.T) []byte {
 	return append(generateTestCAPEMData(t), pem.EncodeToMemory(&pem.Block{Type: "ARBITRARY", Bytes: []byte("extra")})...)
 }
 
-// testOpenSSLHash is the fixed hash returned by fake openssl scripts.
-const testOpenSSLHash = "abcd1234"
-
-// createFakeOpenSSL creates a fake openssl script in fakeBinDir that returns the given hash.
-func createFakeOpenSSL(t *testing.T, fakeBinDir, hash string) {
-	t.Helper()
-	if err := os.MkdirAll(fakeBinDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	opensslScript := "#!/bin/sh\necho " + hash + "\n"
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte(opensslScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// setupCAConfigTest creates a test environment with config, runtime dir, and a fake openssl.
-func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir string) {
+// setupCAConfigTest creates a test environment with config, runtime dir, and CA.
+func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir string) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -120,7 +105,6 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir
 	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
 	stateHome := filepath.Join(dir, "xdg_state")
 	stateSubDir := filepath.Join(stateHome, "docker-helper")
-	fakeBinDir = filepath.Join(dir, "fake_bin")
 
 	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
 		t.Fatal(err)
@@ -132,8 +116,6 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir
 	caPath = filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
 
-	createFakeOpenSSL(t, fakeBinDir, testOpenSSLHash)
-
 	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -141,30 +123,26 @@ func setupCAConfigTest(t *testing.T) (configPath, caPath, runtimeDir, fakeBinDir
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", stateHome)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Prevent tests from reaching a real system daemon.
 	origSocket := systemSocketExists
 	systemSocketExists = func() bool { return false }
 	t.Cleanup(func() { systemSocketExists = origSocket })
 
-	return configPath, caPath, runtimeDir, fakeBinDir
+	return configPath, caPath, runtimeDir
 }
 
 // setupCAConfigPreflightTest creates a minimal test environment for testing
 // config set/unset CA preflight without XDG_RUNTIME_DIR.
-func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir string) {
+func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath string) {
 	t.Helper()
 	dir := t.TempDir()
 
 	configPath = filepath.Join(dir, "config.json")
 	tokenPath := filepath.Join(dir, "admin.token")
-	fakeBinDir = filepath.Join(dir, "fake_bin")
 
 	caPath = filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
-
-	createFakeOpenSSL(t, fakeBinDir, testOpenSSLHash)
 
 	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -178,7 +156,6 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	writeCAConfig(t, configPath, cfg)
 
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Use a short, unique nonexistent runtime dir so the final socket path
 	// stays below the Unix-domain socket pathname limit (~108 bytes on Linux).
@@ -193,7 +170,7 @@ func setupCAConfigPreflightTest(t *testing.T) (configPath, caPath, fakeBinDir st
 	systemSocketExists = func() bool { return false }
 	t.Cleanup(func() { systemSocketExists = origSocket })
 
-	return configPath, caPath, fakeBinDir
+	return configPath, caPath
 }
 
 // writeCAConfig marshals cfg as indented JSON and writes it to configPath.

@@ -392,7 +392,7 @@ Configuration fields:
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log (bounded buffer, default: `4194304` = 4 MiB) |
 | `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`) |
-| `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. Requires host `openssl` binary for hash computation. |
+| `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. |
 | `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |
 
 `allowed_root` and `session_ttl` are required and cannot be unset.
@@ -445,8 +445,7 @@ Runtime paths (socket, database, state) are not changed by reload.
 
 Inject a company or internal CA certificate into agent containers so they
 trust your internal services. The CA file must be a single PEM-encoded
-X.509 CA certificate. The host `openssl` binary must be available in PATH
-for fingerprint computation. Injection only affects containers started via
+X.509 CA certificate. Injection only affects containers started via
 `POST /run`.
 
 Enable:

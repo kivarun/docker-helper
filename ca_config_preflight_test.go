@@ -10,7 +10,7 @@ import (
 )
 
 func TestCAPreflightAutoMissingCA(t *testing.T) {
-	configPath, caPath, _ := setupCAConfigPreflightTest(t)
+	configPath, caPath := setupCAConfigPreflightTest(t)
 
 	// Remove the CA file so it's missing.
 	if err := os.Remove(caPath); err != nil {
@@ -55,7 +55,7 @@ func TestCAPreflightAutoMissingCA(t *testing.T) {
 }
 
 func TestCAPreflightAutoMalformedCA(t *testing.T) {
-	configPath, _, _ := setupCAConfigPreflightTest(t)
+	configPath, _ := setupCAConfigPreflightTest(t)
 
 	// Create a malformed CA file.
 	badCAPath := filepath.Join(filepath.Dir(configPath), "bad-ca.crt")
@@ -101,7 +101,7 @@ func TestCAPreflightAutoMalformedCA(t *testing.T) {
 }
 
 func TestCAPreflightAutoLeafCA(t *testing.T) {
-	configPath, _, _ := setupCAConfigPreflightTest(t)
+	configPath, _ := setupCAConfigPreflightTest(t)
 
 	// Create a leaf certificate.
 	leafPath := filepath.Join(filepath.Dir(configPath), "leaf.crt")
@@ -147,147 +147,8 @@ func TestCAPreflightAutoLeafCA(t *testing.T) {
 	}
 }
 
-func TestCAPreflightAutoNoOpenSSL(t *testing.T) {
-	configPath, caPath, _ := setupCAConfigPreflightTest(t)
-
-	// Set PATH to empty dir (no openssl).
-	emptyBin := filepath.Join(filepath.Dir(configPath), "empty_bin")
-	if err := os.MkdirAll(emptyBin, 0755); err != nil {
-		t.Fatalf("cannot create empty_bin: %v", err)
-	}
-	t.Setenv("PATH", emptyBin)
-
-	// Set the path first.
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d", code)
-	}
-
-	// Save original config bytes.
-	originalBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-
-	// Try to enable auto without openssl.
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
-	}
-	if stdout.String() != "" {
-		t.Errorf("expected empty stdout, got: %q", stdout.String())
-	}
-	if stderr.String() == "" {
-		t.Error("expected non-empty stderr")
-	}
-
-	// Config should be byte-for-byte unchanged.
-	newBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-	if !bytes.Equal(originalBytes, newBytes) {
-		t.Error("config.json should be byte-for-byte unchanged")
-	}
-}
-
-func TestCAPreflightAutoOpenSSLFailure(t *testing.T) {
-	configPath, caPath, _ := setupCAConfigPreflightTest(t)
-
-	// Replace fake openssl with one that fails.
-	fakeBinDir := filepath.Join(filepath.Dir(configPath), "fake_bin")
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
-		t.Fatalf("cannot write fake openssl: %v", err)
-	}
-
-	// Set the path first.
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d", code)
-	}
-
-	// Save original config bytes.
-	originalBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-
-	// Try to enable auto with failing openssl.
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
-	}
-	if stdout.String() != "" {
-		t.Errorf("expected empty stdout, got: %q", stdout.String())
-	}
-	if stderr.String() == "" {
-		t.Error("expected non-empty stderr")
-	}
-
-	// Config should be byte-for-byte unchanged.
-	newBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-	if !bytes.Equal(originalBytes, newBytes) {
-		t.Error("config.json should be byte-for-byte unchanged")
-	}
-}
-
-func TestCAPreflightAutoOpenSSLInvalidOutput(t *testing.T) {
-	configPath, caPath, _ := setupCAConfigPreflightTest(t)
-
-	// Replace fake openssl with one that returns invalid output.
-	fakeBinDir := filepath.Join(filepath.Dir(configPath), "fake_bin")
-	if err := os.WriteFile(filepath.Join(fakeBinDir, "openssl"), []byte("#!/bin/sh\necho not-a-hash\n"), 0755); err != nil {
-		t.Fatalf("cannot write fake openssl: %v", err)
-	}
-
-	// Set the path first.
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d stdout: %q stderr: %q", code, stdout.String(), stderr.String())
-	}
-
-	// Save original config bytes.
-	originalBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-
-	// Try to enable auto with invalid openssl output.
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
-	}
-	if stdout.String() != "" {
-		t.Errorf("expected empty stdout, got: %q", stdout.String())
-	}
-	if stderr.String() == "" {
-		t.Error("expected non-empty stderr")
-	}
-
-	// Config should be byte-for-byte unchanged.
-	newBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-	if !bytes.Equal(originalBytes, newBytes) {
-		t.Error("config.json should be byte-for-byte unchanged")
-	}
-}
-
 func TestCAPreflightReplacePathInvalidWhileAuto(t *testing.T) {
-	configPath, caPath, _ := setupCAConfigPreflightTest(t)
+	configPath, caPath := setupCAConfigPreflightTest(t)
 
 	// First set path and enable auto (should succeed with valid CA).
 	var stdout, stderr bytes.Buffer
@@ -334,7 +195,7 @@ func TestCAPreflightReplacePathInvalidWhileAuto(t *testing.T) {
 }
 
 func TestCAPreflightValidCASucceeds(t *testing.T) {
-	configPath, caPath, _ := setupCAConfigPreflightTest(t)
+	configPath, caPath := setupCAConfigPreflightTest(t)
 
 	// Set path and enable auto (should succeed).
 	var stdout, stderr bytes.Buffer
@@ -372,12 +233,6 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 	tokenPath := filepath.Join(dir, "admin.token")
 	nonexistentRuntime := filepath.Join(dir, "nonexistent_runtime")
 	nonexistentState := filepath.Join(dir, "nonexistent_state")
-	emptyBin := filepath.Join(dir, "empty_bin")
-
-	// Create empty bin dir (no openssl).
-	if err := os.MkdirAll(emptyBin, 0755); err != nil {
-		t.Fatalf("cannot create empty_bin: %v", err)
-	}
 
 	// Write admin token.
 	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
@@ -392,11 +247,10 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 		"trusted_ca_injection": "disabled",
 	})
 
-	// Set environment: nonexistent runtime/state, PATH with no openssl.
+	// Set environment: nonexistent runtime/state.
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", nonexistentRuntime)
 	t.Setenv("XDG_STATE_HOME", nonexistentState)
-	t.Setenv("PATH", emptyBin)
 
 	// Prevent reaching a real system daemon.
 	origSocket := systemSocketExists
@@ -427,7 +281,7 @@ func TestCAPreflightDisabledNoValidation(t *testing.T) {
 }
 
 func TestCAPreflightUnchangedWithBrokenCA(t *testing.T) {
-	configPath, caPath, _ := setupCAConfigPreflightTest(t)
+	configPath, caPath := setupCAConfigPreflightTest(t)
 
 	// Set up valid config first.
 	var stdout, stderr bytes.Buffer
@@ -478,7 +332,7 @@ func TestCAPreflightUnchangedWithBrokenCA(t *testing.T) {
 }
 
 func TestCAPreflightSetUnchanged(t *testing.T) {
-	configPath, caPath, _, _ := setupCAConfigTest(t)
+	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         testAllowedRootDir(t),
@@ -498,7 +352,7 @@ func TestCAPreflightSetUnchanged(t *testing.T) {
 }
 
 func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
-	configPath, caPath, _, _ := setupCAConfigTest(t)
+	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
 		"allowed_root":         testAllowedRootDir(t),

@@ -1057,10 +1057,9 @@ into containers started via `POST /run`:
 1. **CA validation** — The CA file must be a regular file containing exactly
    one valid PEM-encoded X.509 certificate.
 
-2. **OpenSSL hash** — docker-helper runs `openssl x509 -hash -noout -in CA_FILE`
-   to compute the 8-character hex hash. This requires the `openssl` binary
-   on the host. Missing `openssl`, execution failure, or invalid output makes
-   configuration invalid.
+ 2. **OpenSSL hash** — docker-helper computes the 8-character hex hash
+    natively: MD5 of the DER-encoded subject name, first 4 bytes as
+    lowercase hex. No external `openssl` binary is required.
 
 3. **Runtime artifact** — The CA is materialized in the helper-owned runtime
    directory:

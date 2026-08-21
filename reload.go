@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -63,9 +64,13 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 			Result:   "invalid_config",
 			Duration: duration,
 		})
+		diagnostic := "invalid configuration"
+		if strings.Contains(err.Error(), "trusted_ca") {
+			diagnostic = fmt.Sprintf("trusted CA preparation failed: %v", err)
+		}
 		writeError(ctx, w, http.StatusBadRequest,
 			"invalid_config",
-			"invalid configuration",
+			diagnostic,
 		)
 		return
 	}

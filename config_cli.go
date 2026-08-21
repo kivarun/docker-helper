@@ -132,7 +132,6 @@ var configSetCommand = &Command{
 
 Trusted CA injection:
   To enable, set trusted_ca_path first, then set trusted_ca_injection to auto.
-  The host "openssl" binary must be available in PATH.
   CA injection only affects containers started via POST /run.
 
 To disable, set trusted_ca_injection to disabled first, then optionally
