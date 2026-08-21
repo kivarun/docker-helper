@@ -40,3 +40,9 @@ jobs:
 
       - name: Whitespace errors
         run: git diff --check
+
+      - name: SELinux policy syntax
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y checkpolicy
+          scripts/check-selinux-policy.sh

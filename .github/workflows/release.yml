@@ -55,7 +55,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools checkpolicy
 
       - name: Formatting
         run: |
@@ -76,6 +76,9 @@ jobs:
 
       - name: Whitespace errors
         run: git diff --check
+
+      - name: SELinux policy syntax
+        run: scripts/check-selinux-policy.sh
 
       - name: Clean dist
         run: rm -rf dist
