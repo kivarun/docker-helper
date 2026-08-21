@@ -230,9 +230,10 @@ func asn1StringNeedsCanon(tag byte) bool {
 }
 
 // isASCIISpace returns true for ASCII whitespace characters that OpenSSL
-// considers for stripping/collapsing: space (0x20), tab (0x09), LF (0x0a), CR (0x0d).
+// considers for stripping/collapsing (per ossl_isspace):
+// TAB (0x09), LF (0x0a), VT (0x0b), FF (0x0c), CR (0x0d), SPACE (0x20).
 func isASCIISpace(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+	return b == '\t' || b == '\n' || b == '\v' || b == '\f' || b == '\r' || b == ' '
 }
 
 // isASCIILetter returns true for ASCII uppercase letters A-Z.
@@ -261,10 +262,15 @@ func convertASN1StringToUTF8(data []byte, tag byte) ([]byte, error) {
 	case 0x1a: // VisibleString (ASCII visible characters)
 		return data, nil
 	case 0x14: // T61String (ISO 8859-1 / Latin-1)
-		// Each byte maps directly to Unicode code point
-		result := make([]byte, len(data))
-		for i, b := range data {
-			result[i] = b
+		// ISO-8859-1 bytes 0x00-0x7F map directly to UTF-8
+		// ISO-8859-1 bytes 0x80-0xFF need two-byte UTF-8 encoding
+		result := make([]byte, 0, len(data))
+		for _, b := range data {
+			if b < 0x80 {
+				result = append(result, b)
+			} else {
+				result = append(result, 0xc0|b>>6, 0x80|b&0x3f)
+			}
 		}
 		return result, nil
 	case 0x1e: // BMPString (UTF-16 BE)
@@ -274,6 +280,9 @@ func convertASN1StringToUTF8(data []byte, tag byte) ([]byte, error) {
 		result := make([]byte, 0, len(data))
 		for i := 0; i < len(data); i += 2 {
 			ch := uint16(data[i])<<8 | uint16(data[i+1])
+			if ch >= 0xd800 && ch <= 0xdfff {
+				return nil, fmt.Errorf("x509 name: BMPString contains surrogate code point U+%04X", ch)
+			}
 			if ch < 0x80 {
 				result = append(result, byte(ch))
 			} else if ch < 0x800 {
@@ -290,6 +299,12 @@ func convertASN1StringToUTF8(data []byte, tag byte) ([]byte, error) {
 		result := make([]byte, 0, len(data))
 		for i := 0; i < len(data); i += 4 {
 			ch := uint32(data[i])<<24 | uint32(data[i+1])<<16 | uint32(data[i+2])<<8 | uint32(data[i+3])
+			if ch > 0x10ffff {
+				return nil, fmt.Errorf("x509 name: UniversalString code point U+%04X exceeds U+10FFFF", ch)
+			}
+			if ch >= 0xd800 && ch <= 0xdfff {
+				return nil, fmt.Errorf("x509 name: UniversalString contains surrogate code point U+%04X", ch)
+			}
 			if ch < 0x80 {
 				result = append(result, byte(ch))
 			} else if ch < 0x800 {
@@ -369,11 +384,20 @@ func encodeDERLength(length int) []byte {
 // buildCanonicalX509NameDER builds the canonical DER encoding of an X.509 name
 // matching OpenSSL's x509_name_canon / i2d_name_canon. The outer SEQUENCE
 // wrapper is omitted (OpenSSL's canon_enc excludes it for dirName comparison).
+//
+// For multi-valued RDNs (multiple attributes in a single SET), the attributes
+// are sorted by their canonical DER encoding to match OpenSSL's SET OF semantics.
 func buildCanonicalX509NameDER(rdns []x509NameRDN) ([]byte, error) {
 	var buf []byte
 
 	for _, rdn := range rdns {
-		var setInner []byte
+		// Build canonical DER for each attribute first
+		type attrDER struct {
+			der []byte
+			raw x509NameAttr
+		}
+		var attrs []attrDER
+
 		for _, attr := range rdn.attrs {
 			var attrInner []byte
 			// OID with proper DER length encoding
@@ -398,10 +422,30 @@ func buildCanonicalX509NameDER(rdns []x509NameRDN) ([]byte, error) {
 			}
 
 			// Attribute SEQUENCE with proper DER length encoding
-			setInner = append(setInner, 0x30)
-			setInner = append(setInner, encodeDERLength(len(attrInner))...)
-			setInner = append(setInner, attrInner...)
+			var seq []byte
+			seq = append(seq, 0x30)
+			seq = append(seq, encodeDERLength(len(attrInner))...)
+			seq = append(seq, attrInner...)
+
+			attrs = append(attrs, attrDER{der: seq, raw: attr})
 		}
+
+		// Sort attributes by their DER encoding for SET OF semantics
+		// This matches OpenSSL's canonical ordering for multi-valued RDNs
+		for i := 0; i < len(attrs); i++ {
+			for j := i + 1; j < len(attrs); j++ {
+				if bytes.Compare(attrs[i].der, attrs[j].der) > 0 {
+					attrs[i], attrs[j] = attrs[j], attrs[i]
+				}
+			}
+		}
+
+		// Build the SET from sorted attributes
+		var setInner []byte
+		for _, a := range attrs {
+			setInner = append(setInner, a.der...)
+		}
+
 		// RDN SET with proper DER length encoding
 		buf = append(buf, 0x31)
 		buf = append(buf, encodeDERLength(len(setInner))...)
@@ -464,7 +508,14 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 		return "", err
 	}
 
-	// Parse certificate to compute the openssl-compatible hash.
+	return prepareCAFromData(runtimeDir, caData)
+}
+
+// prepareCAFromData computes the openssl hash and materializes the CA in the
+// helper-owned runtime directory using pre-read CA bytes. This function is the
+// authoritative path for CA preparation and is also exposed for tests that need
+// to verify snapshot consistency without filesystem races.
+func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, err error) {
 	cert, err := validateCAPEM(caData)
 	if err != nil {
 		return "", err

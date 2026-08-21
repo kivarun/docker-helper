@@ -5,8 +5,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -451,25 +453,19 @@ func TestCAPrepareSnapshotConsistency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// prepareCAInjection reads the file once and uses that snapshot
-	// for both the hash and the file write. Verify this by corrupting
-	// the source file after the first read (via a goroutine) and
-	// confirming the prepared ca.pem still matches the original.
-	done := make(chan struct{})
-	go func() {
-		<-done
-		// Corrupt the source file after prepareCAInjection has read it.
-		os.WriteFile(caPath, []byte("corrupted"), 0644)
-	}()
-
-	// prepareCAInjection should succeed using the original snapshot.
-	preparedDir, err := prepareCAInjection(runtimeSubDir, caPath)
-	close(done)
-	if err != nil {
-		t.Fatalf("prepareCAInjection failed: %v", err)
+	// Corrupt the source file to prove that prepareCAFromData uses only the
+	// captured bytes and never re-reads the filesystem.
+	if err := os.WriteFile(caPath, []byte("corrupted"), 0644); err != nil {
+		t.Fatalf("corruption write failed: %v", err)
 	}
 
-	// Verify prepared ca.pem matches original bytes (not the corrupted content).
+	// prepareCAFromData uses only the captured snapshot, not the file.
+	preparedDir, err := prepareCAFromData(runtimeSubDir, originalData)
+	if err != nil {
+		t.Fatalf("prepareCAFromData failed: %v", err)
+	}
+
+	// Verify prepared ca.pem matches the original snapshot, not the corrupted file.
 	preparedCAFile := filepath.Join(preparedDir, "ca.pem")
 	preparedData, err := os.ReadFile(preparedCAFile)
 	if err != nil {
@@ -477,6 +473,28 @@ func TestCAPrepareSnapshotConsistency(t *testing.T) {
 	}
 	if !bytes.Equal(preparedData, originalData) {
 		t.Error("prepared ca.pem does not match original CA bytes")
+	}
+
+	// Verify the hash symlink exists and points to ca.pem.
+	entries, err := os.ReadDir(preparedDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSymlink := false
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".0") {
+			foundSymlink = true
+			target, err := os.Readlink(filepath.Join(preparedDir, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target != "ca.pem" {
+				t.Errorf("symlink target = %s, want ca.pem", target)
+			}
+		}
+	}
+	if !foundSymlink {
+		t.Fatal("no hash symlink found")
 	}
 }
 
@@ -588,4 +606,417 @@ func createTestCertWithSubject(t *testing.T, subject pkix.Name) *x509.Certificat
 		t.Fatal(err)
 	}
 	return cert
+}
+
+// --- raw ASN.1 subject compatibility tests ---
+
+var oidCommonName = []byte{0x55, 0x04, 0x03} // 2.5.4.3
+
+// makeCertWithRawSubject creates a certificate whose RawSubject is set to
+// the provided DER bytes. computeOpenSSLHash only reads RawSubject, so the
+// rest of the certificate is irrelevant.
+func makeCertWithRawSubject(t *testing.T, rawSubject []byte) *x509.Certificate {
+	t.Helper()
+	cert := createTestCertWithSubject(t, pkix.Name{CommonName: "placeholder"})
+	cert.RawSubject = rawSubject
+	return cert
+}
+
+// expectedHashFromCanonDER computes the OpenSSL subject hash from canonical
+// DER bytes (without outer SEQUENCE). This serves as an independent reference
+// for test expectations.
+func expectedHashFromCanonDER(t *testing.T, canonDER []byte) string {
+	t.Helper()
+	h := sha1.Sum(canonDER)
+	return fmt.Sprintf("%08x", uint32(h[3])<<24|uint32(h[2])<<16|uint32(h[1])<<8|uint32(h[0]))
+}
+
+// derSeq builds a DER SEQUENCE wrapper around the given inner bytes.
+func derSeq(inner []byte) []byte {
+	return append(append([]byte{0x30}, encodeDERLength(len(inner))...), inner...)
+}
+
+// derSet builds a DER SET wrapper around the given inner bytes.
+func derSet(inner []byte) []byte {
+	return append(append([]byte{0x31}, encodeDERLength(len(inner))...), inner...)
+}
+
+// derOID builds a DER OID wrapper around the given OID bytes.
+func derOID(oid []byte) []byte {
+	return append(append([]byte{0x06}, encodeDERLength(len(oid))...), oid...)
+}
+
+// derUTF8String builds a DER UTF8String wrapper.
+func derUTF8String(b []byte) []byte {
+	return append(append([]byte{0x0c}, encodeDERLength(len(b))...), b...)
+}
+
+// derT61String builds a DER T61String wrapper.
+func derT61String(b []byte) []byte {
+	return append(append([]byte{0x14}, encodeDERLength(len(b))...), b...)
+}
+
+// derBMPString builds a DER BMPString (UTF-16 BE) wrapper from runes.
+func derBMPString(runes []rune) []byte {
+	b := make([]byte, 0, len(runes)*2)
+	for _, r := range runes {
+		b = append(b, byte(r>>8), byte(r))
+	}
+	return append(append([]byte{0x1e}, encodeDERLength(len(b))...), b...)
+}
+
+// derUniversalString builds a DER UniversalString (UTF-32 BE) wrapper from runes.
+func derUniversalString(runes []rune) []byte {
+	b := make([]byte, 0, len(runes)*4)
+	for _, r := range runes {
+		b = append(b, 0, 0, byte(r>>8), byte(r))
+	}
+	return append(append([]byte{0x1c}, encodeDERLength(len(b))...), b...)
+}
+
+// derAttr builds a DER AttributeTypeAndValue SEQUENCE.
+func derAttr(oid, value []byte) []byte {
+	return derSeq(append(derOID(oid), value...))
+}
+
+// canonAttr builds a canonical attribute DER (OID + UTF8String value).
+func canonAttr(oid, canonValue []byte) []byte {
+	return derSeq(append(derOID(oid), derUTF8String(canonValue)...))
+}
+
+// canonRDN builds a canonical RDN SET from canonical attribute DERs.
+func canonRDN(attrs ...[]byte) []byte {
+	return derSet(bytes.Join(attrs, nil))
+}
+
+func TestOpenSSLHashRawSubject(t *testing.T) {
+	// Pre-compute values that can't be expressed inline in a composite literal.
+	longVal := make([]byte, 130)
+	for i := range longVal {
+		longVal[i] = 'A'
+	}
+	longCanon := make([]byte, 130)
+	for i := range longCanon {
+		longCanon[i] = 'a'
+	}
+	attrBBB := derAttr(oidCommonName, derUTF8String([]byte("BBB")))
+	attrAAA := derAttr(oidCommonName, derUTF8String([]byte("AAA")))
+
+	tests := []struct {
+		name       string
+		rawSubject []byte
+		canonDER   []byte
+	}{
+		{
+			name: "T61String non-ASCII e9",
+			// CN = T61String(0xe9) — ISO-8859-1 é
+			rawSubject: derSeq(derSet(derAttr(oidCommonName, derT61String([]byte{0xe9})))),
+			// Canonical: UTF8String(c3 a9) — UTF-8 é
+			canonDER: canonRDN(canonAttr(oidCommonName, []byte{0xc3, 0xa9})),
+		},
+		{
+			name: "BMPString Test",
+			// CN = BMPString("Test")
+			rawSubject: derSeq(derSet(derAttr(oidCommonName, derBMPString([]rune("Test"))))),
+			// Canonical: UTF8String("test")
+			canonDER: canonRDN(canonAttr(oidCommonName, []byte("test"))),
+		},
+		{
+			name: "UniversalString Test",
+			// CN = UniversalString("Test")
+			rawSubject: derSeq(derSet(derAttr(oidCommonName, derUniversalString([]rune("Test"))))),
+			// Canonical: UTF8String("test")
+			canonDER: canonRDN(canonAttr(oidCommonName, []byte("test"))),
+		},
+		{
+			name: "VT and FF whitespace",
+			// CN = UTF8String("Test\x0b\x0cCA") — VT and FF between words
+			rawSubject: derSeq(derSet(derAttr(oidCommonName, derUTF8String([]byte("Test\x0b\x0cCA"))))),
+			// Canonical: UTF8String("test ca") — VT/FF collapsed to single space, lowercased
+			canonDER: canonRDN(canonAttr(oidCommonName, []byte("test ca"))),
+		},
+		{
+			name: "long-form DER length",
+			// CN = UTF8String(130 'A' bytes) — triggers long-form DER length encoding
+			rawSubject: derSeq(derSet(derAttr(oidCommonName, derUTF8String(longVal)))),
+			// Canonical: UTF8String(130 'a' bytes)
+			canonDER: canonRDN(canonAttr(oidCommonName, longCanon)),
+		},
+		{
+			name: "multi-valued RDN SET OF ordering",
+			// SET { CN="BBB", CN="AAA" } — raw order is reversed
+			rawSubject: derSeq(derSet(append(attrBBB, attrAAA...))),
+			// Canonical: sorted SET { CN="aaa", CN="bbb" }
+			canonDER: canonRDN(
+				canonAttr(oidCommonName, []byte("aaa")),
+				canonAttr(oidCommonName, []byte("bbb")),
+			),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cert := makeCertWithRawSubject(t, tt.rawSubject)
+			hash, err := computeOpenSSLHash(cert)
+			if err != nil {
+				t.Fatalf("computeOpenSSLHash failed: %v", err)
+			}
+			want := expectedHashFromCanonDER(t, tt.canonDER)
+			if hash != want {
+				t.Errorf("hash = %s, want %s", hash, want)
+			}
+		})
+	}
+}
+
+func TestOpenSSLHashSameValueDifferentEncodings(t *testing.T) {
+	// Same logical value "Test" encoded with different ASN.1 string types
+	// must produce identical hashes after canonicalization.
+	encodings := [][]byte{
+		derSeq(derSet(derAttr(oidCommonName, derUTF8String([]byte("Test"))))),
+		derSeq(derSet(derAttr(oidCommonName, derBMPString([]rune("Test"))))),
+		derSeq(derSet(derAttr(oidCommonName, derUniversalString([]rune("Test"))))),
+		derSeq(derSet(derAttr(oidCommonName, derT61String([]byte("Test"))))),
+	}
+
+	var firstHash string
+	for i, raw := range encodings {
+		cert := makeCertWithRawSubject(t, raw)
+		hash, err := computeOpenSSLHash(cert)
+		if err != nil {
+			t.Fatalf("encoding %d: computeOpenSSLHash failed: %v", i, err)
+		}
+		if firstHash == "" {
+			firstHash = hash
+		}
+		if hash != firstHash {
+			t.Errorf("encoding %d hash %s != first hash %s", i, hash, firstHash)
+		}
+	}
+}
+
+// TestOpenSSLHashSurrogateRejection verifies that BMPString and UniversalString
+// with surrogate code points are rejected, matching OpenSSL behavior.
+func TestOpenSSLHashSurrogateRejection(t *testing.T) {
+	tests := []struct {
+		name       string
+		rawSubject []byte
+	}{
+		{
+			name: "BMPString surrogate low",
+			// CN = BMPString(U+D800) — low surrogate
+			rawSubject: derSeq(derSet(derAttr(oidCommonName,
+				derTagLength(0x1e, []byte{0xd8, 0x00})))),
+		},
+		{
+			name: "BMPString surrogate high",
+			// CN = BMPString(U+DFFF) — high surrogate
+			rawSubject: derSeq(derSet(derAttr(oidCommonName,
+				derTagLength(0x1e, []byte{0xdf, 0xff})))),
+		},
+		{
+			name: "UniversalString surrogate",
+			// CN = UniversalString(U+D800) — surrogate
+			rawSubject: derSeq(derSet(derAttr(oidCommonName,
+				derTagLength(0x1c, []byte{0x00, 0x00, 0xd8, 0x00})))),
+		},
+		{
+			name: "UniversalString above 10FFFF",
+			// CN = UniversalString(U+110000) — above valid Unicode range
+			rawSubject: derSeq(derSet(derAttr(oidCommonName,
+				derTagLength(0x1c, []byte{0x01, 0x10, 0x00, 0x00})))),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cert := makeCertWithRawSubject(t, tt.rawSubject)
+			_, err := computeOpenSSLHash(cert)
+			if err == nil {
+				t.Fatal("expected error for invalid code point, got nil")
+			}
+		})
+	}
+}
+
+// TestOpenSSLHashMalformedLength verifies that malformed BMPString and
+// UniversalString lengths are rejected.
+func TestOpenSSLHashMalformedLength(t *testing.T) {
+	tests := []struct {
+		name       string
+		rawSubject []byte
+	}{
+		{
+			name: "BMPString odd length",
+			// CN = BMPString with 3 bytes (not multiple of 2)
+			rawSubject: derSeq(derSet(derAttr(oidCommonName,
+				derTagLength(0x1e, []byte{0x00, 0x54, 0x65})))),
+		},
+		{
+			name: "UniversalString length not multiple of 4",
+			// CN = UniversalString with 5 bytes (not multiple of 4)
+			rawSubject: derSeq(derSet(derAttr(oidCommonName,
+				derTagLength(0x1c, []byte{0x00, 0x00, 0x00, 0x54, 0x65})))),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cert := makeCertWithRawSubject(t, tt.rawSubject)
+			_, err := computeOpenSSLHash(cert)
+			if err == nil {
+				t.Fatal("expected error for malformed length, got nil")
+			}
+		})
+	}
+}
+
+// derTagLength builds a DER tag+length+value for the given tag and data.
+func derTagLength(tag byte, data []byte) []byte {
+	return append(append([]byte{tag}, encodeDERLength(len(data))...), data...)
+}
+
+// TestOpenSSLHashNumericStringNotCanonicalized verifies that NumericString
+// is NOT canonicalized (not in ASN1_MASK_CANON) and retains its original tag.
+func TestOpenSSLHashNumericStringNotCanonicalized(t *testing.T) {
+	// CN = NumericString("12345")
+	rawSubject := derSeq(derSet(derAttr(oidCommonName,
+		derTagLength(0x12, []byte("12345")))))
+	canonDER := canonRDN(derSeq(append(derOID(oidCommonName),
+		derTagLength(0x12, []byte("12345"))...)))
+
+	cert := makeCertWithRawSubject(t, rawSubject)
+	hash, err := computeOpenSSLHash(cert)
+	if err != nil {
+		t.Fatalf("computeOpenSSLHash failed: %v", err)
+	}
+	want := expectedHashFromCanonDER(t, canonDER)
+	if hash != want {
+		t.Errorf("hash = %s, want %s", hash, want)
+	}
+}
+
+// TestOpenSSLHashNonASCIIUntouched verifies that non-ASCII UTF-8 bytes
+// are not modified by the ASCII-only lowercase/whitespace logic.
+func TestOpenSSLHashNonASCIIUntouched(t *testing.T) {
+	// CN = UTF8String("Tëst CÄ") — non-ASCII bytes should pass through unchanged
+	rawSubject := derSeq(derSet(derAttr(oidCommonName,
+		derUTF8String([]byte("T\xc3\xa9st C\xc3\x84")))))
+	// Canonical: lowercase ASCII only, non-ASCII unchanged
+	// "T" -> "t", "ë" (c3 a9) unchanged, "st" -> "st", " " unchanged,
+	// "C" -> "c", "Ä" (c3 84) unchanged
+	canonDER := canonRDN(canonAttr(oidCommonName, []byte("t\xc3\xa9st c\xc3\x84")))
+
+	cert := makeCertWithRawSubject(t, rawSubject)
+	hash, err := computeOpenSSLHash(cert)
+	if err != nil {
+		t.Fatalf("computeOpenSSLHash failed: %v", err)
+	}
+	want := expectedHashFromCanonDER(t, canonDER)
+	if hash != want {
+		t.Errorf("hash = %s, want %s", hash, want)
+	}
+}
+
+// TestOpenSSLHashWhitespaceFull verifies all 6 whitespace characters
+// (TAB, LF, VT, FF, CR, SPACE) are normalized.
+func TestOpenSSLHashWhitespaceFull(t *testing.T) {
+	// CN = UTF8String("\t\x0a\x0b\x0c\x0d  Test   CA  \t\x0a")
+	// All whitespace types at leading, internal, and trailing positions
+	rawSubject := derSeq(derSet(derAttr(oidCommonName,
+		derUTF8String([]byte("\t\x0a\x0b\x0c\x0d  Test   CA  \t\x0a")))))
+	// Canonical: "test ca" (all whitespace trimmed/collapsed, lowercased)
+	canonDER := canonRDN(canonAttr(oidCommonName, []byte("test ca")))
+
+	cert := makeCertWithRawSubject(t, rawSubject)
+	hash, err := computeOpenSSLHash(cert)
+	if err != nil {
+		t.Fatalf("computeOpenSSLHash failed: %v", err)
+	}
+	want := expectedHashFromCanonDER(t, canonDER)
+	if hash != want {
+		t.Errorf("hash = %s, want %s", hash, want)
+	}
+}
+
+// TestOpenSSLHashIA5AndVisible verifies IA5String and VisibleString
+// are canonicalized (in ASN1_MASK_CANON).
+func TestOpenSSLHashIA5AndVisible(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  byte
+		data []byte
+	}{
+		{"IA5String", 0x16, []byte("Test CA")},
+		{"VisibleString", 0x1a, []byte("Test CA")},
+	}
+
+	// All should produce the same canonical form: UTF8String("test ca")
+	expectedCanon := canonRDN(canonAttr(oidCommonName, []byte("test ca")))
+	want := expectedHashFromCanonDER(t, expectedCanon)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawSubject := derSeq(derSet(derAttr(oidCommonName,
+				derTagLength(tt.tag, tt.data))))
+			cert := makeCertWithRawSubject(t, rawSubject)
+			hash, err := computeOpenSSLHash(cert)
+			if err != nil {
+				t.Fatalf("computeOpenSSLHash failed: %v", err)
+			}
+			if hash != want {
+				t.Errorf("hash = %s, want %s", hash, want)
+			}
+		})
+	}
+}
+
+// TestOpenSSLHashPrintableString verifies PrintableString is canonicalized.
+func TestOpenSSLHashPrintableString(t *testing.T) {
+	// CN = PrintableString("Test CA")
+	rawSubject := derSeq(derSet(derAttr(oidCommonName,
+		derTagLength(0x13, []byte("Test CA")))))
+	canonDER := canonRDN(canonAttr(oidCommonName, []byte("test ca")))
+
+	cert := makeCertWithRawSubject(t, rawSubject)
+	hash, err := computeOpenSSLHash(cert)
+	if err != nil {
+		t.Fatalf("computeOpenSSLHash failed: %v", err)
+	}
+	want := expectedHashFromCanonDER(t, canonDER)
+	if hash != want {
+		t.Errorf("hash = %s, want %s", hash, want)
+	}
+}
+
+// TestOpenSSLHashMultiAttributeRDN verifies multi-attribute RDNs.
+func TestOpenSSLHashMultiAttributeRDN(t *testing.T) {
+	oidOrg := []byte{0x55, 0x04, 0x0a} // 2.5.4.10 (organization)
+
+	// SET { O="Org", CN="CN" }
+	attrOrg := derAttr(oidOrg, derUTF8String([]byte("Org")))
+	attrCN := derAttr(oidCommonName, derUTF8String([]byte("CN")))
+	rawSubject := derSeq(derSet(append(attrOrg, attrCN...)))
+
+	// Canonical: both become UTF8String, sorted by DER
+	canonOrg := canonAttr(oidOrg, []byte("org"))
+	canonCN := canonAttr(oidCommonName, []byte("cn"))
+	// Sort: compare full DER of each attribute
+	var canonAttrs [][]byte
+	if bytes.Compare(canonCN, canonOrg) < 0 {
+		canonAttrs = [][]byte{canonCN, canonOrg}
+	} else {
+		canonAttrs = [][]byte{canonOrg, canonCN}
+	}
+	canonDER := canonRDN(canonAttrs...)
+
+	cert := makeCertWithRawSubject(t, rawSubject)
+	hash, err := computeOpenSSLHash(cert)
+	if err != nil {
+		t.Fatalf("computeOpenSSLHash failed: %v", err)
+	}
+	want := expectedHashFromCanonDER(t, canonDER)
+	if hash != want {
+		t.Errorf("hash = %s, want %s", hash, want)
+	}
 }
