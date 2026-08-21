@@ -41,7 +41,7 @@ module docker_helper 1.0;
 		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton rename };
 		class dir { getattr search read open write add_name remove_name create rmdir mounton setattr };
 		class sock_file { create setattr unlink write };
-		class lnk_file { read };
+		class lnk_file { read create unlink };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto };
 		class udp_socket { create setopt connect getattr read write };
@@ -96,6 +96,7 @@ allow docker_helper_t docker_helper_config_t:file { read open getattr };
 allow docker_helper_t docker_helper_runtime_t:dir { getattr search read open write add_name remove_name create mounton rmdir setattr };
 allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink mounton getattr setattr };
 allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
+allow docker_helper_t docker_helper_runtime_t:lnk_file { create read unlink };
 
 # State (from live AVC evidence)
 allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name };

@@ -1,11 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -55,19 +55,20 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	newCfg, err := loadConfig()
 	if err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
+		diagnostic := "invalid configuration"
+		if errors.Is(err, errTrustedCAFailed) {
+			diagnostic = fmt.Sprintf("trusted CA preparation failed: %v", errors.Unwrap(err))
+		}
 		opLog(ctx).Error("reload config error",
 			slog.String("operation", "reload"),
 			slog.String("error", err.Error()),
+			slog.String("diagnostic", diagnostic),
 		)
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:    "config.reload",
 			Result:   "invalid_config",
 			Duration: duration,
 		})
-		diagnostic := "invalid configuration"
-		if strings.Contains(err.Error(), "trusted_ca") {
-			diagnostic = fmt.Sprintf("trusted CA preparation failed: %v", err)
-		}
 		writeError(ctx, w, http.StatusBadRequest,
 			"invalid_config",
 			diagnostic,

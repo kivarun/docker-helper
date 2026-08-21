@@ -2129,3 +2129,147 @@ func TestConfigSetReloadTransportError(t *testing.T) {
 		t.Error("config.json should be byte-for-byte restored after rollback")
 	}
 }
+
+// TestReloadCATypedErrorDiagnostic verifies that a CA preparation failure
+// whose inner error does NOT contain the literal string "trusted_ca" still
+// produces the detailed trusted-CA diagnostic. This is a regression test for
+// the brittle strings.Contains(err.Error(), "trusted_ca") check that was
+// replaced with errors.Is(err, errTrustedCAFailed).
+func TestReloadCATypedErrorDiagnostic(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	// Capture operational logs
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+
+	waitForDialReady(t, "unix", socketPath)
+
+	// Write config that triggers CA preparation with a path that will fail
+	// with "permission denied" (not containing "trusted_ca").
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	generateTestCAPEM(t, caPath)
+	// Make the runtime dir unreadable so symlink creation fails with "permission denied".
+	dir := t.TempDir()
+	runtimeDir := filepath.Join(dir, "xdg_runtime")
+	runtimeSubDir := filepath.Join(runtimeDir, "docker-helper")
+	if err := os.MkdirAll(runtimeSubDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Remove read permission from runtime dir to trigger "permission denied"
+	if err := os.Chmod(runtimeSubDir, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(runtimeSubDir, 0700) })
+
+	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
+	os.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Cleanup(func() { os.Setenv("XDG_RUNTIME_DIR", oldRuntime) })
+
+	newCfg := map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_path":      caPath,
+		"trusted_ca_injection": "auto",
+	}
+	data, err := json.MarshalIndent(newCfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %s", body)
+	}
+
+	// The response must contain the detailed CA diagnostic, not just "invalid configuration".
+	msg, ok := result["message"].(string)
+	if !ok {
+		t.Fatalf("expected message string, got: %s", body)
+	}
+	if !strings.Contains(msg, "trusted CA preparation failed") {
+		t.Errorf("expected 'trusted CA preparation failed' in response message, got: %s", msg)
+	}
+	// The inner error (permission denied) should also be visible.
+	if !strings.Contains(msg, "permission denied") && !strings.Contains(msg, "cannot create") {
+		// The exact inner error depends on the OS; either is acceptable.
+		// The key point is that the message is more specific than "invalid configuration".
+		if msg == "invalid configuration" {
+			t.Error("got generic 'invalid configuration' instead of detailed CA diagnostic")
+		}
+	}
+
+	// Verify the operational log contains the diagnostic field.
+	opLog := opBuf.String()
+	if !strings.Contains(opLog, "trusted CA preparation failed") {
+		t.Errorf("expected 'trusted CA preparation failed' in operational log, got:\n%s", opLog)
+	}
+}

@@ -352,7 +352,7 @@ func loadConfig() (*Config, error) {
 		}
 		preparedDir, err := prepareCAInjection(runtimeDir, cfg.TrustedCAPath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", errTrustedCAFailed, err)
 		}
 		cfg.TrustedCAPreparedDir = preparedDir
 	}

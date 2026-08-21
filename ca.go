@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,11 @@ import (
 
 // trustedCAContainerDir is the container mount target for the trusted CA directory.
 const trustedCAContainerDir = "/run/docker-helper/trusted-ca"
+
+// errTrustedCAFailed is a sentinel error that identifies any failure originating
+// from trusted CA preflight or preparation. It is used by reload diagnostics to
+// produce an actionable error message regardless of the inner error text.
+var errTrustedCAFailed = errors.New("trusted CA preparation failed")
 
 // trustedCAEnvSSLDir and trustedCAEnvNodeExtra are the injected environment
 // variable names for CA injection.
