@@ -123,8 +123,26 @@ Exact staging permissions proven:
 - `docker_helper_runtime_t:dir read open setattr` (staging metadata)
 - `docker_helper_runtime_t:file getattr setattr` (staged file metadata)
 
-Buildx execution, network, and TLS permissions remain unresolved and
-deferred to a separate discovery phase.
+Buildx execution, network, and TLS permissions proven in live enforcing UAT:
+
+- `lib_t:file execute_no_trans` — shared library loading for Buildx
+- `self:unix_stream_socket connectto` — Buildx daemon communication
+- `docker_helper_runtime_t:file rename` — Buildx workspace management
+- `net_conf_t:file read open getattr` — network configuration read
+- `self:udp_socket { create setopt connect getattr }` — Buildx network
+- `self:tcp_socket { connect getopt }` — Buildx network
+- `http_port_t:tcp_socket name_connect` — registry access
+- `cert_t:dir { search read open }` — system certificate access
+- `cert_t:lnk_file read` — certificate symlinks
+- `cert_t:file { read open getattr }` — certificate files
+
+Intentionally NOT granted (proven non-essential in enforcing UAT):
+
+- `bin_t` / git execution — denied with permissive=0, build succeeded
+- `cgroup_t` — non-fatal probe, build succeeded
+- `sysctl_net_t` — non-fatal probe, build succeeded
+- `container_file_t` — unresolved; host custom CA file requires
+  separate investigation; broad `container_file_t` access not acceptable
 
 Automatic workspace relabeling is NOT implemented or approved.
 

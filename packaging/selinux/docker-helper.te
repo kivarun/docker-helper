@@ -31,14 +31,20 @@ module docker_helper 1.0;
 		type container_var_run_t;
 		type user_home_dir_t;
 		type fs_t;
+		type lib_t;
+		type net_conf_t;
+		type http_port_t;
+		type cert_t;
 
 		role system_r;
 
-		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton };
+		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton rename };
 		class dir { getattr search read open write add_name remove_name create rmdir mounton setattr };
 		class sock_file { create setattr unlink write };
-		class tcp_socket { create setopt bind node_bind listen accept getattr read write };
+		class lnk_file { read };
+		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto };
+		class udp_socket { create setopt connect getattr };
 		class filesystem { unmount };
 		class capability { dac_read_search sys_admin };
 		class process { transition };
@@ -127,3 +133,31 @@ allow docker_helper_t self:capability { dac_read_search sys_admin };
 
 # Mount-pin: unmount filesystem (proven in enforcing UAT)
 allow docker_helper_t fs_t:filesystem { unmount };
+
+# --- Buildx execution/runtime/network/certificates (proven in enforcing UAT) ---
+
+# Buildx needs lib_t for execute_no_trans (shared library loading)
+allow docker_helper_t lib_t:file { execute_no_trans };
+
+# Unix stream socket connectto for Buildx daemon communication
+allow docker_helper_t self:unix_stream_socket { connectto };
+
+# Runtime directory rename (Buildx workspace management)
+allow docker_helper_t docker_helper_runtime_t:file { rename };
+
+# Network configuration read
+allow docker_helper_t net_conf_t:file { read open getattr };
+
+# UDP socket for Buildx network communication
+allow docker_helper_t self:udp_socket { create setopt connect getattr };
+
+# TCP socket for Buildx network communication
+allow docker_helper_t self:tcp_socket { connect getopt };
+
+# HTTP port connection for registry access
+allow docker_helper_t http_port_t:tcp_socket { name_connect };
+
+# System certificate access for TLS verification
+allow docker_helper_t cert_t:dir { search read open };
+allow docker_helper_t cert_t:lnk_file { read };
+allow docker_helper_t cert_t:file { read open getattr };
