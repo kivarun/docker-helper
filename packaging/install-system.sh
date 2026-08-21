@@ -269,6 +269,18 @@ install_apparmor_fragment() {
 	chmod 0644 "$AA_FRAGMENT_DEST"
 }
 
+install_completion() {
+	local completion_src="$script_dir/completions/docker-helper"
+	local completion_dest="/usr/share/bash-completion/completions/docker-helper"
+	if [[ ! -f "$completion_src" ]]; then
+		return
+	fi
+	info "Installing Bash completion to $completion_dest"
+	mkdir -p "$(dirname "$completion_dest")"
+	cp "$completion_src" "$completion_dest"
+	chmod 0644 "$completion_dest"
+}
+
 load_apparmor_profile() {
 	info "Loading AppArmor profile $AA_PROFILE_DEST"
 	if ! "$AA_PARSER" --replace --skip-read-cache "$AA_PROFILE_DEST"; then
@@ -354,6 +366,7 @@ main() {
 	install_unit
 	install_apparmor_profile
 	install_apparmor_fragment
+	install_completion
 	load_apparmor_profile
 	run_init
 	reload_systemd

@@ -169,6 +169,14 @@ remove_binary() {
 	rm -f "$BINARY_DEST"
 }
 
+remove_completion() {
+	local completion_dest="/usr/share/bash-completion/completions/docker-helper"
+	if [[ -f "$completion_dest" ]]; then
+		info "Removing $completion_dest"
+		rm -f "$completion_dest"
+	fi
+}
+
 # --- Purge ---
 
 purge_persistent_data() {
@@ -217,6 +225,7 @@ main() {
 	unload_apparmor_profile
 	remove_apparmor_profile
 	remove_binary
+	remove_completion
 
 	if $purge; then
 		purge_persistent_data

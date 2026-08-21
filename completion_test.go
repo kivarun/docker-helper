@@ -280,22 +280,127 @@ func TestCompletionOptionWithValue(t *testing.T) {
 	}
 }
 
-func TestCompletionConfigKeyValues(t *testing.T) {
+func TestCompletionConfigShowFields(t *testing.T) {
 	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "config", "set", "--config", ""})
+	results := runCompletion(t, script, []string{"docker-helper", "config", "show", ""})
 	if len(results) == 0 {
-		t.Error("expected config key completions")
+		t.Error("expected config show field completions")
 		return
 	}
-	expected := []string{"allowed_root", "session_ttl", "log_level"}
+	expected := []string{"allowed_root", "session_ttl", "log_level", "audit_enabled"}
 	resultsMap := make(map[string]bool)
 	for _, r := range results {
 		resultsMap[r] = true
 	}
 	for _, exp := range expected {
 		if !resultsMap[exp] {
-			t.Errorf("expected config key %q not found: %v", exp, results)
+			t.Errorf("expected config show field %q not found: %v", exp, results)
 		}
+	}
+}
+
+func TestCompletionConfigSetFields(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "config", "set", ""})
+	if len(results) == 0 {
+		t.Error("expected config set field completions")
+		return
+	}
+	expected := []string{"allowed_root", "session_ttl", "log_level", "audit_enabled"}
+	resultsMap := make(map[string]bool)
+	for _, r := range results {
+		resultsMap[r] = true
+	}
+	for _, exp := range expected {
+		if !resultsMap[exp] {
+			t.Errorf("expected config set field %q not found: %v", exp, results)
+		}
+	}
+}
+
+func TestCompletionConfigUnsetFields(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "config", "unset", ""})
+	if len(results) == 0 {
+		t.Error("expected config unset field completions")
+		return
+	}
+	expected := []string{"log_level", "audit_enabled", "shutdown_timeout"}
+	resultsMap := make(map[string]bool)
+	for _, r := range results {
+		resultsMap[r] = true
+	}
+	for _, exp := range expected {
+		if !resultsMap[exp] {
+			t.Errorf("expected config unset field %q not found: %v", exp, results)
+		}
+	}
+}
+
+func TestCompletionConfigSetValue(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "config", "set", "log_level", ""})
+	if len(results) == 0 {
+		t.Error("expected config set log_level value completions")
+		return
+	}
+	expected := []string{"debug", "info", "warn", "error"}
+	resultsMap := make(map[string]bool)
+	for _, r := range results {
+		resultsMap[r] = true
+	}
+	for _, exp := range expected {
+		if !resultsMap[exp] {
+			t.Errorf("expected config set log_level value %q not found: %v", exp, results)
+		}
+	}
+}
+
+func TestCompletionIntermediateCommandHelp(t *testing.T) {
+	// -h/--help must complete on intermediate commands whose NewInvocation is nil
+	script := completionScript(t)
+	for _, cmd := range []string{"principal", "session", "config"} {
+		results := runCompletion(t, script, []string{"docker-helper", cmd, "-"})
+		if len(results) == 0 {
+			t.Errorf("expected flag completions for %s", cmd)
+			continue
+		}
+		foundH := false
+		foundHelp := false
+		for _, r := range results {
+			if r == "-h" {
+				foundH = true
+			}
+			if r == "--help" {
+				foundHelp = true
+			}
+		}
+		if !foundH {
+			t.Errorf("expected -h in %s flag completions: %v", cmd, results)
+		}
+		if !foundHelp {
+			t.Errorf("expected --help in %s flag completions: %v", cmd, results)
+		}
+	}
+}
+
+func TestCompletionPasswordStdinIsBool(t *testing.T) {
+	// --password-stdin is a real bool flag; it must not swallow the next word
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "registry", "login", "--password-stdin", "-"})
+	if len(results) == 0 {
+		t.Error("expected flag completions after --password-stdin")
+		return
+	}
+	found := false
+	for _, r := range results {
+		if strings.HasPrefix(r, "--") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected flags after --password-stdin: %v", results)
 	}
 }
 
