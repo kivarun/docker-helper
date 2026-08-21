@@ -1058,8 +1058,11 @@ into containers started via `POST /run`:
    one valid PEM-encoded X.509 certificate.
 
  2. **OpenSSL hash** — docker-helper computes the 8-character hex hash
-    natively: MD5 of the DER-encoded subject name, first 4 bytes as
-    lowercase hex. No external `openssl` binary is required.
+    natively, matching `openssl x509 -hash -noout` (OpenSSL 3.x
+    subject_hash). The algorithm canonicalizes the X.509 subject name
+    (UTF-8 conversion, lowercase, whitespace normalization), DER-encodes
+    it without the outer SEQUENCE wrapper, and takes SHA-1 truncated to
+    4 bytes (little-endian hex). No external `openssl` binary is required.
 
 3. **Runtime artifact** — The CA is materialized in the helper-owned runtime
    directory:

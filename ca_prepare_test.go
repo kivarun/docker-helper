@@ -487,35 +487,39 @@ func TestOpenSSLHashGolden(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "simple common name",
-			subject: pkix.Name{
-				CommonName: "Test CA",
-			},
-			expected: "d2b0b910",
+			name:     "simple CN",
+			subject:  pkix.Name{CommonName: "Test CA"},
+			expected: "3387b84d",
 		},
 		{
-			name: "organization",
-			subject: pkix.Name{
-				Organization: []string{"My Company"},
-			},
-			expected: "212fc7b3",
+			name:     "organization",
+			subject:  pkix.Name{Organization: []string{"My Company"}},
+			expected: "82b2249e",
 		},
 		{
-			name: "full dn",
+			name: "full DN",
 			subject: pkix.Name{
 				Country:            []string{"US"},
 				Organization:       []string{"Example Inc"},
 				OrganizationalUnit: []string{"Engineering"},
 				CommonName:         "Root CA",
 			},
-			expected: "34198664",
+			expected: "41c6e02d",
 		},
 		{
-			name: "non-ascii subject",
-			subject: pkix.Name{
-				CommonName: "日本語テスト",
-			},
-			expected: "cfd8260d",
+			name:     "non-ascii subject",
+			subject:  pkix.Name{CommonName: "日本語テスト"},
+			expected: "6ca7f5bd",
+		},
+		{
+			name:     "case normalization",
+			subject:  pkix.Name{CommonName: "TEST CA"},
+			expected: "3387b84d",
+		},
+		{
+			name:     "whitespace normalization",
+			subject:  pkix.Name{CommonName: "  Test   CA  "},
+			expected: "3387b84d",
 		},
 	}
 
@@ -527,6 +531,27 @@ func TestOpenSSLHashGolden(t *testing.T) {
 				t.Errorf("hash = %s, want %s", hash, tt.expected)
 			}
 		})
+	}
+}
+
+// TestOpenSSLHashNotMD5RawSubject verifies that the implementation does NOT
+// degenerate to MD5(RawSubject) or SHA1(RawSubject), which were incorrect
+// algorithms that produced wrong hashes.
+func TestOpenSSLHashNotMD5RawSubject(t *testing.T) {
+	cert := createTestCertWithSubject(t, pkix.Name{CommonName: "Test CA"})
+	hash := computeOpenSSLHash(cert)
+
+	// These are the hashes that would be produced by the wrong algorithms.
+	// If any of these match, the implementation has regressed.
+	wrongHashes := map[string]string{
+		"d2b0b910": "MD5(RawSubject) big-endian",
+		"02ff75da": "SHA1(RawSubject) big-endian",
+		"9536e9fc": "SHA256(RawSubject) big-endian",
+	}
+	for wrong, label := range wrongHashes {
+		if hash == wrong {
+			t.Errorf("hash %s matches wrong algorithm: %s", hash, label)
+		}
 	}
 }
 
