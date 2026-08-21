@@ -134,6 +134,19 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 	fs := flag.NewFlagSet(c.Name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
+	// Override flag.FlagSet's default Usage so that parse errors render
+	// through our own formatter (double-dash long options) instead of
+	// Go's default single-dash format.
+	fs.Usage = func() {
+		prefix := buildPrefix(path)
+		fmt.Fprintln(stderr, c.usageLine(prefix))
+		fmt.Fprintln(stderr)
+		fmt.Fprintln(stderr, "Flags:")
+		fs.VisitAll(func(f *flag.Flag) {
+			fmt.Fprintln(stderr, usageLine(f))
+		})
+	}
+
 	// Register help flags
 	helpShort := fs.Bool("h", false, "Show help for this command")
 	helpLong := fs.Bool("help", false, "Show help for this command")

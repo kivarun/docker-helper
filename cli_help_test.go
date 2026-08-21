@@ -102,6 +102,20 @@ func TestFrameworkParseErrorDoesNotCallRun(t *testing.T) {
 	}
 }
 
+func TestFrameworkParseErrorUsageDoubleDash(t *testing.T) {
+	runCount := 0
+	cmd := makeTestLeaf(&runCount)
+	var stdout, stderr bytes.Buffer
+	cmd.dispatch([]string{"--bogus-flag"}, []string{}, &stdout, &stderr)
+
+	stderrStr := stderr.String()
+
+	// The usage output must use double-dash for long options.
+	if strings.Contains(stderrStr, "-flag") && !strings.Contains(stderrStr, "--flag") {
+		t.Errorf("parse error usage must use -- for long options, got: %s", stderrStr)
+	}
+}
+
 func TestFrameworkValidateErrorDoesNotCallRun(t *testing.T) {
 	runCount := 0
 	cmd := makeTestValidate(&runCount)
@@ -139,6 +153,21 @@ func TestBlackBoxBogusCommand(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "unknown command") {
 		t.Errorf("expected unknown command error, got: %s", stderr.String())
+	}
+}
+
+func TestBlackBoxUnknownFlagDoubleDashUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"run", "--bogus-flag"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+
+	stderrStr := stderr.String()
+
+	// Verify usage shows --image, not -image
+	if strings.Contains(stderrStr, "-image") && !strings.Contains(stderrStr, "--image") {
+		t.Errorf("parse error usage must use -- for long options, got: %s", stderrStr)
 	}
 }
 
