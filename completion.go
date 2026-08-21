@@ -353,6 +353,8 @@ func generateBashCompletion(w io.Writer) {
 			fmt.Fprintf(w, "        \"%s\") echo \"-h --help\" ;;\n", path)
 		}
 	}
+	// Root command also gets -h/--help
+	fmt.Fprintf(w, "        \"\") echo \"-h --help\" ;;\n")
 	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)

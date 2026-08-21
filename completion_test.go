@@ -384,6 +384,32 @@ func TestCompletionIntermediateCommandHelp(t *testing.T) {
 	}
 }
 
+func TestCompletionRootHelpFlags(t *testing.T) {
+	// docker-helper -<TAB> must complete -h and --help
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "-"})
+	if len(results) == 0 {
+		t.Error("expected flag completions for root command")
+		return
+	}
+	foundH := false
+	foundHelp := false
+	for _, r := range results {
+		if r == "-h" {
+			foundH = true
+		}
+		if r == "--help" {
+			foundHelp = true
+		}
+	}
+	if !foundH {
+		t.Errorf("expected -h in root flag completions: %v", results)
+	}
+	if !foundHelp {
+		t.Errorf("expected --help in root flag completions: %v", results)
+	}
+}
+
 func TestCompletionPasswordStdinIsBool(t *testing.T) {
 	// --password-stdin is a real bool flag; it must not swallow the next word
 	script := completionScript(t)
