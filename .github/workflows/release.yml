@@ -55,7 +55,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools checkpolicy
+          sudo apt-get install -y musl-tools checkpolicy semodule-utils
 
       - name: Formatting
         run: |
