@@ -386,6 +386,39 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// In system mode, determine the MAC backend before any side effects:
+	// no pin creation, no operation registration, no run.start audit.
+	// A detection failure or unsupported configuration must fail closed.
+	securityOpt := ""
+	if cfg.Mode == ModeSystem {
+		backend, err := detectLSM()
+		if err != nil {
+			opLog(ctx).Error("cannot determine MAC backend",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		switch backend {
+		case LSMSelinux:
+			securityOpt = "label=type:docker_helper_container_t"
+		case LSMAppArmor:
+			securityOpt = "label=disable"
+		default:
+			// LSMNone: no supported MAC backend active — fail closed.
+			opLog(ctx).Error("no MAC backend active for system mode",
+				slog.String("operation", "run"),
+				slog.String("backend", string(backend)),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+	} else {
+		// User mode: disable SELinux labels (existing behavior)
+		securityOpt = "label=disable"
+	}
+
 	bufSize := cfg.OperationLogMaxBytes
 
 	// Create run operation and register it.
@@ -464,36 +497,13 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		PrincipalName:     session.PrincipalName,
 	})
 
-	// Build docker run command.
+	// Container security label determined above (before pins/registration/audit).
 	args := []string{
 		"--config", dockerDir,
 		"run",
 		"--rm",
 		"--user", fmt.Sprintf("%d:%d", execUID, execGID),
-	}
-
-	// Container MAC backend selection:
-	// - System mode + SELinux enforcing: custom container type for workspace access
-	// - System mode + AppArmor: disable SELinux labels (existing behavior)
-	// - User mode: disable SELinux labels (existing behavior)
-	if cfg.Mode == ModeSystem {
-		backend, err := detectLSM()
-		if err != nil {
-			opLog(ctx).Error("cannot determine MAC backend",
-				slog.String("operation", "run"),
-				slog.String("error", err.Error()),
-			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-			return
-		}
-		if backend == LSMSelinux {
-			args = append(args, "--security-opt", "label=type:docker_helper_container_t")
-		} else {
-			args = append(args, "--security-opt", "label=disable")
-		}
-	} else {
-		// User mode: disable SELinux labels (existing behavior)
-		args = append(args, "--security-opt", "label=disable")
+		"--security-opt", securityOpt,
 	}
 
 	if op.cidfile != "" {

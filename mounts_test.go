@@ -635,6 +635,10 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
+	// Set up operation registry to prove it remains unchanged.
+	app.OperationRegistry = newOperationRegistry()
+	initialOps := 0 // registry starts empty
+
 	dockerInvoked := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		dockerInvoked = true
@@ -666,6 +670,68 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+	}
+
+	// Verify operation registry was not modified.
+	// LSM detection must happen before operation registration.
+	app.OperationRegistry.mu.RLock()
+	currentOps := len(app.OperationRegistry.ops)
+	app.OperationRegistry.mu.RUnlock()
+	if currentOps != initialOps {
+		t.Errorf("operation registry modified by LSM detection failure: expected %d ops, got %d", initialOps, currentOps)
+	}
+}
+
+func TestRunLSMNoneFailsClosed(t *testing.T) {
+	app := newTestAppWithAuth(t)
+	app.Config.Mode = ModeSystem
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	app.OperationRegistry = newOperationRegistry()
+
+	dockerInvoked := false
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerInvoked = true
+		return exec.CommandContext(ctx, "/bin/true")
+	}
+
+	// Mock: no MAC backend active (LSMNone)
+	origSEL := selinuxEnabled
+	origAA := apparmorLSMActive
+	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
+	apparmorLSMActive = func() (bool, error) { return false, nil }
+	t.Cleanup(func() {
+		selinuxEnabled = origSEL
+		apparmorLSMActive = origAA
+	})
+
+	reqBody := map[string]any{"image": "alpine:latest"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRun(w, req)
+
+	if dockerInvoked {
+		t.Error("Docker must not be invoked when no MAC backend is active")
+	}
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+	}
+
+	// Verify operation registry was not modified.
+	app.OperationRegistry.mu.RLock()
+	currentOps := len(app.OperationRegistry.ops)
+	app.OperationRegistry.mu.RUnlock()
+	if currentOps != 0 {
+		t.Errorf("operation registry must not be modified when LSMNone: got %d ops", currentOps)
 	}
 }
 

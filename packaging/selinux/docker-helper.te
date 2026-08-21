@@ -3,9 +3,31 @@
 # Model: docker-helper validates and accesses workspaces that retain their
 # normal host labels (user_home_type). No workspace relabeling required.
 #
-# docker_helper_container_t is a real container domain that inherits
-# container-selinux confinement via the container_domain attribute, with
-# additional user_home_type access for session-mounted workspaces.
+# Integration mechanism: raw checkmodule policy with container_domain attribute.
+#
+# docker_helper_container_t carries the container_domain attribute. When Docker
+# creates a container with --security-opt label=type:docker_helper_container_t,
+# the container-selinux policy (loaded separately) grants the following to any
+# type with container_domain:
+#   - MCS label isolation (via container_init_mcs_transition + label_module)
+#   - File access to container_file_t types (container_ro_file_t, container_file_t, etc.)
+#   - Entrypoint execution on container entrypoint files
+#   - Network socket creation and DNS resolution
+#   - Process transition from container_runtime_domain
+#
+# This module adds only what container-selinux does not provide:
+#   allow docker_helper_container_t user_home_type: { workspace access }
+#
+# Why raw checkmodule (not m4/refpolicy):
+#   - The module is a small addition to the existing container-selinux policy.
+#   - It defines one new domain (docker_helper_container_t) and four new file
+#     types for docker-helper's own paths. No refpolicy interfaces needed.
+#   - The container domain inherits confinement via the container_domain
+#     attribute, which is the mechanism container-selinux uses internally.
+#   - Building through m4/refpolicy would require installing refpolicy build
+#     infrastructure and rebuilding the entire container-selinux module.
+#   - Raw checkmodule is the standard approach for small policy additions
+#     that compose with the base policy via shared attributes.
 #
 # Build:
 #   checkmodule -M -m -o docker_helper.tmp docker-helper.te
@@ -24,7 +46,6 @@ module docker_helper 1.0;
 		attribute file_type;
 		attribute exec_type;
 		attribute user_home_type;
-		attribute container_file_type;
 		attribute container_domain;
 
 		type security_t;
@@ -40,68 +61,8 @@ module docker_helper 1.0;
 		type net_conf_t;
 		type http_port_t;
 		type cert_t;
-		type container_file_t;
-		type container_log_t;
-		type container_share_t;
-		type container_storage_t;
-		type container_tmp_t;
-		type container_var_lib_t;
-		type container_etc_t;
-		type container_ro_file_t;
-		type bin_t;
-		type lib_t;
-		type ld_so_t;
-		type proc_t;
-		type sysfs_t;
-		type tmpfs_t;
-		type devpts_t;
-		type fuse_device_t;
-		type fusefs_t;
-		type shm_t;
-		type kerneloops_device_t;
-		type netif_var_run_t;
-		type port_t;
-		type unreserved_port_t;
-		type node_port_t;
-		type dns_port_t;
-		type ntalk_port_t;
-		type nntps_port_t;
-		type pop3s_port_t;
-		type imaps_port_t;
-		type ldaps_port_t;
-		type https_port_t;
-		type http_cache_port_t;
-		type cifs_port_t;
-		type nbd_port_t;
-		type ceph_port_t;
-		type glusterfs_port_t;
-		type smb_port_t;
-		type nfs_port_t;
-		type rpc_port_t;
-		type gsshttp_port_t;
-		type xmpp_port_t;
-		type ntp_port_t;
-		type syslog_port_t;
-		type snmp_port_t;
-		type snmptrap_port_t;
-		type radius_port_t;
-		type radius_accounting_port_t;
-		type ntp_port_t;
-		type syslog_tls_port_t;
-		type snmp_tls_port_t;
-		type snmptrap_tls_port_t;
-		type radius_tls_port_t;
-		type radius_accounting_tls_port_t;
-		type ntp_tls_port_t;
-		type syslog_tls_port_t;
-		type snmp_tls_port_t;
-		type snmptrap_tls_port_t;
-		type radius_tls_port_t;
-		type radius_accounting_tls_port_t;
-		type ntp_tls_port_t;
 
 		role system_r;
-		role container_r;
 
 		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton rename };
 		class dir { getattr search read open write add_name remove_name create rmdir mounton setattr };
@@ -112,7 +73,6 @@ module docker_helper 1.0;
 		class udp_socket { create setopt connect getattr read write };
 		class filesystem { unmount };
 		class capability { dac_read_search sys_admin };
-		class process { transition dyntransition };
 		class process2 { nnp_transition };
 	}
 
@@ -132,14 +92,12 @@ type docker_helper_runtime_t, file_type;
 
 # Custom container domain for docker-helper containers.
 # Inherits container-selinux confinement via container_domain attribute.
-# Additional user_home_type access for session-mounted workspaces.
+# Container transitions are performed by container_runtime_domain (Docker).
+# The only extra permission is user_home_type access for session workspaces.
 type docker_helper_container_t, domain;
 typeattribute docker_helper_container_t container_domain;
-type docker_helper_container_file_t, file_type;
-typeattribute docker_helper_container_file_t container_file_type;
 
-role system_r types docker_helper_container_t;
-role container_r types docker_helper_container_t;
+# --- docker_helper_t: daemon process ---
 
 # Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
@@ -148,9 +106,6 @@ allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entr
 allow init_t docker_helper_exec_t:file { read open execute };
 
 # systemd (init_t) -> docker_helper_t explicit transition (from live AVC evidence)
-allow init_t docker_helper_t:process { transition };
-
-# systemd NoNewPrivileges=true requires nnp_transition (from live AVC evidence)
 allow init_t docker_helper_t:process2 { nnp_transition };
 
 # systemd (init_t) needs to create/cleanup RuntimeDirectory (from live AVC evidence)
@@ -165,7 +120,7 @@ allow docker_helper_t docker_helper_config_t:file { read open getattr };
 
 # Runtime (from live AVC evidence)
 allow docker_helper_t docker_helper_runtime_t:dir { getattr search read open write add_name remove_name create mounton rmdir setattr };
-allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink mounton getattr setattr };
+allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink mounton getattr setattr rename };
 allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
 allow docker_helper_t docker_helper_runtime_t:lnk_file { create read unlink };
 
@@ -222,9 +177,6 @@ allow docker_helper_t lib_t:file { execute_no_trans };
 # Unix stream socket connectto for Buildx daemon communication
 allow docker_helper_t self:unix_stream_socket { connectto };
 
-# Runtime directory rename (Buildx workspace management)
-allow docker_helper_t docker_helper_runtime_t:file { rename };
-
 # Network configuration read
 allow docker_helper_t net_conf_t:file { read open getattr };
 
@@ -246,16 +198,12 @@ allow docker_helper_t cert_t:file { read open getattr };
 
 # --- docker_helper_container_t: custom container domain ---
 
-# docker_helper_t can transition to docker_helper_container_t via Docker
-allow docker_helper_t docker_helper_container_t:process { transition dyntransition };
-allow docker_helper_t docker_helper_container_t:process2 { nnp_transition };
+# Container transitions are performed by container_runtime_domain (Docker),
+# not by docker_helper_t. container-selinux already grants transitions from
+# container_runtime_domain to types with container_domain attribute.
 
-# docker_helper_container_t can access user_home_type workspaces (bind-mounted)
+# docker_helper_container_t can access user_home_type workspaces (bind-mounted).
 # This is the ONLY extra permission beyond standard container-selinux policy.
 allow docker_helper_container_t user_home_type:dir { getattr search read open write add_name remove_name create rmdir };
 allow docker_helper_container_t user_home_type:file { read open getattr create write setattr lock unlink rename };
 allow docker_helper_container_t user_home_type:lnk_file { read create unlink };
-
-# docker_helper_container_t can access its own file type
-allow docker_helper_container_t docker_helper_container_file_t:file { read open getattr create write setattr lock unlink };
-allow docker_helper_container_t docker_helper_container_file_t:dir { getattr search read open write add_name remove_name create rmdir };
