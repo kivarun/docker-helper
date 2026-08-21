@@ -77,3 +77,8 @@ contents:
     packager: rpm
     file_info:
       mode: 0644
+
+  - src: dist/completions/docker-helper
+    dst: /usr/share/bash-completion/completions/docker-helper
+    file_info:
+      mode: 0644

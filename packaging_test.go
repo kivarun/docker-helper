@@ -2519,6 +2519,13 @@ func TestPackageMetadataIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a dummy completion script (required by nfpm.yaml).
+	os.MkdirAll(filepath.Join(tmpDir, "completions"), 0755)
+	dummyCompletion := filepath.Join(tmpDir, "completions", "docker-helper")
+	if err := os.WriteFile(dummyCompletion, []byte("# bash completion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Create a temporary nFPM config that uses the dummy binary and tmp output.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -2528,6 +2535,8 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
 	// Replace dist/docker-helper.pp with the dummy PP path (RPM-only section).
 	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	// Replace dist/completions/docker-helper with the dummy completion path.
+	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	// Replace ${VERSION} with test version.
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
 
@@ -2615,6 +2624,13 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a dummy completion script (required by nfpm.yaml).
+	os.MkdirAll(filepath.Join(tmpDir, "completions"), 0755)
+	dummyCompletion := filepath.Join(tmpDir, "completions", "docker-helper")
+	if err := os.WriteFile(dummyCompletion, []byte("# bash completion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Create a temporary nFPM config.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -2622,6 +2638,7 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
 	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
 
 	configFile := filepath.Join(tmpDir, "nfpm.yaml")
@@ -4594,6 +4611,13 @@ func TestPackageMetadataScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a dummy completion script (required by nfpm.yaml).
+	os.MkdirAll(filepath.Join(tmpDir, "completions"), 0755)
+	dummyCompletion := filepath.Join(tmpDir, "completions", "docker-helper")
+	if err := os.WriteFile(dummyCompletion, []byte("# bash completion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Create a temporary nFPM config.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -4601,6 +4625,7 @@ func TestPackageMetadataScripts(t *testing.T) {
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
 	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")
 	configFile := filepath.Join(tmpDir, "nfpm.yaml")
 	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
@@ -4727,6 +4752,13 @@ func TestPackageMetadataManPages(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a dummy completion script (required by nfpm.yaml).
+	os.MkdirAll(filepath.Join(tmpDir, "completions"), 0755)
+	dummyCompletion := filepath.Join(tmpDir, "completions", "docker-helper")
+	if err := os.WriteFile(dummyCompletion, []byte("# bash completion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Build real compressed man pages for the test.
 	os.MkdirAll(filepath.Join(tmpDir, "man"), 0755)
 	for _, src := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
@@ -4755,6 +4787,7 @@ func TestPackageMetadataManPages(t *testing.T) {
 	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper.1.gz"))
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper-config.5.gz"))
+	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")
 	configFile := filepath.Join(tmpDir, "nfpm.yaml")
 	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
@@ -4838,6 +4871,130 @@ func TestPackageMetadataManPages(t *testing.T) {
 		}
 	} else {
 		t.Log("rpm not available, skipping RPM man page verification")
+	}
+}
+
+// TestPackageBashCompletion verifies that the built packages contain the
+// Bash completion script at the correct path.
+func TestPackageBashCompletion(t *testing.T) {
+	if _, err := exec.LookPath("nfpm"); err != nil {
+		t.Skip("nfpm not installed, skipping package bash completion test")
+	}
+
+	tmpDir := t.TempDir()
+
+	// Create dummy binary.
+	dummyBin := filepath.Join(tmpDir, "docker-helper")
+	if err := os.WriteFile(dummyBin, []byte("dummy"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a dummy SELinux policy module (required by nfpm.yaml).
+	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create dummy man pages.
+	os.MkdirAll(filepath.Join(tmpDir, "man"), 0755)
+	for _, src := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
+		srcData, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := filepath.Base(src)
+		cmd := exec.Command("gzip", "-9n", "-c")
+		cmd.Stdin = strings.NewReader(string(srcData))
+		gzOut, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("gzip %s: %v", src, err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "man", name+".gz"), gzOut, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create dummy completion script.
+	os.MkdirAll(filepath.Join(tmpDir, "completions"), 0755)
+	dummyCompletion := filepath.Join(tmpDir, "completions", "docker-helper")
+	if err := os.WriteFile(dummyCompletion, []byte("# bash completion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create temp nFPM config.
+	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper.1.gz"))
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper-config.5.gz"))
+	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
+	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")
+	configFile := filepath.Join(tmpDir, "nfpm.yaml")
+	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build DEB.
+	debCmd := exec.Command("nfpm", "package", "--config", configFile, "--packager", "deb", "--target", tmpDir)
+	debCmd.Env = append(os.Environ(), "VERSION=0.0.0")
+	if out, err := debCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm DEB build failed: %v\n%s", err, out)
+	}
+
+	// Build RPM.
+	rpmCmd := exec.Command("nfpm", "package", "--config", configFile, "--packager", "rpm", "--target", tmpDir)
+	rpmCmd.Env = append(os.Environ(), "VERSION=0.0.0")
+	if out, err := rpmCmd.CombinedOutput(); err != nil {
+		t.Fatalf("nfpm RPM build failed: %v\n%s", err, out)
+	}
+
+	debFile := filepath.Join(tmpDir, "docker-helper_0.0.0_amd64.deb")
+	rpmFile := filepath.Join(tmpDir, "docker-helper-0.0.0-1.x86_64.rpm")
+
+	// Verify DEB contains bash completion.
+	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+		cmd := exec.Command(dpkgDeb, "--contents", debFile)
+		out, _ := cmd.CombinedOutput()
+		if !strings.Contains(string(out), "/usr/share/bash-completion/completions/docker-helper") {
+			t.Error("DEB missing /usr/share/bash-completion/completions/docker-helper")
+		}
+	} else {
+		t.Log("dpkg-deb not available, skipping DEB completion verification")
+	}
+
+	// Verify RPM contains bash completion.
+	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+		cmd := exec.Command(rpmPath, "-qpl", rpmFile)
+		out, _ := cmd.CombinedOutput()
+		if !strings.Contains(string(out), "/usr/share/bash-completion/completions/docker-helper") {
+			t.Error("RPM missing /usr/share/bash-completion/completions/docker-helper")
+		}
+	} else {
+		t.Log("rpm not available, skipping RPM completion verification")
+	}
+}
+
+// TestBuildPackagesScriptGeneratesCompletion verifies that build-packages.sh
+// generates the completion script and fails if generation produces empty output.
+func TestBuildPackagesScriptGeneratesCompletion(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "completion bash") {
+		t.Error("build-packages.sh must generate bash completion")
+	}
+	if !strings.Contains(content, "dist/completions/docker-helper") {
+		t.Error("build-packages.sh must output completion to dist/completions/docker-helper")
+	}
+	// Must fail closed if generation produces empty output.
+	if !strings.Contains(content, "empty output") {
+		t.Error("build-packages.sh must fail if completion generation produces empty output")
 	}
 }
 

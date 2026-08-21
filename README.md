@@ -596,6 +596,26 @@ unavailable, the command fails.
 
 For the full command syntax, use `docker-helper help <command>`.
 
+## Bash completion
+
+Bash completion is available and installed automatically when using the
+DEB or RPM packages. The completion script is derived from the command
+tree at build time, so it stays in sync with the CLI.
+
+Install manually:
+
+    source <(docker-helper completion bash)
+
+Or persistently:
+
+    docker-helper completion bash > ~/.local/share/bash-completion/completions/docker-helper
+
+Package-installed completion is at:
+
+    /usr/share/bash-completion/completions/docker-helper
+
+Restart your shell or source the file to activate.
+
 ## Client interfaces
 
 Docker Helper has two supported client interfaces:

@@ -41,6 +41,16 @@ fi
 # Build man pages.
 "${SCRIPT_DIR}/build-manpages.sh"
 
+# Generate Bash completion script from the freshly built binary.
+rm -f "${SCRIPT_DIR}/dist/completions/docker-helper"
+mkdir -p "${SCRIPT_DIR}/dist/completions"
+echo "Generating Bash completion..."
+"${SCRIPT_DIR}/dist/docker-helper" completion bash > "${SCRIPT_DIR}/dist/completions/docker-helper"
+if [[ ! -s "${SCRIPT_DIR}/dist/completions/docker-helper" ]]; then
+  echo "error: completion generation produced empty output" >&2
+  exit 1
+fi
+
 # Build SELinux policy module (required).
 if ! command -v checkmodule >/dev/null 2>&1; then
   echo "error: checkmodule not found (install checkpolicy or policycoreutils-devel)" >&2
