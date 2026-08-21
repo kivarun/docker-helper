@@ -1,7 +1,7 @@
-# docker-helper SELinux policy — bootstrap for live testing
+# docker-helper SELinux policy
 #
-# Milestone: docker_helper_t domain + dedicated file types from live AVCs
-# NOT for production. Only for collecting actual AVCs.
+# Model: docker-helper validates and accesses workspaces that retain their
+# normal host labels (user_home_type). No workspace relabeling required.
 #
 # Build:
 #   checkmodule -M -m -o docker_helper.tmp docker-helper.te
@@ -35,6 +35,8 @@ module docker_helper 1.0;
 		type net_conf_t;
 		type http_port_t;
 		type cert_t;
+		type container_t;
+		type container_file_t;
 
 		role system_r;
 
@@ -49,6 +51,7 @@ module docker_helper 1.0;
 		class capability { dac_read_search sys_admin };
 		class process { transition };
 		class process2 { nnp_transition };
+		class dyntransition { transition };
 	}
 
 # Domain definition
@@ -65,10 +68,12 @@ type docker_helper_config_t, file_type;
 type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
 
-# Workspace type for bind-mounted agent workspaces (proven in enforcing UAT)
-type docker_helper_workspace_t, file_type;
-typeattribute docker_helper_workspace_t user_home_type;
-typeattribute docker_helper_workspace_t container_file_type;
+# Custom container type for docker-helper containers.
+# Allows access to user_home_type workspaces without relabeling.
+type docker_helper_container_t, domain;
+type docker_helper_container_file_t, file_type;
+
+role system_r types docker_helper_container_t;
 
 # Binary needs to be readable/executable by the domain itself
 allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entrypoint };
@@ -122,9 +127,17 @@ allow docker_helper_t passwd_file_t:file { read open getattr };
 allow docker_helper_t container_var_run_t:sock_file { write };
 allow docker_helper_t container_runtime_t:unix_stream_socket { connectto };
 
-# Workspace (proven in enforcing UAT)
-allow docker_helper_t docker_helper_workspace_t:dir { getattr search read open };
-allow docker_helper_t docker_helper_workspace_t:file { getattr read open };
+# Workspace access: docker-helper reads workspaces with normal user_home_type labels.
+# No relabeling required. Uses user_home_type attribute to cover all home types.
+
+# user_home_type:dir — workspace directory traversal and access
+allow docker_helper_t user_home_type:dir { getattr search read open };
+
+# user_home_type:file — workspace file access (Docker context, build files)
+allow docker_helper_t user_home_type:file { getattr read open };
+
+# user_home_type:lnk_file — symlink traversal in workspace
+allow docker_helper_t user_home_type:lnk_file { read };
 
 # Home directory traversal (proven in enforcing UAT)
 allow docker_helper_t user_home_dir_t:dir { getattr search };
@@ -164,3 +177,31 @@ allow docker_helper_t http_port_t:tcp_socket { name_connect };
 allow docker_helper_t cert_t:dir { search read open };
 allow docker_helper_t cert_t:lnk_file { read };
 allow docker_helper_t cert_t:file { read open getattr };
+
+# --- docker_helper_container_t: custom container domain ---
+
+# docker_helper_t can transition to docker_helper_container_t via Docker
+allow docker_helper_t docker_helper_container_t:process { transition dyntransition };
+
+# docker_helper_container_t inherits basic container confinement from container_t
+allow docker_helper_container_t container_file_t:file { read open getattr };
+
+# docker_helper_container_t can access user_home_type workspaces (bind-mounted)
+allow docker_helper_container_t user_home_type:dir { getattr search read open write add_name remove_name create rmdir };
+allow docker_helper_container_t user_home_type:file { read open getattr create write setattr lock unlink rename };
+allow docker_helper_container_t user_home_type:lnk_file { read create unlink };
+
+# docker_helper_container_t can access docker_helper_container_file_t (container-owned files)
+allow docker_helper_container_t docker_helper_container_file_t:file { read open getattr create write setattr lock unlink };
+allow docker_helper_container_t docker_helper_container_file_t:dir { getattr search read open write add_name remove_name create rmdir };
+
+# docker_helper_container_t network access
+allow docker_helper_container_t self:tcp_socket { create setopt bind listen accept getattr read write connect getopt };
+allow docker_helper_container_t self:udp_socket { create setopt connect getattr read write };
+allow docker_helper_container_t node_t:tcp_socket { node_bind };
+allow docker_helper_container_t http_port_t:tcp_socket { name_connect };
+
+# docker_helper_container_t can read certificates
+allow docker_helper_container_t cert_t:dir { search read open };
+allow docker_helper_container_t cert_t:lnk_file { read };
+allow docker_helper_container_t cert_t:file { read open getattr };

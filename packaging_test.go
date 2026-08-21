@@ -4539,6 +4539,127 @@ func TestDebPostinstallNeitherMAC(t *testing.T) {
 	}
 }
 
+// TestSELinuxPolicyNoWorkspaceRelabeling verifies that the SELinux policy
+// model does not require workspace relabeling (chcon, semanage, :z/:Z).
+func TestSELinuxPolicyNoWorkspaceRelabeling(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must use user_home_type attribute for workspace access
+	if !strings.Contains(content, "user_home_type") {
+		t.Error("SELinux policy must use user_home_type attribute for workspace access")
+	}
+
+	// Must NOT require docker_helper_workspace_t for workspace access
+	// (removed in favor of user_home_type model)
+	if strings.Contains(content, "docker_helper_workspace_t") {
+		t.Error("SELinux policy must not use docker_helper_workspace_t (use user_home_type instead)")
+	}
+}
+
+// TestSELinuxPolicyNoGlobalContainerAccess verifies that the SELinux policy
+// does not globally grant normal container_t access to user_home_type.
+func TestSELinuxPolicyNoGlobalContainerAccess(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must NOT grant container_t access to user_home_type
+	// (only docker_helper_container_t should have this access)
+	if strings.Contains(content, "allow container_t user_home_type") {
+		t.Error("SELinux policy must not grant container_t access to user_home_type")
+	}
+}
+
+// TestSELinuxPolicyCustomContainerType verifies that the SELinux policy
+// defines a custom container type for docker-helper containers.
+func TestSELinuxPolicyCustomContainerType(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must define docker_helper_container_t
+	if !strings.Contains(content, "docker_helper_container_t") {
+		t.Error("SELinux policy must define docker_helper_container_t")
+	}
+
+	// Must grant docker_helper_container_t access to user_home_type
+	if !strings.Contains(content, "allow docker_helper_container_t user_home_type") {
+		t.Error("SELinux policy must grant docker_helper_container_t access to user_home_type")
+	}
+}
+
+// TestSELinuxFCNoWorkspacePaths verifies that the SELinux file contexts
+// do not include workspace/home paths.
+func TestSELinuxFCNoWorkspacePaths(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.fc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must NOT include /home paths as file context rules
+	// (comments are allowed, but not actual file context rules)
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, "/home") {
+			t.Errorf("SELinux .fc must not include /home paths: %s", line)
+		}
+	}
+}
+
+// TestRunSELinuxContainerSecurityOpt verifies that the run command uses
+// the correct SELinux container security option.
+func TestRunSELinuxContainerSecurityOpt(t *testing.T) {
+	// Verify the run.go code uses docker_helper_container_t for SELinux
+	data, err := os.ReadFile("run.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must use docker_helper_container_t for SELinux system mode
+	if !strings.Contains(content, "docker_helper_container_t") {
+		t.Error("run.go must use docker_helper_container_t for SELinux system mode")
+	}
+
+	// Must check for LSMSelinux before using custom type
+	if !strings.Contains(content, "LSMSelinux") {
+		t.Error("run.go must check for LSMSelinux before using custom container type")
+	}
+}
+
+// TestInvalidWorkspaceOperationalLogging verifies that ErrInvalidWorkspace
+// logs the detailed internal error to the operational log.
+func TestInvalidWorkspaceOperationalLogging(t *testing.T) {
+	data, err := os.ReadFile("sessions.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must log the internal error for ErrInvalidWorkspace
+	if !strings.Contains(content, "session creation rejected") {
+		t.Error("sessions.go must log 'session creation rejected' for ErrInvalidWorkspace")
+	}
+
+	// Must include the error in the log
+	if !strings.Contains(content, "slog.String(\"error\"") {
+		t.Error("sessions.go must include the error in the operational log")
+	}
+}
+
 // --- Offline (no live system) tests ---
 
 // TestLifecycleScriptsOfflineNoop verifies all DEB/RPM lifecycle scripts

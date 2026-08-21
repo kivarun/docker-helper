@@ -171,6 +171,12 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeAuditWithRequestID(ctx, auditRec)
 
 		if errors.Is(err, ErrInvalidWorkspace) {
+			// Log the internal cause to the operational log.
+			// The client receives the generic invalid_workspace response.
+			opLog(ctx).Warn("session creation rejected",
+				slog.String("operation", "session_create"),
+				slog.String("error", err.Error()),
+			)
 			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", "invalid workspace")
 		} else {
 			opLog(ctx).Error("session creation error",

@@ -349,7 +349,7 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 
 	// --config is first, then --cidfile is inserted after --user, before other options.
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--security-opt", "label=disable", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--security-opt", "label=disable"}
 	for i, expected := range baseArgs {
 		if capturedArgs[i] != expected {
 			t.Fatalf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])

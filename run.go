@@ -469,8 +469,22 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		"--config", dockerDir,
 		"run",
 		"--rm",
-		"--security-opt", "label=disable",
 		"--user", fmt.Sprintf("%d:%d", execUID, execGID),
+	}
+
+	// Container MAC backend selection:
+	// - System mode + SELinux enforcing: custom container type for workspace access
+	// - All other modes: disable SELinux labels (existing behavior)
+	if cfg.Mode == ModeSystem {
+		backend, _ := detectLSM()
+		if backend == LSMSelinux {
+			args = append(args, "--security-opt", "label=type:docker_helper_container_t")
+		} else {
+			args = append(args, "--security-opt", "label=disable")
+		}
+	} else {
+		// User mode: disable SELinux labels (existing behavior)
+		args = append(args, "--security-opt", "label=disable")
 	}
 
 	if op.cidfile != "" {

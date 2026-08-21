@@ -1,9 +1,10 @@
-# docker-helper file contexts — bootstrap
-# Binary + dedicated config/state/runtime labels from live AVC evidence.
+# docker-helper file contexts
+# Binary + dedicated config/state/runtime labels for docker-helper-owned paths.
 # Apply after policy install:
 #   sudo restorecon /usr/bin/docker-helper
 #
-# Do NOT recursively restorecon workspace paths.
+# Workspace paths retain their normal host labels (user_home_type).
+# No workspace relabeling is performed or required.
 
 /usr/bin/docker-helper              --  system_u:object_r:docker_helper_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
