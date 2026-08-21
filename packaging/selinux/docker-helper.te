@@ -3,27 +3,26 @@
 # Model: docker-helper validates and accesses workspaces that retain their
 # normal host labels (user_home_type). No workspace relabeling required.
 #
-# Integration mechanism: raw checkmodule policy with container_domain attribute.
+# Integration mechanism: raw checkmodule policy with container-selinux
+# attributes. docker_helper_container_t carries both container_domain and
+# mcs_constrained_type, matching the attributes applied by
+# container-selinux's container_type_template.
 #
-# docker_helper_container_t carries the container_domain attribute. When Docker
-# creates a container with --security-opt label=type:docker_helper_container_t,
-# the container-selinux policy (loaded separately) grants the following to any
-# type with container_domain:
-#   - MCS label isolation (via container_init_mcs_transition + label_module)
-#   - File access to container_file_t types (container_ro_file_t, container_file_t, etc.)
-#   - Entrypoint execution on container entrypoint files
-#   - Network socket creation and DNS resolution
-#   - Process transition from container_runtime_domain
+# container_domain provides generic container confinement rules from the
+# loaded container-selinux policy (network, process transition from
+# container_runtime_domain). mcs_constrained_type enables MCS category
+# isolation. Neither attribute alone is sufficient; both are required.
 #
-# This module adds only what container-selinux does not provide:
-#   allow docker_helper_container_t user_home_type: { workspace access }
+# This module explicitly provides:
+#   - role system_r membership for docker_helper_container_t
+#   - container_file_t rootfs access (read/execute)
+#   - user_home_type workspace access (the only extra permission beyond
+#     standard container-selinux)
 #
 # Why raw checkmodule (not m4/refpolicy):
 #   - The module is a small addition to the existing container-selinux policy.
 #   - It defines one new domain (docker_helper_container_t) and four new file
 #     types for docker-helper's own paths. No refpolicy interfaces needed.
-#   - The container domain inherits confinement via the container_domain
-#     attribute, which is the mechanism container-selinux uses internally.
 #   - Building through m4/refpolicy would require installing refpolicy build
 #     infrastructure and rebuilding the entire container-selinux module.
 #   - Raw checkmodule is the standard approach for small policy additions
@@ -47,6 +46,8 @@ module docker_helper 1.0;
 		attribute exec_type;
 		attribute user_home_type;
 		attribute container_domain;
+		attribute mcs_constrained_type;
+		attribute container_file_type;
 
 		type security_t;
 		type node_t;
@@ -61,6 +62,7 @@ module docker_helper 1.0;
 		type net_conf_t;
 		type http_port_t;
 		type cert_t;
+		type container_file_t;
 
 		role system_r;
 
@@ -73,6 +75,7 @@ module docker_helper 1.0;
 		class udp_socket { create setopt connect getattr read write };
 		class filesystem { unmount };
 		class capability { dac_read_search sys_admin };
+		class process { transition };
 		class process2 { nnp_transition };
 	}
 
@@ -91,11 +94,20 @@ type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
 
 # Custom container domain for docker-helper containers.
-# Inherits container-selinux confinement via container_domain attribute.
+# Composes with container-selinux via shared attributes:
+#   container_domain       — generic container confinement rules
+#   mcs_constrained_type   — MCS category isolation
 # Container transitions are performed by container_runtime_domain (Docker).
-# The only extra permission is user_home_type access for session workspaces.
+# Explicit rules below reproduce the minimum container-selinux container
+# domain semantics that this module must provide independently:
+#   - role system_r membership (required by target policy)
+#   - container_file_t rootfs access (read/execute/container entrypoint)
+# The only extra permission beyond standard container-selinux is:
+#   allow docker_helper_container_t user_home_type: { workspace access }
 type docker_helper_container_t, domain;
 typeattribute docker_helper_container_t container_domain;
+typeattribute docker_helper_container_t mcs_constrained_type;
+role system_r types docker_helper_container_t;
 
 # --- docker_helper_t: daemon process ---
 
@@ -105,7 +117,8 @@ allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entr
 # systemd (init_t) needs to execute the binary (from live AVC evidence)
 allow init_t docker_helper_exec_t:file { read open execute };
 
-# systemd (init_t) -> docker_helper_t explicit transition (from live AVC evidence)
+# systemd (init_t) -> docker_helper_t explicit transition (SELinuxContext= in unit file)
+allow init_t docker_helper_t:process { transition };
 allow init_t docker_helper_t:process2 { nnp_transition };
 
 # systemd (init_t) needs to create/cleanup RuntimeDirectory (from live AVC evidence)
@@ -201,6 +214,12 @@ allow docker_helper_t cert_t:file { read open getattr };
 # Container transitions are performed by container_runtime_domain (Docker),
 # not by docker_helper_t. container-selinux already grants transitions from
 # container_runtime_domain to types with container_domain attribute.
+
+# Container rootfs access: minimum rules equivalent to
+# container_manage_files_template for container_file_t.
+# Required to execute and run a normal container under enforcing SELinux.
+allow docker_helper_container_t container_file_t:file { read open getattr execute execute_no_trans };
+allow docker_helper_container_t container_file_t:dir { getattr search read open };
 
 # docker_helper_container_t can access user_home_type workspaces (bind-mounted).
 # This is the ONLY extra permission beyond standard container-selinux policy.

@@ -386,8 +386,11 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In system mode, determine the MAC backend before any side effects:
-	// no pin creation, no operation registration, no run.start audit.
+	// In system mode, determine the MAC backend before pin creation,
+	// operation registration, and run.start audit.
+	// Note: ensureSessionDockerDir() above is a filesystem side effect
+	// that occurs before detection; it is idempotent and safe to create
+	// early. Detection failure still prevents Docker invocation.
 	// A detection failure or unsupported configuration must fail closed.
 	securityOpt := ""
 	if cfg.Mode == ModeSystem {
