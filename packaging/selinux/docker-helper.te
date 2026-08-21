@@ -35,7 +35,7 @@ module docker_helper 1.0;
 		role system_r;
 
 		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton };
-		class dir { getattr search read open write add_name remove_name create rmdir mounton };
+		class dir { getattr search read open write add_name remove_name create rmdir mounton setattr };
 		class sock_file { create setattr unlink write };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write };
 		class unix_stream_socket { connectto };
