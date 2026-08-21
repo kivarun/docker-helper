@@ -125,24 +125,31 @@ Exact staging permissions proven:
 
 Buildx execution, network, and TLS permissions proven in live enforcing UAT:
 
-- `lib_t:file execute_no_trans` — shared library loading for Buildx
+- `lib_t:file execute_no_trans` — executing the Docker Buildx CLI plugin
 - `self:unix_stream_socket connectto` — Buildx daemon communication
 - `docker_helper_runtime_t:file rename` — Buildx workspace management
 - `net_conf_t:file read open getattr` — network configuration read
-- `self:udp_socket { create setopt connect getattr }` — Buildx network
+- `self:udp_socket { create setopt connect getattr read write }` — DNS resolution
 - `self:tcp_socket { connect getopt }` — Buildx network
 - `http_port_t:tcp_socket name_connect` — registry access
 - `cert_t:dir { search read open }` — system certificate access
 - `cert_t:lnk_file read` — certificate symlinks
 - `cert_t:file { read open getattr }` — certificate files
 
+Buildx basic enforcing path is proven complete. The custom host CA was
+restored to its expected `cert_t` label and remained `cert_t` through the
+build.
+
 Intentionally NOT granted (proven non-essential in enforcing UAT):
 
 - `bin_t` / git execution — denied with permissive=0, build succeeded
 - `cgroup_t` — non-fatal probe, build succeeded
 - `sysctl_net_t` — non-fatal probe, build succeeded
-- `container_file_t` — unresolved; host custom CA file requires
-  separate investigation; broad `container_file_t` access not acceptable
+- `container_file_t` — the observed denial was caused by an external agent
+  launcher mounting the system CA with Docker `:Z`, not by a docker-helper
+  requirement; the custom host CA was restored to `cert_t` and remained
+  `cert_t` through the build; broad `container_file_t` access is
+  intentionally not granted
 
 Automatic workspace relabeling is NOT implemented or approved.
 
