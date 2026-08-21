@@ -526,7 +526,10 @@ func TestOpenSSLHashGolden(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cert := createTestCertWithSubject(t, tt.subject)
-			hash := computeOpenSSLHash(cert)
+			hash, err := computeOpenSSLHash(cert)
+			if err != nil {
+				t.Fatalf("computeOpenSSLHash failed: %v", err)
+			}
 			if hash != tt.expected {
 				t.Errorf("hash = %s, want %s", hash, tt.expected)
 			}
@@ -539,7 +542,10 @@ func TestOpenSSLHashGolden(t *testing.T) {
 // algorithms that produced wrong hashes.
 func TestOpenSSLHashNotMD5RawSubject(t *testing.T) {
 	cert := createTestCertWithSubject(t, pkix.Name{CommonName: "Test CA"})
-	hash := computeOpenSSLHash(cert)
+	hash, err := computeOpenSSLHash(cert)
+	if err != nil {
+		t.Fatalf("computeOpenSSLHash failed: %v", err)
+	}
 
 	// These are the hashes that would be produced by the wrong algorithms.
 	// If any of these match, the implementation has regressed.
