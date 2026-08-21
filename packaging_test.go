@@ -2960,6 +2960,54 @@ esac
 	}
 }
 
+// writeFakeSemodule creates a semodule script that logs calls.
+func writeFakeSemodule(t *testing.T, fakeDir, logFile string, failInstall bool, failRemove bool) {
+	t.Helper()
+	failInstallStr := "false"
+	if failInstall {
+		failInstallStr = "true"
+	}
+	failRemoveStr := "false"
+	if failRemove {
+		failRemoveStr = "true"
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+case "$*" in
+  *"-i"*)
+    if [ "%s" = "true" ]; then
+      echo "semodule: Failed to install module" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *"-r"*)
+    if [ "%s" = "true" ]; then
+      echo "semodule: Failed to remove module" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+`, logFile, failInstallStr, failRemoveStr)
+	if err := os.WriteFile(filepath.Join(fakeDir, "semodule"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFakeRestorecon creates a restorecon script that logs calls.
+func writeFakeRestorecon(t *testing.T, fakeDir, logFile string) {
+	t.Helper()
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$0 $@" >> "%s"
+exit 0
+`, logFile)
+	if err := os.WriteFile(filepath.Join(fakeDir, "restorecon"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // readCalls reads the command log.
 func readLifecycleScriptCalls(t *testing.T, logFile string) []string {
 	t.Helper()
@@ -2994,6 +3042,8 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	modified := strings.ReplaceAll(string(data), "/run/systemd/system", "$TEST_RUN_SYSTEMD")
 	// Replace AppArmor LSM status path with a test-controlled path.
 	modified = strings.ReplaceAll(modified, "/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH")
+	// Replace SELinux enforce path with a test-controlled path.
+	modified = strings.ReplaceAll(modified, "/sys/fs/selinux/enforce", "$SELINUX_ENFORCE_PATH")
 	modifiedFile := filepath.Join(scriptDir, "modified.sh")
 	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
 		t.Fatal(err)
@@ -3016,6 +3066,16 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		t.Fatal(err)
 	}
 
+	// Default: SELinux is not enforcing. Tests can override by providing
+	// their own SELINUX_ENFORCE_PATH via extraEnv and creating the file.
+	selinuxEnforcePath := filepath.Join(tmpDir, "sys", "fs", "selinux", "enforce")
+	if err := os.MkdirAll(filepath.Dir(selinuxEnforcePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(selinuxEnforcePath, []byte("0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	env := append(os.Environ(),
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 		"STOP_FAIL=false",
@@ -3023,8 +3083,10 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		"RESTART_FAIL=false",
 		"RELOAD_FAIL=false",
 		"DISABLE_FAIL=false",
+		"SEMODULE_FAIL=false",
 		"TEST_RUN_SYSTEMD="+testRunDir,
 		"AA_ENABLED_PATH="+aaEnabledPath,
+		"SELINUX_ENFORCE_PATH="+selinuxEnforcePath,
 	)
 	env = append(env, extraEnv...)
 
@@ -3664,6 +3726,578 @@ func TestRpmPostremoveFinalErase(t *testing.T) {
 	}
 	if !found {
 		t.Error("must call daemon-reload on final erase")
+	}
+}
+
+// --- Offline (no live system) tests ---
+
+// --- SELinux packaging tests ---
+
+// TestNfpmConfigIncludesSELinuxPolicy verifies nfpm.yaml includes the
+// compiled SELinux policy module.
+func TestNfpmConfigIncludesSELinuxPolicy(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "packaging/selinux/docker-helper.pp") {
+		t.Error("nfpm.yaml must include packaging/selinux/docker-helper.pp source")
+	}
+	if !strings.Contains(content, "/usr/share/selinux/docker-helper.pp") {
+		t.Error("nfpm.yaml must install .pp to /usr/share/selinux/docker-helper.pp")
+	}
+}
+
+// TestBuildPackagesScriptContentSELinux verifies build-packages.sh builds
+// the SELinux policy module when tools are available.
+func TestBuildPackagesScriptContentSELinux(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "checkmodule") {
+		t.Error("build-packages.sh must reference checkmodule")
+	}
+	if !strings.Contains(content, "semodule_package") {
+		t.Error("build-packages.sh must reference semodule_package")
+	}
+	if !strings.Contains(content, "docker-helper.te") {
+		t.Error("build-packages.sh must reference docker-helper.te")
+	}
+	if !strings.Contains(content, "docker-helper.pp") {
+		t.Error("build-packages.sh must produce docker-helper.pp")
+	}
+}
+
+// TestRpmPostinstallSELinuxActive verifies RPM postinstall installs the
+// SELinux module and restores contexts when SELinux is enforcing.
+func TestRpmPostinstallSELinuxActive(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+
+	// Set SELinux to enforcing.
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disable AppArmor.
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+		})
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0 when SELinux active, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+
+	// Must call semodule -i
+	foundSemodule := false
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
+			foundSemodule = true
+			if !strings.Contains(c, "/usr/share/selinux/docker-helper.pp") {
+				t.Errorf("semodule -i must use correct path: %s", c)
+			}
+		}
+	}
+	if !foundSemodule {
+		t.Error("must call semodule -i to install SELinux module")
+	}
+
+	// Must call restorecon for the binary
+	foundRestorecon := false
+	for _, c := range calls {
+		if strings.Contains(c, "restorecon") && strings.Contains(c, "/usr/bin/docker-helper") {
+			foundRestorecon = true
+		}
+	}
+	if !foundRestorecon {
+		t.Error("must call restorecon for /usr/bin/docker-helper")
+	}
+
+	// Must call daemon-reload
+	foundDaemonReload := false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			foundDaemonReload = true
+		}
+	}
+	if !foundDaemonReload {
+		t.Error("must call daemon-reload")
+	}
+
+	// Must NOT call apparmor_parser --replace
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") && strings.Contains(c, "--replace") {
+			t.Error("must not call apparmor_parser when SELinux is the only active MAC")
+		}
+	}
+}
+
+// TestRpmPostinstallSELinuxUpgrade verifies RPM postinstall replaces the
+// SELinux module on upgrade when SELinux is enforcing.
+func TestRpmPostinstallSELinuxUpgrade(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"2"}, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+		})
+	if code != 0 {
+		t.Fatalf("rpm postinst upgrade should exit 0, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+
+	// Must call semodule -i (replaces existing module)
+	foundSemodule := false
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
+			foundSemodule = true
+		}
+	}
+	if !foundSemodule {
+		t.Error("upgrade must call semodule -i to replace SELinux module")
+	}
+
+	// Must call try-restart when service was active
+	foundRestart := false
+	for _, c := range calls {
+		if strings.Contains(c, "try-restart") {
+			foundRestart = true
+		}
+	}
+	if !foundRestart {
+		t.Error("upgrade must call try-restart when service was active")
+	}
+}
+
+// TestRpmPostinstallSELinuxNoFalseAppArmorWarning verifies that when
+// SELinux is active, the RPM postinstall does not emit the false
+// "AppArmor LSM is not active" warning.
+func TestRpmPostinstallSELinuxNoFalseAppArmorWarning(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+		})
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0, got %d", code)
+	}
+
+	// Must NOT emit the false AppArmor warning
+	if strings.Contains(stdout, "AppArmor LSM is not active") {
+		t.Error("must not emit 'AppArmor LSM is not active' warning when SELinux is active")
+	}
+	// Must NOT say "system mode will not start" when SELinux is active
+	if strings.Contains(stdout, "system mode will not start") {
+		t.Error("must not say 'system mode will not start' when SELinux is active")
+	}
+}
+
+// TestRpmPostinstallAppArmorActive verifies the AppArmor path still works
+// when only AppArmor is active (SELinux not enforcing).
+func TestRpmPostinstallAppArmorActive(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0 when AppArmor active, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+
+	// Must call apparmor_parser --replace
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") && strings.Contains(c, "--replace") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("must call apparmor_parser --replace when AppArmor is active")
+	}
+
+	// Must NOT call semodule -i (SELinux not enforcing)
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
+			t.Error("must not call semodule -i when SELinux is not enforcing")
+		}
+	}
+}
+
+// TestRpmPostinstallNeitherMAC verifies that when no MAC backend is active,
+// the RPM postinstall emits the correct warning and still performs daemon-reload.
+func TestRpmPostinstallNeitherMAC(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+		})
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0 when no MAC active, got %d", code)
+	}
+
+	// Must emit warning about no MAC backend
+	if !strings.Contains(stdout, "no supported MAC backend active") {
+		t.Errorf("expected 'no supported MAC backend active' warning, got: %s", stdout)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+
+	// Must NOT call apparmor_parser
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") {
+			t.Error("must not call apparmor_parser when no MAC is active")
+		}
+	}
+	// Must NOT call semodule
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") {
+			t.Error("must not call semodule when no MAC is active")
+		}
+	}
+	// Must still call daemon-reload
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("must still call daemon-reload when no MAC is active")
+	}
+}
+
+// TestRpmPostinstallBothMAC verifies that when both AppArmor and SELinux
+// are active, the postinstall warns about the unsupported configuration
+// and still attempts to set up both.
+func TestRpmPostinstallBothMAC(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+	writeFakeRestorecon(t, fakeDir, logFile)
+
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("Y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+		})
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0 when both MAC active, got %d", code)
+	}
+
+	// Must warn about both being active
+	if !strings.Contains(stdout, "both AppArmor and SELinux are active") {
+		t.Errorf("expected 'both AppArmor and SELinux are active' warning, got: %s", stdout)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+
+	// Must attempt both apparmor_parser and semodule
+	foundAA, foundSELinux := false, false
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") && strings.Contains(c, "--replace") {
+			foundAA = true
+		}
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
+			foundSELinux = true
+		}
+	}
+	if !foundAA {
+		t.Error("must still attempt apparmor_parser when both are active")
+	}
+	if !foundSELinux {
+		t.Error("must still attempt semodule when both are active")
+	}
+}
+
+// TestRpmPostinstallSemoduleFailure verifies that when semodule -i fails,
+// the RPM postinstall fails the transaction.
+func TestRpmPostinstallSemoduleFailure(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, true, false)
+
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+		})
+	if code == 0 {
+		t.Fatal("rpm postinst should fail when semodule -i fails")
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") || strings.Contains(c, "try-restart") {
+			t.Error("must not proceed after semodule failure")
+		}
+	}
+}
+
+// TestRpmPreremoveFinalEraseSELinux verifies RPM preremove on final erase
+// removes the SELinux module.
+func TestRpmPreremoveFinalEraseSELinux(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+
+	// Must call semodule -r
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-r") {
+			found = true
+			if !strings.Contains(c, "docker_helper") {
+				t.Errorf("semodule -r must target docker_helper: %s", c)
+			}
+		}
+	}
+	if !found {
+		t.Error("must call semodule -r docker_helper on final erase")
+	}
+}
+
+// TestRpmPreremoveUpgradePreservesSELinux verifies RPM preremove on upgrade
+// does NOT remove the SELinux module (the new postinstall will replace it).
+func TestRpmPreremoveUpgradePreservesSELinux(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+
+	_, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"1"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm preun upgrade should exit 0, got %d", code)
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") {
+			t.Errorf("rpm preun upgrade must not call semodule: %s", c)
+		}
+		if strings.Contains(c, "stop") || strings.Contains(c, "disable") {
+			t.Errorf("rpm preun upgrade must not stop/disable: %s", c)
+		}
+	}
+}
+
+// TestDebPostinstallSELinuxNoFalseAppArmorWarning verifies that when
+// SELinux is active, the DEB postinstall does not emit the false
+// "AppArmor LSM is not active" warning.
+func TestDebPostinstallSELinuxNoFalseAppArmorWarning(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+		})
+	if code != 0 {
+		t.Fatalf("deb postinst should exit 0 when SELinux active, got %d", code)
+	}
+
+	// Must NOT emit the false AppArmor warning
+	if strings.Contains(stdout, "AppArmor LSM is not active") {
+		t.Error("must not emit 'AppArmor LSM is not active' warning when SELinux is active")
+	}
+	// Must NOT say "system mode will not start" when SELinux is active
+	if strings.Contains(stdout, "system mode will not start") {
+		t.Error("must not say 'system mode will not start' when SELinux is active")
+	}
+
+	calls := readLifecycleScriptCalls(t, logFile)
+
+	// Must still call daemon-reload
+	found := false
+	for _, c := range calls {
+		if strings.Contains(c, "daemon-reload") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("must still call daemon-reload when SELinux is active")
+	}
+}
+
+// TestDebPostinstallNeitherMAC verifies that when no MAC backend is active,
+// the DEB postinstall emits the correct warning.
+func TestDebPostinstallNeitherMAC(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+		})
+	if code != 0 {
+		t.Fatalf("deb postinst should exit 0 when no MAC active, got %d", code)
+	}
+
+	// Must emit warning about no MAC backend
+	if !strings.Contains(stdout, "no supported MAC backend active") {
+		t.Errorf("expected 'no supported MAC backend active' warning, got: %s", stdout)
 	}
 }
 

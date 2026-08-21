@@ -41,6 +41,19 @@ fi
 # Build man pages.
 "${SCRIPT_DIR}/build-manpages.sh"
 
+# Build SELinux policy module (if tools available).
+if command -v checkmodule >/dev/null 2>&1 && command -v semodule_package >/dev/null 2>&1; then
+  echo "Building SELinux policy module..."
+  checkmodule -M -m -o "${SCRIPT_DIR}/packaging/selinux/docker-helper.mod" \
+    "${SCRIPT_DIR}/packaging/selinux/docker-helper.te"
+  semodule_package -o "${SCRIPT_DIR}/packaging/selinux/docker-helper.pp" \
+    -m "${SCRIPT_DIR}/packaging/selinux/docker-helper.mod" \
+    -f "${SCRIPT_DIR}/packaging/selinux/docker-helper.fc"
+  rm -f "${SCRIPT_DIR}/packaging/selinux/docker-helper.mod"
+else
+  echo "warning: checkmodule/semodule_package not found; SELinux policy module will not be built" >&2
+fi
+
 # Build from repo root so src paths in the config resolve correctly.
 # nFPM expands ${VERSION} from the environment.
 cd "${SCRIPT_DIR}"

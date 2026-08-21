@@ -32,4 +32,9 @@ unload_output=$(apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>&1) ||
   echo "warning: failed to unload AppArmor profile docker-helper-system: $unload_output" >&2
 }
 
+# Remove SELinux policy module (best-effort).
+semodule -r docker_helper 2>/dev/null || {
+  echo "warning: failed to remove SELinux module docker_helper" >&2
+}
+
 exit 0
