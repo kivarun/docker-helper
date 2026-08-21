@@ -105,8 +105,28 @@ Live enforcing testing on openSUSE Tumbleweed has proven that explicit
 - Only remaining AVCs were intentionally ignored cgroup_t/sysctl_net_t
   probes.
 
-Automatic recursive workspace relabeling is NOT implemented or approved.
-Build staging workspace data permissions remain untested and incomplete.
+#### Enforcing UAT: build staging
+
+Basic build staging with nested regular files has been proven in live
+enforcing UAT on openSUSE Tumbleweed:
+
+- `stageBuildContext/walkAndCopy` reads source context directories and
+  opens source files.
+- File/directory metadata is preserved in `/run/docker-helper/builds`.
+- Staged Dockerfile is verified.
+- `docker build` completed successfully.
+
+Exact staging permissions proven:
+
+- `docker_helper_workspace_t:dir read open` (reading source context dirs)
+- `docker_helper_workspace_t:file read open` (opening source files)
+- `docker_helper_runtime_t:dir read open setattr` (staging metadata)
+- `docker_helper_runtime_t:file getattr setattr` (staged file metadata)
+
+Buildx execution, network, and TLS permissions remain unresolved and
+deferred to a separate discovery phase.
+
+Automatic workspace relabeling is NOT implemented or approved.
 
 ## 4. LSM Abstraction
 

@@ -87,8 +87,8 @@ allow docker_helper_t docker_helper_config_t:dir { search };
 allow docker_helper_t docker_helper_config_t:file { read open getattr };
 
 # Runtime (from live AVC evidence)
-allow docker_helper_t docker_helper_runtime_t:dir { getattr search write add_name remove_name create mounton rmdir };
-allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink mounton };
+allow docker_helper_t docker_helper_runtime_t:dir { getattr search read open write add_name remove_name create mounton rmdir setattr };
+allow docker_helper_t docker_helper_runtime_t:file { create read write open lock unlink mounton getattr setattr };
 allow docker_helper_t docker_helper_runtime_t:sock_file { create setattr unlink };
 
 # State (from live AVC evidence)
@@ -116,8 +116,8 @@ allow docker_helper_t container_var_run_t:sock_file { write };
 allow docker_helper_t container_runtime_t:unix_stream_socket { connectto };
 
 # Workspace (proven in enforcing UAT)
-allow docker_helper_t docker_helper_workspace_t:dir { getattr search };
-allow docker_helper_t docker_helper_workspace_t:file { getattr };
+allow docker_helper_t docker_helper_workspace_t:dir { getattr search read open };
+allow docker_helper_t docker_helper_workspace_t:file { getattr read open };
 
 # Home directory traversal (proven in enforcing UAT)
 allow docker_helper_t user_home_dir_t:dir { getattr search };
