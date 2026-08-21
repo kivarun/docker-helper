@@ -53,12 +53,12 @@ fi
 # Remove any previous generated output to prevent stale artifacts.
 rm -f "${SCRIPT_DIR}/dist/docker-helper.pp"
 echo "Building SELinux policy module..."
-checkmodule -M -m -o "${SCRIPT_DIR}/dist/docker-helper.mod" \
+checkmodule -M -m -o "${SCRIPT_DIR}/dist/docker_helper.mod" \
   "${SCRIPT_DIR}/packaging/selinux/docker-helper.te"
 semodule_package -o "${SCRIPT_DIR}/dist/docker-helper.pp" \
-  -m "${SCRIPT_DIR}/dist/docker-helper.mod" \
+  -m "${SCRIPT_DIR}/dist/docker_helper.mod" \
   -f "${SCRIPT_DIR}/packaging/selinux/docker-helper.fc"
-rm -f "${SCRIPT_DIR}/dist/docker-helper.mod"
+rm -f "${SCRIPT_DIR}/dist/docker_helper.mod"
 
 # Build from repo root so src paths in the config resolve correctly.
 # nFPM expands ${VERSION} from the environment.
