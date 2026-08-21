@@ -66,14 +66,17 @@ module docker_helper 1.0;
 
 		role system_r;
 
-		class file { append create execute execute_no_trans getattr ioctl lock open read rename setattr unlink write entrypoint mounton };
-		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton };
+		class file { append create execute execute_no_trans getattr ioctl lock open read rename setattr unlink write entrypoint mounton map };
+		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton map relabelfrom relabelto };
 		class sock_file { append create getattr ioctl read setattr unlink write };
 		class lnk_file { create getattr read unlink write };
+		class chr_file { append create getattr ioctl read watch };
+		class blk_file { append create getattr ioctl read };
+		class fifo_file { append create getattr ioctl read watch write };
+		class filesystem { mount remount unmount };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto };
 		class udp_socket { create setopt connect getattr read write };
-		class filesystem { unmount };
 		class capability { dac_read_search sys_admin };
 		class process { transition };
 		class process2 { nnp_transition };
@@ -215,14 +218,20 @@ allow docker_helper_t cert_t:file { read open getattr };
 # not by docker_helper_t. container-selinux already grants transitions from
 # container_runtime_domain to types with container_domain attribute.
 
-# Container rootfs access: permissions equivalent to container_t on
-# container_file_t per container-selinux container_manage_files_template.
-# Supports: file create/write/rename/unlink, directory create/remove,
-# ELF/shared-library mmap/execute, Unix socket creation.
-allow docker_helper_container_t container_file_t:file { read open getattr execute execute_no_trans create write setattr lock unlink rename append ioctl };
-allow docker_helper_container_t container_file_t:dir { getattr search read open write add_name remove_name create rmdir setattr ioctl };
-allow docker_helper_container_t container_file_t:lnk_file { read create unlink write getattr };
-allow docker_helper_container_t container_file_t:sock_file { create setattr unlink read write append getattr ioctl };
+# Container rootfs access: reproduces container_manage_files_template
+# from container-selinux for container_file_t.
+allow docker_helper_container_t container_file_t:file {
+	read write create getattr setattr lock open ioctl append
+	unlink rename execute execute_no_trans map
+};
+allow docker_helper_container_t container_file_t:dir {
+	read open search add_name remove_name create rmdir getattr setattr write ioctl
+};
+allow docker_helper_container_t container_file_t:lnk_file { read create getattr unlink write };
+allow docker_helper_container_t container_file_t:sock_file { create getattr read write append ioctl setattr unlink };
+allow docker_helper_container_t container_file_t:chr_file { create getattr read append ioctl watch };
+allow docker_helper_container_t container_file_t:blk_file { create getattr read append ioctl };
+allow docker_helper_container_t container_file_t:fifo_file { create getattr read write append ioctl watch };
 
 # docker_helper_container_t can access user_home_type workspaces (bind-mounted).
 # This is the ONLY extra permission beyond standard container-selinux policy.
