@@ -118,6 +118,17 @@ mkdir -p "$BUNDLE_DIR/man"
 cp "$OUT_DIR/man/docker-helper.1.gz" "$BUNDLE_DIR/man/docker-helper.1.gz"
 cp "$OUT_DIR/man/docker-helper-config.5.gz" "$BUNDLE_DIR/man/docker-helper-config.5.gz"
 
+# Bash completion
+rm -f "$OUT_DIR/completions/docker-helper"
+mkdir -p "$OUT_DIR/completions"
+"$BUNDLE_DIR/docker-helper" completion bash > "$OUT_DIR/completions/docker-helper"
+if [[ ! -s "$OUT_DIR/completions/docker-helper" ]]; then
+  echo "error: completion generation produced empty output" >&2
+  exit 1
+fi
+mkdir -p "$BUNDLE_DIR/completions"
+cp "$OUT_DIR/completions/docker-helper" "$BUNDLE_DIR/completions/docker-helper"
+
 # --- Step 3: Create tarball ---
 
 echo "=== Creating tarball ==="
@@ -184,6 +195,7 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper.1.gz"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper-config.5.gz"
+  "docker-helper-${VERSION}-linux-amd64/completions/docker-helper"
 )
 
 TARBALL_CONTENTS=$(tar tzf "$TARBALL")

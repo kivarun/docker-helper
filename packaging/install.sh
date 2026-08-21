@@ -22,6 +22,7 @@ readonly INSTALL_DIR="$HOME/.local/bin"
 readonly UNIT_DIR="$HOME/.config/systemd/user"
 readonly UNIT_NAME="docker-helper.service"
 readonly SKILL_INSTALL_DIR="$HOME/.claude/skills/docker-helper"
+readonly COMPLETION_INSTALL_DIR="$HOME/.local/share/bash-completion/completions"
 
 # --- State ---
 interactive=true
@@ -213,6 +214,19 @@ install_skill() {
 	info "Skill installed"
 }
 
+install_completion() {
+	local completion_src="$script_dir/completions/docker-helper"
+	if [[ ! -f "$completion_src" ]]; then
+		return
+	fi
+
+	info "Installing Bash completion to $COMPLETION_INSTALL_DIR"
+	mkdir -p "$COMPLETION_INSTALL_DIR"
+	cp "$completion_src" "$COMPLETION_INSTALL_DIR/docker-helper"
+	chmod 644 "$COMPLETION_INSTALL_DIR/docker-helper"
+	info "Bash completion installed (restart shell or source the file to activate)"
+}
+
 check_path() {
 	if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
 		info ""
@@ -301,6 +315,7 @@ main() {
 	install_binary
 	install_unit
 	install_skill
+	install_completion
 	check_path
 
 	info ""

@@ -22,6 +22,7 @@ readonly UNIT_NAME="docker-helper.service"
 readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper"
 readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/docker-helper"
 readonly SKILL_INSTALL_DIR="$HOME/.claude/skills/docker-helper"
+readonly COMPLETION_INSTALL_DIR="$HOME/.local/share/bash-completion/completions"
 
 # --- State ---
 interactive=true
@@ -146,6 +147,13 @@ remove_skill() {
 	info "Skill removed"
 }
 
+remove_completion() {
+	if [[ -f "$COMPLETION_INSTALL_DIR/docker-helper" ]]; then
+		info "Removing $COMPLETION_INSTALL_DIR/docker-helper"
+		rm -f "$COMPLETION_INSTALL_DIR/docker-helper"
+	fi
+}
+
 purge_config_and_state() {
 	if [[ -d "$CONFIG_DIR" ]]; then
 		info "Removing config directory: $CONFIG_DIR"
@@ -170,6 +178,7 @@ main() {
 	remove_binary
 	remove_unit
 	remove_skill
+	remove_completion
 
 	info ""
 
