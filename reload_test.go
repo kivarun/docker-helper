@@ -2134,7 +2134,7 @@ func TestConfigSetReloadTransportError(t *testing.T) {
 // whose inner error does NOT contain the literal string "trusted_ca" still
 // produces the detailed trusted-CA diagnostic. This is a regression test for
 // the brittle strings.Contains(err.Error(), "trusted_ca") check that was
-// replaced with errors.Is(err, errTrustedCAFailed).
+// replaced with errors.As(err, &trustedCAPreparationError).
 func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()

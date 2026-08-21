@@ -178,11 +178,11 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "MAC backend") {
-		t.Errorf("expected 'MAC backend' in stderr, got: %s", stderrStr)
+	opLog := stdout.String()
+	if !strings.Contains(opLog, "MAC backend") {
+		t.Errorf("expected 'MAC backend' in operational log, got: %s", opLog)
 	}
-	if strings.Contains(stderrStr, "configuration not found") {
+	if strings.Contains(opLog, "configuration not found") {
 		t.Error("loadConfig must not be called before MAC preflight (got config error instead of MAC backend error)")
 	}
 }
@@ -219,11 +219,11 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "not confined") {
-		t.Errorf("expected 'not confined' in stderr, got: %s", stderrStr)
+	opLog := stdout.String()
+	if !strings.Contains(opLog, "not confined") {
+		t.Errorf("expected 'not confined' in operational log, got: %s", opLog)
 	}
-	if strings.Contains(stderrStr, "configuration not found") {
+	if strings.Contains(opLog, "configuration not found") {
 		t.Error("loadConfig must not be called before AppArmor preflight (got config error instead of confinement error)")
 	}
 }

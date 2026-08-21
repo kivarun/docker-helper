@@ -658,9 +658,9 @@ func TestRunCommandWithWritersServeFailure(t *testing.T) {
 	}
 
 	// Operational output must be valid JSONL.
-	opOutput := stderrBuf.String()
+	opOutput := stdoutBuf.String()
 	if opOutput == "" {
-		t.Fatal("stderr is empty")
+		t.Fatal("stdout (operational) is empty")
 	}
 	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
 		if line == "" {
@@ -692,7 +692,7 @@ func TestMissingConfigProducesSingleJSONLRecord(t *testing.T) {
 	// Point config to a nonexistent file.
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/config.json")
 
-	err := runServe(auditBuf, opBuf)
+	err := runServe(opBuf, auditBuf)
 	if err == nil {
 		t.Fatal("expected error from runServe with missing config")
 	}
@@ -766,7 +766,7 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	err = runServe(auditBuf, opBuf)
+	err = runServe(opBuf, auditBuf)
 	if err == nil {
 		lockFile.Close()
 		t.Fatal("expected error from runServe with held lock")

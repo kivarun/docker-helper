@@ -610,12 +610,12 @@ func TestServeSystemModePreflightSELinuxEnforcing(t *testing.T) {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
 	// SELinux preflight passed — error is from a later startup step.
-	stderrStr := stderr.String()
-	if strings.Contains(stderrStr, "MAC backend") {
-		t.Errorf("MAC preflight should not block with correct confinement, got: %s", stderrStr)
+	opLog := stdout.String()
+	if strings.Contains(opLog, "MAC backend") {
+		t.Errorf("MAC preflight should not block with correct confinement, got: %s", opLog)
 	}
-	if strings.Contains(stderrStr, "SELinux") {
-		t.Errorf("SELinux preflight should not block enforcing mode, got: %s", stderrStr)
+	if strings.Contains(opLog, "SELinux") {
+		t.Errorf("SELinux preflight should not block enforcing mode, got: %s", opLog)
 	}
 }
 
@@ -644,11 +644,11 @@ func TestServeSystemModePreflightSELinuxPermissive(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "permissive") {
-		t.Errorf("expected 'permissive' in stderr, got: %s", stderrStr)
+	opLog := stdout.String()
+	if !strings.Contains(opLog, "permissive") {
+		t.Errorf("expected 'permissive' in operational log, got: %s", opLog)
 	}
-	if strings.Contains(stderrStr, "configuration not found") {
+	if strings.Contains(opLog, "configuration not found") {
 		t.Error("loadConfig must not be called before MAC preflight")
 	}
 }
@@ -678,11 +678,11 @@ func TestServeSystemModePreflightBothActive(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "both") {
-		t.Errorf("expected 'both' in stderr, got: %s", stderrStr)
+	opLog := stdout.String()
+	if !strings.Contains(opLog, "both") {
+		t.Errorf("expected 'both' in operational log, got: %s", opLog)
 	}
-	if strings.Contains(stderrStr, "configuration not found") {
+	if strings.Contains(opLog, "configuration not found") {
 		t.Error("loadConfig must not be called before MAC preflight")
 	}
 }
@@ -712,9 +712,9 @@ func TestServeSystemModePreflightBothAppArmorPermissiveSELinux(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "both") {
-		t.Errorf("expected 'both' in stderr (AppArmor + permissive SELinux must fail), got: %s", stderrStr)
+	opLog := stdout.String()
+	if !strings.Contains(opLog, "both") {
+		t.Errorf("expected 'both' in operational log (AppArmor + permissive SELinux must fail), got: %s", opLog)
 	}
 }
 

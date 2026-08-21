@@ -56,8 +56,9 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		diagnostic := "invalid configuration"
-		if errors.Is(err, errTrustedCAFailed) {
-			diagnostic = fmt.Sprintf("trusted CA preparation failed: %v", errors.Unwrap(err))
+		var caErr *trustedCAPreparationError
+		if errors.As(err, &caErr) {
+			diagnostic = caErr.Error()
 		}
 		opLog(ctx).Error("reload config error",
 			slog.String("operation", "reload"),
