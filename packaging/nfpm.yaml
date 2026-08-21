@@ -71,7 +71,7 @@ contents:
     file_info:
       mode: 0644
 
-  - src: packaging/selinux/docker-helper.pp
+  - src: dist/docker-helper.pp
     dst: /usr/share/selinux/docker-helper.pp
     file_info:
       mode: 0644

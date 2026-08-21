@@ -2513,6 +2513,12 @@ func TestPackageMetadataIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a dummy SELinux policy module (required by nfpm.yaml).
+	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Create a temporary nFPM config that uses the dummy binary and tmp output.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -2520,6 +2526,8 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	}
 	// Replace dist/docker-helper with the dummy binary path.
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	// Replace dist/docker-helper.pp with the dummy PP path.
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
 	// Replace ${VERSION} with test version.
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
 
@@ -2805,6 +2813,16 @@ func TestPackageBuildIntegration(t *testing.T) {
 	}
 	if !hasCC {
 		t.Skip("musl-gcc (or Alpine gcc) not available, skipping full package build pipeline")
+	}
+
+	// Skip if SELinux build tools are not available (checkmodule is required by build-packages.sh).
+	if _, err := exec.LookPath("checkmodule"); err != nil {
+		t.Skip("checkmodule not available, skipping full package build pipeline (requires SELinux build tools)")
+	}
+
+	// Clean up dist/ to avoid stale artifacts.
+	if err := os.RemoveAll("dist"); err != nil {
+		t.Skipf("cannot clean dist/: %v, skipping test", err)
 	}
 
 	testVersion := "1.0.0"
@@ -3742,8 +3760,13 @@ func TestNfpmConfigIncludesSELinuxPolicy(t *testing.T) {
 	}
 	content := string(data)
 
-	if !strings.Contains(content, "packaging/selinux/docker-helper.pp") {
-		t.Error("nfpm.yaml must include packaging/selinux/docker-helper.pp source")
+	// nfpm source must point to the freshly generated artifact in dist/,
+	// never to packaging/selinux/ (which would permit stale policy reuse).
+	if !strings.Contains(content, "dist/docker-helper.pp") {
+		t.Error("nfpm.yaml must source dist/docker-helper.pp (freshly generated artifact)")
+	}
+	if strings.Contains(content, "packaging/selinux/docker-helper.pp") {
+		t.Error("nfpm.yaml must not source packaging/selinux/docker-helper.pp (stale policy risk)")
 	}
 	if !strings.Contains(content, "/usr/share/selinux/docker-helper.pp") {
 		t.Error("nfpm.yaml must install .pp to /usr/share/selinux/docker-helper.pp")
@@ -3751,7 +3774,8 @@ func TestNfpmConfigIncludesSELinuxPolicy(t *testing.T) {
 }
 
 // TestBuildPackagesScriptContentSELinux verifies build-packages.sh builds
-// the SELinux policy module when tools are available.
+// the SELinux policy module with fail-closed semantics: requires tools,
+// generates under dist/, removes previous output.
 func TestBuildPackagesScriptContentSELinux(t *testing.T) {
 	data, err := os.ReadFile("build-packages.sh")
 	if err != nil {
@@ -3770,6 +3794,68 @@ func TestBuildPackagesScriptContentSELinux(t *testing.T) {
 	}
 	if !strings.Contains(content, "docker-helper.pp") {
 		t.Error("build-packages.sh must produce docker-helper.pp")
+	}
+
+	// Must generate under dist/, never under packaging/selinux/.
+	if !strings.Contains(content, "dist/docker-helper.pp") {
+		t.Error("build-packages.sh must output to dist/docker-helper.pp")
+	}
+	if strings.Contains(content, "packaging/selinux/docker-helper.pp") {
+		t.Error("build-packages.sh must not output to packaging/selinux/docker-helper.pp (stale policy risk)")
+	}
+
+	// Must fail-closed: exit 1 when tools are missing, not warn-and-continue.
+	// The script uses set -euo pipefail, so missing tools should cause failure.
+	// Verify explicit error handling with exit 1.
+	if !strings.Contains(content, "exit 1") {
+		t.Error("build-packages.sh must contain explicit exit 1 for missing tools")
+	}
+
+	// Must remove previous generated output before building.
+	if !strings.Contains(content, "rm -f") && !strings.Contains(content, "rm -rf") {
+		t.Error("build-packages.sh must remove previous generated output before building")
+	}
+}
+
+// TestBuildPackagesScriptSELinuxToolsRequired verifies that build-packages.sh
+// fails when SELinux build tools are unavailable, rather than warning and
+// continuing (which would allow stale policy packaging).
+func TestBuildPackagesScriptSELinuxToolsRequired(t *testing.T) {
+	data, err := os.ReadFile("build-packages.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// The script must check for checkmodule and semodule_package and fail
+	// if either is missing. Verify the pattern: if ! command -v ... then exit 1.
+	checkmoduleIdx := strings.Index(content, "checkmodule")
+	semoduleIdx := strings.Index(content, "semodule_package")
+	if checkmoduleIdx < 0 {
+		t.Fatal("checkmodule reference not found")
+	}
+	if semoduleIdx < 0 {
+		t.Fatal("semodule_package reference not found")
+	}
+
+	// Find the error handling blocks for each tool.
+	// After each tool check, there should be an exit 1 before the next major step.
+	for _, tool := range []string{"checkmodule", "semodule_package"} {
+		idx := strings.Index(content, tool)
+		if idx < 0 {
+			continue
+		}
+		// Look for the error block after this tool reference.
+		remaining := content[idx:]
+		// The error block should contain "exit 1" before "nfpm" or the next major step.
+		nfpmIdx := strings.Index(remaining, "nfpm")
+		if nfpmIdx < 0 {
+			continue
+		}
+		errorBlock := remaining[:nfpmIdx]
+		if !strings.Contains(errorBlock, "exit 1") {
+			t.Errorf("build-packages.sh must exit 1 when %s is missing (before nfpm step)", tool)
+		}
 	}
 }
 
@@ -4210,8 +4296,9 @@ func TestRpmPreremoveUpgradePreservesSELinux(t *testing.T) {
 }
 
 // TestDebPostinstallSELinuxNoFalseAppArmorWarning verifies that when
-// SELinux is active, the DEB postinstall does not emit the false
-// "AppArmor LSM is not active" warning.
+// SELinux is active but AppArmor is not, the DEB postinstall emits an
+// accurate message about DEB not supporting SELinux (not the old false
+// "AppArmor LSM is not active" warning).
 func TestDebPostinstallSELinuxNoFalseAppArmorWarning(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, false, false)
@@ -4241,17 +4328,25 @@ func TestDebPostinstallSELinuxNoFalseAppArmorWarning(t *testing.T) {
 		t.Fatalf("deb postinst should exit 0 when SELinux active, got %d", code)
 	}
 
-	// Must NOT emit the false AppArmor warning
-	if strings.Contains(stdout, "AppArmor LSM is not active") {
-		t.Error("must not emit 'AppArmor LSM is not active' warning when SELinux is active")
-	}
-	// Must NOT say "system mode will not start" when SELinux is active
-	if strings.Contains(stdout, "system mode will not start") {
-		t.Error("must not say 'system mode will not start' when SELinux is active")
+	// Must emit accurate message about DEB not supporting SELinux.
+	if !strings.Contains(stdout, "DEB package does not install the SELinux module") {
+		t.Errorf("expected accurate DEB/SELinux message, got: %s", stdout)
 	}
 
 	calls := readLifecycleScriptCalls(t, logFile)
 
+	// Must NOT call apparmor_parser (AppArmor not active)
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") {
+			t.Error("must not call apparmor_parser when AppArmor is not active")
+		}
+	}
+	// Must NOT call semodule (DEB does not support SELinux)
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") {
+			t.Error("must not call semodule in DEB postinstall")
+		}
+	}
 	// Must still call daemon-reload
 	found := false
 	for _, c := range calls {
@@ -4260,12 +4355,12 @@ func TestDebPostinstallSELinuxNoFalseAppArmorWarning(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("must still call daemon-reload when SELinux is active")
+		t.Error("must still call daemon-reload")
 	}
 }
 
 // TestDebPostinstallNeitherMAC verifies that when no MAC backend is active,
-// the DEB postinstall emits the correct warning.
+// the DEB postinstall emits the AppArmor-specific warning.
 func TestDebPostinstallNeitherMAC(t *testing.T) {
 	fakeDir, logFile := setupScriptTest(t)
 	writeFakeSystemctl(t, fakeDir, logFile, false, false)
@@ -4295,9 +4390,9 @@ func TestDebPostinstallNeitherMAC(t *testing.T) {
 		t.Fatalf("deb postinst should exit 0 when no MAC active, got %d", code)
 	}
 
-	// Must emit warning about no MAC backend
-	if !strings.Contains(stdout, "no supported MAC backend active") {
-		t.Errorf("expected 'no supported MAC backend active' warning, got: %s", stdout)
+	// Must emit AppArmor-specific warning (not generic "no MAC backend")
+	if !strings.Contains(stdout, "AppArmor LSM is not active") {
+		t.Errorf("expected 'AppArmor LSM is not active' warning, got: %s", stdout)
 	}
 }
 
@@ -4367,12 +4462,19 @@ func TestPackageMetadataScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a dummy SELinux policy module (required by nfpm.yaml).
+	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Create a temporary nFPM config.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")
 	configFile := filepath.Join(tmpDir, "nfpm.yaml")
 	if err := os.WriteFile(configFile, []byte(configContent), 0644); err != nil {
@@ -4493,6 +4595,12 @@ func TestPackageMetadataManPages(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create a dummy SELinux policy module (required by nfpm.yaml).
+	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Build real compressed man pages for the test.
 	os.MkdirAll(filepath.Join(tmpDir, "man"), 0755)
 	for _, src := range []string{"docs/man/docker-helper.1", "docs/man/docker-helper-config.5"} {
@@ -4518,6 +4626,7 @@ func TestPackageMetadataManPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper.1.gz"))
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper-config.5.gz"))
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")

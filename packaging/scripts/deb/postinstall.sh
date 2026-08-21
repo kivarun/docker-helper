@@ -21,27 +21,21 @@ fi
 was_active=false
 systemctl is-active --quiet docker-helper.service && was_active=true
 
-# Detect MAC backend(s).
+# DEB packages require AppArmor confinement for system mode.
 aa_enabled="$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" || true
-selinux_enforcing="$(cat /sys/fs/selinux/enforce 2>/dev/null | tr -d '[:space:]')" || true
-
-aa_active=false
-selinux_active=false
-[ "$aa_enabled" = "Y" ] && aa_active=true
-[ "$selinux_enforcing" = "1" ] && selinux_active=true
-
-if [ "$aa_active" = "true" ] && [ "$selinux_active" = "true" ]; then
-  echo "warning: both AppArmor and SELinux are active (unsupported configuration)" >&2
-fi
-
-if [ "$aa_active" = "true" ]; then
+if [ "$aa_enabled" = "Y" ]; then
   if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system; then
     exit 1
   fi
-fi
-
-if [ "$aa_active" = "false" ] && [ "$selinux_active" = "false" ]; then
-  echo "warning: no supported MAC backend active (system mode will not start)" >&2
+else
+  # Check if SELinux is the active MAC (informative only — DEB packages
+  # do not install the SELinux module; use the RPM on SELinux hosts).
+  selinux_enforcing="$(cat /sys/fs/selinux/enforce 2>/dev/null | tr -d '[:space:]')" || true
+  if [ "$selinux_enforcing" = "1" ]; then
+    echo "warning: SELinux enforcing but AppArmor is not active; DEB package does not install the SELinux module (system mode will not start)" >&2
+  else
+    echo "warning: AppArmor LSM is not active; skipping apparmor_parser (system mode will not start)" >&2
+  fi
 fi
 
 # Reload systemd unit files.
