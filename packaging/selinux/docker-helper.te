@@ -15,7 +15,8 @@
 #
 # This module explicitly provides:
 #   - role system_r membership for docker_helper_container_t
-#   - container_file_t rootfs access (read/execute)
+#   - container_file_t rootfs access (full create/write/rename/unlink,
+#     directory management, ELF mmap/execute, Unix sockets)
 #   - user_home_type workspace access (the only extra permission beyond
 #     standard container-selinux)
 #
@@ -47,7 +48,6 @@ module docker_helper 1.0;
 		attribute user_home_type;
 		attribute container_domain;
 		attribute mcs_constrained_type;
-		attribute container_file_type;
 
 		type security_t;
 		type node_t;
@@ -66,10 +66,10 @@ module docker_helper 1.0;
 
 		role system_r;
 
-		class file { read open execute getattr entrypoint create write setattr lock unlink execute_no_trans mounton rename };
-		class dir { getattr search read open write add_name remove_name create rmdir mounton setattr };
-		class sock_file { create setattr unlink write };
-		class lnk_file { read create unlink };
+		class file { append create execute execute_no_trans getattr ioctl lock open read rename setattr unlink write entrypoint mounton };
+		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton };
+		class sock_file { append create getattr ioctl read setattr unlink write };
+		class lnk_file { create getattr read unlink write };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto };
 		class udp_socket { create setopt connect getattr read write };
@@ -101,7 +101,7 @@ type docker_helper_runtime_t, file_type;
 # Explicit rules below reproduce the minimum container-selinux container
 # domain semantics that this module must provide independently:
 #   - role system_r membership (required by target policy)
-#   - container_file_t rootfs access (read/execute/container entrypoint)
+#   - container_file_t rootfs access (full container workload semantics)
 # The only extra permission beyond standard container-selinux is:
 #   allow docker_helper_container_t user_home_type: { workspace access }
 type docker_helper_container_t, domain;
@@ -215,11 +215,14 @@ allow docker_helper_t cert_t:file { read open getattr };
 # not by docker_helper_t. container-selinux already grants transitions from
 # container_runtime_domain to types with container_domain attribute.
 
-# Container rootfs access: minimum rules equivalent to
-# container_manage_files_template for container_file_t.
-# Required to execute and run a normal container under enforcing SELinux.
-allow docker_helper_container_t container_file_t:file { read open getattr execute execute_no_trans };
-allow docker_helper_container_t container_file_t:dir { getattr search read open };
+# Container rootfs access: permissions equivalent to container_t on
+# container_file_t per container-selinux container_manage_files_template.
+# Supports: file create/write/rename/unlink, directory create/remove,
+# ELF/shared-library mmap/execute, Unix socket creation.
+allow docker_helper_container_t container_file_t:file { read open getattr execute execute_no_trans create write setattr lock unlink rename append ioctl };
+allow docker_helper_container_t container_file_t:dir { getattr search read open write add_name remove_name create rmdir setattr ioctl };
+allow docker_helper_container_t container_file_t:lnk_file { read create unlink write getattr };
+allow docker_helper_container_t container_file_t:sock_file { create setattr unlink read write append getattr ioctl };
 
 # docker_helper_container_t can access user_home_type workspaces (bind-mounted).
 # This is the ONLY extra permission beyond standard container-selinux policy.
