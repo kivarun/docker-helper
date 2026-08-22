@@ -34,6 +34,15 @@ func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
 	return 0
 }
 
+// reloadDeps are the production dependencies for handleReload.
+// Tests may inject their own to avoid real filesystem or LSM calls.
+type reloadDeps struct {
+	loadConfig             func() (*Config, error)
+	deploymentMode         func() DeploymentMode
+	detectLSM              func() (LSMBackend, error)
+	verifySELinuxWorkspace func(string) error
+}
+
 // handleReload reloads the configuration from disk and updates the daemon's
 // runtime configuration. Configurable fields updated: allowed_root,
 // session_ttl, log_level, audit_enabled, shutdown_timeout,
@@ -45,6 +54,17 @@ func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
 // If the new configuration is invalid, the daemon keeps its current
 // configuration and returns an error.
 func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
+	a.handleReloadWithDeps(w, r, reloadDeps{
+		loadConfig:             loadConfig,
+		deploymentMode:         resolveDeploymentMode,
+		detectLSM:              detectLSM,
+		verifySELinuxWorkspace: newSELinuxWorkspaceManager().verifyWorkspaceLabel,
+	})
+}
+
+// handleReloadWithDeps is the implementation of handleReload with
+// injectable dependencies for testing.
+func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps reloadDeps) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
@@ -52,7 +72,7 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	ctx := r.Context()
 
-	newCfg, err := loadConfig()
+	newCfg, err := deps.loadConfig()
 	if err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		diagnostic := "invalid configuration"
@@ -79,8 +99,8 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 
 	// System mode with SELinux: verify non-home allowed_root workspace label.
 	// This is a read-only check — no semanage/restorecon mutation on reload.
-	if resolveDeploymentMode() == ModeSystem {
-		backend, err := detectLSM()
+	if deps.deploymentMode() == ModeSystem {
+		backend, err := deps.detectLSM()
 		if err != nil {
 			duration := time.Since(started).Round(time.Millisecond).String()
 			opLog(ctx).Error("reload SELinux detection failed",
@@ -99,8 +119,7 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if backend == LSMSelinux && !isHomeRoot(newCfg.AllowedRoot) {
-			selMgr := newSELinuxWorkspaceManager()
-			if err := selMgr.verifyWorkspaceLabel(newCfg.AllowedRoot); err != nil {
+			if err := deps.verifySELinuxWorkspace(newCfg.AllowedRoot); err != nil {
 				duration := time.Since(started).Round(time.Millisecond).String()
 				opLog(ctx).Error("reload SELinux workspace verification failed",
 					slog.String("operation", "reload"),

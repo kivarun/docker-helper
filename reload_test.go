@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2279,47 +2280,17 @@ func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 // during handleReload, the HTTP reload is rejected with the expected SELinux
 // detection error and the runtime config is unchanged.
 func TestReloadDetectLSMErrorDirect(t *testing.T) {
-	// Use temp config/token/state to avoid touching real /var or /run.
 	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-	tokenPath := filepath.Join(dir, "admin.token")
 	stateDir := filepath.Join(dir, "state")
-
-	// /home is valid for system mode, exists on CI, and does not require
-	// SELinux workspace verification (isHomeRoot skips it).
-	allowedRoot := "/home"
-
-	cfg := map[string]any{
-		"allowed_root": allowedRoot,
-		"session_ttl":  "12h",
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-
-	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
-	t.Setenv("XDG_STATE_HOME", dir)
-
-	// Inject system mode so handleReload calls detectLSM.
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = origUID }()
 
 	// Capture operational logs.
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelError, false)
 
-	// Create App state manually to avoid loadConfig creating system dirs.
+	// Create App state manually to avoid loadConfig entirely.
 	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -2329,49 +2300,69 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 	}
 	defer db.Close()
 
+	// Compute the admin token hash for the bearer token used in the request.
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
 	app := &App{
 		Config: &Config{
-			AllowedRoot: allowedRoot,
+			AllowedRoot: "/home",
 			SessionTTL:  12 * time.Hour,
 			LogLevel:    slog.LevelInfo,
 			Mode:        ModeSystem,
 		},
 		DB:             db,
-		AdminTokenHash: [32]byte{1}, // dummy hash; auth bypassed via httptest
+		AdminTokenHash: adminHash,
 	}
 
 	// Save the original config for comparison.
 	originalConfig := app.getConfig()
 
-	// Inject detectLSM to return a sentinel error.
-	origSEL := selinuxEnabled
-	origAA := apparmorLSMActive
-	selinuxEnabled = func() (bool, bool, error) {
-		return false, false, os.ErrPermission
+	// Track which injected deps were called.
+	var loadConfigCalled, detectLSMCalled, verifyCalled bool
+	detectErr := fmt.Errorf("simulated LSM detection failure")
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			loadConfigCalled = true
+			return &Config{
+				AllowedRoot: "/home",
+				SessionTTL:  12 * time.Hour,
+				LogLevel:    slog.LevelInfo,
+				Mode:        ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			detectLSMCalled = true
+			return LSMNone, detectErr
+		},
+		verifySELinuxWorkspace: func(string) error {
+			verifyCalled = true
+			return fmt.Errorf("verifySELinuxWorkspace must not be called")
+		},
 	}
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() {
-		selinuxEnabled = origSEL
-		apparmorLSMActive = origAA
-	}()
 
 	// Use httptest to avoid real Unix listener.
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/reload", nil)
 	req.Header.Set("Authorization", "Bearer test-admin-token")
 
-	// Bypass admin auth for this test by calling handleReload directly.
-	// handleReload calls requireAdmin which checks the token.
-	// We need to set a valid admin token hash.
-	// Actually, let's use the real token hash.
-	adminHash, err := loadAdminToken(tokenPath)
-	if err != nil {
-		t.Fatal(err)
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	// 1. injected loadConfig was called.
+	if !loadConfigCalled {
+		t.Error("injected loadConfig was not called")
 	}
-	app.AdminTokenHash = adminHash
 
-	app.handleReload(recorder, req)
+	// 2. injected detectLSM was called.
+	if !detectLSMCalled {
+		t.Error("injected detectLSM was not called")
+	}
 
+	// 3. response code is selinux_detection_failed.
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
@@ -2381,13 +2372,11 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatalf("invalid JSON: %s", body)
 	}
-
-	// Verify the response contains the SELinux detection error.
 	if code, ok := result["code"].(string); !ok || code != "selinux_detection_failed" {
 		t.Fatalf("expected code=selinux_detection_failed, got: %s", body)
 	}
 
-	// Verify app.Config is semantically unchanged.
+	// 4. runtime app.Config remains unchanged.
 	currentConfig := app.getConfig()
 	if currentConfig.AllowedRoot != originalConfig.AllowedRoot {
 		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoot, originalConfig.AllowedRoot)
@@ -2397,5 +2386,10 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 	}
 	if currentConfig.LogLevel != originalConfig.LogLevel {
 		t.Errorf("LogLevel changed: got %v, want %v", currentConfig.LogLevel, originalConfig.LogLevel)
+	}
+
+	// 5. SELinux workspace verification was not called after detection failure.
+	if verifyCalled {
+		t.Error("verifySELinuxWorkspace must not be called when detectLSM fails")
 	}
 }
