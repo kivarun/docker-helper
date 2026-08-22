@@ -2736,6 +2736,89 @@ func TestRPMSelinuxDependencies(t *testing.T) {
 	// installed with default context and systemd handles the runtime directory.
 }
 
+// TestRPMBackendDependencies verifies that the RPM retains both AppArmor
+// and SELinux backend toolchain dependencies, as required for the Release 2
+// openSUSE Tumbleweed support contract.
+func TestRPMBackendDependencies(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Extract the RPM depends section.
+	rpmIdx := strings.Index(content, "  rpm:")
+	if rpmIdx < 0 {
+		t.Fatal("rpm overrides section not found")
+	}
+	afterRpm := content[rpmIdx:]
+	dependsIdx := strings.Index(afterRpm, "    depends:")
+	if dependsIdx < 0 {
+		t.Fatal("rpm depends section not found")
+	}
+	dependsSection := afterRpm[dependsIdx:]
+	nextKeyIdx := strings.Index(dependsSection, "\n    scripts:")
+	if nextKeyIdx > 0 {
+		dependsSection = dependsSection[:nextKeyIdx]
+	}
+
+	// AppArmor backend dependency.
+	if !strings.Contains(dependsSection, "apparmor-parser") {
+		t.Error("RPM depends must include apparmor-parser (AppArmor backend)")
+	}
+
+	// SELinux backend dependencies.
+	for _, pkg := range []string{"policycoreutils", "policycoreutils-python-utils"} {
+		if !strings.Contains(dependsSection, pkg) {
+			t.Errorf("RPM depends must include %s (SELinux backend)", pkg)
+		}
+	}
+}
+
+// TestRPMDocumentationTargetsTumbleweed verifies that Release 2 RPM
+// documentation explicitly identifies openSUSE Tumbleweed as the supported
+// RPM target, rather than generic RPM/Fedora/RHEL wording.
+func TestRPMDocumentationTargetsTumbleweed(t *testing.T) {
+	// README.md package installation section must name openSUSE Tumbleweed.
+	readmeData, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := string(readmeData)
+
+	// Locate the RPM installation subsection in the package installation section.
+	// It follows the DEB subsection and contains the zypper install command.
+	zypperIdx := strings.Index(readme, "zypper install")
+	if zypperIdx < 0 {
+		t.Fatal("README.md must contain zypper install command for RPM")
+	}
+
+	// The heading above the zypper command must mention openSUSE Tumbleweed.
+	// Look backward from the zypper line for the section heading.
+	beforeZypper := readme[:zypperIdx]
+	if !strings.Contains(beforeZypper, "openSUSE Tumbleweed") {
+		t.Error("README.md RPM section must identify openSUSE Tumbleweed as the supported target")
+	}
+
+	// packaging/README.release.md must also name openSUSE Tumbleweed for RPM.
+	releaseData, err := os.ReadFile("packaging/README.release.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseReadme := string(releaseData)
+
+	// The RPM mention in the release README must reference openSUSE Tumbleweed.
+	rpmIdx := strings.Index(releaseReadme, ".rpm")
+	if rpmIdx < 0 {
+		t.Fatal("packaging/README.release.md must reference .rpm package")
+	}
+	// Check the surrounding context for openSUSE Tumbleweed mention.
+	context := releaseReadme[:rpmIdx+200]
+	if !strings.Contains(context, "openSUSE Tumbleweed") {
+		t.Error("packaging/README.release.md must identify openSUSE Tumbleweed for RPM support")
+	}
+}
+
 func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
 	t.Helper()
 

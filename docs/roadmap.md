@@ -293,8 +293,10 @@ Implemented contract:
 - exactly one supported MAC backend is mandatory in system mode: AppArmor or
   enforcing SELinux;
 - native DEB/RPM packages contain both user- and system-mode deployment assets;
-  the release tarball installs user mode normally and requires explicit
-  `install-system.sh` for system mode;
+   DEB targets Ubuntu; RPM is validated against openSUSE Tumbleweed and carries
+   both AppArmor and SELinux runtime toolchain dependencies;
+   the release tarball installs user mode normally and requires explicit
+   `install-system.sh` for system mode;
 - native packages and release artifacts include Bash completion and manuals;
 - trusted CA injection is configured through `trusted_ca_path` and
   `trusted_ca_injection=auto`.

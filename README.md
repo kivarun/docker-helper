@@ -186,7 +186,7 @@ Install the package for your distribution:
 sudo apt install ./docker-helper_*.deb
 ```
 
-**openSUSE / RPM:**
+**openSUSE Tumbleweed / RPM:**
 
 ```bash
 sudo zypper install ./docker-helper-*.rpm
@@ -197,6 +197,11 @@ the AppArmor system profile, Bash completion, and man pages. The RPM also
 contains the compiled SELinux policy module. Packages do NOT run `init`,
 generate configuration, or start the service. Thus one native package supports
 both user and system deployment; the selected service determines the mode.
+
+The RPM is validated against openSUSE Tumbleweed. It carries both AppArmor
+and SELinux runtime toolchain dependencies because RPM dependency resolution
+cannot select packages based on the host's active LSM. Broader RPM
+distribution support is planned post-Release-2.
 
 Package installation paths:
 
