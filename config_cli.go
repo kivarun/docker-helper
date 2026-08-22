@@ -488,7 +488,28 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func configSet(field, value string, stdout, stderr io.Writer) int {
+// configSetSeam is the SELinux workspace preparation seam for configSet.
+// Production: nil (uses real canonicalizer, detectLSM, and manager).
+// Tests: can inject to control canonicalization, detection, and preparation.
+type configSetSeam struct {
+	// canonicalizeRoot replaces canonicalizeWorkspaceRootForAdd.
+	// nil means use the real function.
+	canonicalizeRoot func(string) (string, error)
+	// detectBackend replaces detectLSM.
+	// nil means use the real function.
+	detectBackend func() (LSMBackend, error)
+	// selinuxEnsure replaces the SELinux ensure call.
+	// nil means use the real manager.
+	selinuxEnsure func(root string) (bool, error)
+}
+
+// configSetSeamVar is the active seam for configSet.
+// Production: nil. Tests: set per-test with defer restore.
+var configSetSeamVar *configSetSeam
+
+// configSetWithSeam is the internal implementation of configSet that
+// respects the injection seam. The public configSet delegates here.
+func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *configSetSeam) int {
 	if msg := deprecatedFieldMessage(field); msg != "" {
 		fmt.Fprint(stderr, msg)
 		return 2
@@ -512,7 +533,13 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: allowed_root must be a non-empty absolute path\n")
 			return 2
 		}
-		canonical, err := canonicalizeWorkspaceRootForAdd(value)
+		var canonical string
+		var err error
+		if seam != nil && seam.canonicalizeRoot != nil {
+			canonical, err = seam.canonicalizeRoot(value)
+		} else {
+			canonical, err = canonicalizeWorkspaceRootForAdd(value)
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 2
@@ -618,16 +645,29 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 	// Once ensureWorkspaceLabel succeeds, the mapping is managed durable state
 	// (monotonic R2 lifecycle). We do NOT roll it back on config failure.
 	if field == "allowed_root" && resolveDeploymentMode() == ModeSystem {
-		backend, err := detectLSM()
+		var backend LSMBackend
+		var err error
+		if seam != nil && seam.detectBackend != nil {
+			backend, err = seam.detectBackend()
+		} else {
+			backend, err = detectLSM()
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "error: cannot determine MAC backend: %v\n", err)
 			return 1
 		}
 		if backend == LSMSelinux && !isHomeRoot(value) {
-			selMgr := newSELinuxWorkspaceManager()
-			if _, err := selMgr.ensureWorkspaceLabel(value); err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				return 1
+			if seam != nil && seam.selinuxEnsure != nil {
+				if _, err := seam.selinuxEnsure(value); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+			} else {
+				selMgr := newSELinuxWorkspaceManager()
+				if _, err := selMgr.ensureWorkspaceLabel(value); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
 			}
 		}
 	}
@@ -644,6 +684,10 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		stdout,
 		stderr,
 	)
+}
+
+func configSet(field, value string, stdout, stderr io.Writer) int {
+	return configSetWithSeam(field, value, stdout, stderr, configSetSeamVar)
 }
 
 func configUnset(field string, stdout, stderr io.Writer) int {
@@ -765,7 +809,7 @@ func applyConfigChangeTransactionally(
 	writeFn configWriter,
 	stdout, stderr io.Writer,
 ) int {
-	configPath := getConfigPath()
+	configPath := getConfigPathFunc()
 
 	// Acquire process-level lock BEFORE reading config.
 	lockFile, err := acquireConfigChangeLock(configPath)

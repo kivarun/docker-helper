@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -13,6 +15,9 @@ const (
 	selinuxWorkspaceType = "docker_helper_workspace_t"
 	semanagePath         = "/usr/sbin/semanage"
 	restoreconPath       = "/usr/sbin/restorecon"
+	// selinuxWorkspaceLockPath is the global lock for serializing
+	// SELinux workspace fcontext state transitions.
+	selinuxWorkspaceLockPath = "/run/lock/docker-helper-selinux.lock"
 )
 
 // isHomeRoot returns true if the canonical path is /home or under /home.
@@ -28,13 +33,18 @@ func isHomeRoot(canonical string) bool {
 // non-home system allowed_roots. It uses semanage fcontext + restorecon to
 // create persistent mappings that survive reboot and restorecon.
 //
-// Test seams: runCommand, readPathCon, and selinuxActive are injectable.
+// Test seams: runCommand, readPathCon, selinuxActive, and acquireLock are
+// injectable.
 type selinuxWorkspaceManager struct {
 	semanagePath   string
 	restoreconPath string
 	runCommand     func(string, ...string) ([]byte, error)
 	readPathCon    func(string) (string, error)
 	selinuxActive  func() (bool, bool, error) // (active, enforcing, error)
+	// acquireLock acquires the global SELinux workspace management lock.
+	// Returns a release function and an error. The release function must be
+	// called to release the lock.
+	acquireLock func() (func() error, error)
 }
 
 func newSELinuxWorkspaceManager() *selinuxWorkspaceManager {
@@ -49,7 +59,28 @@ func newSELinuxWorkspaceManager() *selinuxWorkspaceManager {
 		runCommand:     rc,
 		readPathCon:    readPathSELinuxType,
 		selinuxActive:  selinuxEnabled,
+		acquireLock:    acquireSELinuxWorkspaceLock,
 	}
+}
+
+// acquireSELinuxWorkspaceLock acquires the global SELinux workspace management
+// lock. Returns a release function and an error.
+func acquireSELinuxWorkspaceLock() (func() error, error) {
+	if err := os.MkdirAll("/run/lock", 0755); err != nil {
+		return nil, fmt.Errorf("cannot create lock directory: %w", err)
+	}
+	f, err := os.OpenFile(selinuxWorkspaceLockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("cannot open SELinux workspace lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("cannot acquire SELinux workspace lock: %w", err)
+	}
+	return func() error {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return f.Close()
+	}, nil
 }
 
 // readPathSELinuxType returns the SELinux type component of the given path's
@@ -89,9 +120,6 @@ func readPathSELinuxType(path string) (string, error) {
 // escapeFcontextPath escapes a filesystem path for use in a semanage fcontext
 // regex. It escapes regex metacharacters but preserves the path structure.
 // The caller appends the descendant pattern (e.g., "(/.*)?").
-//
-// Note: regexp.QuoteMeta does not escape '.', but we need to escape it
-// for fcontext patterns to avoid matching any character at that position.
 func escapeFcontextPath(path string) string {
 	var b strings.Builder
 	for _, c := range path {
@@ -132,8 +160,6 @@ func fcontextStem(pattern string) string {
 
 // unescapeFcontextPath reverses escapeFcontextPath escaping.
 func unescapeFcontextPath(s string) string {
-	// escapeFcontextPath escapes: \ ^ $ * + ? ( ) [ ] { } | and .
-	// We need to remove the backslash before these characters.
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\\' && i+1 < len(s) {
@@ -152,11 +178,12 @@ func unescapeFcontextPath(s string) string {
 
 // ensureWorkspaceLabel ensures that the canonical root has a persistent
 // SELinux mapping to docker_helper_workspace_t. It:
-//  1. Checks for existing local fcontext rules;
-//  2. If no matching rule exists, adds one;
-//  3. If an existing rule maps to a different type, fails closed;
-//  4. Runs restorecon recursively;
-//  5. Verifies the actual on-disk type.
+//  1. Acquires the global SELinux workspace management lock;
+//  2. Checks for existing local fcontext rules;
+//  3. If no matching rule exists, adds one;
+//  4. If an existing rule maps to a different type, fails closed;
+//  5. Runs restorecon recursively;
+//  6. Verifies the actual on-disk type.
 //
 // Returns whether a new mapping was created (true) or already existed (false).
 //
@@ -174,6 +201,13 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 		return false, nil
 	}
 
+	// Acquire global SELinux workspace management lock.
+	release, err := m.acquireLock()
+	if err != nil {
+		return false, fmt.Errorf("cannot acquire SELinux workspace lock: %w", err)
+	}
+	defer release() // best-effort
+
 	pattern := fcontextPattern(root)
 
 	// Check existing local fcontext rules.
@@ -182,12 +216,18 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 		return false, fmt.Errorf("cannot list local fcontext rules: %w", err)
 	}
 
+	// Identify our exact rule if present.
 	ourRuleIdx := -1
 	for i, rule := range existing {
 		if rule.pattern == pattern {
 			ourRuleIdx = i
 			break
 		}
+	}
+
+	// Validate ALL other rules for conflicts/overlap.
+	if err := m.checkOverlap(root, pattern, existing); err != nil {
+		return false, err
 	}
 
 	if ourRuleIdx >= 0 {
@@ -217,11 +257,6 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 		)
 	}
 
-	// Check for overlapping operator-local rules.
-	if err := m.checkOverlap(root, pattern, existing); err != nil {
-		return false, err
-	}
-
 	// No matching rule - add ours.
 	if err := m.addFcontextRule(pattern, selinuxWorkspaceType); err != nil {
 		return false, fmt.Errorf("cannot add fcontext rule for %s: %w", root, err)
@@ -249,22 +284,20 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 }
 
 // checkOverlap checks for overlapping operator-local rules that would conflict
-// with our new mapping.
+// with our new mapping. It validates ALL other rules, regardless of whether
+// our exact rule already exists.
 //
 // Contract:
-// - exact generated ROOT(/.*)? -> docker_helper_workspace_t: idempotent (handled before this call);
-// - exact generated pattern -> another type: fail closed (handled before this call);
 // - operator-local customization definitely inside ROOT: fail closed;
 // - operator-local customization whose target is an ancestor of ROOT: fail closed;
 // - unrelated sibling roots: allowed;
 // - if an arbitrary regex/equivalence cannot be proven disjoint safely: fail closed.
 func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, existing []fcontextRule) error {
 	ourStem := root // the literal unescaped root
-	ourEscapedStem := escapeFcontextPath(root)
 
 	for _, rule := range existing {
 		if rule.pattern == ourPattern {
-			continue // exact match handled elsewhere
+			continue // our own exact rule, handled separately
 		}
 
 		// Equivalence records: fail closed.
@@ -285,9 +318,11 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 			)
 		}
 
-		// Check if the rule stem contains any regex metacharacters.
-		// A literal stem should not contain these after unescaping.
-		if containsRegexMeta(ruleStem) {
+		// Check if the rule pattern contains unescaped regex metacharacters
+		// in the stem portion (before the /(.*)? suffix).
+		// We check the escaped stem for bare metacharacters.
+		escapedStem := rule.pattern[:len(rule.pattern)-len("(/.*)?")]
+		if hasUnescapedRegexMeta(escapedStem) {
 			return fmt.Errorf(
 				"unclassifiable SELinux fcontext pattern %s (contains regex metacharacters) may overlap with %s; remove or classify it before proceeding",
 				rule.pattern, ourPattern,
@@ -295,8 +330,7 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 		}
 
 		// Rule stem is a descendant of our root: our broad rule would override it.
-		// Must be a proper descendant (not just a prefix match like /data vs /data2).
-		if ruleStem != ourStem && isDescendantOf(ruleStem, ourEscapedStem) {
+		if isProperDescendant(ruleStem, ourStem) {
 			return fmt.Errorf(
 				"operator-local fcontext rule %s (stem %s) would be overridden by %s; remove the local rule before proceeding",
 				rule.pattern, ruleStem, ourPattern,
@@ -304,7 +338,7 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 		}
 
 		// Rule stem is an ancestor of our root: its semantics would be overridden.
-		if ourStem != ruleStem && isDescendantOf(ourEscapedStem, escapeFcontextPath(ruleStem)) {
+		if isProperDescendant(ourStem, ruleStem) {
 			return fmt.Errorf(
 				"operator-local fcontext rule %s (stem %s) is an ancestor of %s; removing it would change operator policy",
 				rule.pattern, ruleStem, ourPattern,
@@ -314,29 +348,32 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 	return nil
 }
 
-// isDescendantOf returns true if child is a proper descendant of parent.
-// parent must be the escaped form of the parent path.
-// child must be the escaped form of the child path (or the literal path
-// if it contains no regex metacharacters).
+// isProperDescendant returns true if child is a proper descendant of parent.
+// Both child and parent are literal filesystem paths (not regex-escaped).
 // This correctly handles /data vs /data2: /data2 is NOT a descendant of /data.
-func isDescendantOf(child, parent string) bool {
+func isProperDescendant(child, parent string) bool {
 	if !strings.HasPrefix(child, parent) {
 		return false
 	}
-	// Must be a proper descendant: the character after the parent prefix
-	// must be '/' (or the child equals the parent, but we handle equality separately).
 	if len(child) == len(parent) {
 		return false
 	}
 	return child[len(parent)] == '/'
 }
 
-// containsRegexMeta returns true if the string contains regex metacharacters
-// that would indicate it is not a simple literal path.
-func containsRegexMeta(s string) bool {
-	for _, c := range s {
+// hasUnescapedRegexMeta returns true if the pattern contains regex metacharacters
+// that are NOT escaped with a backslash. These characters are checked because
+// escapeFcontextPath escapes them, so a bare occurrence indicates an operator
+// who used regex directly.
+func hasUnescapedRegexMeta(pattern string) bool {
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if c == '\\' {
+			i++ // skip escaped character
+			continue
+		}
 		switch c {
-		case '\\', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|':
+		case '+', '*', '?', '(', ')', '{', '}', '[', ']':
 			return true
 		}
 	}
