@@ -2284,7 +2284,10 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 	configPath := filepath.Join(dir, "config.json")
 	tokenPath := filepath.Join(dir, "admin.token")
 	stateDir := filepath.Join(dir, "state")
-	allowedRoot := testAllowedRootDir(t)
+
+	// /home is valid for system mode, exists on CI, and does not require
+	// SELinux workspace verification (isHomeRoot skips it).
+	allowedRoot := "/home"
 
 	cfg := map[string]any{
 		"allowed_root": allowedRoot,
