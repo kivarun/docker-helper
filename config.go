@@ -446,6 +446,54 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]stri
 	return result, nil
 }
 
+// resolveAllowedRootsForMutation resolves allowed_roots for mutation operations
+// (add/remove). It canonicalizes paths that exist on the filesystem, but falls
+// back to cleaned absolute stored spelling when a path no longer exists.
+// This allows remove to work when a stored root directory has been deleted.
+func resolveAllowedRootsForMutation(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {
+	hasLegacy := raw["allowed_root"] != nil
+	hasNew := raw["allowed_roots"] != nil
+	if hasLegacy && hasNew {
+		return nil, fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
+	}
+	var roots []string
+	if hasNew {
+		roots = fc.AllowedRoots
+	} else if hasLegacy {
+		roots = []string{fc.AllowedRootLegacy}
+	} else {
+		return nil, fmt.Errorf("allowed_roots is required")
+	}
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
+			return nil, fmt.Errorf("allowed_roots contains an empty entry")
+		}
+		if !filepath.IsAbs(r) {
+			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", r)
+		}
+		// Try full canonicalization; fall back to cleaned absolute if path doesn't exist.
+		canon, err := canonicalizeWorkspaceRootForAdd(r)
+		if err != nil {
+			// Path may not exist; use cleaned absolute as stable identifier.
+			canon = filepath.Clean(r)
+		}
+		if seen[canon] {
+			continue
+		}
+		seen[canon] = true
+		result = append(result, canon)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	return result, nil
+}
+
 // resolveAllowedRootsForShow resolves allowed_roots for config show.
 // It does not canonicalize paths, just resolves legacy migration.
 func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {

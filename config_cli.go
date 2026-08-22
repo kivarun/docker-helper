@@ -275,7 +275,7 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 		return 1
 	}
 	// Use canonical requested roots (same as loadConfig).
-	requestedRoots, err := resolveAllowedRoots(raw, fc)
+	requestedRoots, err := resolveAllowedRootsForMutation(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -332,7 +332,7 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	requestedRoots, err := resolveAllowedRoots(raw, fc)
+	requestedRoots, err := resolveAllowedRootsForMutation(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -505,7 +505,7 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	requestedRoots, err := resolveAllowedRoots(raw, fc)
+	requestedRoots, err := resolveAllowedRootsForMutation(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -1071,6 +1071,11 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 	}
 	if !isKnownField(field) {
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
+		return 2
+	}
+	if field == "allowed_root" {
+		fmt.Fprintln(stderr, "error: allowed_root is legacy and cannot be unset directly")
+		fmt.Fprintln(stderr, "use: docker-helper config allowed-root remove PATH")
 		return 2
 	}
 	if isReadOnlyField(field) {
