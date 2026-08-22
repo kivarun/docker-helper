@@ -24,39 +24,74 @@ SELinux does not enforce each configured allowed root as an independent path.
 Canonical docker-helper path validation is the authoritative boundary in both
 backends.
 
-## 2. Workspace-root research and decision
+## 2. Workspace-root SELinux labeling
 
-### Rejected: per-bind-mount SELinux context
+### `/home` and descendants
 
-Creating a private bind or `open_tree` mount under `/run/docker-helper` cannot
-apply a distinct SELinux `context=` to that view of an ordinary local
-filesystem:
+`/home` and any path under `/home` retain their normal host `user_home_type`
+labels. docker-helper does not create `semanage fcontext` rules or run
+`restorecon` on `/home` paths. The existing `user_home_type` policy grants the
+daemon and container domain the necessary workspace permissions.
 
-- `context=` is a superblock option, not a bind-mount-point option;
-- bind mounts and `OPEN_TREE_CLONE` share the source superblock;
-- remounting a bind with a separate context is rejected;
-- `fsopen`/`fsmount` creates a new filesystem rather than a labelled view of an
-  existing directory;
-- overlay and filesystem-specific workarounds are not a general solution for
-  arbitrary operator workspaces.
+### Non-home system allowed_roots
 
-There is therefore no general kernel primitive for a per-path SELinux label on
-an existing bind-mounted tree.
+A non-home system `allowed_root` (e.g., `/opt`, `/data`, `/projects/agents`)
+is managed by docker-helper under a dedicated SELinux type:
 
-### Rejected for Release 2: automatic recursive relabelling
+```
+docker_helper_workspace_t
+```
 
-docker-helper does not run `semanage fcontext`/`restorecon` recursively on
-operator or user workspaces. That would mutate external filesystem policy,
-conflict with local/distro rules, and require complex rollback.
+This type is **not** `usr_t`, `default_t`, `var_t`, or any other generic host
+type. The daemon and container domains receive only the permissions required
+for workspace access, equivalent to what they have for `user_home_type`.
 
-### Implemented decision
+#### Persistent labeling
 
-Workspaces retain normal host labels. The daemon and custom container domain
-receive only the workspace file-type permissions justified by live testing.
-The current module uses the `user_home_type` attribute, which covers the proven
-`/home` scenario without changing labels.
+When docker-helper initializes or changes a non-home `allowed_root` under
+active SELinux, it:
 
-Automatic workspace relabelling is not implemented or approved.
+1. Creates a persistent `semanage fcontext` rule for the canonical root and
+   descendants: `<escaped-root>(/.*)? -> docker_helper_workspace_t`
+2. Applies the rule recursively with `restorecon -R -F`
+3. Verifies the root's actual SELinux type is `docker_helper_workspace_t`
+
+The mapping survives `restorecon` and reboot because it is stored in the
+persistent SELinux file-context database.
+
+#### Existing operator policy
+
+docker-helper does not blindly overwrite an existing conflicting local
+`semanage fcontext` rule:
+
+- No matching docker-helper rule: add ours.
+- Exact existing rule already maps to `docker_helper_workspace_t`: idempotent
+  success.
+- Conflicting exact/local operator rule: fail closed with a diagnostic.
+
+`semanage fcontext -m` is not used as an unconditional overwrite.
+
+#### Regex escaping
+
+The root path is correctly escaped when constructing the fcontext regex to
+avoid over-matching. For example, `/data` produces a pattern that matches
+`/data` and `/data/...` but not `/data/foobar` as a separate root.
+
+#### No Docker :z/:Z or label=disable
+
+docker-helper does not use Docker `:z`/`:Z` mount options or `label=disable`.
+The SELinux labeling is managed natively through `semanage fcontext` and
+`restorecon`.
+
+#### Previously managed roots
+
+When `allowed_root` is changed, docker-helper does NOT automatically remove or
+relabel the previous root. Existing sessions may still reference the old root,
+and the `docker_helper_workspace_t` label may persist. This is acceptable
+because SELinux labeling is confinement metadata, not authorization. The
+application/session policy still controls access.
+
+Session-aware SELinux label garbage collection is deferred to post-2.0.
 
 ## 3. Detection and confinement
 
@@ -97,6 +132,7 @@ The compiled module defines:
 | `docker_helper_config_t` | `/etc/docker-helper/**` |
 | `docker_helper_state_t` | `/var/lib/docker-helper/**` |
 | `docker_helper_runtime_t` | `/run/docker-helper/**` |
+| `docker_helper_workspace_t` | non-home system workspace files |
 
 The daemon's `sys_admin` and `dac_read_search` capabilities are required by the
 mount-pin and private-workspace design and were proven through enforcing UAT.
@@ -106,8 +142,14 @@ config/state/runtime, and home-workspace permissions are explicit.
 The custom container domain carries the container-selinux `container_domain`
 and `mcs_constrained_type` attributes. The module also supplies the rootfs
 file-management permissions required by normal container workloads and grants
-only this custom domain access to `user_home_type` workspaces. It does not grant
-global `container_t` access to home files.
+only this custom domain access to `user_home_type` and `docker_helper_workspace_t`
+workspaces. It does not grant global `container_t` access to home or workspace
+files.
+
+The daemon and container domains receive workspace permissions for both
+`user_home_type` (for `/home` paths) and `docker_helper_workspace_t` (for
+non-home system roots). No broad `usr_t`, `default_t`, or `var_t` grants are
+added.
 
 This is an explicit compatibility dependency on the installed base policy and
 container-selinux. A raw `checkmodule` syntax pass alone does not prove that
@@ -169,16 +211,14 @@ converted into broad permissions.
 
 ## 8. Release blockers and remaining UAT
 
-### `/opt` mismatch
+### `/opt` and non-home system roots (resolved)
 
-Application policy allows exact `/home` and `/opt` for root initialization.
-The SELinux module grants workspace access through `user_home_type` and init
-does not validate the selected root's file type. `/opt` is therefore not a
-proven SELinux workspace contract.
-
-Do not grant broad `usr_t` access by default. Before Release 2, either reject an
-unsupported SELinux root during init, require a dedicated operator-managed
-label, or prove a narrow portable type grant on every supported target.
+Non-home system `allowed_roots` (e.g., `/opt`, `/data`, `/projects/agents`) are
+now managed under `docker_helper_workspace_t` with persistent `semanage fcontext`
+rules and `restorecon`. The daemon and container domains receive workspace
+permissions for this type. Init, config mutation, and startup/reload verify the
+label and fail closed if it is missing. Rollback of newly-created mappings
+occurs if a later init or config step fails.
 
 ### Required target matrix
 

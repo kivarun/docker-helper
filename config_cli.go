@@ -613,6 +613,41 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		newValue, _ = json.Marshal(value)
 	}
 
+	// SELinux workspace preparation for allowed_root in system mode.
+	// Prepare the label BEFORE committing the config transaction.
+	if field == "allowed_root" && resolveDeploymentMode() == ModeSystem {
+		backend, _ := detectLSM()
+		if backend == LSMSelinux && !isHomeRoot(value) {
+			selMgr := newSELinuxWorkspaceManager()
+			selinuxNewlyCreated, err := selMgr.ensureWorkspaceLabel(value)
+			if err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+			if selinuxNewlyCreated {
+				// Transaction with SELinux rollback on failure.
+				exitCode := applyConfigChangeTransactionally(
+					configOpSet,
+					field,
+					value,
+					newValue,
+					func(raw map[string]json.RawMessage) {
+						raw[field] = newValue
+					},
+					safeWriteConfig,
+					stdout,
+					stderr,
+				)
+				if exitCode != 0 {
+					if rbErr := selMgr.rollbackWorkspaceLabel(value); rbErr != nil {
+						fmt.Fprintf(stderr, "error: SELinux rollback also failed: %v\n", rbErr)
+					}
+				}
+				return exitCode
+			}
+		}
+	}
+
 	return applyConfigChangeTransactionally(
 		configOpSet,
 		field,

@@ -764,8 +764,13 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 // initSystemSELinux performs system-mode initialization under SELinux
 // without AppArmor root management. It performs the same preflight checks
 // as initSystemWithAppArmor but skips the AppArmor-specific steps.
+// For non-home allowed_roots, it prepares persistent SELinux workspace
+// labeling (docker_helper_workspace_t) before running core init.
+// If core init fails after a new mapping was created, it rolls back.
+// mgr is the SELinux workspace manager (injectable for testing).
 // core is the file-based init function (injectable for testing).
 func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
+	mgr *selinuxWorkspaceManager,
 	core func(string, io.Writer, io.Writer) error,
 ) error {
 	configPath := getConfigPathFunc()
@@ -830,8 +835,28 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 		}
 	}
 
+	// SELinux workspace preparation for non-home roots.
+	newlyCreated := false
+	if mgr != nil && !isHomeRoot(effectiveAllowedRoot) {
+		newlyCreated, err = mgr.ensureWorkspaceLabel(effectiveAllowedRoot)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Run core init.
-	return core(allowedRoot, stdout, stderr)
+	err = core(allowedRoot, stdout, stderr)
+	if err != nil {
+		// Rollback newly-created SELinux mapping.
+		if newlyCreated && mgr != nil {
+			if rbErr := mgr.rollbackWorkspaceLabel(effectiveAllowedRoot); rbErr != nil {
+				return fmt.Errorf("core init failed: %v; SELinux rollback also failed: %v", err, rbErr)
+			}
+		}
+		return err
+	}
+
+	return nil
 }
 
 // runInit orchestrates the initialization process based on deployment mode.
@@ -881,6 +906,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		)
 	case LSMSelinux:
 		return initSystemSELinux(allowedRoot, stdout, stderr,
+			newSELinuxWorkspaceManager(),
 			func(ar string, so, se io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err

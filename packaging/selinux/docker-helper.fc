@@ -3,8 +3,9 @@
 # Apply after policy install:
 #   sudo restorecon /usr/bin/docker-helper
 #
-# Workspace paths retain their normal host labels (user_home_type).
-# No workspace relabeling is performed or required.
+# Workspace paths under /home retain their normal host labels (user_home_type).
+# Non-home system allowed_roots are persistently managed as
+# docker_helper_workspace_t via semanage fcontext + restorecon by docker-helper.
 
 /usr/bin/docker-helper              --  system_u:object_r:docker_helper_exec_t:s0
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0

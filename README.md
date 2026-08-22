@@ -954,6 +954,28 @@ AppArmor's per-path managed-root rules. The canonical allowed-root check in
 docker-helper remains the path boundary, while SELinux permits only supported
 workspace file types as defense in depth.
 
+#### Workspace SELinux labeling
+
+- `/home` and descendants retain their normal host `user_home_type` labels.
+  docker-helper does not relabel `/home` paths.
+
+- Non-home system `allowed_roots` (e.g., `/opt`, `/data`, `/projects/agents`)
+  are managed under the dedicated `docker_helper_workspace_t` SELinux type.
+  When docker-helper initializes or changes a non-home `allowed_root`, it
+  creates a persistent `semanage fcontext` rule and applies `restorecon`
+  recursively. This mapping survives reboot and `restorecon`.
+
+- Selecting a non-home `allowed_root` may recursively restore SELinux labels
+  under that explicitly selected root.
+
+- Previously managed roots may retain the `docker_helper_workspace_t` label
+  after an `allowed_root` change, because existing sessions can still reference
+  them. This label is confinement metadata, not authorization.
+
+- No Docker `:z`/`:Z` mount options or `label=disable` is used for workspace
+  labeling. The SELinux labeling is managed natively through `semanage fcontext`
+  and `restorecon`.
+
 The RPM contains `/usr/share/selinux/docker-helper.pp` and its lifecycle script
 loads the module on an enforcing SELinux host. The DEB does not install the
 SELinux module. See [docs/selinux-support-plan.md](docs/selinux-support-plan.md)

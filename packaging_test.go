@@ -4539,24 +4539,29 @@ func TestDebPostinstallNeitherMAC(t *testing.T) {
 	}
 }
 
-// TestSELinuxPolicyNoWorkspaceRelabeling verifies that the SELinux policy
-// model does not require workspace relabeling (chcon, semanage, :z/:Z).
-func TestSELinuxPolicyNoWorkspaceRelabeling(t *testing.T) {
+// TestSELinuxPolicyWorkspaceType verifies that the SELinux policy
+// defines docker_helper_workspace_t for non-home system allowed_roots
+// while retaining user_home_type for /home paths.
+func TestSELinuxPolicyWorkspaceType(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
 	if err != nil {
 		t.Fatal(err)
 	}
 	content := string(data)
 
-	// Must use user_home_type attribute for workspace access
+	// Must use user_home_type attribute for /home workspace access
 	if !strings.Contains(content, "user_home_type") {
-		t.Error("SELinux policy must use user_home_type attribute for workspace access")
+		t.Error("SELinux policy must use user_home_type attribute for /home workspace access")
 	}
 
-	// Must NOT require docker_helper_workspace_t for workspace access
-	// (removed in favor of user_home_type model)
-	if strings.Contains(content, "docker_helper_workspace_t") {
-		t.Error("SELinux policy must not use docker_helper_workspace_t (use user_home_type instead)")
+	// Must define docker_helper_workspace_t for non-home system roots
+	if !strings.Contains(content, "docker_helper_workspace_t") {
+		t.Error("SELinux policy must define docker_helper_workspace_t for non-home system roots")
+	}
+
+	// Must define docker_helper_workspace_t as file_type
+	if !strings.Contains(content, "type docker_helper_workspace_t, file_type;") {
+		t.Error("SELinux policy must define docker_helper_workspace_t as file_type")
 	}
 }
 

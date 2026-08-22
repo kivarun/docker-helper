@@ -77,6 +77,32 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// System mode with SELinux: verify non-home allowed_root workspace label.
+	// This is a read-only check — no semanage/restorecon mutation on reload.
+	if resolveDeploymentMode() == ModeSystem {
+		backend, _ := detectLSM()
+		if backend == LSMSelinux && !isHomeRoot(newCfg.AllowedRoot) {
+			selMgr := newSELinuxWorkspaceManager()
+			if err := selMgr.verifyWorkspaceLabel(newCfg.AllowedRoot); err != nil {
+				duration := time.Since(started).Round(time.Millisecond).String()
+				opLog(ctx).Error("reload SELinux workspace verification failed",
+					slog.String("operation", "reload"),
+					slog.String("error", err.Error()),
+				)
+				writeAuditWithRequestID(ctx, auditRecord{
+					Event:    "config.reload",
+					Result:   "selinux_workspace_verification_failed",
+					Duration: duration,
+				})
+				writeError(ctx, w, http.StatusBadRequest,
+					"selinux_workspace_verification_failed",
+					err.Error(),
+				)
+				return
+			}
+		}
+	}
+
 	// Preserve startup-only fields that cannot be changed at runtime.
 	oldCfg := a.getConfig()
 	newCfg.HTTPAddress = oldCfg.HTTPAddress
