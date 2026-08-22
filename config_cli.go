@@ -615,6 +615,8 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 
 	// SELinux workspace preparation for allowed_root in system mode.
 	// Prepare the label BEFORE committing the config transaction.
+	// Once ensureWorkspaceLabel succeeds, the mapping is managed durable state
+	// (monotonic R2 lifecycle). We do NOT roll it back on config failure.
 	if field == "allowed_root" && resolveDeploymentMode() == ModeSystem {
 		backend, err := detectLSM()
 		if err != nil {
@@ -623,31 +625,9 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 		}
 		if backend == LSMSelinux && !isHomeRoot(value) {
 			selMgr := newSELinuxWorkspaceManager()
-			selinuxNewlyCreated, err := selMgr.ensureWorkspaceLabel(value)
-			if err != nil {
+			if _, err := selMgr.ensureWorkspaceLabel(value); err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				return 1
-			}
-			if selinuxNewlyCreated {
-				// Transaction with SELinux rollback on failure.
-				exitCode := applyConfigChangeTransactionally(
-					configOpSet,
-					field,
-					value,
-					newValue,
-					func(raw map[string]json.RawMessage) {
-						raw[field] = newValue
-					},
-					safeWriteConfig,
-					stdout,
-					stderr,
-				)
-				if exitCode != 0 {
-					if rbErr := selMgr.rollbackWorkspaceLabel(value); rbErr != nil {
-						fmt.Fprintf(stderr, "error: SELinux rollback also failed: %v\n", rbErr)
-					}
-				}
-				return exitCode
 			}
 		}
 	}

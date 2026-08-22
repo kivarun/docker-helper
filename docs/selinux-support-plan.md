@@ -53,11 +53,32 @@ active SELinux, it:
 
 1. Creates a persistent `semanage fcontext` rule for the canonical root and
    descendants: `<escaped-root>(/.*)? -> docker_helper_workspace_t`
-2. Applies the rule recursively with `restorecon -R -F`
+2. Applies the rule recursively with `restorecon -R` (type-only, no `-F`)
 3. Verifies the root's actual SELinux type is `docker_helper_workspace_t`
 
 The mapping survives `restorecon` and reboot because it is stored in the
 persistent SELinux file-context database.
+
+#### Monotonic managed-label lifecycle (R2)
+
+Once `ensureWorkspaceLabel(ROOT)` returns success, the mapping becomes managed
+durable state. Outer init and config code MUST NOT automatically remove it on a
+later unrelated failure.
+
+This applies to:
+- init core failure (e.g., admin.token creation fails);
+- config write/reload/rollback failure.
+
+A stale `docker_helper_workspace_t` mapping is acceptable because:
+- it is confinement metadata, not authorization;
+- config/principal/session checks remain authoritative;
+- old mappings already intentionally persist while sessions may use them;
+- session-aware garbage collection remains post-2.0.
+
+Internal rollback inside `ensureWorkspaceLabel` still occurs when the manager
+itself fails before returning success (e.g., restorecon fails after adding a
+new rule). At that point no successful managed-state transition has been
+reported.
 
 #### Existing operator policy
 
@@ -92,6 +113,13 @@ because SELinux labeling is confinement metadata, not authorization. The
 application/session policy still controls access.
 
 Session-aware SELinux label garbage collection is deferred to post-2.0.
+
+#### Type-only restorecon
+
+`restorecon -R` is used (without `-F`) because docker-helper only manages the
+SELinux TYPE. The user, role, and MLS/MCS range are not forcibly reset. An
+existing customizable label (e.g., from `chcon`) that ordinary `restorecon`
+will not replace is correctly treated as a verification failure.
 
 ## 3. Detection and confinement
 
@@ -215,10 +243,14 @@ converted into broad permissions.
 
 Non-home system `allowed_roots` (e.g., `/opt`, `/data`, `/projects/agents`) are
 now managed under `docker_helper_workspace_t` with persistent `semanage fcontext`
-rules and `restorecon`. The daemon and container domains receive workspace
-permissions for this type. Init, config mutation, and startup/reload verify the
-label and fail closed if it is missing. Rollback of newly-created mappings
-occurs if a later init or config step fails.
+rules and `restorecon -R` (type-only). The daemon and container domains receive
+workspace permissions for this type. Init, config mutation, and startup/reload
+verify the label and fail closed if it is missing.
+
+Monotonic managed-label lifecycle (R2): once `ensureWorkspaceLabel` returns
+success, the mapping is managed durable state. Outer init/config code does NOT
+roll it back on subsequent failures. A stale mapping is acceptable because it
+is confinement metadata, not authorization.
 
 ### Required target matrix
 

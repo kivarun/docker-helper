@@ -167,6 +167,26 @@ func TestFcontextPattern(t *testing.T) {
 	}
 }
 
+func TestFcontextStem(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{"/data(/.*)?", "/data"},
+		{"/data\\.test(/.*)?", "/data.test"},
+		{"/projects/agents(/.*)?", "/projects/agents"},
+		{"/opt(/.*)?", "/opt"},
+		{"something_else", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.pattern, func(t *testing.T) {
+			if got := fcontextStem(tc.pattern); got != tc.want {
+				t.Errorf("fcontextStem(%q) = %q, want %q", tc.pattern, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- Manager: ensureWorkspaceLabel tests ---
 
 func TestEnsureWorkspaceLabelNotEnforcing(t *testing.T) {
@@ -241,6 +261,10 @@ func TestEnsureWorkspaceLabelNewRule(t *testing.T) {
 	}
 	if len(restoreconCall) == 0 {
 		t.Error("restorecon should have been called")
+	}
+	// Verify type-only restorecon (no -F).
+	if len(restoreconCall) >= 2 && restoreconCall[1] == "-F" {
+		t.Error("restorecon must not use -F (type-only)")
 	}
 }
 
@@ -346,10 +370,10 @@ func TestEnsureWorkspaceLabelRestoreconFails(t *testing.T) {
 		t.Fatal("expected error for restorecon failure")
 	}
 	if !deleteCalled {
-		t.Error("fcontext rule should be removed on restorecon failure")
+		t.Error("fcontext rule should be removed on restorecon failure (internal rollback)")
 	}
 	if restoreconCalls != 2 {
-		t.Errorf("expected 2 restorecon calls, got %d", restoreconCalls)
+		t.Errorf("expected 2 restorecon calls (original + rollback), got %d", restoreconCalls)
 	}
 }
 
@@ -386,10 +410,10 @@ func TestEnsureWorkspaceLabelVerifyFails(t *testing.T) {
 		t.Errorf("expected type in error, got: %v", err)
 	}
 	if !deleteCalled {
-		t.Error("fcontext rule should be removed on verification failure")
+		t.Error("fcontext rule should be removed on verification failure (internal rollback)")
 	}
 	if restoreconCalls != 2 {
-		t.Errorf("expected 2 restorecon calls, got %d", restoreconCalls)
+		t.Errorf("expected 2 restorecon calls (original + rollback), got %d", restoreconCalls)
 	}
 }
 
@@ -445,6 +469,131 @@ func TestEnsureWorkspaceLabelExistingMappingVerifyFails(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "rollback") {
 		t.Error("pre-existing rule should not be removed on failure")
+	}
+}
+
+// --- Overlap detection tests ---
+
+func TestOverlapSiblingRoots(t *testing.T) {
+	// /data vs /data2 should NOT conflict.
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("/data2(/.*)?  gen_context(system_u:object_r:ssh_home_t:s0)"), nil
+			}
+			return []byte{}, nil
+		},
+		readPathCon: func(path string) (string, error) {
+			return selinuxWorkspaceType, nil
+		},
+	}
+	created, err := mgr.ensureWorkspaceLabel("/data")
+	if err != nil {
+		t.Fatalf("sibling /data2 should not conflict with /data, got: %v", err)
+	}
+	if !created {
+		t.Error("expected newly created mapping")
+	}
+}
+
+func TestOverlapNestedOperatorRule(t *testing.T) {
+	// /data/sub is inside /data: conflict.
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("/data/sub(/.*)?  gen_context(system_u:object_r:ssh_home_t:s0)"), nil
+			}
+			return []byte{}, nil
+		},
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for nested operator rule")
+	}
+	if !strings.Contains(err.Error(), "overridden") {
+		t.Errorf("expected 'overridden' in error, got: %v", err)
+	}
+}
+
+func TestOverlapAncestorLocalRule(t *testing.T) {
+	// /data is inside /projects: ancestor rule conflicts.
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("/projects(/.*)?  gen_context(system_u:object_r:usr_t:s0)"), nil
+			}
+			return []byte{}, nil
+		},
+	}
+	_, err := mgr.ensureWorkspaceLabel("/projects/data")
+	if err == nil {
+		t.Fatal("expected error for ancestor local rule")
+	}
+	if !strings.Contains(err.Error(), "ancestor") {
+		t.Errorf("expected 'ancestor' in error, got: %v", err)
+	}
+}
+
+func TestOverlapRegexUnclassifiable(t *testing.T) {
+	// Arbitrary regex pattern: fail closed.
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("/data[0-9]+(/.*)?  gen_context(system_u:object_r:usr_t:s0)"), nil
+			}
+			return []byte{}, nil
+		},
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for unclassifiable regex")
+	}
+	if !strings.Contains(err.Error(), "unclassifiable") {
+		t.Errorf("expected 'unclassifiable' in error, got: %v", err)
+	}
+}
+
+func TestOverlapEquivalenceRecord(t *testing.T) {
+	// Equivalence record: fail closed.
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("/data(/.*)?  <<None>>"), nil
+			}
+			return []byte{}, nil
+		},
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for equivalence record")
+	}
+	if !strings.Contains(err.Error(), "equivalence") {
+		t.Errorf("expected 'equivalence' in error, got: %v", err)
+	}
+}
+
+func TestOverlapUnparseableLocalCustomization(t *testing.T) {
+	// Unparseable line: fail closed.
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+				return []byte("this is not a valid fcontext line"), nil
+			}
+			return []byte{}, nil
+		},
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for unparseable local customization")
+	}
+	if !strings.Contains(err.Error(), "unparseable") {
+		t.Errorf("expected 'unparseable' in error, got: %v", err)
 	}
 }
 
@@ -592,13 +741,18 @@ func TestParseFcontextLine(t *testing.T) {
 			true,
 		},
 		{
+			"/data(/.*)?  <<None>>",
+			fcontextRule{pattern: "/data(/.*)?", isEquivalence: true},
+			true,
+		},
+		{
 			"invalid line",
 			fcontextRule{},
 			false,
 		},
 	}
 	for _, tc := range tests {
-		t.Run(tc.line[:min(30, len(tc.line))], func(t *testing.T) {
+		t.Run(tc.line[:min(40, len(tc.line))], func(t *testing.T) {
 			got, matched := parseFcontextLine(tc.line)
 			if matched != tc.matched {
 				t.Errorf("matched = %v, want %v", matched, tc.matched)
@@ -609,6 +763,9 @@ func TestParseFcontextLine(t *testing.T) {
 				}
 				if got.fileType != tc.want.fileType {
 					t.Errorf("fileType = %q, want %q", got.fileType, tc.want.fileType)
+				}
+				if got.isEquivalence != tc.want.isEquivalence {
+					t.Errorf("isEquivalence = %v, want %v", got.isEquivalence, tc.want.isEquivalence)
 				}
 			}
 		})
@@ -665,6 +822,29 @@ func TestFcontextListLocalArgv(t *testing.T) {
 	want := []string{"fcontext", "-l", "-C", "-n"}
 	if !reflect.DeepEqual(lastArgs, want) {
 		t.Errorf("argv = %v, want %v", lastArgs, want)
+	}
+}
+
+func TestRestoreconTypeOnlyArgv(t *testing.T) {
+	var lastArgs []string
+	mgr := &selinuxWorkspaceManager{
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			lastArgs = args
+			return []byte{}, nil
+		},
+	}
+	if err := mgr.restoreconRecursive("/data"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-R", "/data"}
+	if !reflect.DeepEqual(lastArgs, want) {
+		t.Errorf("argv = %v, want %v", lastArgs, want)
+	}
+	// Must NOT contain -F.
+	for _, a := range lastArgs {
+		if a == "-F" {
+			t.Error("restorecon must not use -F (type-only)")
+		}
 	}
 }
 
@@ -786,7 +966,9 @@ func TestInitSELinuxPreparationFailureBlocksCore(t *testing.T) {
 	}
 }
 
-func TestInitSELinuxCoreFailureRollsBackNewMapping(t *testing.T) {
+func TestInitSELinuxCoreFailureNoRollback(t *testing.T) {
+	// Monotonic R2 lifecycle: core failure after successful ensure
+	// MUST NOT delete the newly prepared mapping.
 	dir := t.TempDir()
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
@@ -821,48 +1003,8 @@ func TestInitSELinuxCoreFailureRollsBackNewMapping(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for core failure")
 	}
-	if !rollbackCalled {
-		t.Error("rollback should be called when core fails after new mapping")
-	}
-}
-
-func TestInitSELinuxCoreFailureNoRollbackWhenNotNew(t *testing.T) {
-	dir := t.TempDir()
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var rollbackCalled bool
-	mgr := &selinuxWorkspaceManager{
-		selinuxActive: func() (bool, bool, error) { return true, true, nil },
-		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if len(args) > 0 && args[0] == "fcontext" {
-				if args[1] == "-l" {
-					return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
-				}
-				if args[1] == "-d" {
-					rollbackCalled = true
-				}
-			}
-			return []byte{}, nil
-		},
-		readPathCon: func(path string) (string, error) {
-			return selinuxWorkspaceType, nil
-		},
-	}
-
-	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		mgr,
-		func(ar string, so, se io.Writer) error {
-			return errors.New("core init failed")
-		},
-		syntheticResolveRoot,
-	)
-	if err == nil {
-		t.Fatal("expected error for core failure")
-	}
 	if rollbackCalled {
-		t.Error("rollback should NOT be called when mapping already existed")
+		t.Error("rollback MUST NOT be called when core fails (monotonic R2 lifecycle)")
 	}
 }
 
@@ -956,6 +1098,96 @@ func TestInitSELinuxExistingConfigMismatch(t *testing.T) {
 	}
 	if coreCalled {
 		t.Error("core should not be called on config mismatch")
+	}
+}
+
+// --- Config lifecycle regression tests ---
+
+func TestConfigSetSELinuxPreparationFailure(t *testing.T) {
+	// SELinux preparation failure: config bytes unchanged.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configData := `{"allowed_root": "/old", "session_ttl": "12h"}`
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	origAA := apparmorLSMActive
+	origSEL := selinuxEnabled
+	apparmorLSMActive = func() (bool, error) { return false, nil }
+	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+	defer func() {
+		apparmorLSMActive = origAA
+		selinuxEnabled = origSEL
+	}()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := configSet("allowed_root", "/data", &stdout, &stderr)
+	// In non-root test, semanage will fail (command not found).
+	// The config should be unchanged.
+	if exitCode == 0 {
+		// If semanage succeeded (unlikely), check the output.
+	}
+
+	// Config should be unchanged.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "/old") {
+		t.Error("config should be unchanged on SELinux preparation failure")
+	}
+}
+
+func TestConfigSetDetectLSMError(t *testing.T) {
+	// detectLSM failure: config bytes unchanged, manager not invoked.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configData := `{"allowed_root": "/old", "session_ttl": "12h"}`
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	origAA := apparmorLSMActive
+	origSEL := selinuxEnabled
+	apparmorLSMActive = func() (bool, error) { return false, nil }
+	selinuxEnabled = func() (bool, bool, error) {
+		return false, false, os.ErrPermission
+	}
+	defer func() {
+		apparmorLSMActive = origAA
+		selinuxEnabled = origSEL
+	}()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := configSet("allowed_root", "/data", &stdout, &stderr)
+	if exitCode == 0 {
+		t.Fatal("expected non-zero exit code for detectLSM failure")
+	}
+
+	// Config should be unchanged.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "/old") {
+		t.Error("config should be unchanged on detectLSM failure")
 	}
 }
 

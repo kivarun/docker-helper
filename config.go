@@ -766,7 +766,13 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 // as initSystemWithAppArmor but skips the AppArmor-specific steps.
 // For non-home allowed_roots, it prepares persistent SELinux workspace
 // labeling (docker_helper_workspace_t) before running core init.
-// If core init fails after a new mapping was created, it rolls back.
+//
+// Monotonic managed-label lifecycle (R2):
+// Once ensureWorkspaceLabel returns success, the mapping is managed durable
+// state. If core init fails, the mapping is NOT rolled back. A stale
+// docker_helper_workspace_t mapping is acceptable: it is confinement metadata,
+// not authorization, and config/principal/session checks remain authoritative.
+//
 // mgr is the SELinux workspace manager (injectable for testing).
 // core is the file-based init function (injectable for testing).
 // resolveRoot is the canonical root resolver (injectable for testing).
@@ -838,27 +844,16 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// SELinux workspace preparation for non-home roots.
-	newlyCreated := false
+	// Once this succeeds, the mapping is managed durable state.
 	if mgr != nil && !isHomeRoot(effectiveAllowedRoot) {
-		newlyCreated, err = mgr.ensureWorkspaceLabel(effectiveAllowedRoot)
-		if err != nil {
+		if _, err := mgr.ensureWorkspaceLabel(effectiveAllowedRoot); err != nil {
 			return err
 		}
 	}
 
 	// Run core init.
-	err = core(allowedRoot, stdout, stderr)
-	if err != nil {
-		// Rollback newly-created SELinux mapping.
-		if newlyCreated && mgr != nil {
-			if rbErr := mgr.rollbackWorkspaceLabel(effectiveAllowedRoot); rbErr != nil {
-				return fmt.Errorf("core init failed: %v; SELinux rollback also failed: %v", err, rbErr)
-			}
-		}
-		return err
-	}
-
-	return nil
+	// On failure, do NOT roll back the SELinux mapping (monotonic R2 lifecycle).
+	return core(allowedRoot, stdout, stderr)
 }
 
 // runInit orchestrates the initialization process based on deployment mode.

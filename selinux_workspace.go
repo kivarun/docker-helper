@@ -1,9 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -55,22 +55,55 @@ func newSELinuxWorkspaceManager() *selinuxWorkspaceManager {
 // readPathSELinuxType returns the SELinux type component of the given path's
 // current label by reading the security.selinux xattr. This reads the ACTUAL
 // on-disk label, not the policy-default context.
+//
+// Uses the two-call Lgetxattr pattern: query required size, allocate, read.
 func readPathSELinuxType(path string) (string, error) {
-	buf := make([]byte, 1024)
-	n, err := unix.Lgetxattr(path, "security.selinux", buf)
+	// Query required size.
+	n, err := unix.Lgetxattr(path, "security.selinux", nil)
 	if err != nil {
-		return "", fmt.Errorf("cannot read SELinux context for %s: %w", path, err)
+		if errors.Is(err, unix.ENODATA) {
+			return "", fmt.Errorf("no SELinux xattr on %s", path)
+		}
+		return "", fmt.Errorf("cannot query SELinux xattr size for %s: %w", path, err)
 	}
-	return parseSELinuxType(string(buf[:n]))
+	if n == 0 {
+		return "", fmt.Errorf("empty SELinux xattr on %s", path)
+	}
+	// Bounded allocation: SELinux contexts are typically < 256 bytes.
+	if n > 4096 {
+		return "", fmt.Errorf("SELinux xattr on %s exceeds maximum size %d", path, n)
+	}
+	buf := make([]byte, n)
+	n, err = unix.Lgetxattr(path, "security.selinux", buf)
+	if err != nil {
+		return "", fmt.Errorf("cannot read SELinux xattr for %s: %w", path, err)
+	}
+	// Handle trailing NUL safely.
+	ctx := string(buf[:n])
+	if len(ctx) > 0 && ctx[len(ctx)-1] == 0 {
+		ctx = ctx[:len(ctx)-1]
+	}
+	return parseSELinuxType(ctx)
 }
 
 // escapeFcontextPath escapes a filesystem path for use in a semanage fcontext
 // regex. It escapes regex metacharacters but preserves the path structure.
 // The caller appends the descendant pattern (e.g., "(/.*)?").
+//
+// Note: regexp.QuoteMeta does not escape '.', but we need to escape it
+// for fcontext patterns to avoid matching any character at that position.
 func escapeFcontextPath(path string) string {
-	// semanage fcontext uses regex syntax. Escape all regex metacharacters.
-	// The path is already canonicalized (absolute, clean, no symlinks).
-	return regexp.QuoteMeta(path)
+	var b strings.Builder
+	for _, c := range path {
+		switch c {
+		case '\\', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '.':
+			b.WriteByte('\\')
+			b.WriteRune(c)
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }
 
 // fcontextPattern returns the full regex pattern for the fcontext rule.
@@ -79,6 +112,42 @@ func escapeFcontextPath(path string) string {
 func fcontextPattern(root string) string {
 	escaped := escapeFcontextPath(root)
 	return escaped + "(/.*)?"
+}
+
+// fcontextStem extracts the literal path stem from a fcontext pattern.
+// For "/data(/.*)?" it returns "/data".
+// For "/data\\.test(/.*)?" it returns "/data.test".
+// For patterns that cannot be safely classified, it returns an empty string.
+func fcontextStem(pattern string) string {
+	// Strip the common descendant suffix.
+	suffix := "(/.*)?"
+	if strings.HasSuffix(pattern, suffix) {
+		escaped := pattern[:len(pattern)-len(suffix)]
+		// Unescape regex escapes.
+		return unescapeFcontextPath(escaped)
+	}
+	// Cannot classify safely.
+	return ""
+}
+
+// unescapeFcontextPath reverses escapeFcontextPath escaping.
+func unescapeFcontextPath(s string) string {
+	// escapeFcontextPath escapes: \ ^ $ * + ? ( ) [ ] { } | and .
+	// We need to remove the backslash before these characters.
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			next := s[i+1]
+			switch next {
+			case '\\', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '.':
+				b.WriteByte(next)
+				i++
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
 
 // ensureWorkspaceLabel ensures that the canonical root has a persistent
@@ -90,9 +159,12 @@ func fcontextPattern(root string) string {
 //  5. Verifies the actual on-disk type.
 //
 // Returns whether a new mapping was created (true) or already existed (false).
-// If it returns (true, nil), the caller must roll back on subsequent failure.
-// If it returns (false, nil) for an existing mapping, restorecon and verification
-// have already succeeded.
+//
+// Monotonic managed-label lifecycle (R2):
+// Once this function returns success, the mapping is managed durable state.
+// The caller MUST NOT roll it back on subsequent failures.
+// Internal rollback only occurs when the manager itself cannot complete
+// before returning success.
 func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
@@ -119,8 +191,15 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 	}
 
 	if ourRuleIdx >= 0 {
-		// Existing rule found.
-		if existing[ourRuleIdx].fileType == selinuxWorkspaceType {
+		existingRule := existing[ourRuleIdx]
+		// Equivalence record at our exact pattern: fail closed.
+		if existingRule.isEquivalence {
+			return false, fmt.Errorf(
+				"unclassifiable SELinux fcontext equivalence record %s may overlap with %s; remove or classify it before proceeding",
+				existingRule.pattern, pattern,
+			)
+		}
+		if existingRule.fileType == selinuxWorkspaceType {
 			// Exact match already exists - idempotent path.
 			// Still need to run restorecon and verify.
 			if err := m.restoreconRecursive(root); err != nil {
@@ -134,18 +213,13 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 		// Conflicting local rule.
 		return false, fmt.Errorf(
 			"conflicting SELinux fcontext rule exists for %s: pattern %s maps to %s (expected %s); remove the conflicting rule before proceeding",
-			root, existing[ourRuleIdx].pattern, existing[ourRuleIdx].fileType, selinuxWorkspaceType,
+			root, existingRule.pattern, existingRule.fileType, selinuxWorkspaceType,
 		)
 	}
 
-	// Check for nested operator-local rules that our broad rule would override.
-	for _, rule := range existing {
-		if rule.pattern != pattern && strings.HasPrefix(rule.pattern, escapeFcontextPath(root)) {
-			return false, fmt.Errorf(
-				"operator-local fcontext rule %s would be overridden by %s; remove the local rule before proceeding",
-				rule.pattern, pattern,
-			)
-		}
+	// Check for overlapping operator-local rules.
+	if err := m.checkOverlap(root, pattern, existing); err != nil {
+		return false, err
 	}
 
 	// No matching rule - add ours.
@@ -155,7 +229,7 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 
 	// Apply restorecon recursively.
 	if err := m.restoreconRecursive(root); err != nil {
-		// Rollback: remove the rule we just added and restore labels.
+		// Internal rollback: manager cannot complete its transition.
 		if rbErr := m.rollbackWorkspaceLabel(root); rbErr != nil {
 			return false, fmt.Errorf("restorecon failed: %v; rollback also failed: %v", err, rbErr)
 		}
@@ -164,7 +238,7 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 
 	// Verify the actual on-disk type.
 	if err := m.verifyActualType(root); err != nil {
-		// Rollback.
+		// Internal rollback.
 		if rbErr := m.rollbackWorkspaceLabel(root); rbErr != nil {
 			return false, fmt.Errorf("verification failed: %v; rollback also failed: %v", err, rbErr)
 		}
@@ -172,6 +246,101 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 	}
 
 	return true, nil
+}
+
+// checkOverlap checks for overlapping operator-local rules that would conflict
+// with our new mapping.
+//
+// Contract:
+// - exact generated ROOT(/.*)? -> docker_helper_workspace_t: idempotent (handled before this call);
+// - exact generated pattern -> another type: fail closed (handled before this call);
+// - operator-local customization definitely inside ROOT: fail closed;
+// - operator-local customization whose target is an ancestor of ROOT: fail closed;
+// - unrelated sibling roots: allowed;
+// - if an arbitrary regex/equivalence cannot be proven disjoint safely: fail closed.
+func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, existing []fcontextRule) error {
+	ourStem := root // the literal unescaped root
+	ourEscapedStem := escapeFcontextPath(root)
+
+	for _, rule := range existing {
+		if rule.pattern == ourPattern {
+			continue // exact match handled elsewhere
+		}
+
+		// Equivalence records: fail closed.
+		if rule.isEquivalence {
+			return fmt.Errorf(
+				"unclassifiable SELinux fcontext equivalence record %s may overlap with %s; remove or classify it before proceeding",
+				rule.pattern, ourPattern,
+			)
+		}
+
+		// Extract literal stem from the rule pattern.
+		ruleStem := fcontextStem(rule.pattern)
+		if ruleStem == "" {
+			// Cannot classify safely - fail closed.
+			return fmt.Errorf(
+				"unclassifiable SELinux fcontext pattern %s may overlap with %s; remove or classify it before proceeding",
+				rule.pattern, ourPattern,
+			)
+		}
+
+		// Check if the rule stem contains any regex metacharacters.
+		// A literal stem should not contain these after unescaping.
+		if containsRegexMeta(ruleStem) {
+			return fmt.Errorf(
+				"unclassifiable SELinux fcontext pattern %s (contains regex metacharacters) may overlap with %s; remove or classify it before proceeding",
+				rule.pattern, ourPattern,
+			)
+		}
+
+		// Rule stem is a descendant of our root: our broad rule would override it.
+		// Must be a proper descendant (not just a prefix match like /data vs /data2).
+		if ruleStem != ourStem && isDescendantOf(ruleStem, ourEscapedStem) {
+			return fmt.Errorf(
+				"operator-local fcontext rule %s (stem %s) would be overridden by %s; remove the local rule before proceeding",
+				rule.pattern, ruleStem, ourPattern,
+			)
+		}
+
+		// Rule stem is an ancestor of our root: its semantics would be overridden.
+		if ourStem != ruleStem && isDescendantOf(ourEscapedStem, escapeFcontextPath(ruleStem)) {
+			return fmt.Errorf(
+				"operator-local fcontext rule %s (stem %s) is an ancestor of %s; removing it would change operator policy",
+				rule.pattern, ruleStem, ourPattern,
+			)
+		}
+	}
+	return nil
+}
+
+// isDescendantOf returns true if child is a proper descendant of parent.
+// parent must be the escaped form of the parent path.
+// child must be the escaped form of the child path (or the literal path
+// if it contains no regex metacharacters).
+// This correctly handles /data vs /data2: /data2 is NOT a descendant of /data.
+func isDescendantOf(child, parent string) bool {
+	if !strings.HasPrefix(child, parent) {
+		return false
+	}
+	// Must be a proper descendant: the character after the parent prefix
+	// must be '/' (or the child equals the parent, but we handle equality separately).
+	if len(child) == len(parent) {
+		return false
+	}
+	return child[len(parent)] == '/'
+}
+
+// containsRegexMeta returns true if the string contains regex metacharacters
+// that would indicate it is not a simple literal path.
+func containsRegexMeta(s string) bool {
+	for _, c := range s {
+		switch c {
+		case '\\', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|':
+			return true
+		}
+	}
+	return false
 }
 
 // verifyActualType reads the actual on-disk SELinux type for the root and
@@ -226,8 +395,12 @@ func (m *selinuxWorkspaceManager) verifyWorkspaceLabel(root string) error {
 }
 
 // rollbackWorkspaceLabel removes a newly-created fcontext rule and runs
-// restorecon to revert labels. Only called when the mapping was newly created
-// by this invocation.
+// restorecon to revert labels. Only called internally when the manager
+// itself cannot complete its transition before returning success.
+//
+// Outer callers (init, config set) MUST NOT call this on a mapping that
+// was previously returned as successful. Once ensureWorkspaceLabel returns
+// success, the mapping is managed durable state.
 func (m *selinuxWorkspaceManager) rollbackWorkspaceLabel(root string) error {
 	pattern := fcontextPattern(root)
 
@@ -246,12 +419,15 @@ func (m *selinuxWorkspaceManager) rollbackWorkspaceLabel(root string) error {
 
 // fcontextRule represents a parsed semanage fcontext rule.
 type fcontextRule struct {
-	pattern  string
-	fileType string
+	pattern       string
+	fileType      string
+	isEquivalence bool
 }
 
 // listLocalFcontextRules returns local custom fcontext rules.
 // Uses -C -n to inspect only local customizations, not base policy.
+//
+// Fails closed on any non-empty line that cannot be classified safely.
 func (m *selinuxWorkspaceManager) listLocalFcontextRules() ([]fcontextRule, error) {
 	out, err := m.runCommand(m.semanagePath, "fcontext", "-l", "-C", "-n")
 	if err != nil {
@@ -267,6 +443,12 @@ func (m *selinuxWorkspaceManager) listLocalFcontextRules() ([]fcontextRule, erro
 		rule, ok := parseFcontextLine(line)
 		if ok {
 			rules = append(rules, rule)
+		} else {
+			// Unparseable non-empty line: fail closed.
+			return nil, fmt.Errorf(
+				"unparseable local fcontext customization: %q; cannot safely determine overlap",
+				line,
+			)
 		}
 	}
 	return rules, nil
@@ -274,14 +456,13 @@ func (m *selinuxWorkspaceManager) listLocalFcontextRules() ([]fcontextRule, erro
 
 // parseFcontextLine parses a single line from semanage fcontext output.
 // Returns the rule and whether it was successfully parsed.
+//
+// Handles:
+// - Ordinary fcontext records: PATTERN  gen_context(...) or PATTERN  user:role:type:range
+// - Equivalence records: PATTERN  <<None>>
+// - Lines that cannot be classified return (fcontextRule{}, false).
 func parseFcontextLine(line string) (fcontextRule, bool) {
-	// Format: <path_regex>  gen_context(system_u:object_r:<type>:s0)
-	// or:     <path_regex>  system_u:object_r:<type>:s0
-	// The pattern and context are separated by multiple spaces.
-	// We need to handle paths with spaces, so we can't just use strings.Fields.
-
-	// Find the context part by looking for the gen_context or user:role:type pattern.
-	// The pattern is everything before the double-space separator.
+	// Find the context part by looking for the double-space separator.
 	idx := strings.Index(line, "  ")
 	if idx < 0 {
 		return fcontextRule{}, false
@@ -290,7 +471,20 @@ func parseFcontextLine(line string) (fcontextRule, bool) {
 	pattern := strings.TrimSpace(line[:idx])
 	ctxPart := strings.TrimSpace(line[idx+2:])
 
-	// Extract type from context
+	if pattern == "" {
+		return fcontextRule{}, false
+	}
+
+	// Equivalence record.
+	if ctxPart == "<<None>>" {
+		return fcontextRule{
+			pattern:       pattern,
+			fileType:      "",
+			isEquivalence: true,
+		}, true
+	}
+
+	// Extract type from context.
 	var typ string
 	if idx2 := strings.Index(ctxPart, "object_r:"); idx2 >= 0 {
 		rest := ctxPart[idx2+len("object_r:"):]
@@ -301,7 +495,7 @@ func parseFcontextLine(line string) (fcontextRule, bool) {
 		}
 	}
 
-	if pattern == "" || typ == "" {
+	if typ == "" {
 		return fcontextRule{}, false
 	}
 
@@ -327,9 +521,10 @@ func (m *selinuxWorkspaceManager) removeFcontextRule(pattern string) error {
 }
 
 func (m *selinuxWorkspaceManager) restoreconRecursive(root string) error {
-	out, err := m.runCommand(m.restoreconPath, "-R", "-F", root)
+	// Type-only restorecon: do not forcibly reset user, role, or MLS/MCS range.
+	out, err := m.runCommand(m.restoreconPath, "-R", root)
 	if err != nil {
-		return fmt.Errorf("restorecon -R -F: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("restorecon -R: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
