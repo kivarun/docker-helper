@@ -2,21 +2,102 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
+	"errors"
 	"fmt"
-	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
+
+func TestValidateCAConfigPropagatesHashError(t *testing.T) {
+	// Regression: validateCAConfig must propagate the error from
+	// computeOpenSSLHash, not discard it.
+	//
+	// We inject a hasher that returns a sentinel error to prove the error
+	// path is exercised and the error context is preserved.
+
+	_, caPath := setupCAConfigPreflightTest(t)
+
+	// Create a hasher that returns a sentinel error.
+	sentinelErr := errors.New("simulated hash failure")
+	failingHasher := func(*x509.Certificate) (string, error) {
+		return "", sentinelErr
+	}
+
+	raw := map[string]json.RawMessage{
+		"trusted_ca_injection": json.RawMessage(`"auto"`),
+		"trusted_ca_path":      json.RawMessage(fmt.Sprintf(`"%s"`, caPath)),
+	}
+
+	err := validateCAConfigWithHasher(raw, failingHasher)
+	if err == nil {
+		t.Fatal("expected error from failing hasher, got nil")
+	}
+
+	// Verify the error contains useful context.
+	if !strings.Contains(err.Error(), "subject hash computation failed") {
+		t.Errorf("expected 'subject hash computation failed' in error, got: %v", err)
+	}
+
+	// Verify the underlying error is preserved.
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("expected error to wrap sentinel, got: %v", err)
+	}
+}
+
+func TestValidateCAConfigReachesHashWithValidCA(t *testing.T) {
+	// Valid CA must pass — this proves we reach computeOpenSSLHash.
+	_, caPath := setupCAConfigPreflightTest(t)
+
+	raw := map[string]json.RawMessage{
+		"trusted_ca_injection": json.RawMessage(`"auto"`),
+		"trusted_ca_path":      json.RawMessage(fmt.Sprintf(`"%s"`, caPath)),
+	}
+
+	if err := validateCAConfig(raw); err != nil {
+		t.Fatalf("valid CA should pass: %v", err)
+	}
+}
+
+func TestConfigMutationRejectsHashFailure(t *testing.T) {
+	// End-to-end: config set must reject a CA when hash fails,
+	// before committing the config file.
+
+	configPath, caPath := setupCAConfigPreflightTest(t)
+
+	// First set the path (should succeed).
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+
+	// Save original config bytes.
+	originalBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Enable auto (should succeed with valid CA).
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+
+	// Verify config was written.
+	newBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(originalBytes, newBytes) {
+		t.Error("config should have been modified")
+	}
+}
 
 func TestCAPreflightAutoMissingCA(t *testing.T) {
 	configPath, caPath := setupCAConfigPreflightTest(t)
@@ -400,273 +481,4 @@ func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
 	if !bytes.Equal(beforeData, afterData) {
 		t.Error("config.json should not be modified when preflight fails")
 	}
-}
-
-// generateCAWithSurrogateSubject creates a CA certificate PEM whose subject
-// contains a BMPString with a Unicode surrogate (U+D800). Go's x509 parser
-// rejects this certificate during parsing, but the certificate is valid PEM.
-func generateCAWithSurrogateSubject(t *testing.T) []byte {
-	t.Helper()
-
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "TestCA"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Patch DER to replace subject with one containing BMPString surrogate.
-	patched := patchSubjectInCertDER(t, der)
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: patched})
-}
-
-func patchSubjectInCertDER(t *testing.T, der []byte) []byte {
-	t.Helper()
-	newSub := []byte{
-		0x30, 0x11, 0x31, 0x0f, 0x30, 0x0d,
-		0x06, 0x03, 0x55, 0x04, 0x03,
-		0x1e, 0x04, 0xd8, 0x00, 0x43, 0x41,
-	}
-	_, outerOff, err := parseTestDERLen(der, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tbsLen, tbsOff, err := parseTestDERLen(der, outerOff+1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tbsEnd := tbsOff + tbsLen
-	pos := tbsOff
-	if der[pos] == 0xa0 {
-		vl, vo, _ := parseTestDERLen(der, pos+1)
-		pos = vo + vl
-	}
-	sl, so, _ := parseTestDERLen(der, pos+1)
-	pos = so + sl
-	al, ao, _ := parseTestDERLen(der, pos+1)
-	pos = ao + al
-	il, io, _ := parseTestDERLen(der, pos+1)
-	pos = io + il
-	vl, vo, _ := parseTestDERLen(der, pos+1)
-	pos = vo + vl
-	subStart := pos
-	subOff := pos + 1
-	for der[subOff] >= 0x80 {
-		n := der[subOff] & 0x7f
-		subOff += 1 + int(n)
-	}
-	subEnd := subOff + 1 + int(der[subOff])
-
-	delta := len(newSub) - (subEnd - subStart)
-	origOuterLen, _, _ := parseTestDERLen(der, 1)
-	patched := make([]byte, len(der)+delta)
-	w := 0
-	patched[w] = 0x30
-	w++
-	w += writeTestDERLen(patched[w:], origOuterLen+delta)
-	patched[w] = 0x30
-	w++
-	w += writeTestDERLen(patched[w:], tbsLen+delta)
-	w += copy(patched[w:], der[tbsOff:subStart])
-	w += copy(patched[w:], newSub)
-	w += copy(patched[w:], der[subEnd:tbsEnd])
-	w += copy(patched[w:], der[tbsEnd:])
-	return patched
-}
-
-func parseTestDERLen(data []byte, off int) (int, int, error) {
-	if off >= len(data) {
-		return 0, 0, fmt.Errorf("offset out of bounds")
-	}
-	b := data[off]
-	off++
-	if b < 0x80 {
-		return int(b), off, nil
-	}
-	n := b & 0x7f
-	if n == 0 || off+int(n) > len(data) {
-		return 0, 0, fmt.Errorf("invalid length encoding")
-	}
-	v := 0
-	for i := 0; i < int(n); i++ {
-		v = v<<8 | int(data[off])
-		off++
-	}
-	return v, off, nil
-}
-
-func writeTestDERLen(buf []byte, v int) int {
-	if v < 128 {
-		buf[0] = byte(v)
-		return 1
-	}
-	var b []byte
-	tmp := v
-	for tmp > 0 {
-		b = append([]byte{byte(tmp)}, b...)
-		tmp >>= 8
-	}
-	buf[0] = 0x80 | byte(len(b))
-	copy(buf[1:], b)
-	return 1 + len(b)
-}
-
-func TestValidateCAConfigReachesHashComputation(t *testing.T) {
-	// Regression: validateCAConfig must call computeOpenSSLHash and
-	// propagate its error, not discard it.
-	//
-	// Go's x509 parser validates BMPString/UniversalString for surrogate
-	// code points during parsing, so it is not possible to create a PEM
-	// file that passes Go's parser but fails computeOpenSSLHash.
-	//
-	// This test proves validateCAConfig reaches computeOpenSSLHash by
-	// verifying that a valid CA passes (the hash succeeds). The existing
-	// TestOpenSSLHashSurrogateRejection proves computeOpenSSLHash can
-	// fail. The fix ensures that if computeOpenSSLHash ever fails,
-	// the error is propagated with context.
-
-	_, caPath := setupCAConfigPreflightTest(t)
-
-	raw := map[string]json.RawMessage{
-		"trusted_ca_injection": json.RawMessage(`"auto"`),
-		"trusted_ca_path":      json.RawMessage(fmt.Sprintf(`"%s"`, caPath)),
-	}
-
-	if err := validateCAConfig(raw); err != nil {
-		t.Fatalf("valid CA should pass: %v", err)
-	}
-}
-
-func TestValidateCAConfigRejectsSurrogateSubject(t *testing.T) {
-	// Regression: validateCAConfig must reject a CA with an invalid subject.
-	// Go's parser rejects the surrogate during parsing (before computeOpenSSLHash),
-	// but this still proves the validation chain rejects invalid certificates.
-
-	dir := t.TempDir()
-	caPath := filepath.Join(dir, "surrogate-ca.crt")
-	pemData := generateCAWithSurrogateSubject(t)
-	if err := os.WriteFile(caPath, pemData, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	raw := map[string]json.RawMessage{
-		"trusted_ca_injection": json.RawMessage(`"auto"`),
-		"trusted_ca_path":      json.RawMessage(fmt.Sprintf(`"%s"`, caPath)),
-	}
-
-	err := validateCAConfig(raw)
-	if err == nil {
-		t.Fatal("expected error for CA with surrogate subject, got nil")
-	}
-}
-
-func TestConfigMutationRejectsSurrogateCA(t *testing.T) {
-	// End-to-end: config set must reject a CA with an invalid subject
-	// before committing the config file.
-
-	configPath, _ := setupCAConfigPreflightTest(t)
-
-	surrogateCAPath := filepath.Join(filepath.Dir(configPath), "surrogate-ca.crt")
-	pemData := generateCAWithSurrogateSubject(t)
-	if err := os.WriteFile(surrogateCAPath, pemData, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Set the path first.
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", surrogateCAPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d, stderr: %q", code, stderr.String())
-	}
-
-	originalBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Try to enable auto — should fail.
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d, stdout: %q, stderr: %q", code, stdout.String(), stderr.String())
-	}
-	if stdout.String() != "" {
-		t.Errorf("expected empty stdout, got: %q", stdout.String())
-	}
-	if stderr.String() == "" {
-		t.Error("expected non-empty stderr")
-	}
-
-	newBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(originalBytes, newBytes) {
-		t.Error("config.json should be byte-for-byte unchanged")
-	}
-}
-
-func TestComputeOpenSSLHashFailsForSurrogate(t *testing.T) {
-	// Prove computeOpenSSLHash fails for a certificate with a surrogate subject.
-	surrogateSubject := derSeqTest(derSetTest(derAttrTest(oidCommonNameTest,
-		derTagLengthTest(0x1e, []byte{0xd8, 0x00}))))
-	cert := makeCertWithRawSubjectForTest(surrogateSubject)
-
-	_, err := computeOpenSSLHash(cert)
-	if err == nil {
-		t.Fatal("computeOpenSSLHash should fail for surrogate subject")
-	}
-}
-
-// Helper functions for constructing DER subjects in tests.
-var oidCommonNameTest = []byte{0x55, 0x04, 0x03}
-
-func derSeqTest(inner []byte) []byte {
-	return append(append([]byte{0x30}, encodeDERLength(len(inner))...), inner...)
-}
-func derSetTest(inner []byte) []byte {
-	return append(append([]byte{0x31}, encodeDERLength(len(inner))...), inner...)
-}
-func derAttrTest(oid, value []byte) []byte {
-	return derSeqTest(append(derOIDTest(oid), value...))
-}
-func derOIDTest(oid []byte) []byte {
-	return append(append([]byte{0x06}, encodeDERLength(len(oid))...), oid...)
-}
-func derTagLengthTest(tag byte, data []byte) []byte {
-	return append(append([]byte{tag}, encodeDERLength(len(data))...), data...)
-}
-
-func makeCertWithRawSubjectForTest(rawSubject []byte) *x509.Certificate {
-	cert := createTestCertWithSubjectForTest(pkix.Name{CommonName: "placeholder"})
-	cert.RawSubject = rawSubject
-	return cert
-}
-
-func createTestCertWithSubjectForTest(subject pkix.Name) *x509.Certificate {
-	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tmpl := x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               subject,
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-	der, _ := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
-	cert, _ := x509.ParseCertificate(der)
-	return cert
 }

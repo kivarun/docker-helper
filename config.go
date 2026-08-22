@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1203,6 +1204,15 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 // It validates the CA file without requiring
 // XDG_RUNTIME_DIR, creating directories, or materializing artifacts.
 func validateCAConfig(raw map[string]json.RawMessage) error {
+	return validateCAConfigWithHasher(raw, computeOpenSSLHash)
+}
+
+// validateCAConfigWithHasher is like validateCAConfig but allows injecting a
+// custom hasher for testing. Production always uses computeOpenSSLHash.
+func validateCAConfigWithHasher(
+	raw map[string]json.RawMessage,
+	hasher func(*x509.Certificate) (string, error),
+) error {
 	injRaw, ok := raw["trusted_ca_injection"]
 	if !ok {
 		return nil
@@ -1237,7 +1247,7 @@ func validateCAConfig(raw map[string]json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	if _, err := computeOpenSSLHash(cert); err != nil {
+	if _, err := hasher(cert); err != nil {
 		return fmt.Errorf("CA certificate subject hash computation failed: %w", err)
 	}
 
