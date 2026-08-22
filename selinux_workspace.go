@@ -146,6 +146,12 @@ func fcontextPattern(root string) string {
 // For "/data(/.*)?" it returns "/data".
 // For "/data\\.test(/.*)?" it returns "/data.test".
 // For patterns that cannot be safely classified, it returns an empty string.
+//
+// Classification is canonical: the round-trip
+//
+//	escapeFcontextPath(unescapeFcontextPath(escaped)) == escaped
+//
+// is the authority for whether a stem is a safely classifiable literal path.
 func fcontextStem(pattern string) string {
 	// Strip the common descendant suffix.
 	suffix := "(/.*)?"
@@ -154,6 +160,10 @@ func fcontextStem(pattern string) string {
 		literal, ok := unescapeFcontextPath(escaped)
 		if !ok {
 			return "" // unknown escape sequence - unclassifiable
+		}
+		// Round-trip check: the authority for safe classification.
+		if escapeFcontextPath(literal) != escaped {
+			return "" // not a literal-path regex we can classify
 		}
 		return literal
 	}
@@ -337,17 +347,6 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 			)
 		}
 
-		// Check if the rule pattern contains unescaped regex metacharacters
-		// in the stem portion (before the /(.*)? suffix).
-		// We check the escaped stem for bare metacharacters.
-		escapedStem := rule.pattern[:len(rule.pattern)-len("(/.*)?")]
-		if hasUnescapedRegexMeta(escapedStem) {
-			return fmt.Errorf(
-				"unclassifiable SELinux fcontext pattern %s (contains regex metacharacters) may overlap with %s; remove or classify it before proceeding",
-				rule.pattern, ourPattern,
-			)
-		}
-
 		// Rule stem is a descendant of our root: our broad rule would override it.
 		if isProperDescendant(ruleStem, ourStem) {
 			return fmt.Errorf(
@@ -409,32 +408,6 @@ func isProperDescendant(child, parent string) bool {
 		return false
 	}
 	return child[len(parent)] == '/'
-}
-
-// hasUnescapedRegexMeta returns true if the pattern contains regex metacharacters
-// that are NOT escaped with a backslash. It only skips escape sequences that
-// escapeFcontextPath itself can generate. Unknown escape sequences (e.g., \d,
-// \w, \s) are treated as unescaped metacharacters and cause the pattern to be
-// flagged as unclassifiable.
-func hasUnescapedRegexMeta(pattern string) bool {
-	for i := 0; i < len(pattern); i++ {
-		c := pattern[i]
-		if c == '\\' && i+1 < len(pattern) {
-			next := pattern[i+1]
-			switch next {
-			case '\\', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '.':
-				i++ // skip known escape
-				continue
-			}
-			// Unknown escape sequence - treat as unclassifiable.
-			return true
-		}
-		switch c {
-		case '+', '*', '?', '(', ')', '{', '}', '[', ']':
-			return true
-		}
-	}
-	return false
 }
 
 // verifyActualType reads the actual on-disk SELinux type for the root and
@@ -608,6 +581,10 @@ func parseFcontextLine(line string) (fcontextRule, bool) {
 // parseEquivalenceRedirect checks if the line is an equivalence redirect
 // of the form "DEST = SOURCE". Returns a parsed rule or nil if not an
 // equivalence redirect.
+//
+// Both DEST and SOURCE must be non-empty absolute literal filesystem paths.
+// Regex syntax, unknown escapes, or malformed operands cause the function
+// to return nil (fail-closed).
 func parseEquivalenceRedirect(line string) *fcontextRule {
 	// Find " = " separator (not at the start, to avoid matching patterns
 	// that contain " = ").
@@ -623,23 +600,32 @@ func parseEquivalenceRedirect(line string) *fcontextRule {
 		return nil
 	}
 
-	// Extract the literal prefix from dest and source.
-	// These may be regex patterns or plain paths.
-	destPrefix := fcontextStem(dest)
-	if destPrefix == "" {
-		destPrefix = dest
-	}
-	sourcePrefix := fcontextStem(source)
-	if sourcePrefix == "" {
-		sourcePrefix = source
+	// Both operands must be non-empty absolute literal filesystem paths.
+	if !isLiteralAbsPath(dest) || !isLiteralAbsPath(source) {
+		return nil
 	}
 
 	return &fcontextRule{
 		pattern:           line,
 		isEquivalence:     true,
-		equivalenceDest:   destPrefix,
-		equivalenceSource: sourcePrefix,
+		equivalenceDest:   dest,
+		equivalenceSource: source,
 	}
+}
+
+// isLiteralAbsPath returns true if the string is a non-empty absolute
+// literal filesystem path with no regex metacharacters.
+func isLiteralAbsPath(s string) bool {
+	if !strings.HasPrefix(s, "/") {
+		return false
+	}
+	for _, c := range s {
+		switch c {
+		case '\\', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|':
+			return false
+		}
+	}
+	return true
 }
 
 func (m *selinuxWorkspaceManager) addFcontextRule(pattern, fileType string) error {

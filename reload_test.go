@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2278,29 +2279,45 @@ func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 // during handleReload, the HTTP reload is rejected with the expected SELinux
 // detection error and the runtime config is unchanged.
 func TestReloadDetectLSMErrorDirect(t *testing.T) {
-	// This test requires system mode (UID 0) so that handleReload calls detectLSM.
-	// System mode loadConfig creates /var/lib/docker-helper and /run/docker-helper.
-	if EffectiveUID() != 0 {
-		t.Skip("requires root (system mode) for handleReload detectLSM path")
+	// Use temp config/token/state to avoid touching real /var or /run.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	tokenPath := filepath.Join(dir, "admin.token")
+	stateDir := filepath.Join(dir, "state")
+	allowedRoot := testAllowedRootDir(t)
+
+	cfg := map[string]any{
+		"allowed_root": allowedRoot,
+		"session_ttl":  "12h",
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
 	}
 
-	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
-	defer cleanup()
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	// Inject system mode so handleReload calls detectLSM.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
 
 	// Capture operational logs.
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelError, false)
 
-	cfg, err := loadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := openDatabase(cfg.DatabasePath)
+	// Create App state manually to avoid loadConfig creating system dirs.
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2310,9 +2327,14 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 	defer db.Close()
 
 	app := &App{
-		Config:         cfg,
+		Config: &Config{
+			AllowedRoot: allowedRoot,
+			SessionTTL:  12 * time.Hour,
+			LogLevel:    slog.LevelInfo,
+			Mode:        ModeSystem,
+		},
 		DB:             db,
-		AdminTokenHash: adminHash,
+		AdminTokenHash: [32]byte{1}, // dummy hash; auth bypassed via httptest
 	}
 
 	// Save the original config for comparison.
@@ -2330,49 +2352,28 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 		apparmorLSMActive = origAA
 	}()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
-
-	server := &http.Server{Handler: mux}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(socketPath)
-
-	go server.Serve(listener)
-	defer server.Close()
-
-	waitForDialReady(t, "unix", socketPath)
-
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return net.DialTimeout("unix", socketPath, 2*time.Second)
-		},
-	}
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
-
-	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Use httptest to avoid real Unix listener.
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
 	req.Header.Set("Authorization", "Bearer test-admin-token")
 
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	// Bypass admin auth for this test by calling handleReload directly.
+	// handleReload calls requireAdmin which checks the token.
+	// We need to set a valid admin token hash.
+	// Actually, let's use the real token hash.
+	adminHash, err := loadAdminToken(tokenPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	app.AdminTokenHash = adminHash
 
+	app.handleReload(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+
+	body := recorder.Body.Bytes()
 	var result map[string]any
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatalf("invalid JSON: %s", body)
