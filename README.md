@@ -403,7 +403,7 @@ Configuration fields:
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log (bounded buffer, default: `4194304` = 4 MiB) |
-| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`) |
+| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). In system mode, must be under `/etc/docker-helper` |
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. |
 | `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |
 
@@ -460,14 +460,39 @@ trust your internal services. The CA file must be a single PEM-encoded
 X.509 CA certificate. Injection only affects containers started via
 `POST /run`.
 
-Enable:
+#### User mode
+
+User mode accepts any absolute path to a readable CA file.
 
 ```bash
 docker-helper config set trusted_ca_path /absolute/path/to/company-root-ca.pem
 docker-helper config set trusted_ca_injection auto
 ```
 
-Disable:
+#### System mode
+
+System mode requires the CA file to be placed under the helper-owned
+system configuration directory `/etc/docker-helper`. Arbitrary host paths
+are not supported in confined system mode.
+
+```bash
+sudo install -m 0644 company-root-ca.crt /etc/docker-helper/company-root-ca.crt
+```
+
+On SELinux hosts, restore the correct label:
+
+```bash
+sudo restorecon /etc/docker-helper/company-root-ca.crt
+```
+
+Then enable injection:
+
+```bash
+sudo docker-helper config set trusted_ca_path /etc/docker-helper/company-root-ca.crt
+sudo docker-helper config set trusted_ca_injection auto
+```
+
+#### Disable
 
 ```bash
 docker-helper config set trusted_ca_injection disabled

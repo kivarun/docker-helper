@@ -431,3 +431,335 @@ func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
 		t.Error("config.json should not be modified when preflight fails")
 	}
 }
+
+// --- System-mode CA source-path policy tests ---
+
+func TestIsPathContainedUnder(t *testing.T) {
+	root := t.TempDir()
+	insideFile := filepath.Join(root, "subdir", "file.crt")
+	if err := os.MkdirAll(filepath.Dir(insideFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outsideFile := filepath.Join(t.TempDir(), "outside.crt")
+	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Similarly-prefixed path outside the root.
+	similarRoot := root + "-other"
+	if err := os.MkdirAll(similarRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	similarFile := filepath.Join(similarRoot, "file.crt")
+	if err := os.WriteFile(similarFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		want    bool
+		wantErr bool
+	}{
+		{
+			name: "file inside root passes",
+			path: insideFile,
+			want: true,
+		},
+		{
+			name: "outside file fails",
+			path: outsideFile,
+			want: false,
+		},
+		{
+			name: "similarly-prefixed path fails",
+			path: similarFile,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := isPathContainedUnder(tt.path, root)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("isPathContainedUnder(%q, %q) error = %v, wantErr %v", tt.path, root, err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("isPathContainedUnder(%q, %q) = %v, want %v", tt.path, root, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsPathContainedUnderSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.crt")
+	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside root pointing to outside file.
+	insideLink := filepath.Join(root, "link.crt")
+	if err := os.Symlink(outsideFile, insideLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside root pointing to file still inside root.
+	insideFile := filepath.Join(root, "real.crt")
+	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	insideLinkValid := filepath.Join(root, "link-valid.crt")
+	if err := os.Symlink(insideFile, insideLinkValid); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{
+			name: "symlink inside -> outside fails",
+			path: insideLink,
+			want: false,
+		},
+		{
+			name: "symlink inside -> inside passes",
+			path: insideLinkValid,
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := isPathContainedUnder(tt.path, root)
+			if err != nil {
+				t.Fatalf("isPathContainedUnder(%q, %q) error = %v", tt.path, root, err)
+			}
+			if got != tt.want {
+				t.Errorf("isPathContainedUnder(%q, %q) = %v, want %v", tt.path, root, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateSystemCASourcePath(t *testing.T) {
+	root := t.TempDir()
+	insideFile := filepath.Join(root, "subdir", "file.crt")
+	if err := os.MkdirAll(filepath.Dir(insideFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outsideFile := filepath.Join(t.TempDir(), "outside.crt")
+	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside root pointing to outside file.
+	outsideDir := t.TempDir()
+	outsideTarget := filepath.Join(outsideDir, "target.crt")
+	if err := os.WriteFile(outsideTarget, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	escapeLink := filepath.Join(root, "escape.crt")
+	if err := os.Symlink(outsideTarget, escapeLink); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{
+			name: "file inside root passes",
+			path: insideFile,
+		},
+		{
+			name:    "outside file fails",
+			path:    outsideFile,
+			wantErr: true,
+		},
+		{
+			name:    "symlink escape fails",
+			path:    escapeLink,
+			wantErr: true,
+		},
+		{
+			name:    "nonexistent file fails",
+			path:    filepath.Join(root, "nope.crt"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSystemCASourcePathWithRoot(tt.path, root)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateSystemCASourcePathWithRoot(%q) error = %v, wantErr %v", tt.path, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// validateSystemCASourcePathWithRoot is like validateSystemCASourcePath but
+// accepts a custom root for testing. Production always uses systemCASourceRoot.
+func validateSystemCASourcePathWithRoot(caPath, root string) error {
+	contained, err := isPathContainedUnder(caPath, root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
+		}
+		return fmt.Errorf("cannot resolve trusted_ca_path: %w", err)
+	}
+	if !contained {
+		return fmt.Errorf("system mode trusted_ca_path must be under %s: %s", root, caPath)
+	}
+
+	info, err := os.Stat(caPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
+		}
+		return fmt.Errorf("cannot access trusted_ca_path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
+	}
+
+	return nil
+}
+
+func TestSystemModeCAOutsideSourceFails(t *testing.T) {
+	// System mode + auto + outside source must fail before config write.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	tokenPath := filepath.Join(dir, "admin.token")
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	allowedRoot := testAllowedRootDir(t)
+	// Pre-set the CA path so we only need one command to test the validation.
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         allowedRoot,
+		"session_ttl":          "12h",
+		"trusted_ca_path":      caPath,
+		"trusted_ca_injection": "disabled",
+	})
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	shortRuntime := filepath.Join(os.TempDir(), fmt.Sprintf("dh-ca-sys-%d", os.Getpid()))
+	t.Setenv("XDG_RUNTIME_DIR", shortRuntime)
+	t.Cleanup(func() { os.RemoveAll(shortRuntime) })
+
+	// Mock system mode.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	// Mock config path so operator client token resolution uses the test dir.
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	// Prevent reaching a real system daemon.
+	origSocket := systemSocketExists
+	systemSocketExists = func() bool { return false }
+	defer func() { systemSocketExists = origSocket }()
+
+	// Save original config bytes.
+	originalBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to enable auto with a CA outside /etc/docker-helper.
+	// This should fail during validation, before any config write or reload.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	}
+
+	// Config must be byte-for-byte unchanged.
+	newBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(originalBytes, newBytes) {
+		t.Error("config.json should be byte-for-byte unchanged when system CA source policy fails")
+	}
+}
+
+func TestUserModeCAArbitraryPath(t *testing.T) {
+	// User mode must accept arbitrary absolute CA paths.
+	_, caPath := setupCAConfigPreflightTest(t)
+
+	// Ensure user mode.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	defer func() { EffectiveUID = origUID }()
+
+	// Set path and enable auto (should succeed with valid CA in user mode).
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set path: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated") {
+		t.Errorf("expected 'updated' in stdout, got: %q", stdout.String())
+	}
+}
+
+// TestSystemCADocumentation verifies that the Release 2 system-mode CA source
+// documentation explicitly identifies /etc/docker-helper as the CA source namespace.
+func TestSystemCADocumentation(t *testing.T) {
+	readmeData, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := string(readmeData)
+
+	// Locate the trusted CA injection section.
+	caSectionIdx := strings.Index(readme, "### Trusted CA injection")
+	if caSectionIdx < 0 {
+		t.Fatal("README.md must contain '### Trusted CA injection' section")
+	}
+	// Find the next top-level section (## heading at line start) to bound the section.
+	caSection := readme[caSectionIdx:]
+	// Look for "\n## " to avoid matching #### subsections.
+	nextSectionIdx := strings.Index(caSection[1:], "\n## ")
+	if nextSectionIdx >= 0 {
+		caSection = caSection[:nextSectionIdx+1]
+	}
+
+	// The system-mode subsection must mention /etc/docker-helper.
+	systemIdx := strings.Index(caSection, "#### System mode")
+	if systemIdx < 0 {
+		t.Fatal("README.md CA section must contain '#### System mode' subsection")
+	}
+	systemSubsection := caSection[systemIdx:]
+	if !strings.Contains(systemSubsection, "/etc/docker-helper") {
+		t.Error("README.md system-mode CA section must document /etc/docker-helper as the CA source namespace")
+	}
+}

@@ -299,7 +299,9 @@ Implemented contract:
    `install-system.sh` for system mode;
 - native packages and release artifacts include Bash completion and manuals;
 - trusted CA injection is configured through `trusted_ca_path` and
-  `trusted_ca_injection=auto`.
+  `trusted_ca_injection=auto`. In system mode, the CA source must be
+  under `/etc/docker-helper`; user mode accepts arbitrary absolute paths.
+  Managed CA import and broader source-location support are post-Release-2.
 
 Release 2 remains local. Non-loopback listeners, TLS, uploaded build contexts,
 and remote image-only runs are deferred to Release 3.
