@@ -4,7 +4,7 @@ This archive contains a static Linux amd64 build of docker-helper and the
 accompanying installation artifacts.
 
 Native packages are also available per release:
-- `.deb` — Ubuntu / Debian (user and system mode)
+- `.deb` — Ubuntu (user and system mode)
 - `.rpm` — openSUSE Tumbleweed (user and system mode)
 
 The RPM carries both AppArmor and SELinux runtime toolchain dependencies

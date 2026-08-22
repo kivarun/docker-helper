@@ -2762,15 +2762,26 @@ func TestRPMBackendDependencies(t *testing.T) {
 		dependsSection = dependsSection[:nextKeyIdx]
 	}
 
-	// AppArmor backend dependency.
-	if !strings.Contains(dependsSection, "apparmor-parser") {
-		t.Error("RPM depends must include apparmor-parser (AppArmor backend)")
-	}
+	// Parse individual dependency entries from the YAML list.
+	deps := parseYAMLListItems(dependsSection)
 
-	// SELinux backend dependencies.
-	for _, pkg := range []string{"policycoreutils", "policycoreutils-python-utils"} {
-		if !strings.Contains(dependsSection, pkg) {
-			t.Errorf("RPM depends must include %s (SELinux backend)", pkg)
+	// Assert exact presence of each required dependency.
+	required := []string{
+		"systemd",
+		"apparmor-parser",
+		"policycoreutils",
+		"policycoreutils-python-utils",
+	}
+	for _, want := range required {
+		found := false
+		for _, dep := range deps {
+			if dep == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("RPM depends must include exact entry %q (got: %v)", want, deps)
 		}
 	}
 }
@@ -2779,44 +2790,101 @@ func TestRPMBackendDependencies(t *testing.T) {
 // documentation explicitly identifies openSUSE Tumbleweed as the supported
 // RPM target, rather than generic RPM/Fedora/RHEL wording.
 func TestRPMDocumentationTargetsTumbleweed(t *testing.T) {
-	// README.md package installation section must name openSUSE Tumbleweed.
+	// README.md: locate the package installation section and verify RPM subsection.
 	readmeData, err := os.ReadFile("README.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	readme := string(readmeData)
 
-	// Locate the RPM installation subsection in the package installation section.
-	// It follows the DEB subsection and contains the zypper install command.
-	zypperIdx := strings.Index(readme, "zypper install")
-	if zypperIdx < 0 {
-		t.Fatal("README.md must contain zypper install command for RPM")
+	// Find the package installation section.
+	pkgInstallIdx := strings.Index(readme, "### Package installation")
+	if pkgInstallIdx < 0 {
+		t.Fatal("README.md must contain '### Package installation' section")
 	}
+	pkgSection := readme[pkgInstallIdx:]
 
-	// The heading above the zypper command must mention openSUSE Tumbleweed.
-	// Look backward from the zypper line for the section heading.
-	beforeZypper := readme[:zypperIdx]
+	// The RPM subsection must mention openSUSE Tumbleweed.
+	rpmSubIdx := strings.Index(pkgSection, "zypper install")
+	if rpmSubIdx < 0 {
+		t.Fatal("README.md package section must contain zypper install command")
+	}
+	// Check the heading preceding the zypper command.
+	beforeZypper := pkgSection[:rpmSubIdx]
 	if !strings.Contains(beforeZypper, "openSUSE Tumbleweed") {
-		t.Error("README.md RPM section must identify openSUSE Tumbleweed as the supported target")
+		t.Error("README.md RPM subsection must identify openSUSE Tumbleweed")
 	}
 
-	// packaging/README.release.md must also name openSUSE Tumbleweed for RPM.
+	// packaging/README.release.md: verify native package entries.
 	releaseData, err := os.ReadFile("packaging/README.release.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	releaseReadme := string(releaseData)
 
-	// The RPM mention in the release README must reference openSUSE Tumbleweed.
-	rpmIdx := strings.Index(releaseReadme, ".rpm")
-	if rpmIdx < 0 {
-		t.Fatal("packaging/README.release.md must reference .rpm package")
+	// Find the native packages section.
+	nativePkgIdx := strings.Index(releaseReadme, "Native packages")
+	if nativePkgIdx < 0 {
+		t.Fatal("packaging/README.release.md must contain native packages section")
 	}
-	// Check the surrounding context for openSUSE Tumbleweed mention.
-	context := releaseReadme[:rpmIdx+200]
-	if !strings.Contains(context, "openSUSE Tumbleweed") {
-		t.Error("packaging/README.release.md must identify openSUSE Tumbleweed for RPM support")
+	nativeSection := releaseReadme[nativePkgIdx:]
+
+	// The .rpm entry must say openSUSE Tumbleweed.
+	rpmLine := findLineContaining(nativeSection, ".rpm")
+	if rpmLine == "" {
+		t.Fatal("packaging/README.release.md must contain .rpm entry")
 	}
+	if !strings.Contains(rpmLine, "openSUSE Tumbleweed") {
+		t.Errorf("packaging/README.release.md .rpm entry must say openSUSE Tumbleweed (got: %s)", rpmLine)
+	}
+
+	// The .deb entry must say Ubuntu, not Ubuntu/Debian.
+	debLine := findLineContaining(nativeSection, ".deb")
+	if debLine == "" {
+		t.Fatal("packaging/README.release.md must contain .deb entry")
+	}
+	if !strings.Contains(debLine, "Ubuntu") {
+		t.Errorf("packaging/README.release.md .deb entry must say Ubuntu (got: %s)", debLine)
+	}
+	if strings.Contains(debLine, "Debian") {
+		t.Error("packaging/README.release.md .deb entry must not say Debian (Release 2 does not validate Debian)")
+	}
+
+	// No Release 2 package-support wording claims Fedora or RHEL support.
+	// Historical roadmap statements about Fedora/RHEL being outside Release 2 are fine.
+	// Check the package installation sections specifically.
+	if strings.Contains(pkgSection, "Fedora") || strings.Contains(pkgSection, "RHEL") {
+		t.Error("README.md package section must not claim Fedora or RHEL support")
+	}
+	if strings.Contains(nativeSection, "Fedora") || strings.Contains(nativeSection, "RHEL") {
+		t.Error("packaging/README.release.md native packages section must not claim Fedora or RHEL support")
+	}
+}
+
+// parseYAMLListItems extracts individual list items from a YAML list block.
+// It handles "- item" format and returns trimmed item strings.
+func parseYAMLListItems(block string) []string {
+	var items []string
+	for _, line := range strings.Split(block, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- ") {
+			item := strings.TrimSpace(trimmed[2:])
+			if item != "" {
+				items = append(items, item)
+			}
+		}
+	}
+	return items
+}
+
+// findLineContaining returns the first line in text that contains the needle.
+func findLineContaining(text, needle string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, needle) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }
 
 func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
