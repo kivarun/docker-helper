@@ -931,10 +931,18 @@ func initUserWithSystemDaemon(stdout, stderr io.Writer) error {
 		return err
 	}
 
-	// Check if same token is already installed.
-	if verifyCredentialToken(token) == nil {
+	switch checkCredentialState(token) {
+	case credentialMatch:
 		fmt.Fprintln(stdout, "Credential already installed.")
 		return nil
+	case credentialConflict:
+		credPath, _ := credentialPath()
+		return fmt.Errorf(
+			"different credential already installed at %s; to replace it, run: docker-helper credential install --force",
+			credPath,
+		)
+	case credentialAbsent:
+		// No credential installed yet — proceed to install.
 	}
 
 	// Install credential.
@@ -943,6 +951,58 @@ func initUserWithSystemDaemon(stdout, stderr io.Writer) error {
 		writer:     safeWriteCredential,
 		uid:        EffectiveUID,
 		isTerminal: func() bool { return isTerminal },
+		readPassword: func() (string, error) {
+			return token, nil
+		},
+		force: false,
+	})
+	if err != nil {
+		if errors.Is(err, ErrCredentialAlreadyExists) {
+			fmt.Fprintln(stderr, "Use --force to replace the existing credential.")
+		}
+		return err
+	}
+
+	fmt.Fprintln(stdout, "Credential installed successfully.")
+	fmt.Fprintf(stdout, "Stored at: %s\n", credPath)
+	return nil
+}
+
+// initUserWithSystemDaemonWithReader is like initUserWithSystemDaemon but
+// reads the token from the given reader instead of os.Stdin.
+// Used by tests to inject token input without manipulating os.Stdin.
+func initUserWithSystemDaemonWithReader(reader io.Reader, stdout, stderr io.Writer) error {
+	fmt.Fprintln(stderr, "System daemon detected.")
+	fmt.Fprintln(stderr, "Enter credential token provided by the admin:")
+
+	token, err := readTokenFromReader(reader)
+	if err != nil {
+		return err
+	}
+
+	if err := validateCredentialToken(token); err != nil {
+		return err
+	}
+
+	switch checkCredentialState(token) {
+	case credentialMatch:
+		fmt.Fprintln(stdout, "Credential already installed.")
+		return nil
+	case credentialConflict:
+		credPath, _ := credentialPath()
+		return fmt.Errorf(
+			"different credential already installed at %s; to replace it, run: docker-helper credential install --force",
+			credPath,
+		)
+	case credentialAbsent:
+		// No credential installed yet — proceed to install.
+	}
+
+	credPath, err := installCredential(credentialInstallConfig{
+		reader:     strings.NewReader(token),
+		writer:     safeWriteCredential,
+		uid:        EffectiveUID,
+		isTerminal: func() bool { return false },
 		readPassword: func() (string, error) {
 			return token, nil
 		},

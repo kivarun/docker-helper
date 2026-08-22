@@ -72,22 +72,35 @@ func validateCredentialToken(token string) error {
 	return nil
 }
 
-// verifyCredentialToken checks if a credential token is already installed.
-// Returns nil if no credential exists or if the token matches the installed one.
-// Returns an error if a different credential is already installed.
-func verifyCredentialToken(token string) error {
+// credentialState represents the result of checking an existing credential file.
+type credentialState int
+
+const (
+	// credentialAbsent means no credential file exists.
+	credentialAbsent credentialState = iota
+	// credentialMatch means the existing credential matches the given token.
+	credentialMatch
+	// credentialConflict means a different credential is already installed.
+	credentialConflict
+)
+
+// checkCredentialState checks the credential file against the given token.
+// Returns credentialAbsent if no credential file exists.
+// Returns credentialMatch if the file exists and contains the same token.
+// Returns credentialConflict if the file exists with a different token.
+func checkCredentialState(token string) credentialState {
 	credPath, err := credentialPath()
 	if err != nil {
-		return nil
+		return credentialAbsent
 	}
 	existing, err := os.ReadFile(credPath)
 	if err != nil {
-		return nil // no existing credential
+		return credentialAbsent // no existing credential
 	}
 	if strings.TrimSpace(string(existing)) == token {
-		return nil // same token, OK
+		return credentialMatch
 	}
-	return fmt.Errorf("different credential already installed at %s: use --force to replace", credPath)
+	return credentialConflict
 }
 
 // readTokenFromReader reads a single token line from the reader.
