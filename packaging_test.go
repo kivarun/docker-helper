@@ -5191,6 +5191,91 @@ func TestReleaseWorkflow(t *testing.T) {
 	}
 }
 
+// TestReleaseJobSELinuxBuildDeps verifies that the release job itself
+// installs the SELinux policy build dependencies (checkpolicy, semodule-utils)
+// before calling build-packages.sh. This is scoped to the release job section
+// to prevent a false positive from another job (e.g., selinux-policy) installing
+// the same packages.
+func TestReleaseJobSELinuxBuildDeps(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Extract the release job section by finding "release:" at the top level
+	// (indented under "jobs:") and capturing everything until the next top-level
+	// job key or end of file.
+	releaseJob := extractReleaseJob(content)
+	if releaseJob == "" {
+		t.Fatal("could not locate release job in release.yml")
+	}
+
+	// The release job must install checkpolicy and semodule-utils.
+	if !strings.Contains(releaseJob, "checkpolicy") {
+		t.Error("release job must install checkpolicy (provides checkmodule)")
+	}
+	if !strings.Contains(releaseJob, "semodule-utils") {
+		t.Error("release job must install semodule-utils (provides semodule_package)")
+	}
+
+	// The dependency install step must appear before build-packages.sh.
+	installIdx := strings.Index(releaseJob, "apt-get install")
+	buildIdx := strings.Index(releaseJob, "build-packages.sh")
+	if installIdx < 0 {
+		t.Fatal("release job must contain apt-get install step")
+	}
+	if buildIdx < 0 {
+		t.Fatal("release job must call build-packages.sh")
+	}
+	if installIdx > buildIdx {
+		t.Error("release job must install build dependencies before build-packages.sh")
+	}
+}
+
+// extractReleaseJob returns the YAML text belonging to the "release" job.
+// It finds the "release:" key at the job definition indentation level (2 spaces
+// under "jobs:") and captures content until the next job key at the same level
+// or end of file.
+func extractReleaseJob(content string) string {
+	// Find "  release:" (2-space indent, top-level job key).
+	idx := strings.Index(content, "  release:")
+	if idx < 0 {
+		return ""
+	}
+
+	// Scan forward to find the next top-level job key (2-space indent followed
+	// by a word and colon) or end of file.
+	start := idx
+	lines := strings.Split(content[start:], "\n")
+	result := strings.Builder{}
+	for i, line := range lines {
+		if i == 0 {
+			result.WriteString(line)
+			result.WriteString("\n")
+			continue
+		}
+		// A new job key at the same indentation level ends the release job.
+		if len(line) >= 2 && line[0] == ' ' && line[1] == ' ' &&
+			line[2] != ' ' && line[2] != '\t' &&
+			strings.ContainsRune(line, ':') {
+			// Verify it's a job key (word followed by colon, no leading spaces
+			// beyond the 2-space indent).
+			trimmed := strings.TrimSpace(line)
+			if colonIdx := strings.Index(trimmed, ":"); colonIdx > 0 {
+				key := trimmed[:colonIdx]
+				// Job keys are single words without spaces.
+				if !strings.Contains(key, " ") && key != "release" {
+					break
+				}
+			}
+		}
+		result.WriteString(line)
+		result.WriteString("\n")
+	}
+	return result.String()
+}
+
 func TestReleaseWorkflowRaceBeforeBuild(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
