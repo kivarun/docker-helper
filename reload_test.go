@@ -2393,3 +2393,150 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 		t.Error("verifySELinuxWorkspace must not be called when detectLSM fails")
 	}
 }
+
+// TestReloadRejectsOutsideCASourceSystemMode verifies that the reload endpoint
+// rejects a config.json with trusted_ca_injection=auto and trusted_ca_path
+// outside /etc/docker-helper when running in system mode.
+//
+// This exercises the real path:
+//
+//	handleReload -> loadConfig -> validateSystemCASourcePath
+//
+// and proves the active runtime config is unchanged after rejection.
+func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
+
+	// 1. Load a valid initial config and create App.
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	// 2. Snapshot the active runtime config.
+	originalConfig := app.getConfig()
+
+	// 3. Set up the HTTP server with the real handleReload.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+
+	waitForDialReady(t, "unix", socketPath)
+
+	// 4. Create a CA file outside /etc/docker-helper.
+	caFile := filepath.Join(t.TempDir(), "outside-ca.pem")
+	if err := os.WriteFile(caFile, []byte("FAKE-CA-CONTENT"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Switch EffectiveUID to 0 (system mode) for the reload attempt.
+	origEffectiveUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origEffectiveUID }()
+
+	// 6. Manually replace config.json with a structurally valid config
+	//    containing trusted_ca_injection=auto and an outside CA path.
+	newCfg := map[string]any{
+		"allowed_root":         originalConfig.AllowedRoots[0],
+		"session_ttl":          "12h",
+		"log_level":            "info",
+		"trusted_ca_injection": "auto",
+		"trusted_ca_path":      caFile,
+	}
+	data, err := json.MarshalIndent(newCfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 7. Call the real POST /reload endpoint with valid admin auth.
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("reload request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 8. Prove HTTP status is 400.
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	// 9. Prove response code is invalid_config.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %s", body)
+	}
+	if code, ok := result["code"].(string); !ok || code != "invalid_config" {
+		t.Fatalf("expected code=invalid_config, got: %s", body)
+	}
+
+	// 10. Prove the App's active runtime config is unchanged.
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
+	}
+	if currentConfig.SessionTTL != originalConfig.SessionTTL {
+		t.Errorf("SessionTTL changed: got %v, want %v", currentConfig.SessionTTL, originalConfig.SessionTTL)
+	}
+	if currentConfig.LogLevel != originalConfig.LogLevel {
+		t.Errorf("LogLevel changed: got %v, want %v", currentConfig.LogLevel, originalConfig.LogLevel)
+	}
+
+	// 11. In particular, trusted_ca_injection and trusted_ca_path are not replaced.
+	if currentConfig.TrustedCAInjection != originalConfig.TrustedCAInjection {
+		t.Errorf("TrustedCAInjection changed: got %q, want %q", currentConfig.TrustedCAInjection, originalConfig.TrustedCAInjection)
+	}
+	if currentConfig.TrustedCAPath != originalConfig.TrustedCAPath {
+		t.Errorf("TrustedCAPath changed: got %q, want %q", currentConfig.TrustedCAPath, originalConfig.TrustedCAPath)
+	}
+}
