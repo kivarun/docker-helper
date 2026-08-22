@@ -769,9 +769,67 @@ type systemInitPrepareResult struct {
 	// RollbackOnCoreFailure is called when core init fails after
 	// successful preparation. nil means no rollback (e.g., SELinux).
 	RollbackOnCoreFailure func() error
+	// rollbackLabel is the backend-specific name used in the rollback
+	// error message (e.g., "AppArmor"). Empty means no rollback.
+	rollbackLabel string
 	// OnSuccess is called after successful core init to print
 	// backend-specific status. nil means no output.
 	OnSuccess func(stdout io.Writer)
+}
+
+// newAppArmorSystemInitBackend constructs the AppArmor backend for
+// system-mode init. addRoot and removeRoot are the confinement hooks.
+// Production uses getAppArmorAddRoot/getAppArmorRemoveRoot; tests inject
+// mock functions.
+func newAppArmorSystemInitBackend(
+	addRoot func(string) (rootResult, error),
+	removeRoot func(string) (rootResult, error),
+) *systemInitBackend {
+	return &systemInitBackend{
+		prepare: func(canonical string) (*systemInitPrepareResult, error) {
+			addResult, err := addRoot(canonical)
+			if err != nil {
+				return nil, err
+			}
+			pr := &systemInitPrepareResult{
+				rollbackLabel: "AppArmor",
+				OnSuccess: func(stdout io.Writer) {
+					if addResult.Changed {
+						fmt.Fprintf(stdout, "AppArmor workspace root added: %s\n", addResult.Path)
+					} else {
+						fmt.Fprintf(stdout, "AppArmor workspace root already present: %s\n", addResult.Path)
+					}
+				},
+			}
+			if addResult.Changed {
+				pr.RollbackOnCoreFailure = func() error {
+					_, rbErr := removeRoot(addResult.Path)
+					return rbErr
+				}
+			}
+			return pr, nil
+		},
+	}
+}
+
+// newSELinuxSystemInitBackend constructs the SELinux backend for
+// system-mode init. mgr is the workspace manager (nil to skip preparation).
+// resolveRoot is the canonical root resolver (nil to use production default).
+func newSELinuxSystemInitBackend(
+	mgr *selinuxWorkspaceManager,
+	resolveRoot func(string) (string, error),
+) *systemInitBackend {
+	return &systemInitBackend{
+		resolveRoot: resolveRoot,
+		prepare: func(canonical string) (*systemInitPrepareResult, error) {
+			if mgr != nil && !isHomeRoot(canonical) {
+				if _, err := mgr.ensureWorkspaceLabel(canonical); err != nil {
+					return nil, err
+				}
+			}
+			return &systemInitPrepareResult{}, nil
+		},
+	}
 }
 
 // initSystem is the single authoritative owner of the system-init lifecycle.
@@ -882,7 +940,7 @@ func initSystem(allowedRoot string, stdout, stderr io.Writer,
 			// Backend-specific rollback.
 			if pr.RollbackOnCoreFailure != nil {
 				if rbErr := pr.RollbackOnCoreFailure(); rbErr != nil {
-					return fmt.Errorf("init failed: %w; confinement rollback also failed: %v", err, rbErr)
+					return fmt.Errorf("init failed: %w; %s rollback also failed: %v", err, pr.rollbackLabel, rbErr)
 				}
 			}
 			return err
@@ -937,48 +995,15 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	switch backend {
 	case LSMAppArmor:
 		return initSystem(allowedRoot, stdout, stderr,
-			&systemInitBackend{
-				prepare: func(canonical string) (*systemInitPrepareResult, error) {
-					addResult, err := getAppArmorAddRoot()(canonical)
-					if err != nil {
-						return nil, err
-					}
-					pr := &systemInitPrepareResult{
-						OnSuccess: func(stdout io.Writer) {
-							if addResult.Changed {
-								fmt.Fprintf(stdout, "AppArmor workspace root added: %s\n", addResult.Path)
-							} else {
-								fmt.Fprintf(stdout, "AppArmor workspace root already present: %s\n", addResult.Path)
-							}
-						},
-					}
-					if addResult.Changed {
-						pr.RollbackOnCoreFailure = func() error {
-							_, rbErr := getAppArmorRemoveRoot()(addResult.Path)
-							return rbErr
-						}
-					}
-					return pr, nil
-				},
-			},
+			newAppArmorSystemInitBackend(getAppArmorAddRoot(), getAppArmorRemoveRoot()),
 			func(ar string, so, se io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err
 			},
 		)
 	case LSMSelinux:
-		mgr := newSELinuxWorkspaceManager()
 		return initSystem(allowedRoot, stdout, stderr,
-			&systemInitBackend{
-				prepare: func(canonical string) (*systemInitPrepareResult, error) {
-					if !isHomeRoot(canonical) {
-						if _, err := mgr.ensureWorkspaceLabel(canonical); err != nil {
-							return nil, err
-						}
-					}
-					return &systemInitPrepareResult{}, nil
-				},
-			},
+			newSELinuxSystemInitBackend(newSELinuxWorkspaceManager(), nil),
 			func(ar string, so, se io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err

@@ -12,38 +12,6 @@ import (
 	"testing"
 )
 
-// testAppArmorBackend creates a systemInitBackend for AppArmor testing.
-// addRoot and removeRoot are the mock confinement hooks.
-func testAppArmorBackend(
-	addRoot func(string) (rootResult, error),
-	removeRoot func(string) (rootResult, error),
-) *systemInitBackend {
-	return &systemInitBackend{
-		prepare: func(canonical string) (*systemInitPrepareResult, error) {
-			addResult, err := addRoot(canonical)
-			if err != nil {
-				return nil, err
-			}
-			pr := &systemInitPrepareResult{
-				OnSuccess: func(stdout io.Writer) {
-					if addResult.Changed {
-						fmt.Fprintf(stdout, "AppArmor workspace root added: %s\n", addResult.Path)
-					} else {
-						fmt.Fprintf(stdout, "AppArmor workspace root already present: %s\n", addResult.Path)
-					}
-				},
-			}
-			if addResult.Changed {
-				pr.RollbackOnCoreFailure = func() error {
-					_, rbErr := removeRoot(addResult.Path)
-					return rbErr
-				}
-			}
-			return pr, nil
-		},
-	}
-}
-
 // --- Init core tests ---
 
 func TestInitCoreCreatesConfig(t *testing.T) {
@@ -133,7 +101,7 @@ func TestInitSystemCallsAddRoot(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			_, err := initCore(ar, so, se)
 			return err
@@ -171,7 +139,7 @@ func TestInitSystemAddRootFailure(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
@@ -215,7 +183,7 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		})
@@ -255,7 +223,7 @@ func TestInitSystemCoreFailureNoRollbackWhenNotChanged(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		})
@@ -285,7 +253,7 @@ func TestInitSystemRollbackFailureReportsBothErrors(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		})
@@ -340,7 +308,7 @@ func TestInitSystemExistingConfigMismatch(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(newRoot, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(newRoot, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			t.Error("core should not be called on config mismatch")
 			return nil
@@ -391,7 +359,7 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			_, err := initCore(ar, so, se)
 			return err
@@ -407,6 +375,62 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 	// Verify AppArmor already present message
 	if !strings.Contains(stdout.String(), "AppArmor workspace root already present") {
 		t.Errorf("expected 'already present' message, got: %s", stdout.String())
+	}
+}
+
+func TestInitSystemMultiRootPreflight(t *testing.T) {
+	// Multi-root preflight: init with rootB when config has [rootA, rootB].
+	// Prove rootB is accepted (not first-root-only), backend receives canonical rootB,
+	// and core is reached.
+	dir := t.TempDir()
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	// Create two real directories for the multi-root config.
+	rootA := testAllowedRootDir(t)
+	rootB := testAllowedRootDir(t)
+
+	// Create existing config with two roots.
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	configData := fmt.Sprintf(`{"allowed_roots": [%q, %q], "session_ttl": "12h"}`, rootA, rootB)
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Track what backend receives and what core receives.
+	var backendReceived string
+	var coreReceived string
+
+	addRoot := func(path string) (rootResult, error) {
+		backendReceived = path
+		return rootResult{Path: path, Changed: true}, nil
+	}
+	removeRoot := func(path string) (rootResult, error) {
+		t.Error("removeRoot should not be called")
+		return rootResult{}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := initSystem(rootB, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
+		func(ar string, so, se io.Writer) error {
+			coreReceived = ar
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("initSystem with rootB failed: %v", err)
+	}
+
+	// Prove rootB was accepted (not rejected as "not first").
+	if backendReceived != rootB {
+		t.Errorf("backend received %q, want canonical rootB %q", backendReceived, rootB)
+	}
+	if coreReceived != rootB {
+		t.Errorf("core received %q, want rootB %q", coreReceived, rootB)
 	}
 }
 
@@ -436,7 +460,7 @@ func TestInitSystemExistingTokenNoAppArmor(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			t.Error("core should not be called when token exists")
 			return nil
@@ -468,7 +492,7 @@ func TestInitSystemAlreadyPresent(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			_, err := initCore(ar, so, se)
 			return err
@@ -563,7 +587,7 @@ func TestInitSystemInvalidAppArmorPath(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			t.Error("core should not be called on input error from addRoot")
 			return nil
@@ -601,7 +625,7 @@ func TestInitSystemOrderingAddRootBeforeCore(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			order = append(order, "core")
 			_, err := initCore(ar, so, se)
@@ -787,7 +811,7 @@ func TestInitSystemRollbackChangedFalseNotError(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, testAppArmorBackend(addRoot, removeRoot),
+	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		})
@@ -830,7 +854,7 @@ func TestInitSystemConfigPathIsDirectory(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := initSystem(rootDir, &stdout, &stderr,
-		testAppArmorBackend(addRoot,
+		newAppArmorSystemInitBackend(addRoot,
 			func(path string) (rootResult, error) {
 				t.Error("removeRoot should not be called")
 				return rootResult{}, nil
@@ -881,7 +905,7 @@ func TestInitSystemExistingConfigReadError(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := initSystem(rootDir, &stdout, &stderr,
-		testAppArmorBackend(addRoot,
+		newAppArmorSystemInitBackend(addRoot,
 			func(path string) (rootResult, error) {
 				t.Error("removeRoot should not be called")
 				return rootResult{}, nil
@@ -933,7 +957,7 @@ func TestInitSystemExistingConfigInvalid(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := initSystem(rootDir, &stdout, &stderr,
-		testAppArmorBackend(addRoot,
+		newAppArmorSystemInitBackend(addRoot,
 			func(path string) (rootResult, error) {
 				t.Error("removeRoot should not be called")
 				return rootResult{}, nil

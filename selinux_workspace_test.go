@@ -1022,23 +1022,6 @@ func TestSELinuxWorkspaceLockAcquisitionFailure(t *testing.T) {
 
 // --- Init integration tests ---
 
-// testSELinuxBackend creates a systemInitBackend for SELinux testing.
-// mgr is the SELinux workspace manager (nil to skip preparation).
-// resolveRoot is the canonical root resolver (nil to use production default).
-func testSELinuxBackend(mgr *selinuxWorkspaceManager, resolveRoot func(string) (string, error)) *systemInitBackend {
-	return &systemInitBackend{
-		resolveRoot: resolveRoot,
-		prepare: func(canonical string) (*systemInitPrepareResult, error) {
-			if mgr != nil && !isHomeRoot(canonical) {
-				if _, err := mgr.ensureWorkspaceLabel(canonical); err != nil {
-					return nil, err
-				}
-			}
-			return &systemInitPrepareResult{}, nil
-		},
-	}
-}
-
 func syntheticResolveRoot(path string) (string, error) {
 	return path, nil
 }
@@ -1064,7 +1047,7 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 
 	var coreCalled bool
 	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		testSELinuxBackend(mgr, syntheticResolveRoot),
+		newSELinuxSystemInitBackend(mgr, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
@@ -1096,7 +1079,7 @@ func TestInitSELinuxHomeRootNoSELinuxPrep(t *testing.T) {
 
 	var coreCalled bool
 	err := initSystem("/home/alice", &bytes.Buffer{}, &bytes.Buffer{},
-		testSELinuxBackend(mgr, syntheticResolveRoot),
+		newSELinuxSystemInitBackend(mgr, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
@@ -1139,7 +1122,7 @@ func TestInitSELinuxCoreFailureNoRollback(t *testing.T) {
 	}
 
 	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		testSELinuxBackend(mgr, syntheticResolveRoot),
+		newSELinuxSystemInitBackend(mgr, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		},
@@ -1160,7 +1143,7 @@ func TestInitSELinuxNilManager(t *testing.T) {
 
 	var coreCalled string
 	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		testSELinuxBackend(nil, syntheticResolveRoot),
+		newSELinuxSystemInitBackend(nil, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			coreCalled = ar
 			return nil

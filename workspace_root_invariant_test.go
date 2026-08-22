@@ -328,7 +328,7 @@ func TestInitSystemModePassesCanonicalToCore(t *testing.T) {
 	var coreRoot, apparmorRoot string
 	var stdout, stderr bytes.Buffer
 	err = initSystem(resolved, &stdout, &stderr,
-		testAppArmorBackend(
+		newAppArmorSystemInitBackend(
 			func(path string) (rootResult, error) {
 				apparmorRoot = path
 				return rootResult{Path: path, Changed: true}, nil
