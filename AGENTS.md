@@ -76,6 +76,23 @@ Treat these as contracts unless the task explicitly changes them:
 If implementation and documentation disagree, identify which is authoritative
 before changing either.
 
+When introducing or reusing a domain error, inspect every public boundary that
+may receive it.
+
+Expected policy, input, and state errors must not silently fall through to
+generic internal-error handling.
+
+For HTTP and CLI boundaries, verify where applicable:
+- HTTP status and CLI exit code;
+- machine-readable error code;
+- stdout and stderr behavior.
+
+For transactional CLI operations, success output must be emitted only after the
+operation reaches its contractual success or commit point.
+
+If the mutation is rolled back, the command must not already have reported the
+mutation as successful.
+
 # Architecture
 
 6. Keep docker-helper narrow.
@@ -185,6 +202,12 @@ Existing databases must be considered when changing schema behavior.
 An extra historical column in an old SQLite database is acceptable if current
 queries remain compatible; do not create migration machinery solely to remove
 unused physical baggage.
+
+The warning against elaborate transaction frameworks does not permit duplicating
+transaction semantics at multiple call sites.
+
+If transaction or recovery behavior already has an owner, extend that owner.
+Consolidating transaction behavior is not "introducing a transaction framework".
 
 # Tests
 
@@ -336,6 +359,16 @@ test and answer:
 A green test suite is necessary, not sufficient evidence that new tests are
 meaningful.
 
+When behavior changes from one value to many values, mechanically converting
+tests to use the first element is not sufficient.
+
+Tests must exercise genuinely multi-value behavior, including where relevant:
+- more than one value;
+- a non-first value;
+- ordering and deduplication semantics;
+- a case that would fail if the implementation still effectively behaved as
+  single-value.
+
 # Production ownership and parallel work
 
 17. One production mechanism per responsibility.
@@ -356,11 +389,35 @@ In particular, avoid introducing a second:
 - cleanup/termination path;
 - terminal-transition mechanism;
 - path canonicalization/containment implementation;
-- operator/client path for an API that already has one.
+- operator/client path for an API that already has one;
+- configuration mutation path;
+- persistence/write transaction;
+- reload/reconciliation path;
+- rollback/recovery mechanism;
+- retry/error-classification mechanism;
+- authorization/policy evaluation path.
+
+Do not create a parallel implementation merely because the existing abstraction
+needs adaptation.
 
 A separate implementation is justified only when the semantics or trust
 boundary are genuinely different. Make that distinction explicit in the code
 and tests.
+
+Different operation-specific details do not by themselves justify a separate
+surrounding lifecycle.
+
+Differences such as:
+- input shape;
+- preflight checks;
+- mutation logic;
+- success messages;
+- individual validation rules
+
+should normally be expressed through the shared owner.
+
+A separate lifecycle is justified only when the lifecycle itself, its
+invariants, or the trust boundary are genuinely different.
 
 When a regression test depends on an obsolete implementation that is being
 consolidated away, move the test to the authoritative path rather than keeping
@@ -473,6 +530,32 @@ explicitly asks for analysis/review first.
 If the task explicitly asks for analysis, inspection, review, or says not to
 modify code, stop after the analysis and do not edit files or create commits.
 
+For non-trivial feature or refactor work, perform an explicit ownership check
+before writing code.
+
+For every affected responsibility, identify:
+- where the current behavior lives;
+- which production abstraction owns its lifecycle and invariants;
+- whether the new behavior can use that owner unchanged;
+- if not, whether that owner should be generalized.
+
+Searching only for similarly named functions is not sufficient.
+Trace the existing call path by responsibility and behavior.
+
+Do not introduce a new production path before this check.
+
+"Smallest appropriate change" means the smallest architectural change that
+preserves ownership and invariants, not necessarily the smallest diff.
+
+A smaller diff is not preferable if it creates:
+- a second owner for the same responsibility;
+- a parallel lifecycle;
+- duplicated policy or validation;
+- behavior that must later be kept in sync.
+
+Extending an existing abstraction may be the smaller architectural change even
+if it modifies more lines.
+
 23. After implementation run:
 
     gofmt
@@ -488,6 +571,12 @@ Review the final diff for unrelated changes.
 If tests were added or substantially changed, review them against the proof and
 independence requirements in the `# Tests` section before considering the task
 complete. Passing commands alone are not sufficient.
+
+Prefer typed error inspection (`errors.Is`, `errors.As`, concrete error types,
+syscall errors) over matching human-readable error strings.
+
+String matching is acceptable only when the dependency exposes no stable typed
+signal. In that case, keep the classifier narrow and document why it is needed.
 
 24. Commits.
 
@@ -522,3 +611,13 @@ before starting the next major phase, do an architecture cleanup/review:
 Do not require cleanup after every small commit.
 
 Focus on deletion and simplification over new abstractions.
+
+Post-feature architecture cleanup is a backstop, not permission to knowingly
+introduce duplicate ownership during implementation.
+
+If a change supersedes an existing production path, consolidate it during the
+current work unless compatibility explicitly requires coexistence.
+
+When replacing a path, remove obsolete production helpers, seams, tests,
+comments, and documentation that existed solely for the replaced implementation.
+Do not preserve dead implementation solely because tests depend on it.
