@@ -876,12 +876,8 @@ var errSELinuxSentinel = fmt.Errorf("selinux preflight sentinel")
 //  3. valid ADD of already-present root -> preparation invoked even though
 //     the config write is skipped (SkipWrite).
 func TestSELinuxPreflightOrdering(t *testing.T) {
-	// Use /tmp paths so isHomeRoot returns false.
-	// EffectiveUID = 0 makes resolveDeploymentMode return ModeSystem.
-	// selinuxAllowedRootPreflight seam tracks invocation.
-
 	t.Run("invalid_config_skips_selinux", func(t *testing.T) {
-		allowedRoot := testSELinuxRootDir(t)
+		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
@@ -898,9 +894,8 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		}
 		defer func() { selinuxAllowedRootPreflight = origPreflight }()
 
-		newRoot := testSELinuxRootDir(t)
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit, got 0, stdout: %s", stdout.String())
 		}
@@ -915,7 +910,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 	})
 
 	t.Run("valid_add_new_root_invokes_selinux", func(t *testing.T) {
-		allowedRoot := testSELinuxRootDir(t)
+		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
@@ -935,9 +930,8 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		}
 		defer func() { selinuxAllowedRootPreflight = origPreflight }()
 
-		newRoot := testSELinuxRootDir(t)
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit (sentinel error), got 0, stdout: %s", stdout.String())
 		}
@@ -952,9 +946,8 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 	})
 
 	t.Run("valid_add_present_root_invokes_selinux", func(t *testing.T) {
-		allowedRoot := testSELinuxRootDir(t)
 		cfg := map[string]any{
-			"allowed_roots": []string{allowedRoot},
+			"allowed_roots": []string{"/opt"},
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
@@ -972,9 +965,8 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		}
 		defer func() { selinuxAllowedRootPreflight = origPreflight }()
 
-		// Add the same root (already present).
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(allowedRoot, &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1006,26 +998,7 @@ func setupSELinuxTestEnv(t *testing.T, data []byte) string {
 	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Cleanup(func() { os.Setenv("DOCKER_HELPER_CONFIG", oldConfig) })
 
-	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	os.Setenv("XDG_RUNTIME_DIR", "")
-	t.Cleanup(func() { os.Setenv("XDG_RUNTIME_DIR", oldRuntime) })
-
 	return configPath
-}
-
-// testSELinuxRootDir creates a test directory under /workspace so
-// isHomeRoot returns false (non-home root) and workspace policy allows it.
-func testSELinuxRootDir(t *testing.T) string {
-	t.Helper()
-	dir := filepath.Join("/workspace", "test-selinux-"+t.Name())
-	if err := os.RemoveAll(dir); err != nil {
-		t.Fatalf("cannot remove old test dir: %v", err)
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatalf("cannot create test dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
 }
 
 // =============================================================================
