@@ -21,6 +21,38 @@ const (
 	configOpUnset                 // config unset FIELD
 )
 
+// configMutationResult is returned by a mutation callback to control
+// the shared transaction's write/reload behavior.
+type configMutationResult struct {
+	SkipWrite   bool   // true: skip write/reload, print message and return
+	Message     string // success message to print (may be empty if SkipWrite)
+	StartupOnly bool   // true: skip reload, print "restart required" after message
+}
+
+// configMutation is a callback that modifies the raw config under the lock.
+// The raw map has already been validated and legacy-migrated by the shared layer.
+// migrated is true if the shared layer performed a legacy allowed_root migration.
+//
+// Return values:
+//   - configMutationResult: controls write/skip and success message
+//   - error: non-nil aborts the transaction (printed to stderr, exit 1)
+//     use configUserError to return a user-facing error with exit code 2.
+type configMutation func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error)
+
+// configUserError wraps a user-facing error that should produce exit code 2
+// rather than the default exit code 1 for internal/transaction errors.
+type configUserError struct {
+	msg string
+}
+
+func (e configUserError) Error() string { return e.msg }
+
+// isConfigUserError returns true if err is a configUserError.
+func isConfigUserError(err error) bool {
+	_, ok := err.(configUserError)
+	return ok
+}
+
 // configWriter abstracts the atomic file write so tests can inject
 // failure scenarios (e.g., rollback write failure).
 type configWriter func(path string, data []byte) error
@@ -303,50 +335,6 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	configPath := getConfigPathFunc()
-
-	// Acquire process-level lock BEFORE reading config.
-	lockFile, err := acquireConfigChangeLock(configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	defer lockFile.Close()
-
-	// Read current config under lock.
-	raw, err := loadRawConfigFile(configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// Validate original raw first.
-	if err := validateRawConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// Resolve current roots with full canonicalization.
-	fc, err := decodeFileConfig(raw)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	requestedRoots, err := resolveAllowedRoots(raw, fc)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// Check if already present (but still run SELinux ensure below).
-	present := false
-	for _, r := range requestedRoots {
-		if r == canonical {
-			present = true
-			break
-		}
-	}
-
 	// SELinux workspace preparation in system mode (always, even if already present).
 	if resolveDeploymentMode() == ModeSystem && !isHomeRoot(canonical) {
 		backend, err := detectLSM()
@@ -363,100 +351,41 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// If already present and no legacy migration needed, return early.
-	if present {
-		hasLegacy := raw["allowed_root"] != nil
-		hasNew := raw["allowed_roots"] != nil
-		if !hasLegacy || hasNew {
-			// No migration needed (already canonical or both present which is rejected above).
-			fmt.Fprintf(stdout, "already present %s\n", canonical)
-			return 0
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			return configMutationResult{}, err
 		}
-		// Legacy schema present: migrate to canonical.
-	}
 
-	// Determine new roots list.
-	var newRoots []string
-	if present {
-		newRoots = requestedRoots
-	} else {
-		newRoots = append(requestedRoots, canonical)
-	}
-
-	// Migrate: remove legacy allowed_root, write canonical allowed_roots.
-	delete(raw, "allowed_root")
-	rawBytes, _ := json.Marshal(newRoots)
-	raw["allowed_roots"] = rawBytes
-
-	// Save original bytes for rollback.
-	original, err := os.ReadFile(configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
-		return 1
-	}
-
-	// Encode new config.
-	newData, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	newData = append(newData, '\n')
-
-	// Validate before writing.
-	if err := validateRawConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	if err := validateCAConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// Atomically write new config.
-	if err := safeWriteConfig(configPath, newData); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	if present {
-		fmt.Fprintf(stdout, "already present %s (legacy schema migrated)\n", canonical)
-	} else {
-		fmt.Fprintf(stdout, "added %s\n", canonical)
-	}
-
-	// Attempt reload.
-	outcome := attemptReload()
-	switch outcome.result {
-	case reloadSuccess:
-		return 0
-	case reloadDaemonNotRunning:
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-		return 0
-	case reloadRejected, reloadTransportError:
-		reloadErrStr := formatReloadError(outcome)
-		if rollErr := safeWriteConfig(configPath, original); rollErr != nil {
-			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-			fmt.Fprintf(stderr, "error: rollback write failed: %v\n", rollErr)
-			return 1
+		// Validate existing roots with full canonicalization (strict resolver).
+		// This ensures all existing roots are valid before adding a new one.
+		existingRoots, err := resolveAllowedRoots(raw, fc)
+		if err != nil {
+			return configMutationResult{}, err
 		}
-		reOutcome := attemptReload()
-		if reOutcome.result != reloadSuccess {
-			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReReloadError(reOutcome))
-			return 1
-		}
-		fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-		fmt.Fprintln(stderr, "error: config rolled back")
-		return 1
-	}
-	return 0
-}
 
-// removableRoot separates stored representation from comparison identity.
-type removableRoot struct {
-	Stored   string // original absolute stored spelling
-	Identity string // EvalSymlinks result or cleaned abs on ENOENT
+		// Check if already present.
+		present := false
+		for _, r := range existingRoots {
+			if r == canonical {
+				present = true
+				break
+			}
+		}
+
+		if present {
+			if !migrated {
+				return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("already present %s\n", canonical)}, nil
+			}
+			// Legacy migration needed: write migrated config.
+			return configMutationResult{Message: fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical)}, nil
+		}
+
+		// Add new root to canonical roots list.
+		rawBytes, _ := json.Marshal(append(existingRoots, canonical))
+		raw["allowed_roots"] = rawBytes
+		return configMutationResult{Message: fmt.Sprintf("added %s\n", canonical)}, nil
+	})
 }
 
 // configAllowedRootRemove removes a root from allowed_roots.
@@ -486,158 +415,65 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	configPath := getConfigPathFunc()
-
-	// Acquire process-level lock BEFORE reading config.
-	lockFile, err := acquireConfigChangeLock(configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	defer lockFile.Close()
-
-	// Read current config under lock.
-	raw, err := loadRawConfigFile(configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// Check for ambiguous schema (fail closed).
-	hasLegacy := raw["allowed_root"] != nil
-	hasNew := raw["allowed_roots"] != nil
-	if hasLegacy && hasNew {
-		fmt.Fprintln(stderr, "error: ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
-		return 1
-	}
-
-	// Decode stored roots.
-	fc, err := decodeFileConfig(raw)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	var storedRoots []string
-	if hasLegacy && !hasNew {
-		storedRoots = []string{fc.AllowedRootLegacy}
-	} else {
-		storedRoots = fc.AllowedRoots
-	}
-	if len(storedRoots) == 0 {
-		fmt.Fprintln(stderr, "error: allowed_roots must contain at least one entry")
-		return 1
-	}
-
-	// Build removable roots with identity resolution.
-	roots := make([]removableRoot, 0, len(storedRoots))
-	for _, r := range storedRoots {
-		if r == "" || !filepath.IsAbs(r) {
-			fmt.Fprintf(stderr, "error: invalid stored root %q\n", r)
-			return 1
-		}
-		abs, err := filepath.Abs(r)
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+		fc, err := decodeFileConfig(raw)
 		if err != nil {
-			fmt.Fprintf(stderr, "error: cannot resolve stored root %q: %v\n", r, err)
-			return 1
+			return configMutationResult{}, err
 		}
-		identity, err := filepath.EvalSymlinks(abs)
-		if err != nil {
-			if os.IsNotExist(err) {
-				identity = filepath.Clean(abs)
-			} else {
-				fmt.Fprintf(stderr, "error: cannot resolve stored root %q: %v\n", r, err)
-				return 1
+		storedRoots := fc.AllowedRoots
+		if len(storedRoots) == 0 {
+			return configMutationResult{}, fmt.Errorf("allowed_roots must contain at least one entry")
+		}
+
+		// Build removable roots with identity resolution.
+		roots := make([]removableRoot, 0, len(storedRoots))
+		for _, r := range storedRoots {
+			if r == "" || !filepath.IsAbs(r) {
+				return configMutationResult{}, fmt.Errorf("invalid stored root %q", r)
 			}
+			abs, err := filepath.Abs(r)
+			if err != nil {
+				return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r, err)
+			}
+			identity, err := filepath.EvalSymlinks(abs)
+			if err != nil {
+				if os.IsNotExist(err) {
+					identity = filepath.Clean(abs)
+				} else {
+					return configMutationResult{}, fmt.Errorf("cannot resolve stored root %q: %w", r, err)
+				}
+			}
+			roots = append(roots, removableRoot{Stored: r, Identity: identity})
 		}
-		roots = append(roots, removableRoot{Stored: r, Identity: identity})
-	}
 
-	// Find and remove the root (match by identity).
-	found := false
-	newStored := make([]string, 0, len(roots))
-	for _, rr := range roots {
-		if rr.Identity == requestedIdentity {
-			found = true
-			continue
+		// Find and remove the root (match by identity).
+		found := false
+		newStored := make([]string, 0, len(roots))
+		for _, rr := range roots {
+			if rr.Identity == requestedIdentity {
+				found = true
+				continue
+			}
+			newStored = append(newStored, rr.Stored)
 		}
-		newStored = append(newStored, rr.Stored)
-	}
 
-	if !found {
-		fmt.Fprintf(stdout, "not found %s\n", requestedIdentity)
-		return 0
-	}
-
-	// Reject removal of the final global root.
-	if len(newStored) == 0 {
-		fmt.Fprintln(stderr, "error: cannot remove the last allowed root")
-		return 2
-	}
-
-	// Migrate: remove legacy allowed_root, write canonical allowed_roots.
-	delete(raw, "allowed_root")
-	rawBytes, _ := json.Marshal(newStored)
-	raw["allowed_roots"] = rawBytes
-
-	// Save original bytes for rollback.
-	original, err := os.ReadFile(configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
-		return 1
-	}
-
-	// Encode new config.
-	newData, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	newData = append(newData, '\n')
-
-	// Validate before writing.
-	if err := validateRawConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	if err := validateCAConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// Atomically write new config.
-	if err := safeWriteConfig(configPath, newData); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	fmt.Fprintf(stdout, "removed %s\n", requestedIdentity)
-
-	// Attempt reload.
-	outcome := attemptReload()
-	switch outcome.result {
-	case reloadSuccess:
-		return 0
-	case reloadDaemonNotRunning:
-		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
-		return 0
-	case reloadRejected, reloadTransportError:
-		reloadErrStr := formatReloadError(outcome)
-		if rollErr := safeWriteConfig(configPath, original); rollErr != nil {
-			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-			fmt.Fprintf(stderr, "error: rollback write failed: %v\n", rollErr)
-			return 1
+		if !found {
+			if migrated {
+				// Write the migration, report not found.
+				return configMutationResult{Message: fmt.Sprintf("not found %s\n", requestedIdentity)}, nil
+			}
+			return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("not found %s\n", requestedIdentity)}, nil
 		}
-		reOutcome := attemptReload()
-		if reOutcome.result != reloadSuccess {
-			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReReloadError(reOutcome))
-			return 1
+
+		// Reject removal of the final global root.
+		if len(newStored) == 0 {
+			return configMutationResult{}, configUserError{"cannot remove the last allowed root"}
 		}
-		fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-		fmt.Fprintln(stderr, "error: config rolled back")
-		return 1
-	}
-	return 0
+
+		rawBytes, _ := json.Marshal(newStored)
+		raw["allowed_roots"] = rawBytes
+		return configMutationResult{Message: fmt.Sprintf("removed %s\n", requestedIdentity)}, nil
+	})
 }
 
 // loadRawConfig reads config.json from disk as a raw JSON map.
@@ -1213,22 +1049,31 @@ func formatReReloadError(r reloadOutcome) string {
 	}
 }
 
-// applyConfigChangeTransactionally performs the atomic write + reload + rollback
-// transaction for a config set/unset operation.
+// removableRoot separates stored representation from comparison identity.
+type removableRoot struct {
+	Stored   string // original absolute stored spelling
+	Identity string // EvalSymlinks result or cleaned abs on ENOENT
+}
+
+// executeConfigTransaction is the shared config mutation transaction executor.
+// It owns the entire read-modify-write-reload-rollback lifecycle under a
+// single process-level lock.
 //
-// The entire read-modify-write-reload-rollback cycle runs under a single
-// process-level lock to serialize concurrent config mutations.
+// The mutation callback receives the raw config map after legacy migration
+// (if any). It modifies the map in place and returns a result controlling
+// whether the write/reload should proceed.
 //
-// It returns exit code 0 on success, 1 on failure.
-func applyConfigChangeTransactionally(
-	op configOp,
-	field string,
-	value string,
-	newValue json.RawMessage,
-	modify func(map[string]json.RawMessage),
-	writeFn configWriter,
-	stdout, stderr io.Writer,
-) int {
+// The caller provides only operation-specific logic:
+// - path validation/canonicalization (before calling this function);
+// - collection mutation and idempotency checks;
+// - operation-specific success output.
+//
+// writeFn is the atomic write function (safeWriteConfig in production,
+// injectable for tests).
+//
+// It returns exit code 0 on success, 1 on transaction/internal error,
+// 2 on user-facing error (wrapped in configUserError).
+func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mutate configMutation) int {
 	configPath := getConfigPathFunc()
 
 	// Acquire process-level lock BEFORE reading config.
@@ -1255,17 +1100,15 @@ func applyConfigChangeTransactionally(
 	}
 
 	// Migrate legacy allowed_root to allowed_roots if present.
-	// This must happen BEFORE the unchanged check so that a successful
+	// This must happen BEFORE the mutation so that a successful
 	// mutation always produces canonical config.
-	schemaChanged := false
+	migrated := false
 	if hasLegacy && !hasNew {
-		// Migrate: decode legacy value, canonicalize, write as allowed_roots array.
 		var legacyVal string
 		if err := json.Unmarshal(raw["allowed_root"], &legacyVal); err != nil {
 			fmt.Fprintf(stderr, "error: cannot parse allowed_root: %v\n", err)
 			return 1
 		}
-		// Canonicalize the legacy value (fail closed on error).
 		canon, canonErr := canonicalizeWorkspaceRootForAdd(legacyVal)
 		if canonErr != nil {
 			fmt.Fprintf(stderr, "error: cannot canonicalize allowed_root %q: %v\n", legacyVal, canonErr)
@@ -1274,67 +1117,27 @@ func applyConfigChangeTransactionally(
 		newRoots, _ := json.Marshal([]string{canon})
 		raw["allowed_roots"] = newRoots
 		delete(raw, "allowed_root")
-		schemaChanged = true
+		migrated = true
 	}
 
-	// Apply modification tentatively to check if it repairs the config.
-	tempRaw := make(map[string]json.RawMessage)
-	for k, v := range raw {
-		tempRaw[k] = v
-	}
-	modify(tempRaw)
-
-	// Validate after mutation. If the mutation repairs the config, this passes.
-	if err := validateRawConfig(tempRaw); err != nil {
+	// Execute mutation.
+	result, err := mutate(raw, migrated)
+	if err != nil {
+		if isConfigUserError(err) {
+			fmt.Fprintf(stderr, "error: %s\n", err.Error())
+			return 2
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	// Check unchanged AFTER migration.
-	// Distinguish fieldChanged vs schemaChanged.
-	// Only return without writing when BOTH are false.
-	fieldChanged := false
-	if op == configOpSet && newValue != nil {
-		if existing, ok := raw[field]; !ok || !bytes.Equal(existing, newValue) {
-			fieldChanged = true
-		}
-	} else if op == configOpUnset {
-		if _, ok := raw[field]; ok {
-			fieldChanged = true
-		}
-	}
-
-	if !fieldChanged && !schemaChanged {
-		// Truly unchanged: no field change and no schema migration needed.
-		if err := validateCAConfig(raw); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
-		if op == configOpUnset {
-			fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
-		} else {
-			fmt.Fprintf(stdout, "unchanged %s=%s\n", field, value)
+	// Skip write: print message and return.
+	if result.SkipWrite {
+		if result.Message != "" {
+			fmt.Fprint(stdout, result.Message)
 		}
 		return 0
 	}
-
-	// Save original bytes for rollback.
-	original, err := os.ReadFile(configPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
-		return 1
-	}
-
-	// Apply modification.
-	modify(raw)
-
-	// Encode new config.
-	newData, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	newData = append(newData, '\n')
 
 	// Validate before writing.
 	if err := validateRawConfig(raw); err != nil {
@@ -1346,18 +1149,31 @@ func applyConfigChangeTransactionally(
 		return 1
 	}
 
+	// Save original bytes for rollback.
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
+		return 1
+	}
+
+	// Encode new config.
+	newData, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	newData = append(newData, '\n')
+
 	// Atomically write new config.
 	if err := writeFn(configPath, newData); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	// http_address is startup-only: no reload.
-	if field == "http_address" {
-		if op == configOpSet {
-			fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
-		} else {
-			fmt.Fprintln(stdout, "unset", field)
+	// Startup-only fields: no reload, print message immediately.
+	if result.StartupOnly {
+		if result.Message != "" {
+			fmt.Fprint(stdout, result.Message)
 		}
 		fmt.Fprintln(stdout, "restart required")
 		return 0
@@ -1367,38 +1183,18 @@ func applyConfigChangeTransactionally(
 	outcome := attemptReload()
 	switch outcome.result {
 	case reloadSuccess:
-		if op == configOpSet {
-			if fieldChanged {
-				fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
-			} else {
-				fmt.Fprintf(stdout, "unchanged %s=%s; configuration schema migrated\n", field, value)
-			}
-		} else {
-			if fieldChanged {
-				fmt.Fprintln(stdout, "unset", field)
-			} else {
-				fmt.Fprintf(stdout, "unchanged %s is already unset; configuration schema migrated\n", field)
-			}
+		if result.Message != "" {
+			fmt.Fprint(stdout, result.Message)
 		}
 		return 0
 	case reloadDaemonNotRunning:
-		if op == configOpSet {
-			if fieldChanged {
-				fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
-			} else {
-				fmt.Fprintf(stdout, "unchanged %s=%s; configuration schema migrated\n", field, value)
-			}
-		} else {
-			if fieldChanged {
-				fmt.Fprintln(stdout, "unset", field)
-			} else {
-				fmt.Fprintf(stdout, "unchanged %s is already unset; configuration schema migrated\n", field)
-			}
+		if result.Message != "" {
+			fmt.Fprint(stdout, result.Message)
 		}
 		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		return 0
 	case reloadRejected, reloadTransportError:
-		// Always print the initial reload failure reason first.
+		// Print the initial reload failure reason first.
 		reloadErrStr := formatReloadError(outcome)
 
 		// Rollback: restore original bytes.
@@ -1422,6 +1218,93 @@ func applyConfigChangeTransactionally(
 	}
 
 	return 0
+}
+
+// applyConfigChangeTransactionally performs the atomic write + reload + rollback
+// transaction for a config set/unset operation.
+//
+// The entire read-modify-write-reload-rollback cycle runs under a single
+// process-level lock to serialize concurrent config mutations.
+//
+// It returns exit code 0 on success, 1 on failure.
+func applyConfigChangeTransactionally(
+	op configOp,
+	field string,
+	value string,
+	newValue json.RawMessage,
+	modify func(map[string]json.RawMessage),
+	writeFn configWriter,
+	stdout, stderr io.Writer,
+) int {
+	startupOnly := field == "http_address"
+
+	return executeConfigTransaction(stdout, stderr, writeFn, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+		// Apply modification tentatively to check if it repairs the config.
+		tempRaw := make(map[string]json.RawMessage)
+		for k, v := range raw {
+			tempRaw[k] = v
+		}
+		modify(tempRaw)
+
+		// Validate after mutation. If the mutation repairs the config, this passes.
+		if err := validateRawConfig(tempRaw); err != nil {
+			return configMutationResult{}, err
+		}
+
+		// Check unchanged AFTER migration.
+		// Distinguish fieldChanged vs schemaChanged.
+		// Only return without writing when BOTH are false.
+		fieldChanged := false
+		if op == configOpSet && newValue != nil {
+			if existing, ok := raw[field]; !ok || !bytes.Equal(existing, newValue) {
+				fieldChanged = true
+			}
+		} else if op == configOpUnset {
+			if _, ok := raw[field]; ok {
+				fieldChanged = true
+			}
+		}
+
+		if !fieldChanged && !migrated {
+			// Truly unchanged: no field change and no schema migration needed.
+			if err := validateCAConfig(raw); err != nil {
+				return configMutationResult{}, err
+			}
+			if op == configOpUnset {
+				return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("unchanged %s is already unset\n", field)}, nil
+			}
+			return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("unchanged %s=%s\n", field, value)}, nil
+		}
+
+		// Apply modification.
+		modify(raw)
+
+		// Validate CA config (for repair mutations).
+		if err := validateCAConfig(raw); err != nil {
+			return configMutationResult{}, err
+		}
+
+		// Determine success message.
+		var msg string
+		if op == configOpSet {
+			if fieldChanged {
+				msg = fmt.Sprintf("updated %s=%s\n", field, value)
+			} else {
+				msg = fmt.Sprintf("unchanged %s=%s; configuration schema migrated\n", field, value)
+			}
+		} else {
+			if fieldChanged {
+				msg = fmt.Sprintf("unset %s\n", field)
+			} else {
+				msg = fmt.Sprintf("unchanged %s is already unset; configuration schema migrated\n", field)
+			}
+		}
+
+		return configMutationResult{
+			Message:     msg,
+			StartupOnly: startupOnly,
+		}, nil
+	})
 }
 
 // attemptReload calls POST /reload and returns a structured result with error.

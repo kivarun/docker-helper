@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -487,6 +489,157 @@ func TestInitForbiddenUserRootFailsBeforeState(t *testing.T) {
 	tokenPath := filepath.Join(dir, "admin.token")
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Error("token should not be created for forbidden root")
+	}
+}
+
+// =============================================================================
+// Transactional semantics: ADD/REMOVE use shared config transaction
+// =============================================================================
+
+func TestAllowedRootAddReloadRejectedRollback(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	// Set up config with allowed_roots for the test.
+	allowedRoot := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []string{allowedRoot},
+		"session_ttl":   "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := make([]byte, len(data))
+	copy(original, data)
+
+	// Mock server: reject reload.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	newRoot := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "allowed-root", "add", newRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d, stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "added") {
+		t.Error("must not print 'added' on reload rejection")
+	}
+	if !strings.Contains(stderr.String(), "rolled back") {
+		t.Errorf("expected 'rolled back' in stderr, got: %s", stderr.String())
+	}
+
+	// Verify config was rolled back.
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config.json should be byte-for-byte restored after rollback")
+	}
+}
+
+func TestAllowedRootRemoveReloadRejectedRollback(t *testing.T) {
+	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	// Set up config with two roots.
+	allowedRoot := testAllowedRootDir(t)
+	extraRoot := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []string{allowedRoot, extraRoot},
+		"session_ttl":   "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := make([]byte, len(data))
+	copy(original, data)
+
+	// Mock server: reject reload.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "allowed-root", "remove", extraRoot}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d, stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "removed") {
+		t.Error("must not print 'removed' on reload rejection")
+	}
+	if !strings.Contains(stderr.String(), "rolled back") {
+		t.Errorf("expected 'rolled back' in stderr, got: %s", stderr.String())
+	}
+
+	// Verify config was rolled back.
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config.json should be byte-for-byte restored after rollback")
+	}
+}
+
+func TestAllowedRootAddDaemonNotRunning(t *testing.T) {
+	configPath := setupConfigTestWithData(t, nil)
+
+	// Set up config with one root.
+	allowedRoot := testAllowedRootDir(t)
+	cfg := map[string]any{
+		"allowed_roots": []string{allowedRoot},
+		"session_ttl":   "12h",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure XDG_RUNTIME_DIR is set so the socket path exists but daemon doesn't.
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "runtime"))
+
+	newRoot := testAllowedRootDir(t)
+	stdout, _ := runConfigCLI(t, 0, "config", "allowed-root", "add", newRoot)
+	if !strings.Contains(stdout, "added "+newRoot) {
+		t.Errorf("expected 'added %s', got: %s", newRoot, stdout)
+	}
+	if !strings.Contains(stdout, "daemon not running") {
+		t.Errorf("expected 'daemon not running' in output, got: %s", stdout)
+	}
+
+	// Verify config was persisted.
+	raw := readConfigJSON(t, configPath)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatalf("cannot parse allowed_roots: %v", err)
+	}
+	if len(roots) != 2 || !contains(roots, allowedRoot) || !contains(roots, newRoot) {
+		t.Errorf("expected both roots, got %v", roots)
 	}
 }
 
