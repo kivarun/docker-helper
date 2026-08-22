@@ -2454,11 +2454,9 @@ func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
 
 	waitForDialReady(t, "unix", socketPath)
 
-	// 4. Create a CA file outside /etc/docker-helper.
+	// 4. Create a valid CA file outside /etc/docker-helper.
 	caFile := filepath.Join(t.TempDir(), "outside-ca.pem")
-	if err := os.WriteFile(caFile, []byte("FAKE-CA-CONTENT"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	generateTestCAPEM(t, caFile)
 
 	// 5. Switch EffectiveUID to 0 (system mode) for the reload attempt.
 	origEffectiveUID := EffectiveUID
@@ -2538,5 +2536,13 @@ func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
 	}
 	if currentConfig.TrustedCAPath != originalConfig.TrustedCAPath {
 		t.Errorf("TrustedCAPath changed: got %q, want %q", currentConfig.TrustedCAPath, originalConfig.TrustedCAPath)
+	}
+
+	// 12. Prove the rejection was caused by the system CA source containment
+	//     policy, not an unrelated later failure. The operational log contains
+	//     the error from validateSystemCASourcePath.
+	opLogs := opBuf.String()
+	if !strings.Contains(opLogs, systemCASourceRoot) {
+		t.Errorf("expected reload error log to contain %q (system CA source policy), got:\n%s", systemCASourceRoot, opLogs)
 	}
 }
