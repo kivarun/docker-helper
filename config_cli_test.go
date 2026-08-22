@@ -36,6 +36,9 @@ func setupConfigTestWithData(t *testing.T, data []byte) string {
 	// user-mode docker-helper socket. Tests that need XDG_RUNTIME_DIR
 	// empty must set it AFTER calling this helper.
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+	if err := os.MkdirAll(filepath.Join(dir, "runtime", "docker-helper"), 0700); err != nil {
+		t.Fatalf("cannot create runtime dir: %v", err)
+	}
 
 	// Prevent tests from reaching a real system daemon.
 	origSocket := systemSocketExists

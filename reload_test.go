@@ -277,7 +277,7 @@ func TestIsDaemonNotRunning(t *testing.T) {
 		{fmt.Errorf("invalid config"), false},
 		{fmt.Errorf("no such file or directory"), true},
 		// Too-long Unix socket path causes EINVAL, must NOT be daemon-not-running.
-		{fmt.Errorf("dial unix /very/long/path/that/exceeds/unix/socket/limit/docker-helper/docker-helper.sock: connect: invalid argument"), false},
+		{fmt.Errorf("dial unix /very/long/path/that/exceeds/unix/socket/limit/this/is/a/very/long/path/that/is/definitely/over/108/characters/docker-helper/docker-helper.sock: connect: invalid argument"), false},
 	}
 
 	for _, tt := range tests {

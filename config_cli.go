@@ -1368,16 +1368,32 @@ func applyConfigChangeTransactionally(
 	switch outcome.result {
 	case reloadSuccess:
 		if op == configOpSet {
-			fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+			if fieldChanged {
+				fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+			} else {
+				fmt.Fprintf(stdout, "unchanged %s=%s; configuration schema migrated\n", field, value)
+			}
 		} else {
-			fmt.Fprintln(stdout, "unset", field)
+			if fieldChanged {
+				fmt.Fprintln(stdout, "unset", field)
+			} else {
+				fmt.Fprintf(stdout, "unchanged %s is already unset; configuration schema migrated\n", field)
+			}
 		}
 		return 0
 	case reloadDaemonNotRunning:
 		if op == configOpSet {
-			fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+			if fieldChanged {
+				fmt.Fprintf(stdout, "updated %s=%s\n", field, value)
+			} else {
+				fmt.Fprintf(stdout, "unchanged %s=%s; configuration schema migrated\n", field, value)
+			}
 		} else {
-			fmt.Fprintln(stdout, "unset", field)
+			if fieldChanged {
+				fmt.Fprintln(stdout, "unset", field)
+			} else {
+				fmt.Fprintf(stdout, "unchanged %s is already unset; configuration schema migrated\n", field)
+			}
 		}
 		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
 		return 0
@@ -1440,7 +1456,26 @@ func isDaemonNotRunning(err error) bool {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "connection refused") ||
+	if strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "no such file") ||
-		strings.Contains(msg, "no such file or directory")
+		strings.Contains(msg, "no such file or directory") {
+		return true
+	}
+	// "invalid argument" can be caused by missing socket file OR too-long path.
+	// Distinguish: if the path in the error message is suspiciously long (>108 chars),
+	// it's likely a path-too-long error, not a missing-socket error.
+	if strings.Contains(msg, "invalid argument") {
+		// Check if this is a dial unix error with a reasonable path length.
+		// Unix socket paths are limited to ~108 bytes on Linux.
+		// If the path in the error is shorter than that, it's likely a missing socket.
+		// Allow some margin for test temp directories.
+		const maxUnixPathLen = 140
+		if idx := strings.Index(msg, "dial unix "); idx >= 0 {
+			rest := msg[idx+len("dial unix "):]
+			if spaceIdx := strings.Index(rest, ":"); spaceIdx > 0 && spaceIdx < maxUnixPathLen {
+				return true
+			}
+		}
+	}
+	return false
 }
