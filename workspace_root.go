@@ -33,7 +33,6 @@ var forbiddenSystemTrees = []string{
 // workspace roots themselves, but their subdirectories are allowed.
 var forbiddenWideNamespaces = []string{
 	"/home",
-	"/opt",
 	"/srv",
 	"/mnt",
 	"/media",
@@ -43,7 +42,6 @@ var forbiddenWideNamespaces = []string{
 // as workspace roots. Non-root users are still blocked.
 var adminWideNamespaceOverrides = []string{
 	"/home",
-	"/opt",
 }
 
 func isAdminWideNamespaceOverride(ns string) bool {

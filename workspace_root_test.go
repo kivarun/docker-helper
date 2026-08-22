@@ -49,10 +49,9 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 		{"under proc", "/proc/1", true, "under forbidden system directory"},
 		{"under sys", "/sys/kernel", true, "under forbidden system directory"},
 
-		// Forbidden wide namespaces (exact match only) — /home and /opt
-		// are exempted for root via admin bypass.
+		// Forbidden wide namespaces (exact match only) — /home
+		// is exempted for root via admin bypass. /opt is now allowed.
 		{"wide namespace home", "/home", !isRoot, "too broad"},
-		{"wide namespace opt", "/opt", !isRoot, "too broad"},
 		{"wide namespace srv", "/srv", true, "too broad"},
 		{"wide namespace mnt", "/mnt", true, "too broad"},
 		{"wide namespace media", "/media", true, "too broad"},
@@ -61,6 +60,7 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 		{"sub of home", "/home/user", false, ""},
 		{"sub of home deep", "/home/user/workspaces", false, ""},
 		{"sub of opt", "/opt/project", false, ""},
+		{"opt allowed", "/opt", false, ""},
 		{"sub of srv", "/srv/data", false, ""},
 		{"sub of mnt", "/mnt/data", false, ""},
 		{"sub of media", "/media/usb", false, ""},
@@ -105,6 +105,8 @@ func TestValidateWorkspaceRootPolicy(t *testing.T) {
 		{"relative path dot", "./path", true},
 		{"valid abs", "/data/work", false},
 		{"valid home subdir", "/home/user/work", false},
+		{"valid opt", "/opt", false},
+		{"valid opt subdir", "/opt/agents", false},
 		{"forbidden root", "/", true},
 		{"forbidden system", "/etc", true},
 		{"forbidden under system", "/etc/passwd", true},
@@ -218,13 +220,6 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 		}
 	})
 
-	t.Run("root allowed opt", func(t *testing.T) {
-		EffectiveUID = func() int { return 0 }
-		if err := isForbiddenWorkspaceRoot("/opt"); err != nil {
-			t.Errorf("root /opt should be allowed, got: %v", err)
-		}
-	})
-
 	t.Run("root still blocked srv", func(t *testing.T) {
 		EffectiveUID = func() int { return 0 }
 		err := isForbiddenWorkspaceRoot("/srv")
@@ -257,11 +252,17 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 		}
 	})
 
-	t.Run("non-root blocked opt", func(t *testing.T) {
+	t.Run("opt allowed for root", func(t *testing.T) {
+		EffectiveUID = func() int { return 0 }
+		if err := isForbiddenWorkspaceRoot("/opt"); err != nil {
+			t.Errorf("root /opt should be allowed, got: %v", err)
+		}
+	})
+
+	t.Run("opt allowed for non-root", func(t *testing.T) {
 		EffectiveUID = func() int { return 1000 }
-		err := isForbiddenWorkspaceRoot("/opt")
-		if err == nil {
-			t.Error("non-root /opt should be blocked")
+		if err := isForbiddenWorkspaceRoot("/opt"); err != nil {
+			t.Errorf("non-root /opt should be allowed, got: %v", err)
 		}
 	})
 }
