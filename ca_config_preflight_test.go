@@ -778,9 +778,98 @@ func TestIsPathContainedUnderRejectsRoot(t *testing.T) {
 	}
 }
 
+func TestValidateSystemCASourcePathUnder(t *testing.T) {
+	// Test the canonical containment semantics using a temp root.
+	root := t.TempDir()
+	insideFile := filepath.Join(root, "subdir", "file.crt")
+	if err := os.MkdirAll(filepath.Dir(insideFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside root pointing to file still inside root.
+	insideTarget := filepath.Join(root, "real.crt")
+	if err := os.WriteFile(insideTarget, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	insideLink := filepath.Join(root, "link-inside.crt")
+	if err := os.Symlink(insideTarget, insideLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside root pointing to outside file.
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.crt")
+	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outsideLink := filepath.Join(root, "link-outside.crt")
+	if err := os.Symlink(outsideFile, outsideLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Similarly-prefixed path outside the root.
+	similarRoot := root + "-other"
+	if err := os.MkdirAll(similarRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	similarFile := filepath.Join(similarRoot, "file.crt")
+	if err := os.WriteFile(similarFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{
+			name: "file inside root passes",
+			path: insideFile,
+		},
+		{
+			name: "symlink inside -> inside passes",
+			path: insideLink,
+		},
+		{
+			name:    "symlink inside -> outside fails",
+			path:    outsideLink,
+			wantErr: true,
+		},
+		{
+			name:    "similarly-prefixed sibling fails",
+			path:    similarFile,
+			wantErr: true,
+		},
+		{
+			name:    "path == root fails",
+			path:    root,
+			wantErr: true,
+		},
+		{
+			name:    "nonexistent file fails",
+			path:    filepath.Join(root, "nope.crt"),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSystemCASourcePathUnder(tt.path, root)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateSystemCASourcePathUnder(%q, %q) error = %v, wantErr %v", tt.path, root, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoadConfigSystemModeRejectsOutsideCA(t *testing.T) {
 	// loadConfig in system mode must reject trusted_ca_path outside
 	// /etc/docker-helper, even when config was written manually.
+	// The system CA source check runs before runtime dir creation,
+	// so we do not need to mock getRuntimeDir.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	caPath := filepath.Join(dir, "test-ca.crt")
@@ -808,67 +897,9 @@ func TestLoadConfigSystemModeRejectsOutsideCA(t *testing.T) {
 	getConfigPathFunc = func() string { return configPath }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Mock runtime dir to avoid /run/docker-helper creation.
-	origGetRuntime := getRuntimeDirFunc
-	runtimeDir := filepath.Join(dir, "runtime")
-	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
-	defer func() { getRuntimeDirFunc = origGetRuntime }()
-
 	_, err := loadConfig()
 	if err == nil {
 		t.Fatal("loadConfig should reject CA outside /etc/docker-helper in system mode")
-	}
-	if !strings.Contains(err.Error(), systemCASourceRoot) {
-		t.Errorf("expected error mentioning %s, got: %v", systemCASourceRoot, err)
-	}
-}
-
-func TestLoadConfigSystemModeRejectsSymlinkEscape(t *testing.T) {
-	// loadConfig in system mode must reject a symlink under the allowed
-	// root that resolves to a file outside.
-	allowedRoot := t.TempDir()
-	outsideDir := t.TempDir()
-	outsideCA := filepath.Join(outsideDir, "outside-ca.crt")
-	generateTestCAPEM(t, outsideCA)
-
-	// Symlink inside allowed root pointing to outside file.
-	linkCA := filepath.Join(allowedRoot, "link-ca.crt")
-	if err := os.Symlink(outsideCA, linkCA); err != nil {
-		t.Fatal(err)
-	}
-
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-
-	// Manually write config.
-	cfg := map[string]any{
-		"allowed_root":         testAllowedRootDir(t),
-		"session_ttl":          "12h",
-		"trusted_ca_path":      linkCA,
-		"trusted_ca_injection": "auto",
-	}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Mock system mode.
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = origUID }()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return configPath }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	origGetRuntime := getRuntimeDirFunc
-	runtimeDir := filepath.Join(dir, "runtime")
-	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
-	defer func() { getRuntimeDirFunc = origGetRuntime }()
-
-	_, err := loadConfig()
-	if err == nil {
-		t.Fatal("loadConfig should reject symlink escape in system mode")
 	}
 	if !strings.Contains(err.Error(), systemCASourceRoot) {
 		t.Errorf("expected error mentioning %s, got: %v", systemCASourceRoot, err)
@@ -903,16 +934,11 @@ func TestLoadConfigUserModeAcceptsArbitraryCA(t *testing.T) {
 	getConfigPathFunc = func() string { return configPath }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	origGetRuntime := getRuntimeDirFunc
+	// Use XDG environment variables for user mode paths.
 	runtimeDir := filepath.Join(dir, "runtime")
-	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
-	defer func() { getRuntimeDirFunc = origGetRuntime }()
-
-	// Mock state dir.
-	origGetState := getStateDirFunc
 	stateDir := filepath.Join(dir, "state")
-	getStateDirFunc = func() string { return stateDir }
-	defer func() { getStateDirFunc = origGetState }()
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
+	t.Setenv("XDG_STATE_HOME", stateDir)
 
 	loaded, err := loadConfig()
 	if err != nil {

@@ -241,9 +241,6 @@ func getConfigDir() string {
 	return filepath.Dir(getConfigPathFunc())
 }
 
-// getRuntimeDirFunc is injectable for testing.
-var getRuntimeDirFunc = getRuntimeDir
-
 func getRuntimeDir() (string, error) {
 	mode := resolveDeploymentMode()
 	if mode == ModeSystem {
@@ -256,9 +253,6 @@ func getRuntimeDir() (string, error) {
 	}
 	return filepath.Join(dir, "docker-helper"), nil
 }
-
-// getStateDirFunc is injectable for testing.
-var getStateDirFunc = getStateDir
 
 func getStateDir() string {
 	mode := resolveDeploymentMode()
@@ -341,7 +335,20 @@ func loadConfig() (*Config, error) {
 	}
 
 	mode := resolveDeploymentMode()
-	runtimeDir, err := getRuntimeDirFunc()
+
+	// System-mode CA source-path policy: enforce canonical containment
+	// under /etc/docker-helper before runtime directory creation or any CA I/O.
+	// This protects against manually edited config.json bypassing CLI preflight.
+	if mode == ModeSystem && trustedCAInjection == "auto" {
+		if fc.TrustedCAPath == "" {
+			return nil, fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
+		}
+		if err := validateSystemCASourcePath(fc.TrustedCAPath); err != nil {
+			return nil, err
+		}
+	}
+
+	runtimeDir, err := getRuntimeDir()
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +364,7 @@ func loadConfig() (*Config, error) {
 		}
 	}
 
-	stateDir := getStateDirFunc()
+	stateDir := getStateDir()
 
 	// Derive configDir from configPath so DOCKER_HELPER_CONFIG is respected.
 	configDir := filepath.Dir(configPath)
@@ -389,16 +396,6 @@ func loadConfig() (*Config, error) {
 
 	// Prepare CA injection if enabled.
 	if trustedCAInjection == "auto" {
-		if cfg.TrustedCAPath == "" {
-			return nil, fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
-		}
-		// System-mode CA source-path policy: enforce canonical containment
-		// under /etc/docker-helper before any CA file I/O.
-		if mode == ModeSystem {
-			if err := validateSystemCASourcePath(cfg.TrustedCAPath); err != nil {
-				return nil, err
-			}
-		}
 		preparedDir, err := prepareCAInjection(runtimeDir, cfg.TrustedCAPath)
 		if err != nil {
 			return nil, &trustedCAPreparationError{Err: err}
@@ -1456,8 +1453,14 @@ func validateCAConfigWithHasher(
 // canonically contained under the system CA source root (/etc/docker-helper).
 // Symlink escapes outside the root are rejected.
 func validateSystemCASourcePath(caPath string) error {
+	return validateSystemCASourcePathUnder(caPath, systemCASourceRoot)
+}
+
+// validateSystemCASourcePathUnder is like validateSystemCASourcePath but
+// accepts an explicit root for testing. Production always uses systemCASourceRoot.
+func validateSystemCASourcePathUnder(caPath, root string) error {
 	// Check containment of the path under the system CA source root.
-	contained, err := isPathContainedUnder(caPath, systemCASourceRoot)
+	contained, err := isPathContainedUnder(caPath, root)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
@@ -1465,7 +1468,7 @@ func validateSystemCASourcePath(caPath string) error {
 		return fmt.Errorf("cannot resolve trusted_ca_path: %w", err)
 	}
 	if !contained {
-		return fmt.Errorf("system mode trusted_ca_path must be under %s: %s", systemCASourceRoot, caPath)
+		return fmt.Errorf("system mode trusted_ca_path must be under %s: %s", root, caPath)
 	}
 
 	// Verify the final resolved path is a regular file.
