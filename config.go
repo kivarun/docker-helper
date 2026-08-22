@@ -1237,7 +1237,9 @@ func validateCAConfig(raw map[string]json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	computeOpenSSLHash(cert)
+	if _, err := computeOpenSSLHash(cert); err != nil {
+		return fmt.Errorf("CA certificate subject hash computation failed: %w", err)
+	}
 
 	return nil
 }
