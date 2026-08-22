@@ -5191,11 +5191,10 @@ func TestReleaseWorkflow(t *testing.T) {
 	}
 }
 
-// TestReleaseJobSELinuxBuildDeps verifies that the release job itself
-// installs the SELinux policy build dependencies (checkpolicy, semodule-utils)
-// before calling build-packages.sh. This is scoped to the release job section
-// to prevent a false positive from another job (e.g., selinux-policy) installing
-// the same packages.
+// TestReleaseJobSELinuxBuildDeps verifies that the release job's
+// "Install build dependencies" step installs checkpolicy and semodule-utils
+// before the "Build native packages" step. The assertion is scoped to that
+// specific step's run block so a mention in another step or job cannot satisfy it.
 func TestReleaseJobSELinuxBuildDeps(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
@@ -5203,77 +5202,154 @@ func TestReleaseJobSELinuxBuildDeps(t *testing.T) {
 	}
 	content := string(data)
 
-	// Extract the release job section by finding "release:" at the top level
-	// (indented under "jobs:") and capturing everything until the next top-level
-	// job key or end of file.
-	releaseJob := extractReleaseJob(content)
+	// Locate the release job section.
+	releaseJob := findJobSection(content, "release")
 	if releaseJob == "" {
 		t.Fatal("could not locate release job in release.yml")
 	}
 
-	// The release job must install checkpolicy and semodule-utils.
-	if !strings.Contains(releaseJob, "checkpolicy") {
-		t.Error("release job must install checkpolicy (provides checkmodule)")
-	}
-	if !strings.Contains(releaseJob, "semodule-utils") {
-		t.Error("release job must install semodule-utils (provides semodule_package)")
+	// Locate the "Install build dependencies" step within the release job.
+	installStep := findStepBlock(releaseJob, "Install build dependencies")
+	if installStep == "" {
+		t.Fatal("release job must contain 'Install build dependencies' step")
 	}
 
-	// The dependency install step must appear before build-packages.sh.
-	installIdx := strings.Index(releaseJob, "apt-get install")
-	buildIdx := strings.Index(releaseJob, "build-packages.sh")
-	if installIdx < 0 {
-		t.Fatal("release job must contain apt-get install step")
+	// Extract the run block of that step.
+	runBlock := extractRunBlock(installStep)
+	if runBlock == "" {
+		t.Fatal("'Install build dependencies' step must have a run block")
 	}
-	if buildIdx < 0 {
-		t.Fatal("release job must call build-packages.sh")
+
+	// The apt-get install command in the run block must install all three packages.
+	for _, pkg := range []string{"musl-tools", "checkpolicy", "semodule-utils"} {
+		if !strings.Contains(runBlock, pkg) {
+			t.Errorf("Install build dependencies run block must install %s", pkg)
+		}
 	}
-	if installIdx > buildIdx {
-		t.Error("release job must install build dependencies before build-packages.sh")
+
+	// The "Build native packages" step must exist and come after the install step.
+	buildStep := findStepBlock(releaseJob, "Build native packages")
+	if buildStep == "" {
+		t.Fatal("release job must contain 'Build native packages' step")
+	}
+	if !strings.Contains(buildStep, "build-packages.sh") {
+		t.Fatal("'Build native packages' step must call build-packages.sh")
+	}
+
+	// Verify ordering: install step must precede build step in the release job.
+	installPos := strings.Index(releaseJob, "Install build dependencies")
+	buildPos := strings.Index(releaseJob, "Build native packages")
+	if installPos < 0 || buildPos < 0 {
+		t.Fatal("could not locate both Install and Build steps in release job")
+	}
+	if installPos > buildPos {
+		t.Error("Install build dependencies must precede Build native packages in release job")
 	}
 }
 
-// extractReleaseJob returns the YAML text belonging to the "release" job.
-// It finds the "release:" key at the job definition indentation level (2 spaces
-// under "jobs:") and captures content until the next job key at the same level
-// or end of file.
-func extractReleaseJob(content string) string {
-	// Find "  release:" (2-space indent, top-level job key).
-	idx := strings.Index(content, "  release:")
+// findJobSection returns the text belonging to the named job (e.g., "release").
+// It finds "  name:" at the 2-space indentation level under "jobs:" and captures
+// content until the next job key at the same indentation or end of file.
+func findJobSection(content, name string) string {
+	marker := "  " + name + ":"
+	idx := strings.Index(content, marker)
 	if idx < 0 {
 		return ""
 	}
 
-	// Scan forward to find the next top-level job key (2-space indent followed
-	// by a word and colon) or end of file.
-	start := idx
-	lines := strings.Split(content[start:], "\n")
-	result := strings.Builder{}
+	lines := strings.Split(content[idx:], "\n")
+	var result []string
 	for i, line := range lines {
 		if i == 0 {
-			result.WriteString(line)
-			result.WriteString("\n")
+			result = append(result, line)
 			continue
 		}
-		// A new job key at the same indentation level ends the release job.
-		if len(line) >= 2 && line[0] == ' ' && line[1] == ' ' &&
-			line[2] != ' ' && line[2] != '\t' &&
-			strings.ContainsRune(line, ':') {
-			// Verify it's a job key (word followed by colon, no leading spaces
-			// beyond the 2-space indent).
-			trimmed := strings.TrimSpace(line)
-			if colonIdx := strings.Index(trimmed, ":"); colonIdx > 0 {
-				key := trimmed[:colonIdx]
-				// Job keys are single words without spaces.
-				if !strings.Contains(key, " ") && key != "release" {
-					break
-				}
-			}
+		// A new top-level job key (exactly 2-space indent, non-empty, followed
+		// by non-space) ends this job section.
+		if isJobKey(line) {
+			break
 		}
-		result.WriteString(line)
-		result.WriteString("\n")
+		result = append(result, line)
 	}
-	return result.String()
+	return strings.Join(result, "\n")
+}
+
+// isJobKey returns true if line is a YAML key at exactly 2-space indentation
+// (a top-level job definition under "jobs:").
+func isJobKey(line string) bool {
+	if len(line) < 3 {
+		return false
+	}
+	if line[0] != ' ' || line[1] != ' ' || line[2] == ' ' || line[2] == '\t' {
+		return false
+	}
+	// The rest must contain a colon (key: value or key:) and not be a comment.
+	rest := line[2:]
+	if strings.HasPrefix(rest, "#") {
+		return false
+	}
+	return strings.ContainsRune(rest, ':')
+}
+
+// findStepBlock returns the text of the named step within a job's steps list.
+// It finds "- name: STEP_NAME" and captures lines until the next step ("- name:"
+// or "- uses:") or end of the steps list.
+func findStepBlock(jobContent, stepName string) string {
+	marker := "- name: " + stepName
+	idx := strings.Index(jobContent, marker)
+	if idx < 0 {
+		return ""
+	}
+
+	lines := strings.Split(jobContent[idx:], "\n")
+	var result []string
+	for i, line := range lines {
+		if i == 0 {
+			result = append(result, line)
+			continue
+		}
+		// A new step starts with "- name:" or "- uses:" at the step indentation.
+		if isStepStart(line) {
+			break
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
+}
+
+// isStepStart returns true if line begins a new step in a GitHub Actions steps list.
+func isStepStart(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "- name:") || strings.HasPrefix(trimmed, "- uses:")
+}
+
+// extractRunBlock extracts the "run:" block from a step's YAML text.
+// For multi-line blocks ("run: |"), it captures all indented lines after
+// the directive until a non-indented line or end of content.
+func extractRunBlock(stepContent string) string {
+	idx := strings.Index(stepContent, "run:")
+	if idx < 0 {
+		return ""
+	}
+
+	// Find the start of the run block content (after "run: |" or "run: ").
+	rest := stepContent[idx+4:] // skip "run:"
+	lines := strings.Split(rest, "\n")
+	var result []string
+	for _, line := range lines {
+		// Skip the first line if it's just "|" (block scalar indicator) or empty.
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "|" || trimmed == "" {
+			continue
+		}
+		// Lines in the run block are indented (typically 10+ spaces in GitHub Actions).
+		// A line with no leading whitespace and non-empty content ends the block.
+		if line != "" && line[0] != ' ' && line[0] != '\t' {
+			break
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
 }
 
 func TestReleaseWorkflowRaceBeforeBuild(t *testing.T) {
