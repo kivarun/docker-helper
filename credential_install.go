@@ -85,22 +85,27 @@ const (
 )
 
 // checkCredentialState checks the credential file against the given token.
-// Returns credentialAbsent if no credential file exists.
-// Returns credentialMatch if the file exists and contains the same token.
-// Returns credentialConflict if the file exists with a different token.
-func checkCredentialState(token string) credentialState {
+// Returns (credentialAbsent, nil) when the file does not exist (ENOENT).
+// Returns (credentialMatch, nil) when the file exists and contains the same token.
+// Returns (credentialConflict, nil) when the file exists with a different token.
+// Returns (0, error) for credentialPath resolution failures or I/O errors
+// other than ENOENT (fail closed).
+func checkCredentialState(token string) (credentialState, error) {
 	credPath, err := credentialPath()
 	if err != nil {
-		return credentialAbsent
+		return 0, fmt.Errorf("cannot determine credential path: %w", err)
 	}
 	existing, err := os.ReadFile(credPath)
 	if err != nil {
-		return credentialAbsent // no existing credential
+		if errors.Is(err, os.ErrNotExist) {
+			return credentialAbsent, nil
+		}
+		return 0, fmt.Errorf("cannot read credential file: %w", err)
 	}
 	if strings.TrimSpace(string(existing)) == token {
-		return credentialMatch
+		return credentialMatch, nil
 	}
-	return credentialConflict
+	return credentialConflict, nil
 }
 
 // readTokenFromReader reads a single token line from the reader.

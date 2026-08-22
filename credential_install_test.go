@@ -772,7 +772,10 @@ func TestCheckCredentialStateAbsent(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	token := "dhc_" + strings.Repeat("a", 64)
-	state := checkCredentialState(token)
+	state, err := checkCredentialState(token)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if state != credentialAbsent {
 		t.Errorf("state = %v, want credentialAbsent", state)
 	}
@@ -789,7 +792,10 @@ func TestCheckCredentialStateMatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(token+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	state := checkCredentialState(token)
+	state, err := checkCredentialState(token)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if state != credentialMatch {
 		t.Errorf("state = %v, want credentialMatch", state)
 	}
@@ -807,18 +813,46 @@ func TestCheckCredentialStateConflict(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(existingToken+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	state := checkCredentialState(newToken)
+	state, err := checkCredentialState(newToken)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if state != credentialConflict {
 		t.Errorf("state = %v, want credentialConflict", state)
 	}
 }
 
+func TestCheckCredentialStateReadErrorFailsClosed(t *testing.T) {
+	// A credential file that exists but cannot be read must NOT be treated
+	// as absent. The caller must fail closed.
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	token := "dhc_" + strings.Repeat("a", 64)
+	credDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(credDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	credFile := filepath.Join(credDir, "credential.token")
+	if err := os.WriteFile(credFile, []byte("some-content\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Make the file unreadable.
+	if err := os.Chmod(credFile, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(credFile, 0600) })
+
+	state, err := checkCredentialState(token)
+	if err == nil {
+		t.Fatalf("expected error for unreadable credential file, got state %v", state)
+	}
+	if state != 0 {
+		t.Errorf("state = %v, want 0 on error", state)
+	}
+}
+
 func TestInitUserWithSystemDaemonFirstUse(t *testing.T) {
 	// Regression: first-use with system daemon must actually install the credential.
-	origSocket := systemSocketExists
-	defer func() { systemSocketExists = origSocket }()
-	systemSocketExists = func() bool { return true }
-
 	origUID := EffectiveUID
 	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
@@ -829,9 +863,9 @@ func TestInitUserWithSystemDaemonFirstUse(t *testing.T) {
 	validToken := "dhc_" + strings.Repeat("a", 64)
 
 	var stdout, stderr bytes.Buffer
-	err := initUserWithSystemDaemonWithReader(strings.NewReader(validToken), &stdout, &stderr)
+	err := installCredentialForInit(validToken, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("initUserWithSystemDaemon: %v", err)
+		t.Fatalf("installCredentialForInit: %v", err)
 	}
 
 	// Credential file must exist.
@@ -873,10 +907,6 @@ func TestInitUserWithSystemDaemonFirstUse(t *testing.T) {
 }
 
 func TestInitUserWithSystemDaemonSameTokenIdempotent(t *testing.T) {
-	origSocket := systemSocketExists
-	defer func() { systemSocketExists = origSocket }()
-	systemSocketExists = func() bool { return true }
-
 	origUID := EffectiveUID
 	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
@@ -891,14 +921,15 @@ func TestInitUserWithSystemDaemonSameTokenIdempotent(t *testing.T) {
 	if err := os.MkdirAll(credDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(credDir, "credential.token"), []byte(token+"\n"), 0600); err != nil {
+	credPath := filepath.Join(credDir, "credential.token")
+	if err := os.WriteFile(credPath, []byte(token+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initUserWithSystemDaemonWithReader(strings.NewReader(token), &stdout, &stderr)
+	err := installCredentialForInit(token, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("initUserWithSystemDaemon: %v", err)
+		t.Fatalf("installCredentialForInit: %v", err)
 	}
 
 	out := stdout.String()
@@ -906,8 +937,8 @@ func TestInitUserWithSystemDaemonSameTokenIdempotent(t *testing.T) {
 		t.Errorf("expected idempotent message, got: %s", out)
 	}
 
-	// File must not have been rewritten (mtime unchanged).
-	info, err := os.Stat(filepath.Join(credDir, "credential.token"))
+	// File mode preserved.
+	info, err := os.Stat(credPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -917,10 +948,6 @@ func TestInitUserWithSystemDaemonSameTokenIdempotent(t *testing.T) {
 }
 
 func TestInitUserWithSystemDaemonDifferentTokenConflict(t *testing.T) {
-	origSocket := systemSocketExists
-	defer func() { systemSocketExists = origSocket }()
-	systemSocketExists = func() bool { return true }
-
 	origUID := EffectiveUID
 	defer func() { EffectiveUID = origUID }()
 	EffectiveUID = func() int { return 1000 }
@@ -941,7 +968,7 @@ func TestInitUserWithSystemDaemonDifferentTokenConflict(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := initUserWithSystemDaemonWithReader(strings.NewReader(newToken), &stdout, &stderr)
+	err := installCredentialForInit(newToken, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error for different token conflict")
 	}
