@@ -16,7 +16,10 @@ policy:
 - all Docker commands go through a single process;
 - the developer controls which workspace each session can access.
 
-The agent cannot escalate beyond the workspace boundary.
+docker-helper limits the host paths exposed through its supported Docker
+operations. It is not a complete sandbox: Docker/default networking remains
+available, and a validation or command-construction defect in this trusted
+Docker-facing service can compromise the host.
 
 ## High-level architecture
 
@@ -78,6 +81,20 @@ docker-helper supports two deployment modes:
 The `http_address` field is configurable in system mode but requires a
 daemon restart to take effect.
 
+### Mandatory access control in system mode
+
+System mode requires exactly one supported enforcing backend:
+
+- AppArmor confines the daemon with `docker-helper-system` and uses explicit
+  managed roots for path-level workspace defense in depth;
+- SELinux confines the daemon as `docker_helper_t` and system-mode containers
+  as the MCS-constrained `docker_helper_container_t` type.
+
+Neither backend, both backends, and permissive SELinux fail closed. SELinux
+workspace access is type-based and does not reproduce AppArmor's per-path
+managed-root boundary; canonical application-level allowed-root validation
+remains authoritative in both modes.
+
 ## Transports
 
 - **User mode**: Unix socket only
@@ -86,8 +103,8 @@ daemon restart to take effect.
 One handler/API/auth policy on both transports. Transport does not
 determine identity or authorization.
 
-Release 2 adds TLS and non-loopback listener configuration for remote access.
-Loopback HTTP remains the default; non-loopback requires explicit configuration.
+Release 2 transports are local only. Non-loopback listeners, TLS, and remote
+execution are deferred to Release 3.
 
 The launcher creates a session and passes the client token to the agent.
 It is not a mandatory daemon or control plane component.
@@ -265,7 +282,7 @@ subsequent requests with deleted session token
 
 Session token semantics:
 - revoking the launcher credential does not invalidate issued sessions;
-- disabling the principal does not invalidate issued sessions;
+- disabling the principal deletes its active sessions and blocks their tokens;
 - removing an allowed root does not invalidate issued sessions;
 - session expiry or deletion blocks future requests;
 - an already-started Docker operation continues its lifecycle.
@@ -396,15 +413,18 @@ for full syntax:
 - `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
   `set`, `delete`, `allowed-root`.
 - `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
-  `revoke`, `install`.
+  `revoke`, `install`. `credential create --name` is optional and uses the
+  literal name `default` when omitted.
 - `admin` — Administrative operations. Subcommand: `token rotate` (rotate
   the admin token; requires the current token, new token shown once, old
   token invalid immediately, no restart).
+- `apparmor` — Manage/check AppArmor roots for an AppArmor system deployment.
 
 ### General commands
 
 - `version` — Print version.
 - `help` — Show help.
+- `completion bash` — Generate Bash completion.
 
 ### Signal cancellation (agent commands)
 
@@ -563,7 +583,9 @@ systemctl --user start docker-helper
 ### Hardening
 
 The unit applies process-level hardening (`NoNewPrivileges`,
-`RestrictSUIDSGID`, `RestrictNamespaces`, `RestrictRealtime`).
+`RestrictNamespaces`, `RestrictRealtime`). `RestrictSUIDSGID` is deliberately
+omitted because its seccomp filtering blocks the `openat2` staging primitive on
+supported systems.
 Filesystem namespace directives (`ProtectSystem`, `ProtectHome`, etc.)
 are not used in the initial unit: their compatibility with docker-helper
 depends on the runtime environment and requires per-distribution testing.
@@ -619,12 +641,14 @@ Token resolution for `--system` mode:
  2. Non-root `--system` — credential.token from `credentialPath()`.
  3. Root `--system` — `/etc/docker-helper/admin.token`.
 
-Token resolution for default (no `--system`) mode:
+Endpoint and token resolution for default (no `--system`) mode:
  1. `--token-file` — explicit path, always wins.
- 2. System socket present (`/run/docker-helper/docker-helper.sock`) —
-    non-root: credential.token from `credentialPath()`,
-    root: `/etc/docker-helper/admin.token`.
- 3. System socket absent (user daemon) — admin.token in user config dir.
+ 2. If the user socket exists, select it and use `admin.token` in the user
+    config directory.
+ 3. Otherwise, if the system socket exists, select it and use non-root
+    `credential.token` or root `/etc/docker-helper/admin.token`.
+ 4. Once selected, an unavailable/failing endpoint is returned as an error;
+    the client does not retry another daemon.
 
 ### Session token
 
@@ -645,6 +669,27 @@ Session management is dual-authenticated:
 ## Workspace isolation
 
 Each session is bound to a single workspace directory.
+
+### Initialization and allowed-root defaults
+
+Initialization follows the selected deployment identity:
+
+- interactive non-root initialization defaults `allowed_root` to the current
+  user's home directory;
+- interactive root initialization defaults `allowed_root` to `/home`;
+- the shared root validator permits root to select exact `/home` or `/opt`,
+  while non-root validation continues to reject those broad namespaces;
+- non-interactive initialization requires an explicit `--allowed-root`.
+
+When a non-root `docker-helper init` detects an existing system daemon, it uses
+the launcher-credential onboarding path instead of creating a competing user
+daemon configuration. The standalone `credential install` command exposes the
+same user-scoped credential store directly.
+
+Application acceptance of a root does not by itself prove MAC access. AppArmor
+requires the corresponding managed-root rule. SELinux requires a permitted
+workspace file type; `/opt` remains a Release 2 acceptance decision until it is
+either supported by a narrow tested policy or rejected during SELinux init.
 
 ### Canonical paths
 
@@ -1109,6 +1154,11 @@ into containers started via `POST /run`:
     supported. Other CA-related environment variables like `SSL_CERT_FILE`,
     `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` are not used.
 
+In system mode, the configured source must also be readable by the active MAC
+policy. Arbitrary host locations are not an accepted portable contract. Release
+2 must either constrain/document a helper-owned source location or complete the
+previously accepted managed-import workflow.
+
 ## Error handling
 
 The API returns JSON errors with a stable `code` field. Clients can
@@ -1144,10 +1194,10 @@ Current error codes (non-exhaustive):
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero |
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 
-Planned:
-
-- audit coverage for rejected build/run/pull requests;
-- audit events for GET /sessions and GET /health.
+`GET /sessions` emits `session.list`. `GET /health` intentionally emits no
+audit event because it is an unauthenticated liveness endpoint. Consistent audit
+coverage for authenticated build/run/pull requests rejected during validation
+remains a Release 2 decision recorded by the release audit.
 
 ## Audit logging
 
@@ -1281,6 +1331,7 @@ fields.
 | Field | Type | Description |
 |-------|------|-------------|
 | `time` | string | UTC timestamp, RFC 3339 with nanoseconds |
+| `stream` | string | always `audit` for these records |
 | `event` | string | event name |
 | `result` | string | outcome code (omitted on `build.start`) |
 | `session_id` | string | session identifier (omitted on `auth.failure`) |
@@ -1290,6 +1341,20 @@ Additional fields depend on the event. Fields with empty or zero values
 are omitted from the JSON output.
 
 ### Events
+
+Implemented event families are:
+
+| Area | Events |
+|---|---|
+| Authentication | `auth.failure`, `auth.session` |
+| Sessions | `session.create`, `session.list`, `session.delete` |
+| Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_remove`, `principal.delete` |
+| Credentials/admin | `principal.credential_create`, `principal.credential_revoke`, `admin_token.rotate` |
+| Docker operations | `pull.start`, `pull.finish`, `build.start`, `build.finish`, `run.start`, `run.finish`, `registry.login.start`, `registry.login.finish` |
+| Configuration | `config.reload` |
+
+The detailed schemas below document the Docker-operation and principal/session
+events with non-obvious fields. All records also carry `stream=audit`.
 
 #### build.start
 
@@ -1560,27 +1625,27 @@ process output. That stream is not part of the daemon audit or operational logs.
 Successful build:
 
 ```json
-{"time":"2026-01-15T10:30:00Z","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile"}
-{"time":"2026-01-15T10:30:05Z","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","result":"succeeded","duration":"5s"}
+{"time":"2026-01-15T10:30:00Z","stream":"audit","event":"build.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile"}
+{"time":"2026-01-15T10:30:05Z","stream":"audit","event":"build.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"myapp:v1","context":".","dockerfile":"Dockerfile","result":"succeeded","duration":"5s"}
 ```
 
 Successful session creation:
 
 ```json
-{"time":"2026-01-15T10:29:55Z","event":"session.create","session_id":"dhs_0a1b2c3d4e5f","workspace":"/home/user/project","result":"success","duration":"1ms"}
+{"time":"2026-01-15T10:29:55Z","stream":"audit","event":"session.create","session_id":"dhs_0a1b2c3d4e5f","workspace":"/home/user/project","result":"success","duration":"1ms"}
 ```
 
 Authorization failure:
 
 ```json
-{"time":"2026-01-15T10:31:00Z","event":"auth.failure","method":"POST","path":"/run","result":"session.not_found"}
+{"time":"2026-01-15T10:31:00Z","stream":"audit","event":"auth.failure","method":"POST","path":"/run","result":"session.not_found"}
 ```
 
 Container run:
 
 ```json
-{"time":"2026-01-15T10:32:00Z","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
-{"time":"2026-01-15T10:32:01Z","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"succeeded","duration":"1s"}
+{"time":"2026-01-15T10:32:00Z","stream":"audit","event":"run.start","request_id":"req_abcdef1234567890","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"]}
+{"time":"2026-01-15T10:32:01Z","stream":"audit","event":"run.finish","session_id":"dhs_0a1b2c3d4e5f","operation_id":"op_abcdef1234567890","image":"alpine:3.19","command_arg_count":3,"mounts":[{"source":".","target":"/workspace","read_only":true}],"env_keys":["APP_MODE"],"result":"succeeded","duration":"1s"}
 ```
 
 ## Security considerations
@@ -1641,7 +1706,10 @@ but never the arguments themselves.
 docker-helper applies a fixed security policy when running containers:
 
 - `--rm` — remove the container on exit;
-- `--security-opt label=disable` — disable SELinux/MacAppLabel confinement;
+- user mode and AppArmor system mode use `--security-opt label=disable`;
+- SELinux system mode uses
+  `--security-opt label=type:docker_helper_container_t` and keeps MCS
+  confinement;
 - `--user <uid>:<gid>` — run as the principal's UID and GID for
   principal-owned sessions, or daemon UID:GID for legacy sessions.
 
@@ -1677,5 +1745,6 @@ docker-helper applies a fixed security policy when running containers:
 Items discussed but not yet implemented:
 
 - OpenCode custom tool integration (client-side);
-- launcher component;
-- RPM/DEB packaging;
+- remote transport and execution contract (Release 3);
+- stronger privilege separation if operational evidence justifies it;
+- strict SELinux workspace storage based on dedicated/relabelled locations.

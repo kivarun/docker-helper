@@ -260,121 +260,86 @@ Include:
 - richer log streaming if polling becomes insufficient;
 - network/proxy capability as a separate tool/project;
 - notification helper with restricted DBus access;
-- immediate re-evaluation/revocation of already-issued sessions after principal
-  policy changes only if real use demonstrates a need.
+- immediate re-evaluation/revocation of already-issued sessions after launcher
+  credential revocation or allowed-root changes only if real use demonstrates a
+  need. Principal disable/delete already removes that principal's sessions.
 
 Do not design their APIs here.
 
 ## 2.0
 
-### Main goal: server-side execution with remote access
+### Main goal: normally installable local multi-user deployment
 
-Release 2 adds a server-side deployment with remote access while preserving
-the existing Release 1 **user mode**. Both deployment profiles use the same
-binary and share the same HTTP capability API and operation/session semantics
-where practical.
+Release 2 preserves the Release 1 user deployment and adds a local system
+deployment. Both modes use the same binary and HTTP capability API.
 
-The Release 2 architecture review is complete and the binding implementation
-plan is [`docs/release-2-plan.md`](release-2-plan.md).
+Implemented contract:
 
-Accepted direction:
+- user mode uses XDG paths and a private per-user Unix socket;
+- system mode runs as root, serves explicit principals, and uses a system Unix
+  socket plus configurable loopback HTTP (`127.0.0.1:52375` by default);
+- transport does not establish identity; admin, launcher, and session
+  capabilities establish authorization;
+- operator commands select the existing user socket first and otherwise the
+  system socket, together with the matching token source; explicit
+  `--system`, `--endpoint`, and `--token-file` overrides remain available;
+- principal UID/GID/home are resolved by the daemon, each principal starts with
+  its home as an allowed root, and multiple launcher credentials are supported;
+- `credential install` stores the launcher token for non-root system clients;
+- `credential create --name` defaults to `default`;
+- root initialization defaults to `/home` and may explicitly accept `/home` or
+  `/opt`; non-root initialization defaults to the current user's home;
+- system-mode containers run as the authenticated principal UID:GID;
+- exactly one supported MAC backend is mandatory in system mode: AppArmor or
+  enforcing SELinux;
+- native DEB/RPM packages contain both user- and system-mode deployment assets;
+  the release tarball installs user mode normally and requires explicit
+  `install-system.sh` for system mode;
+- native packages and release artifacts include Bash completion and manuals;
+- trusted CA injection is configured through `trusted_ca_path` and
+  `trusted_ca_injection=auto`.
 
-- preserve user mode: daemon runs as the user, uses XDG paths, and listens on the
-  per-user Unix socket;
-- add system mode: daemon runs as root and uses conventional system config,
-  state, and runtime paths;
-- system mode exposes the same HTTP API over two local transports:
-  - a system Unix socket, suitable for bind-mounting into sandbox containers;
-  - loopback HTTP on configurable `127.0.0.1:52375` by default;
-- transport does not establish identity; authorization is credential-based;
-- introduce explicit principals provisioned by a system administrator through
-  the daemon API;
-- resolve principal OS username -> UID/GID/home on the daemon side; never trust
-  launcher-supplied UID/GID or root claims;
-- each principal has an `allowed_roots` array, defaulting to that user's home;
-- allow multiple independently revocable opaque launcher credentials per
-  principal;
-- keep session tokens as narrow workspace-scoped capabilities owned by a
-  principal;
-- launcher credentials may create/manage only their principal's sessions;
-- removing an allowed root affects future session creation but does not
-  dynamically revoke already-issued sessions;
-- deleting/expiring a session does not terminate Docker operations that were
-  already started;
-- in system mode, Docker `--user` comes from the authenticated principal UID/GID,
-  not the root daemon UID/GID and not request fields;
-- multi-user audit records include principal identity;
-- principal/credential administration remains API-first: CLI is a reference
-  client and must not write SQLite state directly;
-- administrative provisioning/policy changes may initially rely on root/sudo;
-  do not introduce a separate administrative control plane;
-- CLI administrative UX should reuse the existing `show`/`set` pattern, with
-  explicit `allowed-root add/remove` operations for the array;
-- old Release 1 sessions are not migrated into system mode;
-- provide a systemd system unit and the operational hardening required by a
-  root system daemon;
-- provide native DEB and RPM packages as standalone artifacts;
-- keep openSUSE and Ubuntu as important targets and select the exact RHEL-family
-  target when implementation reaches packaging; Fedora is not currently
-  committed;
-- package repositories and update channels are deferred until after package
-  lifecycle acceptance or a later distribution workstream;
-- provide at least `docker-helper(1)` and `docker-helper-config(5)` manual pages;
-- add Bash completion for commands, subcommands, and flags, and ship it with
-  native packages and generic release artifacts;
-- add an operator-facing `docker-helper ca` command group for the single managed
-  trusted-CA lifecycle; its contract must cover importing a validated source
-  certificate into helper-owned state, inspection, and removal without giving
-  the confined daemon arbitrary source-path access or reusing workspace
-  AppArmor roots;
+Release 2 remains local. Non-loopback listeners, TLS, uploaded build contexts,
+and remote image-only runs are deferred to Release 3.
 
-**Remote execution** is part of Release 2:
-
-- remote sessions do not require a client-side workspace;
-- remote build accepts an uploaded or streamed build context;
-- remote run is image-based without client-side bind mounts;
-- existing session lifecycle (status, logs, cancel) is preserved for remote
-  sessions;
-- TLS and non-loopback listener configuration are required for remote access;
-- the same principal/credential/authorization model applies to both local and
-  remote clients;
+Outstanding work is release acceptance, not capability expansion: resolve the
+blockers recorded in
+[`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/), complete
+package lifecycle and cross-distribution SELinux UAT, and reconcile the final
+support matrix. The trusted-CA source lifecycle is a release-contract decision:
+use a documented helper-owned path readable under system MAC, or complete the
+previously accepted managed-import workflow.
 
 Explicitly outside Release 2:
 
-- mutable remote workspace delivery and synchronization;
-- remote runs coupled to a synchronized mutable workspace;
-- multiple helper contexts, target routing, or helper-to-helper forwarding;
+- remote execution and mutable workspace delivery;
+- multiple helper contexts, routing, or helper-to-helper forwarding;
 - host port publishing and generic Docker network configuration;
 - durable operation recovery across daemon restarts;
-- dynamic revocation/re-evaluation of existing sessions after principal policy
-  changes;
-- termination of already-started operations solely because their session later
-  expires or is deleted;
-- dedicated unprivileged service-account architecture unless real use justifies
-  the extra filesystem/privilege complexity.
+- dynamic revocation/re-evaluation of issued sessions after launcher-credential
+  revocation or allowed-root changes; principal disable/delete already removes
+  that principal's sessions;
+- termination of started operations solely because a session expires or is
+  deleted;
+- dedicated unprivileged service-account architecture.
 
 ## 3.0
 
-### Main goal: full remote environment
+### Main goal: remote execution
 
-Release 3 is the earliest stage for capabilities that turn remote Docker
-execution into a full remote working environment:
+Release 3 is the earliest stage for non-loopback and remote capabilities:
 
-- mutable remote workspace delivery and synchronization;
-- remote runs coupled to a delivered workspace;
-- multiple helper contexts and target selection;
-- routing or optional helper-to-helper integration;
-- richer asynchronous upload/job protocols if the Release 2 remote-build path
-  proves insufficient;
-- cancellation and recovery across interrupted uploads, connections, or daemon
-  restarts;
-- durable operation state and other deferred operational capabilities justified
-  by real use;
-- host port publishing for container services under explicit server-side policy,
-  if not pulled forward from real use in Release 2;
+- explicit TLS identity and non-loopback transport policy;
+- uploaded or streamed build contexts;
+- image-only remote runs before mutable workspace synchronization;
+- mutable remote workspace delivery only when a concrete use case justifies it;
+- multiple contexts, target selection, and optional routing;
+- cancellation and recovery across interrupted uploads/connections;
+- durable operation state where demonstrated by use;
+- host port publishing only under explicit server-side policy.
 
-Keep Release 3 use-case driven. Do not predesign these APIs while implementing
-Release 2.
+Keep Release 3 use-case driven; do not predesign these APIs during Release 2
+stabilization.
 
 ## Architectural constraints
 

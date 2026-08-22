@@ -2,27 +2,18 @@
 
 ## Goal
 
-Release 2 adds a normally installable multi-user system deployment with remote
-access while preserving the existing per-user deployment.
+Release 2 adds a normally installable local multi-user system deployment while
+preserving the existing per-user deployment.
 
 The same `docker-helper` binary supports two deployment profiles:
 
 - **user mode** — Release 1 style: daemon runs as the user, uses XDG paths, and
   listens on that user's Unix socket;
 - **system mode** — daemon runs as root, uses system paths, serves multiple
-  principals, and exposes both a system Unix socket and HTTP (loopback or
-  non-loopback with TLS).
+  principals, and exposes both a system Unix socket and loopback HTTP.
 
-Remote execution is part of Release 2:
-
-- remote sessions do not require a client-side workspace;
-- remote build accepts an uploaded or streamed build context;
-- remote run is image-based without client-side bind mounts;
-- existing session lifecycle (status, logs, cancel) is preserved for remote
-  sessions;
-
-Mutable workspace synchronization, helper routing, and control-plane
-integration are explicitly deferred.
+Remote execution, non-loopback listeners, TLS, workspace synchronization,
+helper routing, and control-plane integration are explicitly deferred.
 
 The HTTP API remains the capability contract. CLI commands are reference clients
 of that API and must not bypass the daemon by editing SQLite state directly for
@@ -59,15 +50,18 @@ preferences. No cleanup was performed merely for style.
 - Credential table with token hash, ID, name;
 - Credential token format `dhc_` + 32 bytes;
 - Credential CRUD via admin token;
-- Credential authentication for session creation.
+- Credential authentication for session creation;
+- `credential create --name` is optional and defaults to `default`;
+- `credential install` atomically stores a non-root user's launcher token.
 
 ## Phase 3: principal-owned sessions/auth — completed
 
 - `sessions.principal_id` column;
 - Principal-owned sessions created via launcher credential;
 - Session ownership boundary (principal can list/delete own sessions);
-- Session token semantics (credential revoke / principal disable / allowed-root
-  removal do not invalidate issued sessions).
+- Session token semantics: credential revocation and allowed-root removal do not
+  invalidate issued sessions; disabling a principal deletes its active sessions
+  and blocks future authentication.
 
 ## Phase 4: execution identity/audit — completed
 
@@ -80,7 +74,10 @@ preferences. No cleanup was performed merely for style.
 - User mode: XDG paths, Unix socket (0600);
 - System mode: system paths, Unix socket (0666) + loopback HTTP;
 - Default HTTP address `127.0.0.1:52375`;
-- `http_address` configurable (restart required).
+- `http_address` configurable (restart required);
+- interactive non-root init defaults to the user's home;
+- interactive root init defaults to `/home`, and root validation permits exact
+  `/home` and `/opt`.
 
 ## Phase 6: dual local listeners — completed
 
@@ -88,20 +85,25 @@ preferences. No cleanup was performed merely for style.
 - Atomic listener startup;
 - Graceful shutdown closes both listeners.
 
-## Phase 7: operator endpoint selection — completed
+## Phase 7: operator endpoint selection and onboarding — completed
 
 - `--system`, `--endpoint`, `--token-file` flags;
-- No fallback semantics;
+- automatic default selection of the existing user socket, otherwise the system
+  socket, with the matching token source;
+- no retry to another daemon after an endpoint has been selected;
+- non-root init detects an existing system daemon and enters launcher-credential
+  onboarding instead of creating a competing user endpoint;
 - `reload` command uses operator client.
 
 ## Phase 8: system service / packaging — implementation completed, acceptance pending
 
 Implementation completed:
 - systemd system service unit;
-- system-mode AppArmor integration (mandatory);
+- mandatory system-mode AppArmor or enforcing SELinux integration;
 - DEB/RPM native packaging;
 - package lifecycle scriptlets;
 - manpages (docker-helper.1, docker-helper-config.5);
+- Bash completion;
 - release workflow publishes tar.gz, DEB, RPM, SHA256SUMS.
 
 Acceptance pending:
@@ -112,16 +114,16 @@ Acceptance pending:
 
 ### SELinux backend
 
-SELinux support for system mode is planned. See
-[docs/selinux-support-plan.md](selinux-support-plan.md) for the complete
-design, security contract, and implementation phases.
+The backend-neutral detector, fail-closed confinement check, systemd context,
+policy module, RPM lifecycle integration, and custom MCS-constrained container
+domain are implemented. OpenSUSE enforcing UAT has driven the current
+permission set. Fedora/RHEL-family acceptance, `/opt`
+workspace behavior, and cross-distribution module/package lifecycle remain
+release gates. See [docs/selinux-support-plan.md](selinux-support-plan.md).
 
-Current status: design complete; Phase 1 (backend-neutral LSM abstraction)
-may proceed; Phase 2+ require live enforcing-system policy testing.
-
-Key decision: SELinux confines the daemon but does not provide per-path
-workspace isolation. This is an intentional documented difference from the
-AppArmor backend.
+SELinux confines the daemon and container domains but does not provide
+per-path allowed-root isolation. The canonical docker-helper path check remains
+the authoritative path boundary.
 
 ### Completion criteria
 
@@ -151,10 +153,11 @@ Accepted Release 2 decisions:
   not silently select another port.
 - Unix and loopback transports do not imply identity or authorization. They are
   only transports.
-- CLI endpoint selection must be deterministic. Non-root defaults resolve to
-  user-mode paths; root defaults resolve to system-mode paths. Explicit system
-  or endpoint selection must be available instead of silently falling back to a
-  different daemon.
+- CLI endpoint selection must be deterministic. With no explicit override, the
+  operator client selects the user socket when it exists and otherwise the
+  system socket, together with the corresponding token. Explicit system,
+  endpoint, and token-file selection remains available. The client never
+  retries a different daemon after selection.
 
 ### Principal and credential model
 
@@ -172,6 +175,12 @@ Accepted Release 2 decisions:
 - A principal may have multiple opaque launcher credentials. Credentials are
   separate revocable entities, stored only as hashes, and the secret value is
   returned only at creation.
+- The CLI supplies the stable credential name `default` when `--name` is
+  omitted; the HTTP request continues to carry an explicit name.
+- A non-root user can install one returned launcher token in the standard
+  user-scoped credential file. Default endpoint selection then chooses the
+  matching credential automatically; explicit endpoint and token overrides
+  remain authoritative.
 - Launcher credentials identify a principal. The daemon obtains UID/GID and
   `allowed_roots` from its own principal state; the launcher sends only its
   credential and requested workspace.
@@ -181,10 +190,11 @@ Accepted Release 2 decisions:
 ### Policy-change semantics
 
 - Removing an `allowed_root` prevents creation of new sessions using that root.
-- Existing sessions are not dynamically re-evaluated against later principal
-  root-policy changes. They remain valid until normal expiry or deletion.
-- Immediate revocation/re-evaluation of existing sessions after principal policy
-  changes is deferred unless a real need appears.
+- Existing sessions are not dynamically re-evaluated after allowed-root removal
+  or launcher-credential revocation. They remain valid until normal expiry,
+  explicit deletion, principal disable, or principal deletion.
+- Disabling a principal transactionally deletes its sessions; re-enabling the
+  principal does not revive their tokens.
 - Deleting or expiring a session prevents subsequent authenticated requests with
   that session token but does not terminate Docker operations that were already
   started.
@@ -356,8 +366,8 @@ local transports.
   were already opened and releases/removes owned runtime artifacts.
 - Shutdown, HTTP drain, operation termination, and process lock continue to use
   one bounded daemon lifecycle.
-- Preserve a deterministic CLI endpoint selection model; never silently switch
-  between user and system daemons after a failed connection.
+- Preserve deterministic default selection: use the existing user socket,
+  otherwise the system socket, and never switch daemons after a failed request.
 - Keep explicit endpoint selection available for host users and integrations.
 
 ### Unix socket access
@@ -402,18 +412,18 @@ operational experience justifies it.
 - Standalone native DEB/RPM artifacts are the Release 2 deliverable.
   Package repositories and update channels are deferred until after package
   format/lifecycle acceptance or a later distribution slice.
-- Native packages are system-mode packages. User mode remains supported via
-  tarball and user installer.
+- Native packages contain both user- and system-mode assets. The tarball's
+  normal installer provisions user mode; system mode requires the explicit
+  `install-system.sh` path.
 - Provide at least:
   - `docker-helper(1)`;
   - `docker-helper-config(5)`.
 - Add Bash completion for commands, subcommands, and flags, and ship it with
   native packages and generic release artifacts.
-- Add an operator-facing `docker-helper ca` command group for the single managed
-  trusted-CA lifecycle. Its command contract must cover importing a validated
-  source certificate into helper-owned state, inspection, and removal without
-  giving the confined daemon arbitrary source-path access or reusing workspace
-  AppArmor roots.
+- Trusted CA injection is currently configuration-driven through a validated
+  `trusted_ca_path` and `trusted_ca_injection=auto`. Before Release 2, settle
+  the confined source contract: document a helper-owned readable location or
+  complete the previously accepted managed-import workflow.
 - Add package/service upgrade tests, including an existing Release 1 user-mode
   installation on the same machine.
 
@@ -439,6 +449,14 @@ Run the complete regression and system acceptance pass:
 - audit attribution by principal;
 - bounded restart/shutdown with active operations;
 - coexistence of user and system deployment profiles.
+
+Before resuming the broad matrix, resolve the pre-UAT blockers recorded in
+[`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/): credential
+bootstrap, CA preflight error propagation, the SELinux `/opt` contract, release
+job policy-build dependencies, the RPM target/dependency decision, and the
+confined trusted-CA source contract. Bound synchronous Docker subprocess output
+and settle the logging/audit-schema findings before declaring those contracts
+stable.
 
 Reconcile README, architecture, roadmap, agent skill, package documentation, and
 manual pages with the implemented behavior before creating `release/2.0`.

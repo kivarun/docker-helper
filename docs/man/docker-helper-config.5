@@ -65,12 +65,13 @@ New workspace roots are resolved to their canonical path through symlink
 resolution before policy evaluation; the canonical path is the effective
 and stored root.
 .PP
-Existing stale AppArmor roots remain removable even if they no longer
+Existing stale managed AppArmor roots remain removable even if they no longer
 satisfy the current policy.
 .PP
-In system mode, the initial value is added to managed AppArmor roots during
-\fBdocker-helper init\fR. Subsequent changes require manual AppArmor updates
-via \fBdocker-helper apparmor root\fR.
+In AppArmor system mode, the initial value is added to managed roots during
+\fBdocker-helper init\fR. Subsequent changes require manual AppArmor updates via
+\fBdocker-helper apparmor root\fR. SELinux mode keeps normal host labels; the
+selected root's file type must be permitted by the installed policy.
 .TP
 .B session_ttl (string, required)
 Session time-to-live using Go duration syntax (e.g., "30m", "1h", "12h").
@@ -105,7 +106,9 @@ using \fBtrusted_ca_path\fR).
 .B trusted_ca_path (string, conditional)
 Absolute path to a regular file containing exactly one PEM-encoded
 X.509 CA certificate. No additional PEM blocks or content. Required when
-\fBtrusted_ca_injection\fR is set to "auto".
+\fBtrusted_ca_injection\fR is set to "auto". In system mode, the source must
+also be readable under the active AppArmor or SELinux policy; arbitrary host
+locations are not a portable confined-system contract.
 .TP
 .B http_address (string, optional, default="127.0.0.1:52375")
 Loopback TCP listen address for system mode. The host must be exactly
@@ -117,7 +120,7 @@ restart. Exceptions:
 .IP \(bu 4
 \fBhttp_address\fR: Requires daemon restart
 .IP \(bu 4
-\fBallowed_root\fR: Does NOT automatically update AppArmor; use \fBdocker-helper apparmor root\fR
+\fBallowed_root\fR: Does NOT automatically update AppArmor managed roots; use \fBdocker-helper apparmor root\fR when AppArmor is active
 .SH DERIVED PATHS
 .SS System Mode
 .TP
@@ -151,8 +154,11 @@ When \fBDOCKER_HELPER_CONFIG\fR overrides the config path, the admin token
 is also resolved relative to the overridden config directory.
 .PP
 Principal allowed_roots are stored in the state database, not in \fIconfig.json\fR.
-.SH APPARMOR
-System mode uses AppArmor confinement with profile \fBdocker-helper-system\fR.
+.SH MANDATORY ACCESS CONTROL
+System mode requires exactly one active backend: AppArmor or enforcing
+SELinux. Neither, both, and permissive SELinux fail closed.
+.SS AppArmor
+AppArmor uses profile \fBdocker-helper-system\fR.
 Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR
 and can be modified via \fBdocker-helper apparmor root\fR.
 .PP
@@ -160,6 +166,12 @@ The initial \fBallowed_root\fR from \fBdocker-helper init\fR is added to managed
 AppArmor roots. Subsequent changes to configuration or principal allowed roots
 do NOT automatically update AppArmor—use \fBdocker-helper apparmor root add PATH\fR
 to add new roots.
+.SS SELinux
+The service runs in \fBdocker_helper_t\fR and system-mode containers run in
+the MCS-constrained \fBdocker_helper_container_t\fR type. SELinux provides
+type-level defense in depth, not per-path managed-root rules. Canonical
+docker-helper allowed-root validation remains the path boundary. The RPM
+contains the policy module; the DEB does not install an SELinux module.
 .SH EXAMPLES
 .SS Minimal configuration (both required fields)
 .nf
@@ -186,4 +198,5 @@ to add new roots.
 .fi
 .SH SEE ALSO
 .BR docker-helper (1),
-.BR apparmor (7)
+.BR apparmor (7),
+.BR selinux (8)

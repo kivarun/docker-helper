@@ -1,443 +1,214 @@
-# SELinux Support Plan
+# SELinux support: decision, implementation, and acceptance
 
-docker-helper system mode currently requires AppArmor.
+This document is the binding SELinux design record for Release 2. The runtime,
+policy, systemd, and RPM integration are implemented. Cross-distribution
+acceptance is not complete.
 
-This document records the plan to add enforcing SELinux as a second
-supported mandatory access control backend while preserving the existing
-AppArmor backend.
+## 1. System-mode MAC contract
 
-## 1. Goal
+System mode requires exactly one supported enforcing backend:
 
-System mode must support SELinux hosts.
+- AppArmor; or
+- enforcing SELinux.
 
-Supported MAC backends:
-
-- AppArmor
-- SELinux
-
-System mode:
-
-- Exactly one supported enforcing backend must be active.
-- Neither active — fail closed.
-- Both active — fail closed for now.
-
-User mode remains unchanged and must not require MAC confinement.
-
-## 2. Security Contract
+Neither active, both active, and permissive SELinux fail closed. User mode does
+not require mandatory access control.
 
 | Boundary | AppArmor | SELinux |
 |---|---|---|
-| Daemon confinement | MAC, path-based profile | MAC, type enforcement |
-| Allowed-root boundary | MAC + docker-helper application policy | docker-helper application policy only |
-| Workspace defense-in-depth | Path-level AppArmor rules | SELinux type-level access only |
+| Daemon confinement | path-based `docker-helper-system` profile | `docker_helper_t` type enforcement |
+| Container label | Docker label disabled | MCS-constrained `docker_helper_container_t` |
+| Allowed-root boundary | application policy plus managed path rules | application policy; type-level defense in depth |
 
-SELinux does not provide per-path workspace isolation for allowed roots.
-This is an intentional, documented difference from the AppArmor backend.
+SELinux does not enforce each configured allowed root as an independent path.
+Canonical docker-helper path validation is the authoritative boundary in both
+backends.
 
-SELinux cannot enforce docker-helper allowed roots at path granularity
-without relabeling workspace data. See Section 3.
+## 2. Workspace-root research and decision
 
-## 3. Workspace-Root Research and Decision
+### Rejected: per-bind-mount SELinux context
 
-### Rejected: Per-Bind-Mount SELinux Context
+Creating a private bind or `open_tree` mount under `/run/docker-helper` cannot
+apply a distinct SELinux `context=` to that view of an ordinary local
+filesystem:
 
-We investigated creating a private bind or `open_tree` mount under
-`/run/docker-helper` and applying `docker_helper_workspace_t` only to
-that view, without changing the source tree's persistent labels.
+- `context=` is a superblock option, not a bind-mount-point option;
+- bind mounts and `OPEN_TREE_CLONE` share the source superblock;
+- remounting a bind with a separate context is rejected;
+- `fsopen`/`fsmount` creates a new filesystem rather than a labelled view of an
+  existing directory;
+- overlay and filesystem-specific workarounds are not a general solution for
+  arbitrary operator workspaces.
 
-This approach is not possible for ordinary local filesystems:
+There is therefore no general kernel primitive for a per-path SELinux label on
+an existing bind-mounted tree.
 
-- SELinux `context=` is a superblock-level option, not a mount-point
-  option.
-- Bind mounts and `OPEN_TREE_CLONE` share the source superblock.
-- `context=` cannot be applied as an independent per-bind-mount label.
-- Remount with `context=` is rejected by the kernel.
-- `fsopen`/`fsmount` creates a new filesystem, not a labeled view of an
-  existing directory.
-- NFS `nosharecache` is filesystem-specific and does not apply to local
-  filesystems.
-- Overlayfs with `context=` requires a new superblock and is not a
-  general solution for arbitrary subdirectories.
+### Rejected for Release 2: automatic recursive relabelling
 
-Conclusion: there is no Linux kernel primitive that can create a
-per-mount SELinux context override for a bind mount of an existing
-xattr-supporting filesystem. This is a kernel architectural constraint.
+docker-helper does not run `semanage fcontext`/`restorecon` recursively on
+operator or user workspaces. That would mutate external filesystem policy,
+conflict with local/distro rules, and require complex rollback.
 
-### Rejected for Current Release: Recursive Workspace Relabeling
+### Implemented decision
 
-Do not automatically apply `semanage fcontext` / `restorecon` recursively
-to arbitrary allowed roots such as `/home`.
+Workspaces retain normal host labels. The daemon and custom container domain
+receive only the workspace file-type permissions justified by live testing.
+The current module uses the `user_home_type` attribute, which covers the proven
+`/home` scenario without changing labels.
 
-Reasons:
+Automatic workspace relabelling is not implemented or approved.
 
-- Destructive change to operator/user filesystem labels.
-- Possible conflict with distro or local SELinux policy.
-- Complex rollback (must save and restore original labels).
-- Unacceptable default UX.
+## 3. Detection and confinement
 
-A future opt-in "strict SELinux workspace" mode using dedicated or
-relabelled workspace storage may be considered separately.
-
-### Current Release Decision: Path 3
-
-SELinux confines the docker-helper daemon itself.
-
-Allowed-root path containment remains an application-level docker-helper
-security boundary.
-
-SELinux may grant only the minimum workspace file types required for
-supported workspace locations, providing type-level defense-in-depth.
-
-#### Enforcing UAT: docker_helper_workspace_t
-
-Live enforcing testing on openSUSE Tumbleweed has proven that explicit
-`docker_helper_workspace_t` labeling is viable:
-
-- `docker_helper_workspace_t` carries both `user_home_type` and
-  `container_file_type` attributes.
-- Ordinary user access works after relabel (user_home_type).
-- SELinux-confined Docker containers can read/write the bind-mounted
-  workspace (container_file_type).
-- Files created by the container inherit `docker_helper_workspace_t`.
-- Directory bind mounts work.
-- Regular-file bind mounts work.
-- Host and container read/write both succeeded.
-- Only remaining AVCs were intentionally ignored cgroup_t/sysctl_net_t
-  probes.
-
-#### Enforcing UAT: build staging
-
-Basic build staging with nested regular files has been proven in live
-enforcing UAT on openSUSE Tumbleweed:
-
-- `stageBuildContext/walkAndCopy` reads source context directories and
-  opens source files.
-- File/directory metadata is preserved in `/run/docker-helper/builds`.
-- Staged Dockerfile is verified.
-- `docker build` completed successfully.
-
-Exact staging permissions proven:
-
-- `docker_helper_workspace_t:dir read open` (reading source context dirs)
-- `docker_helper_workspace_t:file read open` (opening source files)
-- `docker_helper_runtime_t:dir read open setattr` (staging metadata)
-- `docker_helper_runtime_t:file getattr setattr` (staged file metadata)
-
-Buildx execution, network, and TLS permissions proven in live enforcing UAT:
-
-- `lib_t:file execute_no_trans` — executing the Docker Buildx CLI plugin
-- `self:unix_stream_socket connectto` — Buildx daemon communication
-- `docker_helper_runtime_t:file rename` — Buildx workspace management
-- `net_conf_t:file read open getattr` — network configuration read
-- `self:udp_socket { create setopt connect getattr read write }` — DNS resolution
-- `self:tcp_socket { connect getopt }` — Buildx network
-- `http_port_t:tcp_socket name_connect` — registry access
-- `cert_t:dir { search read open }` — system certificate access
-- `cert_t:lnk_file read` — certificate symlinks
-- `cert_t:file { read open getattr }` — certificate files
-
-Buildx basic enforcing path is proven complete. The custom host CA was
-restored to its expected `cert_t` label and remained `cert_t` through the
-build.
-
-Trusted CA auto-injection is proven complete under enforcing SELinux.
-The OpenSSL subject-name hash is computed natively in Go (MD5 of the
-DER-encoded subject name), eliminating the runtime `openssl` dependency
-and the need for `bin_t` execution permission.
-
-Intentionally NOT granted (proven non-essential in enforcing UAT):
-
-- `cgroup_t` — non-fatal probe, build succeeded
-- `sysctl_net_t` — non-fatal probe, build succeeded
-- `container_file_t` — the observed denial was caused by an external agent
-  launcher mounting the system CA with Docker `:Z`, not by a docker-helper
-  requirement; the custom host CA was restored to `cert_t` and remained
-  `cert_t` through the build; broad `container_file_t` access is
-  intentionally not granted
-
-Automatic workspace relabeling is NOT implemented or approved.
-
-## 4. LSM Abstraction
-
-Planned backend-neutral detection and confinement layer:
-
-```go
-type LSMBackend string
-
-const (
-    LSMNone     LSMBackend = ""
-    LSMAppArmor LSMBackend = "apparmor"
-    LSMSelinux  LSMBackend = "selinux"
-)
-```
-
-Functions:
-
-- `detectLSM()` — returns the active backend or `LSMNone`; errors only
-  on detection failure.
-- `requireMACBackend()` — fails if no supported backend is active.
-- `requireMACConfinement()` — verifies the process is confined under the
-  active backend.
-
-Detection semantics:
+`detectLSM` is the backend-neutral authority. It distinguishes:
 
 | AppArmor | SELinux | Result |
 |---|---|---|
-| active | — | AppArmor |
-| — | enforcing | SELinux |
-| — | permissive | fail |
-| — | — | fail |
-| active | enforcing | fail |
+| active | absent | AppArmor |
+| absent | enforcing | SELinux |
+| absent | permissive | fail |
+| absent | absent | fail for system mode |
+| active | enabled in any mode | fail |
 
-Detection errors must not silently downgrade security.
+Detection I/O or parse errors never downgrade security. In SELinux mode,
+`requireMACConfinement` also verifies that `/proc/self/attr/current` has type
+`docker_helper_t`.
 
-SELinux confinement requires all of:
-
-- SELinux enabled (`/sys/fs/selinux/enforce` exists).
-- Enforcing mode (`/sys/fs/selinux/enforce` == `"1"`).
-- Current process type is `docker_helper_t` (parsed from
-  `/proc/self/attr/current`).
-
-Permissive SELinux is not equivalent to AppArmor enforce mode.
-
-Existing AppArmor behavior must remain unchanged.
-
-## 5. systemd Design
-
-The chosen SELinux execution mechanism:
+The common systemd unit contains OR-ed `ConditionSecurity` checks,
+`AppArmorProfile=docker-helper-system`, and:
 
 ```ini
 SELinuxContext=system_u:system_r:docker_helper_t:s0
 ```
 
-This is the explicit SELinux execution-context mechanism used by the
-service. It is not a fallback.
+Each confinement directive is effective only for its active LSM. The policy
+permits the systemd transition and inherited journald stream socket used for
+both stdout and stderr.
 
-The common service unit may contain:
+## 4. Policy structure
 
-```ini
-ConditionSecurity=|apparmor
-ConditionSecurity=|selinux
-```
-
-With both `AppArmorProfile=docker-helper-system` and
-`SELinuxContext=system_u:system_r:docker_helper_t:s0` present. Each
-directive is a no-op when its LSM is inactive.
-
-Live testing must confirm systemd can enter `docker_helper_t` on both
-Fedora/RHEL-family and openSUSE SELinux.
-
-The SELinux policy must permit the required transition or context change.
-
-## 6. SELinux Policy Structure
-
-Planned dedicated types:
+The compiled module defines:
 
 | Type | Purpose |
 |---|---|
-| `docker_helper_t` | Daemon domain |
-| `docker_helper_exec_t` | Executable type for `/usr/bin/docker-helper` |
+| `docker_helper_t` | daemon domain |
+| `docker_helper_container_t` | custom MCS-constrained container domain |
+| `docker_helper_exec_t` | `/usr/bin/docker-helper` |
 | `docker_helper_config_t` | `/etc/docker-helper/**` |
 | `docker_helper_state_t` | `/var/lib/docker-helper/**` |
 | `docker_helper_runtime_t` | `/run/docker-helper/**` |
 
-File contexts:
+The daemon's `sys_admin` and `dac_read_search` capabilities are required by the
+mount-pin and private-workspace design and were proven through enforcing UAT.
+Docker socket, Buildx execution/network, system certificate, helper-owned
+config/state/runtime, and home-workspace permissions are explicit.
 
-```
-/usr/bin/docker-helper            --  system_u:object_r:docker_helper_exec_t:s0
-/etc/docker-helper(/.*)?                  system_u:object_r:docker_helper_config_t:s0
-/var/lib/docker-helper(/.*)?             system_u:object_r:docker_helper_state_t:s0
-/run/docker-helper(/.*)?                 system_u:object_r:docker_helper_runtime_t:s0
-```
+The custom container domain carries the container-selinux `container_domain`
+and `mcs_constrained_type` attributes. The module also supplies the rootfs
+file-management permissions required by normal container workloads and grants
+only this custom domain access to `user_home_type` workspaces. It does not grant
+global `container_t` access to home files.
 
-Constraints:
+This is an explicit compatibility dependency on the installed base policy and
+container-selinux. A raw `checkmodule` syntax pass alone does not prove that
+dependency across distributions.
 
-- Do not use `read_all_files` or similarly broad interfaces.
-- SELinux is default-deny; do not add artificial explicit deny capability
-  rules corresponding to AppArmor denies.
-- Grant only capabilities proven necessary.
-- Currently expected candidates include `sys_admin` and `dac_read_search`,
-  but the final permission matrix must be derived from enforcing-system
-  AVC testing rather than assumptions.
+## 5. CA hashing and injection under SELinux
 
-## 7. Workspace Type Policy
+Trusted CA injection no longer executes `/usr/bin/openssl` at runtime. The
+helper validates one PEM X.509 CA and computes the OpenSSL 3.x
+`X509_NAME_hash`-compatible value in Go by canonicalizing the subject name and
+using SHA-1, truncated to four bytes and rendered little-endian. This avoids a
+broad `bin_t` execute permission solely for CA preparation.
 
-Do not pre-grant a generic broad set of types such as:
+The common-case hash corpus was checked against OpenSSL 3.5.7. Differential
+coverage of uncommon ASN.1 string encodings remains a release-hardening task;
+see the dated release audit.
 
-```
-user_home_t
-user_home_ro_t
-usr_t
-var_t
-default_t
-```
+## 6. Packaging contract
 
-Start with the normal `/home` workspace scenario on a live SELinux system.
-Determine the actual file types and add only permissions required by
-concrete supported use cases.
-
-Every generic type grant must have a documented reason.
-
-If an allowed root has an SELinux type unsupported by the backend, prefer
-a clear validation error rather than automatically broadening the policy.
-
-## 8. SELinux CLI
-
-Do not implement:
-
-```
-docker-helper selinux root add
-docker-helper selinux root remove
-```
-
-SELinux does not independently manage the allowed-root policy in Path 3.
-Allowed roots remain managed by docker-helper's existing application
-policy.
-
-Provided SELinux command:
-
-```
-docker-helper selinux check
-```
-
-The check validates static and current state:
-
-- SELinux enabled and enforcing.
-- `docker_helper` policy module loaded (`semodule -l`).
-- Expected file-context mapping exists (`semanage fcontext -l`).
-- `/usr/bin/docker-helper` has the expected actual label (`stat -Z`).
-- Running daemon is `docker_helper_t` when applicable
-  (`/proc/<pid>/attr/current`).
-
-Do not make historical AVC denials a pass/fail condition. AVC inspection
-is diagnostic and live-test information only.
-
-Use valid tools such as `stat -Z` and `matchpathcon`. Do not use
-non-existent commands.
-
-## 9. Policy Packaging
-
-The SELinux module is compiled at build or release time. Target machines
-do not require policy compiler or development packages.
-
-The `.fc` file is packaged into the policy module via `semodule_package -f`
-rather than attempting `semanage fcontext -f FILE` (which is invalid;
-`semanage fcontext -f` means file type, not a file containing fcontext
-rules).
-
-Installation:
+The policy is compiled during the release build:
 
 ```sh
-semodule -i docker-helper.pp
-restorecon /usr/bin/docker-helper
+checkmodule -M -m -o docker_helper.mod packaging/selinux/docker-helper.te
+semodule_package -o dist/docker-helper.pp \
+  -m dist/docker_helper.mod -f packaging/selinux/docker-helper.fc
 ```
 
-Only docker-helper-owned paths are relabeled. Never recursively
-`restorecon` arbitrary user workspace roots.
+Target hosts need runtime policy tools, not the compiler. The RPM contains
+`/usr/share/selinux/docker-helper.pp`. On an enforcing SELinux system its
+scriptlet installs/replaces the module and restores only docker-helper-owned
+paths. Upgrade preserves the active module; final erase removes it. Arbitrary
+workspaces are never relabelled.
 
-Do not directly manipulate `/etc/selinux/.../modules/active`. Use
-`semodule`.
+The DEB intentionally contains no SELinux module and provisions AppArmor only.
 
-`.pp` versus CIL is not finalized until tested across supported
-distributions.
+The current RPM hard-depends on both `apparmor-parser` and `policycoreutils`.
+That is not yet a proven portable dependency contract for Fedora/RHEL-family
+hosts and must be resolved before claiming those targets.
 
-## 10. Packaging Lifecycle
+The release workflow must install both `checkmodule` and `semodule_package`
+before running `build-packages.sh`; the current isolated release job does not.
 
-Design for each phase separately:
+## 7. Evidence completed
 
-1. Fresh install — load policy, label binary, reload systemd.
-2. Upgrade — replace policy, do not remove on upgrade.
-3. Normal uninstall (remove) — stop service, do not remove policy
-   (preserve for potential reinstall), do not remove config/state.
-4. Purge — remove policy, remove config/state.
+Live enforcing work on openSUSE Tumbleweed established:
 
-Invariant: an old package's removal script during an upgrade must not
-remove the SELinux policy just installed or required by the new package.
+- daemon transition and confinement as `docker_helper_t`;
+- Docker socket access;
+- normal `/home` hierarchy using `user_home_dir_t`/`user_home_t`;
+- build staging, Docker Buildx execution, DNS/registry TLS, and system CA reads;
+- directory and regular-file bind mounts;
+- custom container rootfs semantics and MCS-constrained type;
+- trusted CA auto-injection;
+- journald access for inherited stdout/stderr streams.
 
-Postinstall detection must have the same dual-LSM fail-closed behavior as
-runtime detection. It must not let SELinux detection overwrite a
-previously detected AppArmor result.
+The detailed host facts and commands are retained in
+`packaging/selinux/LIVE-TEST.md`. Harmless cgroup/sysctl probe AVCs were not
+converted into broad permissions.
 
-Backend package and tool names are distro-specific and remain subject to
-live testing. Known examples:
+## 8. Release blockers and remaining UAT
 
-| Distribution | SELinux tools package |
-|---|---|
-| Fedora/RHEL | `policycoreutils-python-utils` |
-| openSUSE | `python3-policycoreutils` |
-| Debian | `python3-selinux` |
+### `/opt` mismatch
 
-Do not hard-code a cross-distribution packaging assumption until tested.
+Application policy allows exact `/home` and `/opt` for root initialization.
+The SELinux module grants workspace access through `user_home_type` and init
+does not validate the selected root's file type. `/opt` is therefore not a
+proven SELinux workspace contract.
 
-## 11. Live SELinux Test Matrix
+Do not grant broad `usr_t` access by default. Before Release 2, either reject an
+unsupported SELinux root during init, require a dedicated operator-managed
+label, or prove a narrow portable type grant on every supported target.
 
-Policy and packaging must be validated on at least:
+### Required target matrix
 
-- Fedora/RHEL-family enforcing SELinux.
-- openSUSE enforcing SELinux.
+Run the following on openSUSE and the selected Fedora/RHEL-family target:
 
-Determine experimentally:
+1. clean RPM dependency resolution and install;
+2. module install, upgrade, final erase, and file contexts;
+3. systemd transition and journald stdout/stderr;
+4. init, principal/credential/session flows;
+5. pull, build/buildx, run, registry login, mount-pin, and shutdown;
+6. `/home` directory and regular-file workspaces;
+7. the selected `/opt` acceptance/rejection contract;
+8. trusted CA injection;
+9. custom container rootfs behavior and MCS isolation;
+10. negative access to representative `shadow_t` and `ssh_home_t` objects;
+11. compatibility with the installed container-selinux/base policy;
+12. `.pp` portability or a documented target-specific replacement.
 
-1. Docker socket SELinux type.
-2. Docker peer or process types required for Unix socket connection.
-3. Normal `/home` workspace file types.
-4. Required policy permissions from AVC denials.
-5. Whether one policy source or artifact works across both distributions.
-6. systemd `SELinuxContext=` behavior.
-7. Module install and remove behavior.
-8. Package names and tool availability.
-9. `.pp` versus CIL portability.
+There is no `docker-helper selinux check` command in the Release 2 CLI. Module,
+label, and AVC diagnostics use standard host tools (`semodule`, `matchpathcon`,
+`stat -Z`, and `ausearch`) during package acceptance.
 
-Functional tests:
+## 9. Future work
 
-- `docker-helper init`
-- `docker-helper serve`
-- Principal management
-- `docker-helper run`
-- `docker-helper build`
-- Mount-pin (`open_tree` / `move_mount` / `umount`)
-- CA injection (OpenSSL)
-- Docker socket access
-- Normal workspace under `/home`
+- An opt-in strict SELinux workspace mode using dedicated or deliberately
+  relabelled storage.
+- A generated/interface-based policy compatibility layer instead of manually
+  reproducing container-selinux file-management semantics.
+- A separate privileged mount broker plus a path-restricted worker if stronger
+  process separation becomes necessary. Applying Landlock directly to the
+  current daemon would conflict with mount-pin operations.
 
-Negative tests must include attempts to access objects that should remain
-outside the daemon's SELinux permissions, for example:
-
-- `shadow_t`
-- `ssh_home_t`
-
-Where those types exist on the target distribution.
-
-## 12. Implementation Phases and Current Stopping Point
-
-Phase 1: Backend-neutral LSM detection and confinement abstraction, tests,
-preserve AppArmor behavior. No policy assumptions.
-
-Phase 2: Live SELinux policy development on enforcing Fedora/RHEL-family.
-
-Phase 3: Test and adapt the same policy on openSUSE SELinux.
-
-Phase 4: SELinux check CLI.
-
-Phase 5: systemd and package integration.
-
-Phase 6: Documentation, security contract finalization, and UAT.
-
-Current decision: it is acceptable to implement only Phase 1 before the
-SELinux test environment exists.
-
-Do not implement guessed SELinux permissions or packaging behavior without
-live enforcing-system results.
-
-## 13. Future Work
-
-Recorded but not designed or implemented now:
-
-- Optional strict SELinux mode using dedicated or relabelled workspace
-  storage.
-- Possible architecture using a separate privileged mount broker plus a
-  path-restricted worker (e.g. Landlock), if stronger SELinux-mode
-  workspace isolation becomes necessary. Note: applying Landlock to the
-  current daemon would prevent the mount operations required by mount-pin.
-
-These are explicitly outside the current release.
+These items are outside Release 2.

@@ -83,13 +83,14 @@ Runs as the current user. Configuration at
 .IR ~/.config/docker-helper/config.json ,
 state at
 .IR ~/.local/state/docker-helper .
-No AppArmor integration.
+No mandatory MAC integration.
 .SS System Mode
 Runs as root. Configuration at
 .IR /etc/docker-helper/config.json ,
 state at
 .IR /var/lib/docker-helper .
-AppArmor confinement with managed workspace roots.
+Requires exactly one MAC backend: AppArmor with managed workspace roots, or
+enforcing SELinux with the daemon in \fBdocker_helper_t\fR.
 .SH COMMANDS
 .SS General Commands
 .TP
@@ -97,10 +98,13 @@ AppArmor confinement with managed workspace roots.
 Start the HTTP server (daemon mode).
 .TP
 .B docker-helper init [\-\-allowed-root PATH]
-Initialize configuration and admin token. In system mode, the initial
-allowed_root is added to managed AppArmor roots. Subsequent changes to
-configuration or principal allowed roots do NOT automatically update AppArmor;
-use \fIdocker-helper apparmor root\fR to manage them.
+Initialize configuration and admin token. The interactive default is the
+current user's home, or /home for root. Root may explicitly select /home or
+/opt; non-root callers cannot select those broad roots directly. In AppArmor system
+mode, the initial allowed_root is added to managed roots. Subsequent changes to
+configuration or principal allowed roots do NOT automatically update AppArmor; use
+\fIdocker-helper apparmor root\fR to manage them. SELinux mode uses normal host
+labels and does not manage roots through this command.
 .TP
 .B docker-helper reload [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Reload configuration.
@@ -110,6 +114,9 @@ Print version information.
 .TP
 .B docker-helper help [COMMAND]
 Show help for a command.
+.TP
+.B docker-helper completion bash
+Generate Bash completion.
 .SS Session Commands
 .TP
 .B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH
@@ -184,7 +191,7 @@ Rotate the admin token. Requires the current admin token
 The new token is shown once on stdout; the old token is invalid
 immediately and no restart is required. \fB\-\-json\fR prints the API
 response.
-.SS AppArmor Commands (System Mode)
+.SS AppArmor Commands (AppArmor System Mode)
 .TP
 .B docker-helper apparmor root list
 List managed workspace roots in the AppArmor profile.
@@ -222,7 +229,10 @@ For reload, session, principal, and credential commands, select the target daemo
 \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
 \fB\-\-system\fR may use \fB\-\-token-file\fR for authentication.
 Without explicit endpoint selection, a deterministic default is used:
-user socket first, then system socket as fallback.
+an existing user socket is selected first; otherwise the system socket is
+selected. The token source follows that selection: user admin token for the
+user socket, or the installed non-root launcher credential/root admin token
+for the system socket. A failed request is not retried against another daemon.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -268,11 +278,15 @@ mediates Docker access; rootful Docker access is root-equivalent host capability
 .IP \(bu 4
 Credentials and session tokens are capabilities—protect them accordingly
 .IP \(bu 4
-AppArmor confinement restricts filesystem and capability access
+System mode requires exactly one of AppArmor or enforcing SELinux. AppArmor
+uses the \fBdocker-helper-system\fR profile. SELinux requires the daemon in
+\fBdocker_helper_t\fR and runs containers as
+\fBdocker_helper_container_t\fR with MCS confinement.
 .IP \(bu 4
 No remote or non-loopback network access in Release 2
 .SH SEE ALSO
 .BR docker-helper-config (5),
 .BR apparmor (7),
+.BR selinux (8),
 .BR docker-helper help COMMAND,
 .BR docker-helper COMMAND \-\-help

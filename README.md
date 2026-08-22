@@ -45,7 +45,8 @@ loopback HTTP address is configurable (`http_address`); changing it
 requires a daemon restart.
 
 System daemon mode is implemented. Release 2 adds system mode, native
-DEB/RPM packages, systemd system service, and mandatory AppArmor confinement.
+DEB/RPM packages, a systemd system service, and mandatory confinement by
+exactly one supported MAC backend: AppArmor or enforcing SELinux.
 
 ## Authentication model
 
@@ -61,7 +62,7 @@ Three credential classes provide different levels of access:
 
 After a session token is issued:
 - revoking the launcher credential does not invalidate the session;
-- disabling the principal does not invalidate the session;
+- disabling the principal deletes its active sessions and blocks their tokens;
 - removing an allowed root does not invalidate the session;
 - session expiry or deletion blocks future requests;
 - an already-started Docker operation continues its lifecycle.
@@ -151,8 +152,8 @@ sudo docker-helper principal create alice
 sudo docker-helper credential create alice
 ```
 
-The `credential create` command prints a token. On alice's machine (not
-as root):
+The `credential create` command uses the name `default` unless `--name` is
+provided and prints the token once. On alice's machine (not as root):
 
 ```bash
 docker-helper credential install
@@ -172,7 +173,7 @@ docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
 subsequent use. After installation, `docker-helper` commands use the
 credential and connect to the correct daemon automatically.
 
-For more on principals, allowed roots, and AppArmor confinement, see
+For more on principals, allowed roots, and MAC confinement, see
 below.
 
 ### Package installation
@@ -191,9 +192,11 @@ sudo apt install ./docker-helper_*.deb
 sudo zypper install ./docker-helper-*.rpm
 ```
 
-The package installs the binary, systemd units (system and user), the
-AppArmor system profile, and man pages. It does NOT run `init`,
-generate configuration, or start the service.
+Both package formats install the binary, system and user systemd units,
+the AppArmor system profile, Bash completion, and man pages. The RPM also
+contains the compiled SELinux policy module. Packages do NOT run `init`,
+generate configuration, or start the service. Thus one native package supports
+both user and system deployment; the selected service determines the mode.
 
 Package installation paths:
 
@@ -244,6 +247,10 @@ For system mode from a tarball:
 ```bash
 sudo ./install-system.sh --yes --allowed-root /srv/workspaces
 ```
+
+Unlike native packages, extracting or running the normal tarball installer does
+not provision system mode. `install-system.sh` is the explicit manual
+system-install path.
 
 ### Manual installation
 
@@ -465,6 +472,11 @@ docker-helper config unset trusted_ca_path
 Each command triggers a daemon reload automatically when the daemon is
 running.
 
+In system mode, the source file must also be readable under the active AppArmor
+or SELinux policy. Arbitrary host locations are not a portable confined-system
+contract; use a helper-owned operator-controlled location until the Release 2
+source lifecycle is finalized.
+
 **Computed/output-only fields** are read-only and must not be added to
 config.json. If present, configuration validation and daemon startup fail:
 
@@ -587,20 +599,22 @@ support explicit endpoint selection:
 --token-file PATH     token file path
 ```
 
-Default behavior: check user socket existence, fall back to system
-socket.
+Default behavior: select the user socket when it exists; otherwise select the
+system socket. The token source changes with the selected socket: user-mode
+`admin.token` for the user socket, and the installed launcher credential (or
+root system `admin.token`) for the system socket.
 
 `--endpoint` requires `--token-file`. `--system` and `--endpoint` are
-mutually exclusive. There is no fallback: if the chosen endpoint is
-unavailable, the command fails.
+mutually exclusive. Selection happens before the request; if the selected
+endpoint is unavailable, the command fails rather than retrying another daemon.
 
 For the full command syntax, use `docker-helper help <command>`.
 
 ## Bash completion
 
 Bash completion is available and installed automatically when using the
-DEB or RPM packages. The completion script is derived from the command
-tree at build time, so it stays in sync with the CLI.
+DEB or RPM packages. Command names and flags are derived from the command tree;
+argument-value completion is maintained alongside the CLI contract.
 
 Install manually:
 
@@ -856,12 +870,16 @@ Note: `docker-helper config show` (without a field) displays
   socket is accessible to any local user, but security is enforced
   through bearer authentication and authorization, not socket
   permissions alone.
-- **Container policy** — containers run with `--rm`, `--security-opt label=disable`,
-  and `--user <uid>:<gid>` (principal UID:GID for principal-owned sessions,
-  daemon UID:GID for legacy/admin sessions).
-- **AppArmor** — system mode uses mandatory AppArmor confinement with the
-  `docker-helper-system` profile. The release tarball also includes an optional
-  user-mode AppArmor profile template.
+- **Container policy** — containers run with `--rm` and
+  `--user <uid>:<gid>` (principal UID:GID for principal-owned sessions,
+  daemon UID:GID for legacy/admin sessions). User mode and AppArmor system mode
+  use `--security-opt label=disable`; SELinux system mode uses the confined
+  `docker_helper_container_t` type.
+- **Mandatory access control** — system mode requires exactly one active
+  backend: AppArmor with `docker-helper-system`, or enforcing SELinux with the
+  daemon in `docker_helper_t`. Neither, both, and permissive SELinux fail closed.
+  The release tarball also includes an optional user-mode AppArmor profile
+  template.
 
 **Known limitations:**
 
@@ -900,7 +918,12 @@ helper enforces policy that the agent must not bypass. A portable skill is
 available at
 [.claude/skills/docker-helper/SKILL.md](.claude/skills/docker-helper/SKILL.md).
 
-## AppArmor (system mode)
+## Mandatory access control (system mode)
+
+System mode requires exactly one supported enforcing backend. Backend
+detection is automatic; the operator cannot select a weaker mode with a flag.
+
+### AppArmor
 
 System mode uses mandatory AppArmor confinement with the
 `docker-helper-system` profile. Managed workspace roots are stored in
@@ -921,6 +944,20 @@ docker-helper apparmor check
 User mode does not use AppArmor confinement by default. The release tarball
 includes an optional user-mode AppArmor profile template that can be
 installed manually.
+
+### SELinux
+
+On an enforcing SELinux system, the systemd service runs in
+`docker_helper_t`; containers started by the service use
+`docker_helper_container_t` with MCS confinement. SELinux does not reproduce
+AppArmor's per-path managed-root rules. The canonical allowed-root check in
+docker-helper remains the path boundary, while SELinux permits only supported
+workspace file types as defense in depth.
+
+The RPM contains `/usr/share/selinux/docker-helper.pp` and its lifecycle script
+loads the module on an enforcing SELinux host. The DEB does not install the
+SELinux module. See [docs/selinux-support-plan.md](docs/selinux-support-plan.md)
+for the policy contract and outstanding distribution UAT.
 
 ### AppArmor-confined curl
 
@@ -999,7 +1036,7 @@ and stored root.
 Existing stale AppArmor roots remain removable even if they no longer
 satisfy the current policy.
 
-## System mode: provisioning a principal
+## System mode with AppArmor: provisioning a principal
 
 System mode requires the operator to configure both docker-helper policy
 and AppArmor confinement separately. Changing principal or config allowed
@@ -1046,6 +1083,7 @@ they may remove it before provisioning AppArmor:
 ```bash
 sudo docker-helper principal allowed-root remove \
     --system alice /home/alice
+```
 
 To remove a principal and all associated sessions, credentials, and allowed
 roots:
@@ -1081,7 +1119,9 @@ The token is stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credenti
 with mode `0600`. The directory is created with mode `0700` if it does not exist.
 The write is atomic: a failure will not corrupt an existing credential.
 
-Once installed, `docker-helper --system` uses the credential automatically.
+Once installed, operator commands automatically select the system socket and
+credential when no user socket exists. `--system`, `--endpoint`, and
+`--token-file` remain available for an explicit selection.
 
 ## Documentation
 
