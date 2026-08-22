@@ -763,3 +763,165 @@ func TestSystemCADocumentation(t *testing.T) {
 		t.Error("README.md system-mode CA section must document /etc/docker-helper as the CA source namespace")
 	}
 }
+
+// --- Runtime enforcement tests (loadConfig path) ---
+
+func TestIsPathContainedUnderRejectsRoot(t *testing.T) {
+	// path == root must return false (not a proper descendant).
+	root := t.TempDir()
+	got, err := isPathContainedUnder(root, root)
+	if err != nil {
+		t.Fatalf("isPathContainedUnder(%q, %q) error = %v", root, root, err)
+	}
+	if got {
+		t.Errorf("isPathContainedUnder(%q, %q) = true, want false (path == root is not contained)", root, root)
+	}
+}
+
+func TestLoadConfigSystemModeRejectsOutsideCA(t *testing.T) {
+	// loadConfig in system mode must reject trusted_ca_path outside
+	// /etc/docker-helper, even when config was written manually.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	// Manually write config bypassing config CLI.
+	cfg := map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_path":      caPath,
+		"trusted_ca_injection": "auto",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock system mode.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	// Mock config path.
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	// Mock runtime dir to avoid /run/docker-helper creation.
+	origGetRuntime := getRuntimeDirFunc
+	runtimeDir := filepath.Join(dir, "runtime")
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	defer func() { getRuntimeDirFunc = origGetRuntime }()
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("loadConfig should reject CA outside /etc/docker-helper in system mode")
+	}
+	if !strings.Contains(err.Error(), systemCASourceRoot) {
+		t.Errorf("expected error mentioning %s, got: %v", systemCASourceRoot, err)
+	}
+}
+
+func TestLoadConfigSystemModeRejectsSymlinkEscape(t *testing.T) {
+	// loadConfig in system mode must reject a symlink under the allowed
+	// root that resolves to a file outside.
+	allowedRoot := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideCA := filepath.Join(outsideDir, "outside-ca.crt")
+	generateTestCAPEM(t, outsideCA)
+
+	// Symlink inside allowed root pointing to outside file.
+	linkCA := filepath.Join(allowedRoot, "link-ca.crt")
+	if err := os.Symlink(outsideCA, linkCA); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+
+	// Manually write config.
+	cfg := map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_path":      linkCA,
+		"trusted_ca_injection": "auto",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock system mode.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	origGetRuntime := getRuntimeDirFunc
+	runtimeDir := filepath.Join(dir, "runtime")
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	defer func() { getRuntimeDirFunc = origGetRuntime }()
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("loadConfig should reject symlink escape in system mode")
+	}
+	if !strings.Contains(err.Error(), systemCASourceRoot) {
+		t.Errorf("expected error mentioning %s, got: %v", systemCASourceRoot, err)
+	}
+}
+
+func TestLoadConfigUserModeAcceptsArbitraryCA(t *testing.T) {
+	// loadConfig in user mode must accept arbitrary absolute CA paths.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	// Manually write config.
+	cfg := map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_path":      caPath,
+		"trusted_ca_injection": "auto",
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock user mode.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	defer func() { EffectiveUID = origUID }()
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	origGetRuntime := getRuntimeDirFunc
+	runtimeDir := filepath.Join(dir, "runtime")
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	defer func() { getRuntimeDirFunc = origGetRuntime }()
+
+	// Mock state dir.
+	origGetState := getStateDirFunc
+	stateDir := filepath.Join(dir, "state")
+	getStateDirFunc = func() string { return stateDir }
+	defer func() { getStateDirFunc = origGetState }()
+
+	loaded, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig should accept arbitrary CA path in user mode: %v", err)
+	}
+	if loaded.TrustedCAPath != caPath {
+		t.Errorf("TrustedCAPath = %q, want %q", loaded.TrustedCAPath, caPath)
+	}
+	if loaded.TrustedCAPreparedDir == "" {
+		t.Error("TrustedCAPreparedDir should be set")
+	}
+}

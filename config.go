@@ -52,7 +52,8 @@ func resolveDeploymentMode() DeploymentMode {
 // isPathContainedUnder returns true if the canonical path is strictly contained
 // under the canonical root directory. Both paths are resolved with EvalSymlinks
 // before comparison. A path equal to the root is not contained; the path must
-// be a proper descendant.
+// be a proper descendant. If the root does not exist, it is used as-is (the
+// root is typically a well-known system directory).
 func isPathContainedUnder(path, root string) (bool, error) {
 	canonicalPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -60,14 +61,20 @@ func isPathContainedUnder(path, root string) (bool, error) {
 	}
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return false, err
+		if os.IsNotExist(err) {
+			// Root doesn't exist; use it as-is. The root is typically
+			// a well-known system directory that should exist at runtime.
+			canonicalRoot = filepath.Clean(root)
+		} else {
+			return false, err
+		}
 	}
 	rel, err := filepath.Rel(canonicalRoot, canonicalPath)
 	if err != nil {
 		return false, err
 	}
-	// rel must not be ".." or start with "../"
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
+	// rel must not be "." (path == root), "..", or start with "../"
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
 }
 
 type Config struct {
@@ -234,6 +241,9 @@ func getConfigDir() string {
 	return filepath.Dir(getConfigPathFunc())
 }
 
+// getRuntimeDirFunc is injectable for testing.
+var getRuntimeDirFunc = getRuntimeDir
+
 func getRuntimeDir() (string, error) {
 	mode := resolveDeploymentMode()
 	if mode == ModeSystem {
@@ -246,6 +256,9 @@ func getRuntimeDir() (string, error) {
 	}
 	return filepath.Join(dir, "docker-helper"), nil
 }
+
+// getStateDirFunc is injectable for testing.
+var getStateDirFunc = getStateDir
 
 func getStateDir() string {
 	mode := resolveDeploymentMode()
@@ -328,7 +341,7 @@ func loadConfig() (*Config, error) {
 	}
 
 	mode := resolveDeploymentMode()
-	runtimeDir, err := getRuntimeDir()
+	runtimeDir, err := getRuntimeDirFunc()
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +357,7 @@ func loadConfig() (*Config, error) {
 		}
 	}
 
-	stateDir := getStateDir()
+	stateDir := getStateDirFunc()
 
 	// Derive configDir from configPath so DOCKER_HELPER_CONFIG is respected.
 	configDir := filepath.Dir(configPath)
@@ -378,6 +391,13 @@ func loadConfig() (*Config, error) {
 	if trustedCAInjection == "auto" {
 		if cfg.TrustedCAPath == "" {
 			return nil, fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
+		}
+		// System-mode CA source-path policy: enforce canonical containment
+		// under /etc/docker-helper before any CA file I/O.
+		if mode == ModeSystem {
+			if err := validateSystemCASourcePath(cfg.TrustedCAPath); err != nil {
+				return nil, err
+			}
 		}
 		preparedDir, err := prepareCAInjection(runtimeDir, cfg.TrustedCAPath)
 		if err != nil {
