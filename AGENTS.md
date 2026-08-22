@@ -27,6 +27,13 @@ Do not add:
 Future extensibility is a constraint, not a requirement to implement future
 architecture now.
 
+Generalizing an existing owner so that another caller with the same semantics
+can use it is not speculative framework-building.
+
+The prohibition on generic frameworks applies to abstractions created for
+hypothetical reuse or unrelated structurally similar code, not to consolidation
+of an already shared responsibility.
+
 3. Prefer deletion and simplification.
 
 Before adding code, ask whether the correct change is:
@@ -47,6 +54,18 @@ Examples from the current architecture:
 Do not duplicate the behavior of an underlying authoritative component unless
 docker-helper has a concrete policy reason to do so.
 
+Prefer the highest-level existing owner that matches the responsibility being
+changed.
+
+Reusing the same low-level primitives does not count as reusing the existing
+abstraction when it reconstructs an already-owned lifecycle or policy.
+
+Do not compose existing primitives into a second implementation of semantics
+already owned by a higher-level production path.
+
+Deletion and simplification are subordinate to current public contracts and
+explicit compatibility requirements.
+
 # Scope discipline
 
 4. Preserve task scope.
@@ -60,6 +79,14 @@ When you notice another issue:
 
 A cleanup commit should remain a cleanup commit.
 A behavior change should be explicit.
+
+Changes required to preserve a single authoritative owner are part of the
+current task, even when they require updating existing callers or removing the
+superseded path.
+
+Unrelated cleanup beyond that ownership boundary remains out of scope.
+
+Explicit task or file restrictions still take precedence.
 
 5. Do not silently change contracts.
 
@@ -76,6 +103,13 @@ Treat these as contracts unless the task explicitly changes them:
 If implementation and documentation disagree, identify which is authoritative
 before changing either.
 
+When contract sources disagree, do not silently choose the source that best
+matches the intended implementation.
+
+Use explicit task instructions and documented ownership to resolve the conflict.
+If the conflict would require changing a public contract and is not resolved by
+the task or canonical documentation, report it instead of guessing.
+
 When introducing or reusing a domain error, inspect every public boundary that
 may receive it.
 
@@ -86,6 +120,12 @@ For HTTP and CLI boundaries, verify where applicable:
 - HTTP status and CLI exit code;
 - machine-readable error code;
 - stdout and stderr behavior.
+
+Prefer typed error inspection (`errors.Is`, `errors.As`, concrete error types,
+syscall errors) over matching human-readable error strings.
+
+String matching is acceptable only when the dependency exposes no stable typed
+signal. In that case, keep the classifier narrow and document why it is needed.
 
 For transactional CLI operations, success output must be emitted only after the
 operation reaches its contractual success or commit point.
@@ -416,8 +456,27 @@ Differences such as:
 
 should normally be expressed through the shared owner.
 
+A difference in one stage of a lifecycle does not justify duplicating the
+unchanged stages.
+
+When only one stage differs, isolate that stage and keep the common lifecycle
+under the existing owner. Separate the differing semantics, not the entire
+surrounding mechanism.
+
 A separate lifecycle is justified only when the lifecycle itself, its
 invariants, or the trust boundary are genuinely different.
+
+If the existing owner is itself the wrong abstraction, refactor or replace it
+and migrate its callers.
+
+Do not layer a new authoritative mechanism beside an obsolete one merely to
+avoid changing existing callers.
+
+Consolidate by semantic responsibility, not by structural similarity.
+
+Two code paths that happen to use the same sequence of steps must not share an
+owner if they represent different responsibilities, invariants, or trust
+boundaries.
 
 When a regression test depends on an obsolete implementation that is being
 consolidated away, move the test to the authoritative path rather than keeping
@@ -544,6 +603,10 @@ Trace the existing call path by responsibility and behavior.
 
 Do not introduce a new production path before this check.
 
+The ownership check is required whenever a change introduces a new production
+helper, path, or mechanism for an already represented concern, regardless of
+diff size or whether the overall task appears trivial.
+
 "Smallest appropriate change" means the smallest architectural change that
 preserves ownership and invariants, not necessarily the smallest diff.
 
@@ -572,11 +635,14 @@ If tests were added or substantially changed, review them against the proof and
 independence requirements in the `# Tests` section before considering the task
 complete. Passing commands alone are not sufficient.
 
-Prefer typed error inspection (`errors.Is`, `errors.As`, concrete error types,
-syscall errors) over matching human-readable error strings.
+If the task added, generalized, or replaced a production mechanism, trace the
+final production paths again before completion.
 
-String matching is acceptable only when the dependency exposes no stable typed
-signal. In that case, keep the classifier narrow and document why it is needed.
+Verify that:
+- old and new owners do not coexist unintentionally;
+- no caller bypasses the authoritative path;
+- superseded helpers and seams are no longer reachable;
+- tests exercise the authoritative path.
 
 24. Commits.
 
