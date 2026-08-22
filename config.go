@@ -114,7 +114,7 @@ type configFieldSpec struct {
 
 var configFields = []configFieldSpec{
 	{name: "allowed_roots", writable: true, required: true},
-	{name: "allowed_root", writable: true, required: false},
+	{name: "allowed_root", writable: false, required: false},
 	{name: "session_ttl", writable: true, required: true},
 	{name: "log_level", writable: true},
 	{name: "audit_enabled", writable: true},

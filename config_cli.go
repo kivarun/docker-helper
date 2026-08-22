@@ -53,7 +53,7 @@ func isRuntimeDependent(name string) bool {
 	}
 }
 
-// isPureComputed returns true for fields that can be resolved without
+// isPureComputed returns true for fields that can be requested without
 // reading config.json (config_path, config_dir, admin_token_path, mode).
 func isPureComputed(name string) bool {
 	switch name {
@@ -274,12 +274,13 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	// Use canonical requested roots (same as loadConfig).
+	requestedRoots, err := resolveAllowedRoots(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	for _, r := range resolvedRoots {
+	for _, r := range requestedRoots {
 		fmt.Fprintln(stdout, r)
 	}
 	return 0
@@ -331,7 +332,7 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	resolvedRoots, err := resolveAllowedRoots(raw, fc)
+	requestedRoots, err := resolveAllowedRoots(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -339,7 +340,7 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 
 	// Check if already present (but still run SELinux ensure below).
 	present := false
-	for _, r := range resolvedRoots {
+	for _, r := range requestedRoots {
 		if r == canonical {
 			present = true
 			break
@@ -377,9 +378,9 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 	// Determine new roots list.
 	var newRoots []string
 	if present {
-		newRoots = resolvedRoots
+		newRoots = requestedRoots
 	} else {
-		newRoots = append(resolvedRoots, canonical)
+		newRoots = append(requestedRoots, canonical)
 	}
 
 	// Migrate: remove legacy allowed_root, write canonical allowed_roots.
@@ -463,14 +464,14 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// For REMOVE, we do NOT require the path to exist on the filesystem.
-	resolved, err := filepath.Abs(path)
+	// Canonicalize the requested path (try to resolve, but don't require existence).
+	requested, err := filepath.Abs(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
 		return 2
 	}
-	if canonical, err := filepath.EvalSymlinks(resolved); err == nil {
-		resolved = canonical
+	if canonical, err := filepath.EvalSymlinks(requested); err == nil {
+		requested = canonical
 	}
 
 	configPath := getConfigPathFunc()
@@ -490,23 +491,31 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Resolve current roots (handles legacy migration).
+	// Check for ambiguous schema (fail closed).
+	hasLegacy := raw["allowed_root"] != nil
+	hasNew := raw["allowed_roots"] != nil
+	if hasLegacy && hasNew {
+		fmt.Fprintln(stderr, "error: ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
+		return 1
+	}
+
+	// Resolve current roots with canonicalization.
 	fc, err := decodeFileConfig(raw)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	requestedRoots, err := resolveAllowedRoots(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	// Find and remove the root.
+	// Find and remove the root (match by canonical path).
 	found := false
-	newRoots := make([]string, 0, len(resolvedRoots))
-	for _, r := range resolvedRoots {
-		if r == resolved {
+	newRoots := make([]string, 0, len(requestedRoots))
+	for _, r := range requestedRoots {
+		if r == requested {
 			found = true
 			continue
 		}
@@ -514,7 +523,7 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 	}
 
 	if !found {
-		fmt.Fprintf(stdout, "not found %s\n", resolved)
+		fmt.Fprintf(stdout, "not found %s\n", requested)
 		return 0
 	}
 
@@ -560,7 +569,7 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "removed %s\n", resolved)
+	fmt.Fprintf(stdout, "removed %s\n", requested)
 
 	// Attempt reload.
 	outcome := attemptReload()
@@ -692,7 +701,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 	}
 
 	// Resolve effective allowed_roots (handles legacy migration).
-	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -713,7 +722,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
 	result := map[string]any{
-		"allowed_roots":           resolvedRoots,
+		"allowed_roots":           requestedRoots,
 		"session_ttl":             fc.SessionTTL,
 		"log_level":               ec.LogLevel,
 		"audit_enabled":           ec.AuditEnabled,
@@ -855,7 +864,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	}
 
 	// Resolve effective allowed_roots (handles legacy migration).
-	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	requestedRoots, err := resolveAllowedRootsForShow(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -867,7 +876,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 
 	switch field {
 	case "allowed_roots":
-		data, _ := json.MarshalIndent(resolvedRoots, "", "  ")
+		data, _ := json.MarshalIndent(requestedRoots, "", "  ")
 		fmt.Fprintln(stdout, string(data))
 	case "session_ttl":
 		fmt.Fprintln(stdout, fc.SessionTTL)
@@ -926,10 +935,6 @@ func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *conf
 		fmt.Fprintf(stderr, "error: unknown field %q\n", field)
 		return 2
 	}
-	if isReadOnlyField(field) {
-		fmt.Fprintf(stderr, "error: field %q is read-only\n", field)
-		return 2
-	}
 
 	switch field {
 	case "allowed_root":
@@ -940,6 +945,14 @@ func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *conf
 		fmt.Fprintln(stderr, "error: allowed_roots is managed via structured commands")
 		fmt.Fprintln(stderr, "use: docker-helper config allowed-root add/remove/list")
 		return 2
+	}
+
+	if isReadOnlyField(field) {
+		fmt.Fprintf(stderr, "error: field %q is read-only\n", field)
+		return 2
+	}
+
+	switch field {
 	case "session_ttl":
 		if _, err := time.ParseDuration(value); err != nil {
 			fmt.Fprintf(stderr, "error: invalid duration %q: %v\n", value, err)
@@ -1068,6 +1081,11 @@ func configUnset(field string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: field %q is required and cannot be unset\n", field)
 		return 2
 	}
+	if field == "allowed_root" {
+		fmt.Fprintln(stderr, "error: allowed_root is legacy and cannot be unset directly")
+		fmt.Fprintln(stderr, "use: docker-helper config allowed-root remove PATH")
+		return 2
+	}
 
 	return applyConfigChangeTransactionally(
 		configOpUnset,
@@ -1188,7 +1206,6 @@ func applyConfigChangeTransactionally(
 	}
 
 	// Check for ambiguous schema before migration (fail closed).
-	// Do not validate the entire config yet, as the mutation may repair it.
 	hasLegacy := raw["allowed_root"] != nil
 	hasNew := raw["allowed_roots"] != nil
 	if hasLegacy && hasNew {
@@ -1199,25 +1216,27 @@ func applyConfigChangeTransactionally(
 	// Migrate legacy allowed_root to allowed_roots if present.
 	// This must happen BEFORE the unchanged check so that a successful
 	// mutation always produces canonical config.
+	schemaChanged := false
 	if hasLegacy && !hasNew {
 		// Migrate: decode legacy value, canonicalize, write as allowed_roots array.
 		var legacyVal string
-		if err := json.Unmarshal(raw["allowed_root"], &legacyVal); err == nil {
-			// Canonicalize the legacy value.
-			canon, canonErr := canonicalizeWorkspaceRootForAdd(legacyVal)
-			if canonErr != nil {
-				// If canonicalization fails, fall back to the raw value.
-				canon = legacyVal
-			}
-			newRoots, _ := json.Marshal([]string{canon})
-			raw["allowed_roots"] = newRoots
+		if err := json.Unmarshal(raw["allowed_root"], &legacyVal); err != nil {
+			fmt.Fprintf(stderr, "error: cannot parse allowed_root: %v\n", err)
+			return 1
 		}
+		// Canonicalize the legacy value (fail closed on error).
+		canon, canonErr := canonicalizeWorkspaceRootForAdd(legacyVal)
+		if canonErr != nil {
+			fmt.Fprintf(stderr, "error: cannot canonicalize allowed_root %q: %v\n", legacyVal, canonErr)
+			return 1
+		}
+		newRoots, _ := json.Marshal([]string{canon})
+		raw["allowed_roots"] = newRoots
 		delete(raw, "allowed_root")
+		schemaChanged = true
 	}
 
 	// Apply modification tentatively to check if it repairs the config.
-	// If the mutation is for a different field, validate the full config.
-	// If the mutation is for the same field, allow the repair.
 	tempRaw := make(map[string]json.RawMessage)
 	for k, v := range raw {
 		tempRaw[k] = v
@@ -1225,32 +1244,37 @@ func applyConfigChangeTransactionally(
 	modify(tempRaw)
 
 	// Validate after mutation. If the mutation repairs the config, this passes.
-	// If the mutation is for a different field and the config is still invalid,
-	// this fails.
 	if err := validateRawConfig(tempRaw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
 	// Check unchanged AFTER migration.
+	// Distinguish fieldChanged vs schemaChanged.
+	// Only return without writing when BOTH are false.
+	fieldChanged := false
 	if op == configOpSet && newValue != nil {
-		if existing, ok := raw[field]; ok && bytes.Equal(existing, newValue) {
-			if err := validateCAConfig(raw); err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				return 1
-			}
-			fmt.Fprintf(stdout, "unchanged %s=%s\n", field, value)
-			return 0
+		if existing, ok := raw[field]; !ok || !bytes.Equal(existing, newValue) {
+			fieldChanged = true
 		}
 	} else if op == configOpUnset {
-		if _, ok := raw[field]; !ok {
-			if err := validateCAConfig(raw); err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				return 1
-			}
-			fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
-			return 0
+		if _, ok := raw[field]; ok {
+			fieldChanged = true
 		}
+	}
+
+	if !fieldChanged && !schemaChanged {
+		// Truly unchanged: no field change and no schema migration needed.
+		if err := validateCAConfig(raw); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		if op == configOpUnset {
+			fmt.Fprintf(stdout, "unchanged %s is already unset\n", field)
+		} else {
+			fmt.Fprintf(stdout, "unchanged %s=%s\n", field, value)
+		}
+		return 0
 	}
 
 	// Save original bytes for rollback.

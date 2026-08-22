@@ -374,7 +374,7 @@ func TestCAPreflightSetUnchanged(t *testing.T) {
 	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
-		"allowed_root":         testAllowedRootDir(t),
+		"allowed_roots":        []string{testAllowedRootDir(t)},
 		"session_ttl":          "12h",
 		"trusted_ca_path":      caPath,
 		"trusted_ca_injection": "auto",

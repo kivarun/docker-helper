@@ -166,9 +166,9 @@ func TestConfigSetUnchangedNoReload(t *testing.T) {
 
 	allowedRoot := testAllowedRootDir(t)
 	cfg := map[string]any{
-		"allowed_root": allowedRoot,
-		"session_ttl":  "12h",
-		"log_level":    "info",
+		"allowed_roots": []string{allowedRoot},
+		"session_ttl":   "12h",
+		"log_level":     "info",
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
