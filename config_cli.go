@@ -453,6 +453,12 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// removableRoot separates stored representation from comparison identity.
+type removableRoot struct {
+	Stored   string // original absolute stored spelling
+	Identity string // EvalSymlinks result or cleaned abs on ENOENT
+}
+
 // configAllowedRootRemove removes a root from allowed_roots.
 func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 	if path == "" {
@@ -464,14 +470,20 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// Canonicalize the requested path (try to resolve, but don't require existence).
-	requested, err := filepath.Abs(path)
+	// Resolve the requested removal path identity.
+	requestedAbs, err := filepath.Abs(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
 		return 2
 	}
-	if canonical, err := filepath.EvalSymlinks(requested); err == nil {
-		requested = canonical
+	requestedIdentity, err := filepath.EvalSymlinks(requestedAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			requestedIdentity = filepath.Clean(requestedAbs)
+		} else {
+			fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
+			return 2
+		}
 	}
 
 	configPath := getConfigPathFunc()
@@ -499,43 +511,72 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Resolve current roots with canonicalization.
+	// Decode stored roots.
 	fc, err := decodeFileConfig(raw)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	requestedRoots, err := resolveAllowedRootsForRemove(raw, fc)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+	var storedRoots []string
+	if hasLegacy && !hasNew {
+		storedRoots = []string{fc.AllowedRootLegacy}
+	} else {
+		storedRoots = fc.AllowedRoots
+	}
+	if len(storedRoots) == 0 {
+		fmt.Fprintln(stderr, "error: allowed_roots must contain at least one entry")
 		return 1
 	}
 
-	// Find and remove the root (match by canonical path).
+	// Build removable roots with identity resolution.
+	roots := make([]removableRoot, 0, len(storedRoots))
+	for _, r := range storedRoots {
+		if r == "" || !filepath.IsAbs(r) {
+			fmt.Fprintf(stderr, "error: invalid stored root %q\n", r)
+			return 1
+		}
+		abs, err := filepath.Abs(r)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: cannot resolve stored root %q: %v\n", r, err)
+			return 1
+		}
+		identity, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				identity = filepath.Clean(abs)
+			} else {
+				fmt.Fprintf(stderr, "error: cannot resolve stored root %q: %v\n", r, err)
+				return 1
+			}
+		}
+		roots = append(roots, removableRoot{Stored: r, Identity: identity})
+	}
+
+	// Find and remove the root (match by identity).
 	found := false
-	newRoots := make([]string, 0, len(requestedRoots))
-	for _, r := range requestedRoots {
-		if r == requested {
+	newStored := make([]string, 0, len(roots))
+	for _, rr := range roots {
+		if rr.Identity == requestedIdentity {
 			found = true
 			continue
 		}
-		newRoots = append(newRoots, r)
+		newStored = append(newStored, rr.Stored)
 	}
 
 	if !found {
-		fmt.Fprintf(stdout, "not found %s\n", requested)
+		fmt.Fprintf(stdout, "not found %s\n", requestedIdentity)
 		return 0
 	}
 
 	// Reject removal of the final global root.
-	if len(newRoots) == 0 {
+	if len(newStored) == 0 {
 		fmt.Fprintln(stderr, "error: cannot remove the last allowed root")
 		return 2
 	}
 
 	// Migrate: remove legacy allowed_root, write canonical allowed_roots.
 	delete(raw, "allowed_root")
-	rawBytes, _ := json.Marshal(newRoots)
+	rawBytes, _ := json.Marshal(newStored)
 	raw["allowed_roots"] = rawBytes
 
 	// Save original bytes for rollback.
@@ -569,7 +610,7 @@ func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "removed %s\n", requested)
+	fmt.Fprintf(stdout, "removed %s\n", requestedIdentity)
 
 	// Attempt reload.
 	outcome := attemptReload()
