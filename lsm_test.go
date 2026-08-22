@@ -743,19 +743,22 @@ func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
 	configPath := filepath.Join(configDir, "config.json")
 	getConfigPathFunc = func() string { return configPath }
 
-	// Test initSystemSELinux directly with a mock core to avoid
+	// Test initSystem directly with a mock core to avoid
 	// /var/lib/docker-helper creation (requires root).
 	var coreCalled string
-	err := initSystemSELinux(rootDir, &bytes.Buffer{}, &bytes.Buffer{},
-		nil,
+	err := initSystem(rootDir, &bytes.Buffer{}, &bytes.Buffer{},
+		&systemInitBackend{
+			prepare: func(canonical string) (*systemInitPrepareResult, error) {
+				return &systemInitPrepareResult{}, nil
+			},
+		},
 		func(ar string, so, se io.Writer) error {
 			coreCalled = ar
 			return nil
 		},
-		func(path string) (string, error) { return path, nil },
 	)
 	if err != nil {
-		t.Fatalf("initSystemSELinux failed: %v", err)
+		t.Fatalf("initSystem failed: %v", err)
 	}
 	if coreCalled != rootDir {
 		t.Errorf("core called with %q, want %q", coreCalled, rootDir)

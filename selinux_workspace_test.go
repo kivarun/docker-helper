@@ -1022,6 +1022,23 @@ func TestSELinuxWorkspaceLockAcquisitionFailure(t *testing.T) {
 
 // --- Init integration tests ---
 
+// testSELinuxBackend creates a systemInitBackend for SELinux testing.
+// mgr is the SELinux workspace manager (nil to skip preparation).
+// resolveRoot is the canonical root resolver (nil to use production default).
+func testSELinuxBackend(mgr *selinuxWorkspaceManager, resolveRoot func(string) (string, error)) *systemInitBackend {
+	return &systemInitBackend{
+		resolveRoot: resolveRoot,
+		prepare: func(canonical string) (*systemInitPrepareResult, error) {
+			if mgr != nil && !isHomeRoot(canonical) {
+				if _, err := mgr.ensureWorkspaceLabel(canonical); err != nil {
+					return nil, err
+				}
+			}
+			return &systemInitPrepareResult{}, nil
+		},
+	}
+}
+
 func syntheticResolveRoot(path string) (string, error) {
 	return path, nil
 }
@@ -1046,16 +1063,15 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 	}
 
 	var coreCalled bool
-	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		mgr,
+	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
+		testSELinuxBackend(mgr, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
 		},
-		syntheticResolveRoot,
 	)
 	if err != nil {
-		t.Fatalf("initSystemSELinux failed: %v", err)
+		t.Fatalf("initSystem failed: %v", err)
 	}
 	if !ensureCalled {
 		t.Error("ensureWorkspaceLabel should be called for non-home root")
@@ -1079,16 +1095,15 @@ func TestInitSELinuxHomeRootNoSELinuxPrep(t *testing.T) {
 	}
 
 	var coreCalled bool
-	err := initSystemSELinux("/home/alice", &bytes.Buffer{}, &bytes.Buffer{},
-		mgr,
+	err := initSystem("/home/alice", &bytes.Buffer{}, &bytes.Buffer{},
+		testSELinuxBackend(mgr, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
 		},
-		syntheticResolveRoot,
 	)
 	if err != nil {
-		t.Fatalf("initSystemSELinux failed: %v", err)
+		t.Fatalf("initSystem failed: %v", err)
 	}
 	if ensureCalled {
 		t.Error("ensureWorkspaceLabel should NOT be called for home root")
@@ -1123,12 +1138,11 @@ func TestInitSELinuxCoreFailureNoRollback(t *testing.T) {
 		return selinuxWorkspaceType, nil
 	}
 
-	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		mgr,
+	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
+		testSELinuxBackend(mgr, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		},
-		syntheticResolveRoot,
 	)
 	if err == nil {
 		t.Fatal("expected error for core failure")
@@ -1145,16 +1159,15 @@ func TestInitSELinuxNilManager(t *testing.T) {
 	defer func() { getConfigPathFunc = origGetConfig }()
 
 	var coreCalled string
-	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		nil,
+	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
+		testSELinuxBackend(nil, syntheticResolveRoot),
 		func(ar string, so, se io.Writer) error {
 			coreCalled = ar
 			return nil
 		},
-		syntheticResolveRoot,
 	)
 	if err != nil {
-		t.Fatalf("initSystemSELinux failed: %v", err)
+		t.Fatalf("initSystem failed: %v", err)
 	}
 	if coreCalled != "/data" {
 		t.Errorf("core called with %q, want %q", coreCalled, "/data")

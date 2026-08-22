@@ -753,143 +753,55 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	}, nil
 }
 
-// initSystemWithAppArmor performs system-mode initialization with AppArmor integration.
-// core is the file-based init function (injectable for testing).
-func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
-	addRoot func(string) (rootResult, error),
-	removeRoot func(string) (rootResult, error),
-	core func(string, io.Writer, io.Writer) error,
-) error {
-	configPath := getConfigPathFunc()
-	configDir := filepath.Dir(configPath)
-	adminTokenPath := filepath.Join(configDir, "admin.token")
-
-	// Preflight 1: check existing admin.token before any AppArmor changes.
-	if _, err := os.Stat(adminTokenPath); err == nil {
-		fmt.Fprintln(stderr, "admin.token already exists at:")
-		fmt.Fprintln(stderr, adminTokenPath)
-		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "Will not overwrite. Use `docker-helper admin token rotate` to replace it.")
-		return errors.New("admin.token already exists")
-	}
-
-	// Preflight 2: read existing config if present to check for mismatch.
-	var existingRoots []string
-	configExists := false
-
-	if stat, err := os.Stat(configPath); err == nil {
-		if stat.IsDir() {
-			// config.json as a directory is an operational failure.
-			return fmt.Errorf("configuration path is a directory: %s", configPath)
-		}
-		configExists = true
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			return fmt.Errorf("cannot read existing configuration: %w", err)
-		}
-
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("cannot parse existing configuration: %w", err)
-		}
-		if err := validateRawConfig(raw); err != nil {
-			return fmt.Errorf("existing configuration is invalid: %w", err)
-		}
-
-		var fc fileConfig
-		if err := json.Unmarshal(data, &fc); err != nil {
-			return fmt.Errorf("cannot decode existing configuration: %w", err)
-		}
-
-		existingRoots = fc.AllowedRoots
-		if fc.AllowedRootLegacy != "" && len(fc.AllowedRoots) == 0 {
-			existingRoots = []string{fc.AllowedRootLegacy}
-		}
-	} else if !os.IsNotExist(err) {
-		// Non-ENOENT error is operational failure.
-		return fmt.Errorf("cannot stat existing configuration: %w", err)
-	}
-
-	// Canonicalize the allowed root for comparison.
-	effectiveAllowedRoot, err := resolveAllowedRoot(allowedRoot)
-	if err != nil {
-		return err
-	}
-
-	// Preflight 3: check for mismatch with existing config.
-	// The requested bootstrap root must be present in the existing config.
-	if configExists && len(existingRoots) > 0 {
-		// Check if the requested root is already in the existing config.
-		found := false
-		for _, er := range existingRoots {
-			existingCanonical, err := resolveAllowedRoot(er)
-			if err != nil {
-				return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
-			}
-			if existingCanonical == effectiveAllowedRoot {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return &inputError{msg: fmt.Sprintf("existing configuration allowed_roots %v do not include %s", existingRoots, effectiveAllowedRoot)}
-		}
-	}
-
-	// All preflight passed. Now modify AppArmor.
-	appArmorResult, err := addRoot(effectiveAllowedRoot)
-	if err != nil {
-		return err
-	}
-
-	// Run core init.
-	err = core(allowedRoot, stdout, stderr)
-	if err != nil {
-		// Rollback AppArmor if we added a new root.
-		if appArmorResult.Changed {
-			_, rollbackErr := removeRoot(appArmorResult.Path)
-			if rollbackErr != nil {
-				return fmt.Errorf("init failed: %w; AppArmor rollback also failed: %v", err, rollbackErr)
-			}
-		}
-		return err
-	}
-
-	// Print AppArmor status after successful init.
-	if appArmorResult.Changed {
-		fmt.Fprintf(stdout, "AppArmor workspace root added: %s\n", appArmorResult.Path)
-	} else {
-		fmt.Fprintf(stdout, "AppArmor workspace root already present: %s\n", appArmorResult.Path)
-	}
-
-	return nil
+// systemInitBackend holds backend-specific hooks for system-mode init.
+type systemInitBackend struct {
+	// resolveRoot canonicalizes an allowed-root path.
+	// nil means use resolveAllowedRoot.
+	resolveRoot func(string) (string, error)
+	// prepare runs backend-specific confinement preparation with the
+	// canonical root. Returns a prepareResult describing any rollback
+	// behavior and post-success output.
+	prepare func(canonical string) (*systemInitPrepareResult, error)
 }
 
-// initSystemSELinux performs system-mode initialization under SELinux
-// without AppArmor root management. It performs the same preflight checks
-// as initSystemWithAppArmor but skips the AppArmor-specific steps.
-// For non-home allowed_roots, it prepares persistent SELinux workspace
-// labeling (docker_helper_workspace_t) before running core init.
+// systemInitPrepareResult describes the outcome of backend preparation.
+type systemInitPrepareResult struct {
+	// RollbackOnCoreFailure is called when core init fails after
+	// successful preparation. nil means no rollback (e.g., SELinux).
+	RollbackOnCoreFailure func() error
+	// OnSuccess is called after successful core init to print
+	// backend-specific status. nil means no output.
+	OnSuccess func(stdout io.Writer)
+}
+
+// initSystem is the single authoritative owner of the system-init lifecycle.
+// It performs:
 //
-// Monotonic managed-label lifecycle (R2):
-// Once ensureWorkspaceLabel returns success, the mapping is managed durable
-// state. If core init fails, the mapping is NOT rolled back. A stale
-// docker_helper_workspace_t mapping is acceptable: it is confinement metadata,
-// not authorization, and config/principal/session checks remain authoritative.
+//  1. determine config/admin-token paths;
+//  2. reject an existing admin token before any confinement side effects;
+//  3. inspect and validate existing config if present;
+//  4. canonicalize requested bootstrap root;
+//  5. if config exists, require that requested root is already represented;
+//  6. perform backend-specific confinement preparation;
+//  7. run core init with the original requested allowed-root argument;
+//  8. apply backend-specific failure/success behavior.
 //
-// mgr is the SELinux workspace manager (injectable for testing).
+// b is the backend-specific hooks. nil fields use production defaults.
 // core is the file-based init function (injectable for testing).
-// resolveRoot is the canonical root resolver (injectable for testing).
-func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
-	mgr *selinuxWorkspaceManager,
+func initSystem(allowedRoot string, stdout, stderr io.Writer,
+	b *systemInitBackend,
 	core func(string, io.Writer, io.Writer) error,
-	resolveRoot func(string) (string, error),
 ) error {
 	configPath := getConfigPathFunc()
 	configDir := filepath.Dir(configPath)
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
-	// Preflight 1: check existing admin.token.
+	resolveRoot := b.resolveRoot
+	if resolveRoot == nil {
+		resolveRoot = resolveAllowedRoot
+	}
+
+	// Preflight 1: check existing admin.token before any confinement changes.
 	if _, err := os.Stat(adminTokenPath); err == nil {
 		fmt.Fprintln(stderr, "admin.token already exists at:")
 		fmt.Fprintln(stderr, adminTokenPath)
@@ -940,7 +852,6 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Preflight 3: check for mismatch with existing config.
-	// The requested bootstrap root must be present in the existing config.
 	if configExists && len(existingRoots) > 0 {
 		found := false
 		for _, er := range existingRoots {
@@ -958,16 +869,33 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 		}
 	}
 
-	// SELinux workspace preparation for non-home roots.
-	// Once this succeeds, the mapping is managed durable state.
-	if mgr != nil && !isHomeRoot(effectiveAllowedRoot) {
-		if _, err := mgr.ensureWorkspaceLabel(effectiveAllowedRoot); err != nil {
+	// Backend-specific confinement preparation.
+	if b.prepare != nil {
+		pr, err := b.prepare(effectiveAllowedRoot)
+		if err != nil {
 			return err
 		}
+
+		// Run core init.
+		err = core(allowedRoot, stdout, stderr)
+		if err != nil {
+			// Backend-specific rollback.
+			if pr.RollbackOnCoreFailure != nil {
+				if rbErr := pr.RollbackOnCoreFailure(); rbErr != nil {
+					return fmt.Errorf("init failed: %w; confinement rollback also failed: %v", err, rbErr)
+				}
+			}
+			return err
+		}
+
+		// Backend-specific success output.
+		if pr.OnSuccess != nil {
+			pr.OnSuccess(stdout)
+		}
+		return nil
 	}
 
-	// Run core init.
-	// On failure, do NOT roll back the SELinux mapping (monotonic R2 lifecycle).
+	// No backend preparation needed; run core directly.
 	return core(allowedRoot, stdout, stderr)
 }
 
@@ -1008,22 +936,53 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 
 	switch backend {
 	case LSMAppArmor:
-		return initSystemWithAppArmor(allowedRoot, stdout, stderr,
-			getAppArmorAddRoot(),
-			getAppArmorRemoveRoot(),
+		return initSystem(allowedRoot, stdout, stderr,
+			&systemInitBackend{
+				prepare: func(canonical string) (*systemInitPrepareResult, error) {
+					addResult, err := getAppArmorAddRoot()(canonical)
+					if err != nil {
+						return nil, err
+					}
+					pr := &systemInitPrepareResult{
+						OnSuccess: func(stdout io.Writer) {
+							if addResult.Changed {
+								fmt.Fprintf(stdout, "AppArmor workspace root added: %s\n", addResult.Path)
+							} else {
+								fmt.Fprintf(stdout, "AppArmor workspace root already present: %s\n", addResult.Path)
+							}
+						},
+					}
+					if addResult.Changed {
+						pr.RollbackOnCoreFailure = func() error {
+							_, rbErr := getAppArmorRemoveRoot()(addResult.Path)
+							return rbErr
+						}
+					}
+					return pr, nil
+				},
+			},
 			func(ar string, so, se io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err
 			},
 		)
 	case LSMSelinux:
-		return initSystemSELinux(allowedRoot, stdout, stderr,
-			newSELinuxWorkspaceManager(),
+		mgr := newSELinuxWorkspaceManager()
+		return initSystem(allowedRoot, stdout, stderr,
+			&systemInitBackend{
+				prepare: func(canonical string) (*systemInitPrepareResult, error) {
+					if !isHomeRoot(canonical) {
+						if _, err := mgr.ensureWorkspaceLabel(canonical); err != nil {
+							return nil, err
+						}
+					}
+					return &systemInitPrepareResult{}, nil
+				},
+			},
 			func(ar string, so, se io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err
 			},
-			resolveAllowedRoot,
 		)
 	default:
 		return fmt.Errorf("unknown MAC backend: %s", backend)

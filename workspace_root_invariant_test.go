@@ -327,21 +327,23 @@ func TestInitSystemModePassesCanonicalToCore(t *testing.T) {
 
 	var coreRoot, apparmorRoot string
 	var stdout, stderr bytes.Buffer
-	err = initSystemWithAppArmor(resolved, &stdout, &stderr,
-		func(path string) (rootResult, error) {
-			apparmorRoot = path
-			return rootResult{Path: path, Changed: true}, nil
-		},
-		func(path string) (rootResult, error) {
-			return rootResult{Path: path, Changed: true}, nil
-		},
+	err = initSystem(resolved, &stdout, &stderr,
+		testAppArmorBackend(
+			func(path string) (rootResult, error) {
+				apparmorRoot = path
+				return rootResult{Path: path, Changed: true}, nil
+			},
+			func(path string) (rootResult, error) {
+				return rootResult{Path: path, Changed: true}, nil
+			},
+		),
 		func(ar string, so, se io.Writer) error {
 			coreRoot = ar
 			return nil
 		},
 	)
 	if err != nil {
-		t.Fatalf("initSystemWithAppArmor() error: %v", err)
+		t.Fatalf("initSystem() error: %v", err)
 	}
 
 	if coreRoot != canonicalTarget {
