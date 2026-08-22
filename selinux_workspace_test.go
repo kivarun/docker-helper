@@ -890,19 +890,32 @@ func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 	var sharedMutex sync.Mutex
 	var order []string
 
+	// Per-caller "attempting" signal: closed immediately before calling
+	// sharedMutex.Lock(), proving the caller has reached the lock acquisition
+	// point but has not yet entered the critical section.
+	firstAcquiring := make(chan struct{})
+	secondAcquiring := make(chan struct{})
+
 	// Shared lock used by both managers.
-	makeSharedLock := func() func() (func() error, error) {
-		return func() (func() error, error) {
-			sharedMutex.Lock()
-			return func() error {
-				sharedMutex.Unlock()
-				return nil
-			}, nil
-		}
+	firstAcquire := func() (func() error, error) {
+		close(firstAcquiring)
+		sharedMutex.Lock()
+		return func() error {
+			sharedMutex.Unlock()
+			return nil
+		}, nil
+	}
+	secondAcquire := func() (func() error, error) {
+		close(secondAcquiring)
+		sharedMutex.Lock()
+		return func() error {
+			sharedMutex.Unlock()
+			return nil
+		}, nil
 	}
 
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.acquireLock = makeSharedLock()
+	mgr.acquireLock = firstAcquire
 
 	// firstInCritical signals that first has entered the list/mutation section.
 	firstInCritical := make(chan struct{})
@@ -931,12 +944,14 @@ func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 		close(firstDone)
 	}()
 
+	// Wait for first to signal it is acquiring the lock.
+	<-firstAcquiring
 	// Wait for first to enter the critical section.
 	<-firstInCritical
 
-	// Second caller: should block on the shared lock.
+	// Start second caller.
 	mgr2 := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr2.acquireLock = makeSharedLock()
+	mgr2.acquireLock = secondAcquire
 
 	secondInCritical := make(chan struct{})
 	secondDone := make(chan struct{})
@@ -958,12 +973,14 @@ func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 		close(secondDone)
 	}()
 
-	// Verify second has NOT entered the critical section yet.
+	// Wait for second to signal it is acquiring the lock.
+	<-secondAcquiring
+	// Now prove second has NOT entered the critical section yet.
 	select {
 	case <-secondInCritical:
 		t.Fatal("second should not enter critical section while first holds the lock")
 	default:
-		// Expected: second is blocked on the shared lock.
+		// Expected: second is blocked on sharedMutex.Lock().
 	}
 
 	// Release first.
@@ -1362,7 +1379,7 @@ func TestServeDetectLSMError(t *testing.T) {
 func TestRoundTripBareDot(t *testing.T) {
 	// Bare "." is a regex metacharacter, not escaped.
 	// fcontextStem should return "" (unclassifiable).
-	stem := fcontextStem("/data./(.*)?")
+	stem := fcontextStem("/data.test(/.*)?")
 	if stem != "" {
 		t.Errorf("bare '.' should be unclassifiable, got stem %q", stem)
 	}
