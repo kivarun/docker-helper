@@ -276,11 +276,14 @@ func TestInitOmitsAuditEnabled(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("XDG_STATE_HOME", dir)
 
+	// Use a valid workspace root (not under /tmp).
+	rootDir := testAllowedRootDir(t)
+
 	// Standalone user init (no system daemon, Docker accessible).
 	restore := mockStandaloneUserInit()
 	defer restore()
 
-	if err := runInit(dir, io.Discard, io.Discard); err != nil {
+	if err := runInit(rootDir, io.Discard, io.Discard); err != nil {
 		t.Fatalf("runInit: %v", err)
 	}
 

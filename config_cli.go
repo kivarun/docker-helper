@@ -319,27 +319,34 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Resolve current roots (handles legacy migration).
+	// Validate original raw first.
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Resolve current roots with full canonicalization.
 	fc, err := decodeFileConfig(raw)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	resolvedRoots, err := resolveAllowedRoots(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	// Check if already present.
+	// Check if already present (but still run SELinux ensure below).
+	present := false
 	for _, r := range resolvedRoots {
 		if r == canonical {
-			fmt.Fprintf(stdout, "already present %s\n", canonical)
-			return 0
+			present = true
+			break
 		}
 	}
 
-	// SELinux workspace preparation in system mode.
+	// SELinux workspace preparation in system mode (always, even if already present).
 	if resolveDeploymentMode() == ModeSystem && !isHomeRoot(canonical) {
 		backend, err := detectLSM()
 		if err != nil {
@@ -355,8 +362,25 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	// Add the new root.
-	newRoots := append(resolvedRoots, canonical)
+	// If already present and no legacy migration needed, return early.
+	if present {
+		hasLegacy := raw["allowed_root"] != nil
+		hasNew := raw["allowed_roots"] != nil
+		if !hasLegacy || hasNew {
+			// No migration needed (already canonical or both present which is rejected above).
+			fmt.Fprintf(stdout, "already present %s\n", canonical)
+			return 0
+		}
+		// Legacy schema present: migrate to canonical.
+	}
+
+	// Determine new roots list.
+	var newRoots []string
+	if present {
+		newRoots = resolvedRoots
+	} else {
+		newRoots = append(resolvedRoots, canonical)
+	}
 
 	// Migrate: remove legacy allowed_root, write canonical allowed_roots.
 	delete(raw, "allowed_root")
@@ -394,7 +418,11 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "added %s\n", canonical)
+	if present {
+		fmt.Fprintf(stdout, "already present %s (legacy schema migrated)\n", canonical)
+	} else {
+		fmt.Fprintf(stdout, "added %s\n", canonical)
+	}
 
 	// Attempt reload.
 	outcome := attemptReload()
@@ -1159,13 +1187,54 @@ func applyConfigChangeTransactionally(
 		return 1
 	}
 
-	// Check unchanged.
+	// Check for ambiguous schema before migration (fail closed).
+	// Do not validate the entire config yet, as the mutation may repair it.
+	hasLegacy := raw["allowed_root"] != nil
+	hasNew := raw["allowed_roots"] != nil
+	if hasLegacy && hasNew {
+		fmt.Fprintln(stderr, "error: ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
+		return 1
+	}
+
+	// Migrate legacy allowed_root to allowed_roots if present.
+	// This must happen BEFORE the unchanged check so that a successful
+	// mutation always produces canonical config.
+	if hasLegacy && !hasNew {
+		// Migrate: decode legacy value, canonicalize, write as allowed_roots array.
+		var legacyVal string
+		if err := json.Unmarshal(raw["allowed_root"], &legacyVal); err == nil {
+			// Canonicalize the legacy value.
+			canon, canonErr := canonicalizeWorkspaceRootForAdd(legacyVal)
+			if canonErr != nil {
+				// If canonicalization fails, fall back to the raw value.
+				canon = legacyVal
+			}
+			newRoots, _ := json.Marshal([]string{canon})
+			raw["allowed_roots"] = newRoots
+		}
+		delete(raw, "allowed_root")
+	}
+
+	// Apply modification tentatively to check if it repairs the config.
+	// If the mutation is for a different field, validate the full config.
+	// If the mutation is for the same field, allow the repair.
+	tempRaw := make(map[string]json.RawMessage)
+	for k, v := range raw {
+		tempRaw[k] = v
+	}
+	modify(tempRaw)
+
+	// Validate after mutation. If the mutation repairs the config, this passes.
+	// If the mutation is for a different field and the config is still invalid,
+	// this fails.
+	if err := validateRawConfig(tempRaw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Check unchanged AFTER migration.
 	if op == configOpSet && newValue != nil {
 		if existing, ok := raw[field]; ok && bytes.Equal(existing, newValue) {
-			if err := validateRawConfig(raw); err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				return 1
-			}
 			if err := validateCAConfig(raw); err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				return 1
@@ -1175,10 +1244,6 @@ func applyConfigChangeTransactionally(
 		}
 	} else if op == configOpUnset {
 		if _, ok := raw[field]; !ok {
-			if err := validateRawConfig(raw); err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				return 1
-			}
 			if err := validateCAConfig(raw); err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				return 1
@@ -1193,23 +1258,6 @@ func applyConfigChangeTransactionally(
 	if err != nil {
 		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
 		return 1
-	}
-
-	// Migrate legacy allowed_root to allowed_roots if present.
-	// This ensures every successful mutation produces canonical config.
-	if _, hasLegacy := raw["allowed_root"]; hasLegacy {
-		if _, hasNew := raw["allowed_roots"]; !hasNew {
-			// Migrate: decode legacy value, write as allowed_roots array.
-			var legacyVal string
-			if err := json.Unmarshal(raw["allowed_root"], &legacyVal); err == nil {
-				newRoots, _ := json.Marshal([]string{legacyVal})
-				raw["allowed_roots"] = newRoots
-			}
-			delete(raw, "allowed_root")
-		} else {
-			// Both present: already rejected by validateRawConfig, but clean up.
-			delete(raw, "allowed_root")
-		}
 	}
 
 	// Apply modification.

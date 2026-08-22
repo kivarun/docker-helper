@@ -685,8 +685,8 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Canonicalize the allowed root before writing (no policy check for init).
-		canonRoot, err := canonicalizeWorkspaceRootForInit(allowedRoot)
+		// Canonicalize the allowed root before writing (with full policy check).
+		canonRoot, err := canonicalizeWorkspaceRootForAdd(allowedRoot)
 		if err != nil {
 			return nil, fmt.Errorf("invalid allowed root: %w", err)
 		}

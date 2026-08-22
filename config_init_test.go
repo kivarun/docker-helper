@@ -490,11 +490,8 @@ func TestInitUserModeNoAppArmorRestrictions(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Create a directory with a name that AppArmor would reject (glob character)
-	rootDir := filepath.Join(dir, "workspace*")
-	if err := os.MkdirAll(rootDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+	// Use a valid workspace root (not under /tmp).
+	rootDir := testAllowedRootDir(t)
 
 	// Save and restore EffectiveUID
 	origUID := EffectiveUID
