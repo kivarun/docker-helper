@@ -2273,3 +2273,125 @@ func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 		t.Errorf("expected 'trusted CA preparation failed' in operational log, got:\n%s", opLog)
 	}
 }
+
+// TestReloadDetectLSMErrorDirect verifies that when detectLSM returns an error
+// during handleReload, the HTTP reload is rejected with the expected SELinux
+// detection error and the runtime config is unchanged.
+func TestReloadDetectLSMErrorDirect(t *testing.T) {
+	// This test requires system mode (UID 0) so that handleReload calls detectLSM.
+	// System mode loadConfig creates /var/lib/docker-helper and /run/docker-helper.
+	if EffectiveUID() != 0 {
+		t.Skip("requires root (system mode) for handleReload detectLSM path")
+	}
+
+	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
+	defer cleanup()
+
+	// Capture operational logs.
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminHash, err := loadAdminToken(cfg.AdminTokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app := &App{
+		Config:         cfg,
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	// Save the original config for comparison.
+	originalConfig := app.getConfig()
+
+	// Inject detectLSM to return a sentinel error.
+	origSEL := selinuxEnabled
+	origAA := apparmorLSMActive
+	selinuxEnabled = func() (bool, bool, error) {
+		return false, false, os.ErrPermission
+	}
+	apparmorLSMActive = func() (bool, error) { return false, nil }
+	defer func() {
+		selinuxEnabled = origSEL
+		apparmorLSMActive = origAA
+	}()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
+
+	server := &http.Server{Handler: mux}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(socketPath)
+
+	go server.Serve(listener)
+	defer server.Close()
+
+	waitForDialReady(t, "unix", socketPath)
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.DialTimeout("unix", socketPath, 2*time.Second)
+		},
+	}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest("POST", "http://localhost/reload", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %s", body)
+	}
+
+	// Verify the response contains the SELinux detection error.
+	if code, ok := result["code"].(string); !ok || code != "selinux_detection_failed" {
+		t.Fatalf("expected code=selinux_detection_failed, got: %s", body)
+	}
+
+	// Verify app.Config is semantically unchanged.
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoot != originalConfig.AllowedRoot {
+		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoot, originalConfig.AllowedRoot)
+	}
+	if currentConfig.SessionTTL != originalConfig.SessionTTL {
+		t.Errorf("SessionTTL changed: got %v, want %v", currentConfig.SessionTTL, originalConfig.SessionTTL)
+	}
+	if currentConfig.LogLevel != originalConfig.LogLevel {
+		t.Errorf("LogLevel changed: got %v, want %v", currentConfig.LogLevel, originalConfig.LogLevel)
+	}
+}

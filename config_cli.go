@@ -503,10 +503,6 @@ type configSetSeam struct {
 	selinuxEnsure func(root string) (bool, error)
 }
 
-// configSetSeamVar is the active seam for configSet.
-// Production: nil. Tests: set per-test with defer restore.
-var configSetSeamVar *configSetSeam
-
 // configSetWithSeam is the internal implementation of configSet that
 // respects the injection seam. The public configSet delegates here.
 func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *configSetSeam) int {
@@ -687,7 +683,7 @@ func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *conf
 }
 
 func configSet(field, value string, stdout, stderr io.Writer) int {
-	return configSetWithSeam(field, value, stdout, stderr, configSetSeamVar)
+	return configSetWithSeam(field, value, stdout, stderr, nil)
 }
 
 func configUnset(field string, stdout, stderr io.Writer) int {

@@ -887,47 +887,66 @@ func TestRestoreconTypeOnlyArgv(t *testing.T) {
 
 func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 	// Prove that two manager transitions cannot enter the mutation section
-	// concurrently. Use a blocking lock acquisition to serialize.
-	var mutex sync.Mutex
+	// concurrently. Use a shared injected lock to serialize deterministically.
+	var sharedMutex sync.Mutex
 	var order []string
-	var blockChan = make(chan struct{})
+
+	// Shared lock used by both managers.
+	makeSharedLock := func() func() (func() error, error) {
+		return func() (func() error, error) {
+			sharedMutex.Lock()
+			return func() error {
+				sharedMutex.Unlock()
+				return nil
+			}, nil
+		}
+	}
 
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.acquireLock = makeSharedLock()
 
 	// First caller: acquires lock, blocks inside the critical section.
 	firstDone := make(chan struct{})
-	go func() {
-		mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
-			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
-				mutex.Lock()
-				order = append(order, "first-list")
-				mutex.Unlock()
-				return []byte{}, nil
-			}
-			if len(args) > 0 && args[0] == "-R" {
-				// Block here to hold the critical section.
-				<-blockChan
-				return []byte{}, nil
-			}
+	firstProceed := make(chan struct{})
+	firstRelease := make(chan struct{})
+
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			order = append(order, "first-list")
 			return []byte{}, nil
 		}
-		mgr.readPathCon = func(path string) (string, error) {
-			return selinuxWorkspaceType, nil
+		if len(args) > 0 && args[0] == "-R" {
+			// Signal that we're in the critical section.
+			close(firstProceed)
+			// Block until told to release.
+			<-firstRelease
+			return []byte{}, nil
 		}
+		return []byte{}, nil
+	}
+	mgr.readPathCon = func(path string) (string, error) {
+		return selinuxWorkspaceType, nil
+	}
+
+	go func() {
 		_, _ = mgr.ensureWorkspaceLabel("/data")
 		close(firstDone)
 	}()
 
-	// Give first goroutine time to acquire the lock and block.
-	<-time.After(50 * time.Millisecond)
+	// Wait for first to enter the critical section.
+	<-firstProceed
 
-	// Second caller: should block on the lock.
+	// Second caller: should block on the shared lock.
 	mgr2 := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr2.acquireLock = makeSharedLock()
+
+	secondEntered := make(chan struct{})
+	secondDone := make(chan struct{})
+
 	mgr2.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
-			mutex.Lock()
+			close(secondEntered)
 			order = append(order, "second-list")
-			mutex.Unlock()
 			return []byte{}, nil
 		}
 		return []byte{}, nil
@@ -936,38 +955,53 @@ func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 		return selinuxWorkspaceType, nil
 	}
 
-	secondDone := make(chan struct{})
 	go func() {
 		_, _ = mgr2.ensureWorkspaceLabel("/data")
 		close(secondDone)
 	}()
 
-	// First should have listed before second.
+	// Second should NOT have entered yet (blocked on shared lock).
+	select {
+	case <-secondEntered:
+		t.Fatal("second should not enter critical section while first holds the lock")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: second is blocked.
+	}
+
 	// Release first.
-	close(blockChan)
+	close(firstRelease)
 	<-firstDone
 	<-secondDone
 
-	// Verify ordering.
-	mutex.Lock()
-	if len(order) < 2 {
-		mutex.Unlock()
-		t.Skip("concurrent test timing too tight, skipping ordering check")
+	// Verify ordering: first-list before second-list.
+	if len(order) != 2 || order[0] != "first-list" || order[1] != "second-list" {
+		t.Errorf("expected [first-list, second-list], got %v", order)
 	}
-	firstIdx := -1
-	secondIdx := -1
-	for i, entry := range order {
-		if entry == "first-list" {
-			firstIdx = i
-		}
-		if entry == "second-list" {
-			secondIdx = i
-		}
-	}
-	mutex.Unlock()
+}
 
-	if firstIdx >= 0 && secondIdx >= 0 && secondIdx < firstIdx {
-		t.Error("second should not list before first (lock should serialize)")
+func TestSELinuxWorkspaceLockAcquisitionFailure(t *testing.T) {
+	// Lock acquisition failure: ensureWorkspaceLabel returns error.
+	// No semanage/restorecon mutation occurs after lock acquisition failure.
+	var mutationOccurred bool
+
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.acquireLock = func() (func() error, error) {
+		return nil, errors.New("lock acquisition failed")
+	}
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		mutationOccurred = true
+		return []byte{}, nil
+	}
+
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for lock acquisition failure")
+	}
+	if !strings.Contains(err.Error(), "lock") {
+		t.Errorf("expected 'lock' in error, got: %v", err)
+	}
+	if mutationOccurred {
+		t.Error("no semanage/restorecon mutation should occur after lock acquisition failure")
 	}
 }
 
@@ -1132,8 +1166,7 @@ func TestConfigSetSELinuxPreparationFailure(t *testing.T) {
 	defer func() { EffectiveUID = origUID }()
 
 	var prepareCalled bool
-	origSeam := configSetSeamVar
-	configSetSeamVar = &configSetSeam{
+	seam := &configSetSeam{
 		canonicalizeRoot: func(s string) (string, error) { return "/data", nil },
 		detectBackend:    func() (LSMBackend, error) { return LSMSelinux, nil },
 		selinuxEnsure: func(root string) (bool, error) {
@@ -1141,10 +1174,9 @@ func TestConfigSetSELinuxPreparationFailure(t *testing.T) {
 			return false, errors.New("semanage failed")
 		},
 	}
-	defer func() { configSetSeamVar = origSeam }()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := configSet("allowed_root", "/whatever", &stdout, &stderr)
+	exitCode := configSetWithSeam("allowed_root", "/whatever", &stdout, &stderr, seam)
 	if exitCode == 0 {
 		t.Fatal("expected non-zero exit code for SELinux preparation failure")
 	}
@@ -1181,8 +1213,7 @@ func TestConfigSetDetectLSMError(t *testing.T) {
 
 	var detectCalled bool
 	var prepareCalled bool
-	origSeam := configSetSeamVar
-	configSetSeamVar = &configSetSeam{
+	seam := &configSetSeam{
 		canonicalizeRoot: func(s string) (string, error) { return "/data", nil },
 		detectBackend: func() (LSMBackend, error) {
 			detectCalled = true
@@ -1193,10 +1224,9 @@ func TestConfigSetDetectLSMError(t *testing.T) {
 			return false, nil
 		},
 	}
-	defer func() { configSetSeamVar = origSeam }()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := configSet("allowed_root", "/whatever", &stdout, &stderr)
+	exitCode := configSetWithSeam("allowed_root", "/whatever", &stdout, &stderr, seam)
 	if exitCode == 0 {
 		t.Fatal("expected non-zero exit code for detectLSM failure")
 	}
@@ -1235,8 +1265,7 @@ func TestConfigSetSameAllowedRootRunsSELinuxEnsure(t *testing.T) {
 	defer func() { EffectiveUID = origUID }()
 
 	var prepareCalled bool
-	origSeam := configSetSeamVar
-	configSetSeamVar = &configSetSeam{
+	seam := &configSetSeam{
 		canonicalizeRoot: func(s string) (string, error) { return "/data", nil },
 		detectBackend:    func() (LSMBackend, error) { return LSMSelinux, nil },
 		selinuxEnsure: func(root string) (bool, error) {
@@ -1244,10 +1273,9 @@ func TestConfigSetSameAllowedRootRunsSELinuxEnsure(t *testing.T) {
 			return false, nil
 		},
 	}
-	defer func() { configSetSeamVar = origSeam }()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := configSet("allowed_root", "/whatever", &stdout, &stderr)
+	exitCode := configSetWithSeam("allowed_root", "/whatever", &stdout, &stderr, seam)
 	if exitCode != 0 {
 		t.Fatalf("expected success, got exit code %d, stderr: %s", exitCode, stderr.String())
 	}
@@ -1277,8 +1305,7 @@ func TestConfigSetSELinuxHomeRootNoPrepare(t *testing.T) {
 	defer func() { EffectiveUID = origUID }()
 
 	var prepareCalled bool
-	origSeam := configSetSeamVar
-	configSetSeamVar = &configSetSeam{
+	seam := &configSetSeam{
 		canonicalizeRoot: func(s string) (string, error) { return "/home/alice", nil },
 		detectBackend:    func() (LSMBackend, error) { return LSMSelinux, nil },
 		selinuxEnsure: func(root string) (bool, error) {
@@ -1286,10 +1313,9 @@ func TestConfigSetSELinuxHomeRootNoPrepare(t *testing.T) {
 			return false, nil
 		},
 	}
-	defer func() { configSetSeamVar = origSeam }()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := configSet("allowed_root", "/whatever", &stdout, &stderr)
+	exitCode := configSetWithSeam("allowed_root", "/whatever", &stdout, &stderr, seam)
 	// May succeed or fail depending on reload, but prepare must not be called.
 	if prepareCalled {
 		t.Error("SELinux prepare must NOT be called for /home root")
@@ -1331,38 +1357,301 @@ func TestServeDetectLSMError(t *testing.T) {
 	}
 }
 
-func TestReloadDetectLSMError(t *testing.T) {
-	// reload: detectLSM error => request rejected, runtime config unchanged.
-	origAA := apparmorLSMActive
-	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	selinuxEnabled = func() (bool, bool, error) {
-		return false, false, os.ErrPermission
+// --- Constant tests ---
+
+// --- Item 1: strict backslash escape validation ---
+
+func TestUnknownEscapeBackslashD(t *testing.T) {
+	// \d is a PCRE escape, not generated by escapeFcontextPath.
+	// Pattern should be unclassifiable.
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/data\\dtest(/.*)?  gen_context(system_u:object_r:usr_t:s0)"), nil
+		}
+		return []byte{}, nil
 	}
-	defer func() {
-		apparmorLSMActive = origAA
-		selinuxEnabled = origSEL
-	}()
-
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = origUID }()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return "/nonexistent/config.json" }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"reload"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for unknown escape \\d")
 	}
-	// The reload CLI fails because it can't connect to the daemon.
-	// The server-side detection error is tested via handleReload directly.
-	_ = code
+	if !strings.Contains(err.Error(), "unclassifiable") {
+		t.Errorf("expected 'unclassifiable' in error, got: %v", err)
+	}
 }
 
-// --- Constant tests ---
+func TestUnknownEscapeBackslashW(t *testing.T) {
+	// \w is a PCRE escape, not generated by escapeFcontextPath.
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/data\\wtest(/.*)?  gen_context(system_u:object_r:usr_t:s0)"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for unknown escape \\w")
+	}
+	if !strings.Contains(err.Error(), "unclassifiable") {
+		t.Errorf("expected 'unclassifiable' in error, got: %v", err)
+	}
+}
+
+func TestUnknownEscapeBackslashS(t *testing.T) {
+	// \s is a PCRE escape, not generated by escapeFcontextPath.
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/data\\stest(/.*)?  gen_context(system_u:object_r:usr_t:s0)"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for unknown escape \\s")
+	}
+	if !strings.Contains(err.Error(), "unclassifiable") {
+		t.Errorf("expected 'unclassifiable' in error, got: %v", err)
+	}
+}
+
+func TestUnknownEscapeBackslashX2f(t *testing.T) {
+	// \x2f is a PCRE hex escape, not generated by escapeFcontextPath.
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/data\\x2ftest(/.*)?  gen_context(system_u:object_r:usr_t:s0)"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for unknown escape \\x2f")
+	}
+	if !strings.Contains(err.Error(), "unclassifiable") {
+		t.Errorf("expected 'unclassifiable' in error, got: %v", err)
+	}
+}
+
+func TestUnknownEscapeBackslashQ(t *testing.T) {
+	// \Q is a PCRE quoting escape, not generated by escapeFcontextPath.
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/data\\Qtest\\E(/.*)?  gen_context(system_u:object_r:usr_t:s0)"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for unknown escape \\Q")
+	}
+	if !strings.Contains(err.Error(), "unclassifiable") {
+		t.Errorf("expected 'unclassifiable' in error, got: %v", err)
+	}
+}
+
+// --- Item 2: equivalence record parsing and overlap ---
+
+func TestParseEquivalenceRedirect(t *testing.T) {
+	tests := []struct {
+		line            string
+		wantDest        string
+		wantSource      string
+		wantEquivalence bool
+	}{
+		{
+			"/unrelated = /other",
+			"/unrelated",
+			"/other",
+			true,
+		},
+		{
+			"/data/sub = /other",
+			"/data/sub",
+			"/other",
+			true,
+		},
+		{
+			"/data = /other",
+			"/data",
+			"/other",
+			true,
+		},
+		{
+			"/other = /data",
+			"/other",
+			"/data",
+			true,
+		},
+		{
+			"not-an-equivalence",
+			"",
+			"",
+			false,
+		},
+		{
+			"/data(/.*)?  gen_context(system_u:object_r:usr_t:s0)",
+			"",
+			"",
+			false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.line, func(t *testing.T) {
+			got, ok := parseFcontextLine(tc.line)
+			if tc.wantEquivalence {
+				if !ok {
+					t.Fatalf("expected parse success for %q", tc.line)
+				}
+				if !got.isEquivalence {
+					t.Errorf("expected equivalence for %q", tc.line)
+				}
+				if got.equivalenceDest != tc.wantDest {
+					t.Errorf("dest = %q, want %q", got.equivalenceDest, tc.wantDest)
+				}
+				if got.equivalenceSource != tc.wantSource {
+					t.Errorf("source = %q, want %q", got.equivalenceSource, tc.wantSource)
+				}
+			} else {
+				// Should not be parsed as equivalence redirect.
+				if ok && got.isEquivalence && got.equivalenceDest != "" {
+					t.Errorf("should not be equivalence redirect for %q", tc.line)
+				}
+			}
+		})
+	}
+}
+
+func TestEquivalenceDisjointAllowed(t *testing.T) {
+	// /unrelated = /other with ROOT=/data => allowed.
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/unrelated = /other"), nil
+		}
+		return []byte{}, nil
+	}
+	mgr.readPathCon = func(path string) (string, error) {
+		return selinuxWorkspaceType, nil
+	}
+	created, err := mgr.ensureWorkspaceLabel("/data")
+	if err != nil {
+		t.Fatalf("disjoint equivalence should be allowed, got: %v", err)
+	}
+	if !created {
+		t.Error("expected newly created mapping")
+	}
+}
+
+func TestEquivalenceDestEqualsRoot(t *testing.T) {
+	// /data = /other => reject (DEST equals ROOT).
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/data = /other"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for equivalence DEST equals ROOT")
+	}
+	if !strings.Contains(err.Error(), "equivalence") {
+		t.Errorf("expected 'equivalence' in error, got: %v", err)
+	}
+}
+
+func TestEquivalenceDestContainsRoot(t *testing.T) {
+	// /data/sub = /other => reject (DEST is descendant of ROOT).
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/data/sub = /other"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for equivalence DEST contains ROOT")
+	}
+	if !strings.Contains(err.Error(), "equivalence") {
+		t.Errorf("expected 'equivalence' in error, got: %v", err)
+	}
+}
+
+func TestEquivalenceSourceEqualsRoot(t *testing.T) {
+	// /other = /data => reject (SOURCE equals ROOT).
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/other = /data"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for equivalence SOURCE equals ROOT")
+	}
+	if !strings.Contains(err.Error(), "equivalence") {
+		t.Errorf("expected 'equivalence' in error, got: %v", err)
+	}
+}
+
+func TestEquivalenceSourceContainsRoot(t *testing.T) {
+	// /other = /data/sub => reject (SOURCE is descendant of ROOT).
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/other = /data/sub"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for equivalence SOURCE contains ROOT")
+	}
+	if !strings.Contains(err.Error(), "equivalence") {
+		t.Errorf("expected 'equivalence' in error, got: %v", err)
+	}
+}
+
+func TestEquivalenceDestAncestorOfRoot(t *testing.T) {
+	// /parent = /other with ROOT=/parent/data => reject (DEST is ancestor of ROOT).
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/parent = /other"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/parent/data")
+	if err == nil {
+		t.Fatal("expected error for equivalence DEST ancestor of ROOT")
+	}
+	if !strings.Contains(err.Error(), "equivalence") {
+		t.Errorf("expected 'equivalence' in error, got: %v", err)
+	}
+}
+
+func TestEquivalenceSourceAncestorOfRoot(t *testing.T) {
+	// /other = /parent with ROOT=/parent/data => reject (SOURCE is ancestor of ROOT).
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			return []byte("/other = /parent"), nil
+		}
+		return []byte{}, nil
+	}
+	_, err := mgr.ensureWorkspaceLabel("/parent/data")
+	if err == nil {
+		t.Fatal("expected error for equivalence SOURCE ancestor of ROOT")
+	}
+	if !strings.Contains(err.Error(), "equivalence") {
+		t.Errorf("expected 'equivalence' in error, got: %v", err)
+	}
+}
 
 func TestSELinuxWorkspaceTypeConstant(t *testing.T) {
 	if selinuxWorkspaceType != "docker_helper_workspace_t" {
