@@ -58,8 +58,8 @@ func isAdminWideNamespaceOverride(ns string) bool {
 // of wide namespaces (e.g., /home/user is allowed, /home is not).
 // It DOES reject system trees and everything under them (e.g., /var/lib/foo is
 // rejected because /var is a system tree).
-// When running as root (uid 0), certain wide namespaces (/home, /opt) are
-// permitted as workspace roots.
+// When running as root (uid 0), /home is permitted as a workspace root.
+// /opt is now an ordinary allowed namespace for both root and non-root.
 func isForbiddenWorkspaceRoot(canonical string) error {
 	if canonical == "/" {
 		return fmt.Errorf("workspace root cannot be the filesystem root /")
