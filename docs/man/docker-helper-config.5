@@ -97,7 +97,9 @@ Completed operation retention period using Go duration syntax.
 Maximum completed operations to retain in memory. Must be a positive integer.
 .TP
 .B operation_log_max_bytes (integer, optional, default=4194304)
-Maximum operation log size in bytes (default 4 MiB). Must be a positive integer.
+Maximum bytes retained per operation log and per synchronous pull output
+(default 4 MiB). Must be a positive integer. When pull output exceeds this
+limit, the newest tail is retained and the response reports \fBtruncated=true\fR.
 .TP
 .B trusted_ca_injection (string, optional, default="disabled")
 CA injection mode: \fBdisabled\fR (no injection) or \fBauto\fR (automatic injection

@@ -38,11 +38,12 @@ type mountRequest struct {
 
 // pullResponse is the response from POST /pull.
 type pullResponse struct {
-	OK       bool   `json:"ok"`
-	Code     string `json:"code,omitempty"`
-	Message  string `json:"message,omitempty"`
-	Output   string `json:"output,omitempty"`
-	Duration string `json:"duration,omitempty"`
+	OK        bool   `json:"ok"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Duration  string `json:"duration,omitempty"`
 }
 
 // operationCreatedResponse is the response from POST /build and POST /run.

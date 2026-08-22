@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -75,9 +76,11 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 	stdinBuf.WriteString(req.Password)
 	cmd.Stdin = &stdinBuf
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	// Registry login output is intentionally not retained or exposed.
+	// Discard stdout/stderr to avoid unbounded memory retention and
+	// prevent Docker output or credential material from leaking.
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 
 	err = cmd.Run()
 	duration := time.Since(started).Round(time.Millisecond).String()

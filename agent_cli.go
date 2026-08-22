@@ -198,6 +198,10 @@ var pullCommand = &Command{
 					fmt.Fprint(stdout, resp.Output)
 				}
 
+				if resp != nil && resp.Truncated {
+					fmt.Fprintln(stderr, "warning: pull output was truncated")
+				}
+
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

@@ -402,7 +402,7 @@ Configuration fields:
 | `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `30s`) |
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
-| `operation_log_max_bytes` | int | Max bytes retained per operation log (bounded buffer, default: `4194304` = 4 MiB) |
+| `operation_log_max_bytes` | int | Max bytes retained per operation log and synchronous pull output (bounded buffer, default: `4194304` = 4 MiB) |
 | `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). In system mode, must be under `/etc/docker-helper` |
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. |
 | `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |

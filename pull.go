@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -58,16 +57,17 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	args := []string{"--config", dockerDir, "pull", req.Image}
 
 	cmd := a.newOperationCmd(ctx, "docker", args...)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	buf := newBoundedBuffer(cfg.OperationLogMaxBytes)
+	cmd.Stdout = buf
+	cmd.Stderr = buf
 
 	err = cmd.Start()
 	var waitErr error
 	if err == nil {
 		waitErr = cmd.Wait()
 	}
-	outputBytes := output.Bytes()
+	data, _, truncated := buf.Range(0)
+	outputStr := string(data)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	var result string
@@ -83,11 +83,12 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		)
 
 		writeJSONRaw(ctx, w, http.StatusInternalServerError, pullResponse{
-			OK:       false,
-			Code:     "docker_pull_failed",
-			Message:  "docker pull failed",
-			Output:   string(outputBytes),
-			Duration: duration,
+			OK:        false,
+			Code:      "docker_pull_failed",
+			Message:   "docker pull failed",
+			Output:    outputStr,
+			Truncated: truncated,
+			Duration:  duration,
 		})
 	} else if waitErr != nil {
 		// cmd.Wait() returned non-zero — workload result, not operational error.
@@ -95,20 +96,22 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		result = "pull_error"
 
 		writeJSONRaw(ctx, w, http.StatusInternalServerError, pullResponse{
-			OK:       false,
-			Code:     "docker_pull_failed",
-			Message:  "docker pull failed",
-			Output:   string(outputBytes),
-			Duration: duration,
+			OK:        false,
+			Code:      "docker_pull_failed",
+			Message:   "docker pull failed",
+			Output:    outputStr,
+			Truncated: truncated,
+			Duration:  duration,
 		})
 	} else {
 		result = "success"
 
 		writeJSONRaw(ctx, w, http.StatusOK, pullResponse{
-			OK:       true,
-			Message:  "image pulled successfully",
-			Output:   string(outputBytes),
-			Duration: duration,
+			OK:        true,
+			Message:   "image pulled successfully",
+			Output:    outputStr,
+			Truncated: truncated,
+			Duration:  duration,
 		})
 	}
 

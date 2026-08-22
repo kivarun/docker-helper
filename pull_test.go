@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -715,5 +716,176 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	if !childGone {
 		t.Error("child process still exists after daemon shutdown")
 		// Don't SIGKILL here — that would mask the failure.
+	}
+}
+
+func TestPullBoundedOutputTruncatedSuccess(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	// Set a very small operation log limit.
+	app.Config.OperationLogMaxBytes = 64
+
+	// Fake Docker output larger than the limit.
+	largeOutput := strings.Repeat("A", 256)
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "printf", "%s", largeOutput)
+	}
+
+	reqBody := map[string]string{"image": "alpine:3.24"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var resp pullResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if !resp.OK {
+		t.Error("expected ok=true")
+	}
+
+	// Output must not exceed the bounded buffer limit.
+	if len(resp.Output) > 64 {
+		t.Errorf("output length %d exceeds limit 64", len(resp.Output))
+	}
+
+	// Output should be the newest tail of the large output.
+	expectedTail := largeOutput[len(largeOutput)-len(resp.Output):]
+	if resp.Output != expectedTail {
+		t.Errorf("output is not the newest tail: got %q, want %q", resp.Output, expectedTail)
+	}
+
+	// Truncated must be true.
+	if !resp.Truncated {
+		t.Error("expected truncated=true")
+	}
+}
+
+func TestPullBoundedOutputTruncatedFailure(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	// Set a very small operation log limit.
+	app.Config.OperationLogMaxBytes = 64
+
+	// Fake Docker output larger than the limit with non-zero exit.
+	largeOutput := strings.Repeat("B", 256)
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", fmt.Sprintf("printf '%%s' '%s'; exit 1", largeOutput))
+	}
+
+	reqBody := map[string]string{"image": "nonexistent:latest"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+	}
+
+	var resp pullResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if resp.OK {
+		t.Error("expected ok=false")
+	}
+
+	if resp.Code != "docker_pull_failed" {
+		t.Errorf("expected code 'docker_pull_failed', got %q", resp.Code)
+	}
+
+	// Output must not exceed the bounded buffer limit.
+	if len(resp.Output) > 64 {
+		t.Errorf("output length %d exceeds limit 64", len(resp.Output))
+	}
+
+	// Output should be the newest tail.
+	expectedTail := largeOutput[len(largeOutput)-len(resp.Output):]
+	if resp.Output != expectedTail {
+		t.Errorf("output is not the newest tail: got %q, want %q", resp.Output, expectedTail)
+	}
+
+	// Truncated must be true.
+	if !resp.Truncated {
+		t.Error("expected truncated=true")
+	}
+}
+
+func TestPullBoundedOutputNoTruncation(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession() error: %v", err)
+	}
+
+	// Set a generous operation log limit.
+	app.Config.OperationLogMaxBytes = 4 * 1024 * 1024
+
+	smallOutput := "small output\n"
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "printf", "%s", smallOutput)
+	}
+
+	reqBody := map[string]string{"image": "alpine:3.24"}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var resp pullResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+
+	if !resp.OK {
+		t.Error("expected ok=true")
+	}
+
+	// Output should be returned unchanged.
+	if resp.Output != smallOutput {
+		t.Errorf("output = %q, want %q", resp.Output, smallOutput)
+	}
+
+	// Truncated must be false (and omitted in JSON via omitempty).
+	if resp.Truncated {
+		t.Error("expected truncated=false")
+	}
+
+	// Verify truncated is omitted from JSON.
+	rawBody := w.Body.String()
+	if strings.Contains(rawBody, "truncated") {
+		t.Errorf("truncated field should be omitted when false, got: %s", rawBody)
 	}
 }

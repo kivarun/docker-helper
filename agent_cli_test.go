@@ -1120,3 +1120,86 @@ func TestResolveAgentSocketPathFallback(t *testing.T) {
 		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, want)
 	}
 }
+
+// TestPullCLITruncatedSuccess verifies that a truncated successful pull
+// prints the output plus one truncation warning to stderr.
+func TestPullCLITruncatedSuccess(t *testing.T) {
+	out, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "alpine:3.24"}, "", func(s *agentCLITestServer) {
+		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":        true,
+				"message":   "image pulled successfully",
+				"output":    "layer data\n",
+				"truncated": true,
+			})
+		})
+	})
+
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(out.String(), "layer data") {
+		t.Errorf("expected output in stdout, got: %s", out.String())
+	}
+	if !strings.Contains(stderr.String(), "pull output was truncated") {
+		t.Errorf("expected truncation warning in stderr, got: %s", stderr.String())
+	}
+}
+
+// TestPullCLITruncatedFailure verifies that a truncated failed pull
+// prints the retained output and the truncation warning alongside the error.
+func TestPullCLITruncatedFailure(t *testing.T) {
+	out, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "invalid:tag"}, "", func(s *agentCLITestServer) {
+		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":        false,
+				"code":      "docker_pull_failed",
+				"message":   "docker pull failed",
+				"output":    "retained tail\n",
+				"truncated": true,
+			})
+		})
+	})
+
+	if exitCode != 1 {
+		t.Errorf("expected exit 1, got %d", exitCode)
+	}
+	if !strings.Contains(out.String(), "retained tail") {
+		t.Errorf("expected retained output in stdout, got: %s", out.String())
+	}
+	if !strings.Contains(stderr.String(), "pull output was truncated") {
+		t.Errorf("expected truncation warning in stderr, got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "docker pull failed") {
+		t.Errorf("expected error message in stderr, got: %s", stderr.String())
+	}
+}
+
+// TestPullCLINonTruncated verifies that a non-truncated pull prints no warning.
+func TestPullCLINonTruncated(t *testing.T) {
+	out, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "alpine:3.24"}, "", func(s *agentCLITestServer) {
+		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":      true,
+				"message": "image pulled successfully",
+				"output":  "layer data\n",
+			})
+		})
+	})
+
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d, stderr: %s", exitCode, stderr.String())
+	}
+	if !strings.Contains(out.String(), "layer data") {
+		t.Errorf("expected output in stdout, got: %s", out.String())
+	}
+	if strings.Contains(stderr.String(), "truncated") {
+		t.Errorf("expected no truncation warning, got: %s", stderr.String())
+	}
+}

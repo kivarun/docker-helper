@@ -1173,7 +1173,9 @@ through the operation endpoints:
 - `GET /operations/{id}/logs?offset=N` — incremental operation output.
 
 `POST /pull` remains synchronous and returns the execution
-result directly in the response.
+result directly in the response. Pull output is captured into a bounded
+buffer of `operation_log_max_bytes`. When output exceeds the limit, the
+newest tail is retained and `truncated` is set to `true` in the response.
 
 Current error codes (non-exhaustive):
 

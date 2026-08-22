@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -293,5 +294,108 @@ func TestRegistryLoginNilExecCommandContext(t *testing.T) {
 	}
 	if resp.Code != "registry_login_failed" {
 		t.Errorf("expected code 'registry_login_failed', got %q", resp.Code)
+	}
+}
+
+// TestRegistryLoginDiscardsOutput verifies that the registry login handler
+// discards Docker stdout/stderr and does not retain or expose any output,
+// even when the Docker command emits a large amount of data.
+func TestRegistryLoginDiscardsOutput(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Fake Docker command that emits a large amount to stdout/stderr.
+	largeData := strings.Repeat("X", 1024*1024) // 1 MiB
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		// Use a temp file to avoid shell argument length limits.
+		tmpFile := t.TempDir() + "/large.txt"
+		os.WriteFile(tmpFile, []byte(largeData), 0644)
+		return exec.CommandContext(ctx, "/bin/sh", "-c",
+			fmt.Sprintf("cat %s; cat %s >&2; exit 0", tmpFile, tmpFile))
+	}
+
+	reqBody := map[string]string{
+		"registry": "registry.example.com",
+		"username": "user",
+		"password": "secret",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/registry/login", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRegistryLogin(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode: %v", err)
+	}
+	if !resp.OK {
+		t.Error("expected ok=true")
+	}
+
+	// Response must not contain any Docker output.
+	rawBody := w.Body.String()
+	if strings.Contains(rawBody, largeData) {
+		t.Error("response must not contain Docker output")
+	}
+}
+
+// TestRegistryLoginFailureNoOutput verifies that a failed registry login
+// does not include Docker output in the response.
+func TestRegistryLoginFailureNoOutput(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	// Fake Docker command that emits output and fails.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "echo 'login failed with details'; exit 1")
+	}
+
+	reqBody := map[string]string{
+		"registry": "registry.example.com",
+		"username": "user",
+		"password": "secret",
+	}
+	body, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/registry/login", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+
+	app.handleRegistryLogin(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode: %v", err)
+	}
+	if resp.OK {
+		t.Error("expected ok=false")
+	}
+	if resp.Code != "registry_login_failed" {
+		t.Errorf("expected code 'registry_login_failed', got %q", resp.Code)
+	}
+
+	// Response must not contain Docker output.
+	rawBody := w.Body.String()
+	if strings.Contains(rawBody, "login failed with details") {
+		t.Error("response must not contain Docker output on failure")
 	}
 }
