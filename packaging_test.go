@@ -5220,10 +5220,15 @@ func TestReleaseJobSELinuxBuildDeps(t *testing.T) {
 		t.Fatal("'Install build dependencies' step must have a run block")
 	}
 
-	// The apt-get install command in the run block must install all three packages.
+	// Locate the apt-get install command line inside the run block and assert
+	// that all three packages are present on that specific command.
+	installCmd := findAptInstallLine(runBlock)
+	if installCmd == "" {
+		t.Fatal("'Install build dependencies' run block must contain an apt-get install command")
+	}
 	for _, pkg := range []string{"musl-tools", "checkpolicy", "semodule-utils"} {
-		if !strings.Contains(runBlock, pkg) {
-			t.Errorf("Install build dependencies run block must install %s", pkg)
+		if !strings.Contains(installCmd, pkg) {
+			t.Errorf("apt-get install command must install %s (got: %s)", pkg, installCmd)
 		}
 	}
 
@@ -5350,6 +5355,17 @@ func extractRunBlock(stepContent string) string {
 		result = append(result, line)
 	}
 	return strings.Join(result, "\n")
+}
+
+// findAptInstallLine returns the first line in text that contains
+// "apt-get install", trimmed of leading whitespace. Returns "" if not found.
+func findAptInstallLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "apt-get install") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
 }
 
 func TestReleaseWorkflowRaceBeforeBuild(t *testing.T) {
