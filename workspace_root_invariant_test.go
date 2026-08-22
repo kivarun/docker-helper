@@ -103,8 +103,8 @@ func TestLoadConfigCanonicalizesManualSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig() error: %v", err)
 	}
-	if loaded.AllowedRoot != canonicalTarget {
-		t.Errorf("AllowedRoot = %q, want canonical %q", loaded.AllowedRoot, canonicalTarget)
+	if loaded.AllowedRoots[0] != canonicalTarget {
+		t.Errorf("AllowedRoot = %q, want canonical %q", loaded.AllowedRoots[0], canonicalTarget)
 	}
 }
 
@@ -138,7 +138,7 @@ func TestReloadSymlinkBypassKeepsOldConfig(t *testing.T) {
 		DB:             db,
 		AdminTokenHash: adminHash,
 	}
-	oldAllowedRoot := app.Config.AllowedRoot
+	oldAllowedRoot := app.Config.AllowedRoots[0]
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /reload", withRequestID(app.handleReload))
@@ -194,7 +194,7 @@ func TestReloadSymlinkBypassKeepsOldConfig(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for forbidden symlink allowed_root, got %d", resp.StatusCode)
 	}
-	if got := app.getConfig().AllowedRoot; got != oldAllowedRoot {
+	if got := app.getConfig().AllowedRoots[0]; got != oldAllowedRoot {
 		t.Errorf("runtime allowed_root changed on failed reload: got %q, want %q", got, oldAllowedRoot)
 	}
 }
@@ -324,8 +324,8 @@ func TestInitUserModeStoresCanonicalAllowedRoot(t *testing.T) {
 	if err := json.Unmarshal(data, &fc); err != nil {
 		t.Fatal(err)
 	}
-	if fc.AllowedRoot != canonicalTarget {
-		t.Errorf("config allowed_root = %q, want canonical %q", fc.AllowedRoot, canonicalTarget)
+	if fc.AllowedRoots[0] != canonicalTarget {
+		t.Errorf("config allowed_root = %q, want canonical %q", fc.AllowedRoots[0], canonicalTarget)
 	}
 }
 

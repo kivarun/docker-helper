@@ -49,6 +49,20 @@ type CreatedSession struct {
 	Token   string
 }
 
+// intersectRoots returns principal roots that are under at least one global root.
+func intersectRoots(globalRoots, principalRoots []string) []string {
+	result := make([]string, 0, len(principalRoots))
+	for _, pRoot := range principalRoots {
+		for _, gRoot := range globalRoots {
+			if pRoot == gRoot || isInside(gRoot, pRoot) {
+				result = append(result, pRoot)
+				break
+			}
+		}
+	}
+	return result
+}
+
 // scanSessionWithPrincipal scans session columns joined with principal username.
 // Columns: id, workspace, created_at, expires_at, principal_id, principal_username.
 func scanSessionWithPrincipal(s sqlScanner) (Session, error) {
@@ -174,18 +188,20 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 	}, nil
 }
 
-// createSession is the admin-only session creation using global allowed root.
-// Kept for backward compatibility.
+// createSession is the admin-only session creation using global allowed roots.
 func (a *App) createSession(workspace string) (*CreatedSession, error) {
 	cfg := a.getConfig()
-	allowedRoot, err := filepath.EvalSymlinks(cfg.AllowedRoot)
-	if err != nil {
-		return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
+	roots := make([]string, 0, len(cfg.AllowedRoots))
+	for _, r := range cfg.AllowedRoots {
+		resolved, err := filepath.EvalSymlinks(r)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
+		}
+		roots = append(roots, resolved)
 	}
-
 	return a.createSessionWithPolicy(&sessionCreatePolicy{
 		Workspace:    workspace,
-		AllowedRoots: []string{allowedRoot},
+		AllowedRoots: roots,
 		PrincipalID:  nil,
 	})
 }

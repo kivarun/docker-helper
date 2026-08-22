@@ -17,7 +17,7 @@ func TestLegacySessionUsesDaemonUIDGID(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	// Create admin session (principal_id = NULL).
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestLegacySessionUsesDaemonUIDGID(t *testing.T) {
 func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "execuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "execuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 		return "2001", "2001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "execuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "execuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -102,8 +102,8 @@ func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home1 := filepath.Join(app.Config.AllowedRoot, "home", "diffuser1")
-	home2 := filepath.Join(app.Config.AllowedRoot, "home", "diffuser2")
+	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "diffuser1")
+	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "diffuser2")
 	if err := os.MkdirAll(filepath.Join(home1, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -123,10 +123,10 @@ func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 		return "", "", "", fmt.Errorf("not found")
 	}
 
-	if _, err := createPrincipal(app.DB, "diffuser1"); err != nil {
+	if _, err := createPrincipal(app.DB, "diffuser1", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal(diffuser1) error: %v", err)
 	}
-	if _, err := createPrincipal(app.DB, "diffuser2"); err != nil {
+	if _, err := createPrincipal(app.DB, "diffuser2", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal(diffuser2) error: %v", err)
 	}
 
@@ -193,7 +193,7 @@ func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "disabledexecuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disabledexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 		return "4001", "4001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "disabledexecuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "disabledexecuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -250,7 +250,7 @@ func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "revokedexecuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokedexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 		return "5001", "5001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "revokedexecuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "revokedexecuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -316,7 +316,7 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 func TestRunRequestRejectsUserField(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestRunRequestRejectsUserField(t *testing.T) {
 func TestPrincipalIdentityDBError(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "dberruser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dberruser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestPrincipalIdentityDBError(t *testing.T) {
 		return "6001", "6001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "dberruser"); err != nil {
+	if _, err := createPrincipal(app.DB, "dberruser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -403,7 +403,7 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "auditexecuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 		return "7001", "7001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "auditexecuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "auditexecuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -461,7 +461,7 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 func TestResolveSessionExecutionIdentityFromDB(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "fromdbuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "fromdbuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestResolveSessionExecutionIdentityFromDB(t *testing.T) {
 		return "8001", "8001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "fromdbuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "fromdbuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 

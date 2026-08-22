@@ -1847,8 +1847,8 @@ func TestLoadConfigAcceptsValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if c.AllowedRoot != allowedRoot {
-		t.Errorf("AllowedRoot = %q, want %q", c.AllowedRoot, allowedRoot)
+	if c.AllowedRoots[0] != allowedRoot {
+		t.Errorf("AllowedRoot = %q, want %q", c.AllowedRoots[0], allowedRoot)
 	}
 }
 

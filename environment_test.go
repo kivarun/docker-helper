@@ -16,7 +16,7 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 func TestRunEnvironmentInvalidName(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestRunEnvironmentInvalidName(t *testing.T) {
 func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
 func TestRunEnvironmentNameWithSpace(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestRunEnvironmentNameWithSpace(t *testing.T) {
 func TestRunEnvironmentNameWithDash(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}

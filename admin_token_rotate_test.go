@@ -248,7 +248,7 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	// Actual session token.
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -259,15 +259,15 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 	defer func() { OSUserLookup = orig }()
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
 		if username == "rotateuser" {
-			return "1006", "1006", filepath.Join(app.Config.AllowedRoot, "home", "rotateuser"), nil
+			return "1006", "1006", filepath.Join(app.Config.AllowedRoots[0], "home", "rotateuser"), nil
 		}
 		return "", "", "", os.ErrNotExist
 	}
-	home := filepath.Join(app.Config.AllowedRoot, "home", "rotateuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "rotateuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createPrincipal(app.DB, "rotateuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "rotateuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 	var credToken string
@@ -698,7 +698,7 @@ func TestAdminTokenRotateCLIAuthFailure(t *testing.T) {
 // a data race on AdminTokenHash.
 func TestAdminTokenRotationConcurrentSessionAuth(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	workspace := testWorkspaceDir(t, app.Config.AllowedRoot)
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})

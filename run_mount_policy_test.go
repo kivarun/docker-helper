@@ -21,7 +21,7 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestRunSecondPinError(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestRunRegistryShuttingDown(t *testing.T) {
 	reg.setShuttingDown()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	app.Config.RuntimeDir = ""
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestRunUserModeDoesNotCallPinMount(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -527,7 +527,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -583,7 +583,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -638,7 +638,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -710,7 +710,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -771,7 +771,7 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

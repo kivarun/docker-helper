@@ -27,7 +27,7 @@ func candidateBasePaths() []string {
 
 // testAllowedRootDir creates a unique directory that is valid as a workspace
 // root and returns it in canonical form, matching what loadConfig stores in
-// Config.AllowedRoot. Candidate bases are tried in order: the user's home
+// Config.AllowedRoots[0]. Candidate bases are tried in order: the user's home
 // directory, the test process working directory, and "/" as a last resort.
 // A base does not have to be policy-legal itself (root's home is /root, a
 // forbidden system tree); the created directory is what must pass the
@@ -233,7 +233,7 @@ func newTestApp(t *testing.T) *App {
 		t.Fatalf("cannot create runtime dir: %v", err)
 	}
 	cfg := &Config{
-		AllowedRoot:           allowedRoot,
+		AllowedRoots: []string{allowedRoot},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,

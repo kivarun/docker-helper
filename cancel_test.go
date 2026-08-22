@@ -21,7 +21,7 @@ func TestCancelRunningBuild(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCancelUnknownOperation(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -132,12 +132,12 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	session1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	session1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession1: %v", err)
 	}
 
-	session2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	session2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession2: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestCancelAuditEvent(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestCancelNoRegistry(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = nil
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestCancelIdempotent(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -618,7 +618,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -762,7 +762,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -849,7 +849,7 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -919,7 +919,7 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -969,7 +969,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -1107,7 +1107,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -1256,7 +1256,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -1317,7 +1317,7 @@ func TestCancelResponseNoTimestampFields(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

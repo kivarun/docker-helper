@@ -57,7 +57,7 @@ func setupReloadApp(t *testing.T, auditEnabled bool) (*App, string, string, *byt
 func writeReloadConfig(t *testing.T, configPath string, cfg *Config, auditEnabled *bool) {
 	t.Helper()
 	newCfg := map[string]any{
-		"allowed_root": cfg.AllowedRoot,
+		"allowed_root": cfg.AllowedRoots[0],
 		"session_ttl":  "12h",
 		"log_level":    "info",
 	}
@@ -271,7 +271,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "revoke-test")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revoke-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 		return "1000", "1000", home, nil
 	}
 
-	principal, err := createPrincipal(app.DB, "revoke-test")
+	principal, err := createPrincipal(app.DB, "revoke-test", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	_, _ = setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "idempotent-test")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "idempotent-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 		return "1001", "1001", home, nil
 	}
 
-	principal, err := createPrincipal(app.DB, "idempotent-test")
+	principal, err := createPrincipal(app.DB, "idempotent-test", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +391,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	// Create a real credential that can be revoked.
-	home := filepath.Join(app.Config.AllowedRoot, "home", "preread-test")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "preread-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
 		return "1002", "1002", home, nil
 	}
-	principal, err := createPrincipal(app.DB, "preread-test")
+	principal, err := createPrincipal(app.DB, "preread-test", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +458,7 @@ func TestPullNonZeroNoOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestPullStartFailureOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +556,7 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +594,7 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}

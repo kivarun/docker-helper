@@ -37,7 +37,7 @@ func TestBuildStartContainsFields(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestBuildFinishSuccess(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestBuildDockerArgsUnchanged(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}

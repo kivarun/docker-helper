@@ -69,7 +69,7 @@ func TestRunStartAndFinish(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestAuditNonZeroExit(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestAuditDockerError(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestAuditMountsRelativeSource(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestAuditNoContainerOutput(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestAuditCommandArgCount(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestAuditNoCommandInRecord(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestRunShutdownGateNoStartAudit(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}

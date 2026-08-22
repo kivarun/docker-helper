@@ -39,8 +39,8 @@ func TestInitExplicitAllowedRoot(t *testing.T) {
 	if err := json.Unmarshal(data, &fc); err != nil {
 		t.Fatalf("parse config: %v", err)
 	}
-	if fc.AllowedRoot != allowedRoot {
-		t.Errorf("allowed_root = %q, want %q", fc.AllowedRoot, allowedRoot)
+	if fc.AllowedRoots[0] != allowedRoot {
+		t.Errorf("allowed_root = %q, want %q", fc.AllowedRoots[0], allowedRoot)
 	}
 }
 

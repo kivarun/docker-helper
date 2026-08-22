@@ -18,7 +18,7 @@ func TestBuildArgsProducesExpectedArgv(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestBuildArgsDeterministicOrder(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestBuildArgsEmptyValue(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestBuildArgsInvalidKeyRejected(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestBuildArgsOmittedPreservesBehavior(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

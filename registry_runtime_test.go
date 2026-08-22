@@ -9,7 +9,7 @@ import (
 func TestSessionDeleteRemovesRuntimeDir(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -47,12 +47,12 @@ func TestCleanupStaleSessionRuntimeDirs(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	// Create two sessions
-	result1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	result2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCleanupStaleSessionRuntimeDirsPreservesActive(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	// Create a session
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

@@ -82,7 +82,7 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := createPrincipal(a.DB, req.Username)
+	result, err := createPrincipal(a.DB, req.Username, a.getConfig().AllowedRoots)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -98,6 +98,8 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusBadRequest, "os_user_not_found", "OS user not found")
 		case isErrPrincipalExists(err):
 			writeError(ctx, w, http.StatusConflict, "principal_exists", "principal already exists")
+		case errors.Is(err, ErrPrincipalRootOutsideGlobal):
+			writeError(ctx, w, http.StatusBadRequest, "outside_global_root", "principal home is not under any global allowed root")
 		default:
 			opLog(ctx).Error("principal create failed",
 				slog.String("operation", "principal_create"),
@@ -321,7 +323,7 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, canonicalPath, err := addAllowedRoot(a.DB, username, req.Path)
+	changed, canonicalPath, err := addAllowedRoot(a.DB, username, req.Path, a.getConfig().AllowedRoots)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -591,8 +593,10 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		case isErrCredentialExists(err):
-			writeError(ctx, w, http.StatusConflict, "credential_exists", "credential already exists")
+		case isErrInvalidAllowedRoot(err):
+			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		case errors.Is(err, ErrPrincipalRootOutsideGlobal):
+			writeError(ctx, w, http.StatusBadRequest, "outside_global_root", "path is not under any global allowed root")
 		default:
 			opLog(ctx).Error("credential create failed",
 				slog.String("operation", "credential_create"),

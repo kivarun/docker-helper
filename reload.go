@@ -97,8 +97,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 		return
 	}
 
-	// System mode with SELinux: verify non-home allowed_root workspace label.
-	// This is a read-only check — no semanage/restorecon mutation on reload.
+	// System mode with SELinux: verify non-home allowed_roots workspace labels.
 	if deps.deploymentMode() == ModeSystem {
 		backend, err := deps.detectLSM()
 		if err != nil {
@@ -118,23 +117,28 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 			)
 			return
 		}
-		if backend == LSMSelinux && !isHomeRoot(newCfg.AllowedRoot) {
-			if err := deps.verifySELinuxWorkspace(newCfg.AllowedRoot); err != nil {
-				duration := time.Since(started).Round(time.Millisecond).String()
-				opLog(ctx).Error("reload SELinux workspace verification failed",
-					slog.String("operation", "reload"),
-					slog.String("error", err.Error()),
-				)
-				writeAuditWithRequestID(ctx, auditRecord{
-					Event:    "config.reload",
-					Result:   "selinux_workspace_verification_failed",
-					Duration: duration,
-				})
-				writeError(ctx, w, http.StatusBadRequest,
-					"selinux_workspace_verification_failed",
-					err.Error(),
-				)
-				return
+		if backend == LSMSelinux {
+			for _, root := range newCfg.AllowedRoots {
+				if isHomeRoot(root) {
+					continue
+				}
+				if err := deps.verifySELinuxWorkspace(root); err != nil {
+					duration := time.Since(started).Round(time.Millisecond).String()
+					opLog(ctx).Error("reload SELinux workspace verification failed",
+						slog.String("operation", "reload"),
+						slog.String("error", err.Error()),
+					)
+					writeAuditWithRequestID(ctx, auditRecord{
+						Event:    "config.reload",
+						Result:   "selinux_workspace_verification_failed",
+						Duration: duration,
+					})
+					writeError(ctx, w, http.StatusBadRequest,
+						"selinux_workspace_verification_failed",
+						err.Error(),
+					)
+					return
+				}
 			}
 		}
 	}
@@ -173,7 +177,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	}
 
 	opLog(ctx).Info("configuration reloaded",
-		slog.String("allowed_root", newCfg.AllowedRoot),
+		slog.Any("allowed_roots", newCfg.AllowedRoots),
 		slog.String("session_ttl", newCfg.SessionTTL.String()),
 		slog.String("log_level", newCfg.LogLevel.String()),
 		slog.Bool("audit_enabled", newCfg.AuditEnabled),

@@ -17,7 +17,7 @@ import (
 func TestMountSourceDotMountsWorkspace(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 func TestMountRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatalf("cannot create subdir: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestMountRelativeSubdir(t *testing.T) {
 func TestMountRegularFile(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestMountRegularFile(t *testing.T) {
 func TestMountReadOnly(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestMountReadOnly(t *testing.T) {
 func TestMountSameSourceDifferentTargets(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestMountSameSourceDifferentTargets(t *testing.T) {
 func TestMountDuplicateTarget(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestMountDuplicateTarget(t *testing.T) {
 func TestMountAbsoluteSource(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestMountAbsoluteSource(t *testing.T) {
 func TestMountEmptySource(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestMountEmptySource(t *testing.T) {
 func TestMountNonExistentSource(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -352,13 +352,13 @@ func TestMountSymlinkEscape(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	escapeDir := t.TempDir()
-	linkPath := filepath.Join(app.Config.AllowedRoot, "escape-link")
+	linkPath := filepath.Join(app.Config.AllowedRoots[0], "escape-link")
 
 	if err := os.Symlink(escapeDir, linkPath); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestMountSymlinkEscape(t *testing.T) {
 func TestMountRelativeTarget(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestMountRelativeTarget(t *testing.T) {
 func TestMountEmptyTarget(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestMountEmptyTarget(t *testing.T) {
 func TestMountTargetRoot(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestMountTargetRoot(t *testing.T) {
 func TestDockerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -630,7 +630,7 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -686,7 +686,7 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 func TestDockerUser(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestDockerUser(t *testing.T) {
 func TestMountValidationPreventsRunCommand(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -819,7 +819,7 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 func TestMountCommaInTarget(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -865,12 +865,12 @@ func TestMountCommaInTarget(t *testing.T) {
 func TestMountCommaInSource(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	commaDir := filepath.Join(app.Config.AllowedRoot, "dir,with,commas")
+	commaDir := filepath.Join(app.Config.AllowedRoots[0], "dir,with,commas")
 	if err := os.MkdirAll(commaDir, 0755); err != nil {
 		t.Fatalf("cannot create comma dir: %v", err)
 	}
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -916,7 +916,7 @@ func TestMountCommaInSource(t *testing.T) {
 func TestMountDuplicateTargetAfterClean(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -963,7 +963,7 @@ func TestMountDuplicateTargetAfterClean(t *testing.T) {
 func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}

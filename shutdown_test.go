@@ -44,7 +44,7 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 	app, reg, _, token := setupBuildTest(t)
 
 	// Use a readiness marker so we know the trap is installed.
-	readyFile := filepath.Join(app.Config.AllowedRoot, ".process_ready")
+	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".process_ready")
 	defer os.Remove(readyFile)
 	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
 

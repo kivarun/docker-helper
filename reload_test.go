@@ -636,8 +636,8 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfgAfter.AllowedRoot != wantRoot {
-		t.Fatalf("expected allowed_root=%s, got %s", wantRoot, cfgAfter.AllowedRoot)
+	if cfgAfter.AllowedRoots[0] != wantRoot {
+		t.Fatalf("expected allowed_root=%s, got %s", wantRoot, cfgAfter.AllowedRoots[0])
 	}
 }
 
@@ -1039,7 +1039,7 @@ func TestTryReloadConfigMissingToken(t *testing.T) {
 // does not race. Run with -race flag.
 func TestConfigSnapshotRace(t *testing.T) {
 	cfg := &Config{
-		AllowedRoot:  "/workspace/test-work",
+		AllowedRoots: []string{"/workspace/test-work"},
 		SessionTTL:   12 * time.Hour,
 		LogLevel:     slog.LevelInfo,
 		AuditEnabled: false,
@@ -1052,7 +1052,7 @@ func TestConfigSnapshotRace(t *testing.T) {
 	go func() {
 		for i := 0; i < 200; i++ {
 			c := app.getConfig()
-			_ = c.AllowedRoot
+			_ = c.AllowedRoots[0]
 			_ = c.SessionTTL
 			_ = c.LogLevel
 			_ = c.AuditEnabled
@@ -1064,7 +1064,7 @@ func TestConfigSnapshotRace(t *testing.T) {
 
 	for i := 0; i < 200; i++ {
 		newCfg := &Config{
-			AllowedRoot:  "/workspace/test-new-work",
+			AllowedRoots: []string{"/workspace/test-new-work"},
 			SessionTTL:   6 * time.Hour,
 			LogLevel:     slog.LevelDebug,
 			AuditEnabled: true,
@@ -2306,7 +2306,7 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 
 	app := &App{
 		Config: &Config{
-			AllowedRoot: "/home",
+			AllowedRoots: []string{"/home"},
 			SessionTTL:  12 * time.Hour,
 			LogLevel:    slog.LevelInfo,
 			Mode:        ModeSystem,
@@ -2326,7 +2326,7 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 		loadConfig: func() (*Config, error) {
 			loadConfigCalled = true
 			return &Config{
-				AllowedRoot: "/home",
+				AllowedRoots: []string{"/home"},
 				SessionTTL:  12 * time.Hour,
 				LogLevel:    slog.LevelInfo,
 				Mode:        ModeSystem,
@@ -2378,8 +2378,8 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 
 	// 4. runtime app.Config remains unchanged.
 	currentConfig := app.getConfig()
-	if currentConfig.AllowedRoot != originalConfig.AllowedRoot {
-		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoot, originalConfig.AllowedRoot)
+	if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
 	}
 	if currentConfig.SessionTTL != originalConfig.SessionTTL {
 		t.Errorf("SessionTTL changed: got %v, want %v", currentConfig.SessionTTL, originalConfig.SessionTTL)

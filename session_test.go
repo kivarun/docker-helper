@@ -14,7 +14,7 @@ import (
 
 func TestCreateSession(t *testing.T) {
 	app := newTestApp(t)
-	workspace := testWorkspaceDir(t, app.Config.AllowedRoot)
+	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	result, err := app.createSession(workspace)
 	if err != nil {
@@ -35,7 +35,7 @@ func TestCreateSession(t *testing.T) {
 func TestCreateSessionCanonicalWorkspace(t *testing.T) {
 	app := newTestApp(t)
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatalf("cannot create subdir: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestCreateSessionCanonicalWorkspace(t *testing.T) {
 func TestCreateSessionIDPrefix(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestCreateSessionIDPrefix(t *testing.T) {
 func TestCreateSessionTokenPrefix(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestCreateSessionTokenPrefix(t *testing.T) {
 func TestTokenNotStoredInDatabase(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestTokenNotStoredInDatabase(t *testing.T) {
 func TestTokenHashIsSHA256(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestTokenHashIsSHA256(t *testing.T) {
 func TestExpiresAtMatchesSessionTTL(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestExpiresAtMatchesSessionTTL(t *testing.T) {
 func TestFindSessionByToken(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestFindSessionByTokenNotFound(t *testing.T) {
 func TestListSessionsReturnsActive(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestListSessionsReturnsActive(t *testing.T) {
 func TestListSessionsExcludesExpired(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestListSessionsExcludesExpired(t *testing.T) {
 func TestDeleteSession(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestDeleteSessionNotFound(t *testing.T) {
 func TestDeleteSessionRepeatedReturnsError(t *testing.T) {
 	app := newTestApp(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestWorkspaceSymlinkEscapeRejected(t *testing.T) {
 	app := newTestApp(t)
 
 	escapeDir := t.TempDir()
-	linkPath := filepath.Join(app.Config.AllowedRoot, "escape-link")
+	linkPath := filepath.Join(app.Config.AllowedRoots[0], "escape-link")
 
 	if err := os.Symlink(escapeDir, linkPath); err != nil {
 		t.Skipf("cannot create symlink: %v", err)
@@ -300,12 +300,12 @@ func TestWorkspaceSymlinkEscapeRejected(t *testing.T) {
 func TestCreateSessionUniqueIDs(t *testing.T) {
 	app := newTestApp(t)
 
-	result1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("first createSession() error: %v", err)
 	}
 
-	result2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("second createSession() error: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	_, err := app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?)`,
-		"dhs_expired", "hash1", app.Config.AllowedRoot,
+		"dhs_expired", "hash1", app.Config.AllowedRoots[0],
 		time.Now().Add(-2*time.Hour).Unix(),
 		time.Now().Add(-1*time.Hour).Unix(),
 	)
@@ -339,7 +339,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	_, err = app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?)`,
-		"dhs_expires_now", "hash2", app.Config.AllowedRoot,
+		"dhs_expires_now", "hash2", app.Config.AllowedRoots[0],
 		now-3600, now,
 	)
 	if err != nil {
@@ -350,7 +350,7 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	_, err = app.DB.Exec(
 		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?)`,
-		"dhs_active", "hash3", app.Config.AllowedRoot,
+		"dhs_active", "hash3", app.Config.AllowedRoots[0],
 		now, now+3600,
 	)
 	if err != nil {

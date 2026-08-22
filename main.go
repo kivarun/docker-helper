@@ -242,19 +242,23 @@ func runServe(stdout, stderr io.Writer) error {
 	// Re-initialize with the configured log level and audit setting.
 	initLoggers(stdout, stderr, cfg.LogLevel, cfg.AuditEnabled)
 
-	// System mode with SELinux: verify non-home allowed_root workspace label.
-	// This is a read-only check — no semanage/restorecon mutation on startup.
+	// System mode with SELinux: verify non-home allowed_roots workspace labels.
 	if cfg.Mode == ModeSystem {
 		backend, err := detectLSM()
 		if err != nil {
 			serveStartupError(err, "")
 			return err
 		}
-		if backend == LSMSelinux && !isHomeRoot(cfg.AllowedRoot) {
+		if backend == LSMSelinux {
 			selMgr := newSELinuxWorkspaceManager()
-			if err := selMgr.verifyWorkspaceLabel(cfg.AllowedRoot); err != nil {
-				serveStartupError(err, "")
-				return err
+			for _, root := range cfg.AllowedRoots {
+				if isHomeRoot(root) {
+					continue
+				}
+				if err := selMgr.verifyWorkspaceLabel(root); err != nil {
+					serveStartupError(err, "")
+					return err
+				}
 			}
 		}
 	}

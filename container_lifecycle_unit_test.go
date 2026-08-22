@@ -44,7 +44,7 @@ func TestCidfileCreatedAndCleanedUpOnNormalCompletion(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestCidfileRemovedOnFailedStart(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestCidfileNotExposedInHTTPResponse(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	}
 
 	// Use a readiness marker so we know the process is running.
-	readyFile := filepath.Join(app.Config.AllowedRoot, ".race_ready")
+	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".race_ready")
 	defer os.Remove(readyFile)
 
 	var cidfilePath string
@@ -309,7 +309,7 @@ func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

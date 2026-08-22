@@ -11,7 +11,7 @@ import (
 func TestAdminAuthValidTokenCreateSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -42,7 +42,7 @@ func TestAdminAuthValidTokenListSessions(t *testing.T) {
 func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestAdminAuthHealthPublic(t *testing.T) {
 func TestAdminAuthInvalidTokenDoesNotCreateSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))

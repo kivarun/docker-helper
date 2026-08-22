@@ -17,7 +17,7 @@ import (
 func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 	app, reg, _, token := setupBuildTest(t)
 
-	readyFile := filepath.Join(app.Config.AllowedRoot, ".lifecycle_ready")
+	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".lifecycle_ready")
 	defer os.Remove(readyFile)
 	app.ExecCommandContext = makeIgnoringSignalCmd(t, readyFile)
 
@@ -58,7 +58,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	reg := newOperationRegistry()
 	app.OperationRegistry = reg
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

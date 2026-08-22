@@ -45,7 +45,7 @@ func resolveDeploymentMode() DeploymentMode {
 }
 
 type Config struct {
-	AllowedRoot           string
+	AllowedRoots          []string
 	SessionTTL            time.Duration
 	LogLevel              slog.Level
 	AuditEnabled          bool
@@ -69,18 +69,22 @@ type Config struct {
 	TrustedCAPreparedDir string // computed: prepared runtime directory (not in JSON/show)
 }
 
+// fileConfig is the JSON-decoded form of config.json.
+// AllowedRoots is the canonical new schema.
+// AllowedRootLegacy is the legacy scalar for migration compatibility only.
 type fileConfig struct {
-	AllowedRoot           string `json:"allowed_root"`
-	SessionTTL            string `json:"session_ttl"`
-	Level                 string `json:"log_level,omitempty"`
-	AuditEnabled          *bool  `json:"audit_enabled,omitempty"`
-	ShutdownTimeout       string `json:"shutdown_timeout,omitempty"`
-	OperationRetentionTTL string `json:"operation_retention_ttl,omitempty"`
-	OperationMaxCompleted *int   `json:"operation_max_completed,omitempty"`
-	OperationLogMaxBytes  *int64 `json:"operation_log_max_bytes,omitempty"`
-	TrustedCAPath         string `json:"trusted_ca_path,omitempty"`
-	TrustedCAInjection    string `json:"trusted_ca_injection,omitempty"`
-	HTTPAddress           string `json:"http_address,omitempty"`
+	AllowedRoots          []string `json:"allowed_roots"`
+	AllowedRootLegacy     string   `json:"allowed_root"`
+	SessionTTL            string   `json:"session_ttl"`
+	Level                 string   `json:"log_level,omitempty"`
+	AuditEnabled          *bool    `json:"audit_enabled,omitempty"`
+	ShutdownTimeout       string   `json:"shutdown_timeout,omitempty"`
+	OperationRetentionTTL string   `json:"operation_retention_ttl,omitempty"`
+	OperationMaxCompleted *int     `json:"operation_max_completed,omitempty"`
+	OperationLogMaxBytes  *int64   `json:"operation_log_max_bytes,omitempty"`
+	TrustedCAPath         string   `json:"trusted_ca_path,omitempty"`
+	TrustedCAInjection    string   `json:"trusted_ca_injection,omitempty"`
+	HTTPAddress           string   `json:"http_address,omitempty"`
 }
 
 func parseLogLevel(s string) (slog.Level, error) {
@@ -109,7 +113,8 @@ type configFieldSpec struct {
 }
 
 var configFields = []configFieldSpec{
-	{name: "allowed_root", writable: true, required: true},
+	{name: "allowed_roots", writable: true, required: true},
+	{name: "allowed_root", writable: false, required: false},
 	{name: "session_ttl", writable: true, required: true},
 	{name: "log_level", writable: true},
 	{name: "audit_enabled", writable: true},
@@ -261,13 +266,10 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	// The runtime allowed_root must be the canonical, policy-validated form.
-	// This closes the manual-config symlink bypass: a config.json that points
-	// allowed_root at a symlink into a forbidden tree is rejected here, before
-	// any runtime/state filesystem side effects.
-	allowedRoot, err := canonicalizeWorkspaceRootForAdd(fc.AllowedRoot)
+	// Resolve allowed_roots with legacy migration.
+	allowedRoots, err := resolveAllowedRoots(raw, &fc)
 	if err != nil {
-		return nil, fmt.Errorf("invalid allowed_root: %w", err)
+		return nil, err
 	}
 
 	ec := resolveEffectiveConfig(fc)
@@ -326,7 +328,7 @@ func loadConfig() (*Config, error) {
 	socketPath := filepath.Join(runtimeDir, "docker-helper.sock")
 
 	cfg := &Config{
-		AllowedRoot:           allowedRoot,
+		AllowedRoots:          allowedRoots,
 		SessionTTL:            ttl,
 		LogLevel:              level,
 		AuditEnabled:          ec.AuditEnabled,
@@ -397,6 +399,49 @@ func resolveTrustedCAInjection(s string) string {
 		return "disabled"
 	}
 	return s
+}
+
+// resolveAllowedRoots resolves allowed_roots from raw config with legacy migration.
+func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {
+	hasLegacy := raw["allowed_root"] != nil
+	hasNew := raw["allowed_roots"] != nil
+	if hasLegacy && hasNew {
+		return nil, fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
+	}
+	var roots []string
+	if hasNew {
+		roots = fc.AllowedRoots
+	} else if hasLegacy {
+		roots = []string{fc.AllowedRootLegacy}
+	} else {
+		return nil, fmt.Errorf("allowed_roots is required")
+	}
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
+			return nil, fmt.Errorf("allowed_roots contains an empty entry")
+		}
+		if !filepath.IsAbs(r) {
+			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", r)
+		}
+		canon, err := canonicalizeWorkspaceRootForAdd(r)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed_roots entry %q: %w", r, err)
+		}
+		if seen[canon] {
+			continue
+		}
+		seen[canon] = true
+		result = append(result, canon)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	return result, nil
 }
 
 // effectiveConfigValues holds the effective (default-applied) output values
@@ -599,7 +644,7 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultConfig := fileConfig{
-			AllowedRoot:           allowedRoot,
+			AllowedRoots:          []string{allowedRoot},
 			SessionTTL:            "12h",
 			Level:                 "info",
 			ShutdownTimeout:       "30s",
@@ -682,7 +727,7 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Preflight 2: read existing config if present to check for mismatch.
-	var existingAllowedRoot string
+	var existingRoots []string
 	configExists := false
 
 	if stat, err := os.Stat(configPath); err == nil {
@@ -709,7 +754,10 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 			return fmt.Errorf("cannot decode existing configuration: %w", err)
 		}
 
-		existingAllowedRoot = fc.AllowedRoot
+		existingRoots = fc.AllowedRoots
+		if fc.AllowedRootLegacy != "" && len(fc.AllowedRoots) == 0 {
+			existingRoots = []string{fc.AllowedRootLegacy}
+		}
 	} else if !os.IsNotExist(err) {
 		// Non-ENOENT error is operational failure.
 		return fmt.Errorf("cannot stat existing configuration: %w", err)
@@ -722,8 +770,8 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Preflight 3: check for mismatch with existing config.
-	if configExists && existingAllowedRoot != "" {
-		existingCanonical, err := resolveAllowedRoot(existingAllowedRoot)
+	if configExists && len(existingRoots) > 0 {
+		existingCanonical, err := resolveAllowedRoot(existingRoots[0])
 		if err != nil {
 			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
 		}
@@ -795,7 +843,7 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Preflight 2: read existing config if present to check for mismatch.
-	var existingAllowedRoot string
+	var existingRoots []string
 	configExists := false
 
 	if stat, err := os.Stat(configPath); err == nil {
@@ -821,7 +869,10 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 			return fmt.Errorf("cannot decode existing configuration: %w", err)
 		}
 
-		existingAllowedRoot = fc.AllowedRoot
+		existingRoots = fc.AllowedRoots
+		if fc.AllowedRootLegacy != "" && len(fc.AllowedRoots) == 0 {
+			existingRoots = []string{fc.AllowedRootLegacy}
+		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("cannot stat existing configuration: %w", err)
 	}
@@ -833,8 +884,8 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Preflight 3: check for mismatch with existing config.
-	if configExists && existingAllowedRoot != "" {
-		existingCanonical, err := resolveRoot(existingAllowedRoot)
+	if configExists && len(existingRoots) > 0 {
+		existingCanonical, err := resolveRoot(existingRoots[0])
 		if err != nil {
 			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
 		}
@@ -1091,17 +1142,35 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		return err
 	}
 
-	// Validate allowed_root: must exist as a non-empty absolute string.
-	if v, ok := raw["allowed_root"]; ok {
+	// Validate allowed_roots (new) or allowed_root (legacy).
+	hasAllowedRoots := raw["allowed_roots"] != nil
+	hasAllowedRootLegacy := raw["allowed_root"] != nil
+	if hasAllowedRoots && hasAllowedRootLegacy {
+		return fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
+	}
+	if hasAllowedRoots {
+		var roots []string
+		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+			return fmt.Errorf("allowed_roots must be a JSON array of strings")
+		}
+		if len(roots) == 0 {
+			return fmt.Errorf("allowed_roots must contain at least one entry")
+		}
+		for _, r := range roots {
+			if err := validateAllowedRootValue(r); err != nil {
+				return err
+			}
+		}
+	} else if hasAllowedRootLegacy {
 		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
+		if err := json.Unmarshal(raw["allowed_root"], &s); err != nil {
 			return fmt.Errorf("allowed_root must be a JSON string")
 		}
 		if err := validateAllowedRootValue(s); err != nil {
 			return err
 		}
 	} else {
-		return fmt.Errorf("allowed_root is required")
+		return fmt.Errorf("allowed_roots is required")
 	}
 
 	// Validate session_ttl: must exist as a valid positive duration string.

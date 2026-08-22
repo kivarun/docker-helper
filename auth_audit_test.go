@@ -370,7 +370,7 @@ func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 
 	// Create a real session so the token is known.
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
-	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoot)}
+	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
@@ -429,7 +429,7 @@ func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

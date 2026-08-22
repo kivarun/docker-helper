@@ -119,7 +119,10 @@ func findPrincipalIDByUserName(db *sql.DB, username string) (int, error) {
 	return id, nil
 }
 
-func createPrincipal(db *sql.DB, username string) (*PrincipalWithRoots, error) {
+// ErrPrincipalRootOutsideGlobal is returned when a principal root is outside global roots.
+var ErrPrincipalRootOutsideGlobal = errors.New("principal root outside global allowed roots")
+
+func createPrincipal(db *sql.DB, username string, globalRoots []string) (*PrincipalWithRoots, error) {
 	if username == "" {
 		return nil, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -137,6 +140,11 @@ func createPrincipal(db *sql.DB, username string) (*PrincipalWithRoots, error) {
 	canonicalHome, err := canonicalizeWorkspaceRootForAdd(home)
 	if err != nil {
 		return nil, fmt.Errorf("OS user %q home directory %q is not a valid workspace root: %s", username, home, err)
+	}
+
+	// Validate the home directory is under at least one global allowed root.
+	if !isUnderAnyRoot(canonicalHome, globalRoots) {
+		return nil, fmt.Errorf("OS user %q home directory %q is not under any global allowed root: %w", username, canonicalHome, ErrPrincipalRootOutsideGlobal)
 	}
 
 	tx, err := db.Begin()
@@ -297,7 +305,17 @@ func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) ([]string
 	return sessionIDs, nil
 }
 
-func addAllowedRoot(db *sql.DB, username string, rootPath string) (changed bool, canonicalPath string, err error) {
+// isUnderAnyRoot returns true if path is equal to or under at least one root.
+func isUnderAnyRoot(path string, roots []string) bool {
+	for _, r := range roots {
+		if path == r || isInside(r, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func addAllowedRoot(db *sql.DB, username string, rootPath string, globalRoots []string) (changed bool, canonicalPath string, err error) {
 	if username == "" {
 		return false, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -305,6 +323,11 @@ func addAllowedRoot(db *sql.DB, username string, rootPath string) (changed bool,
 	resolved, err := validateAllowedRootForAdd(rootPath)
 	if err != nil {
 		return false, "", err
+	}
+
+	// Validate the root is under at least one global allowed root.
+	if !isUnderAnyRoot(resolved, globalRoots) {
+		return false, "", fmt.Errorf("path %q is not under any global allowed root: %w", resolved, ErrPrincipalRootOutsideGlobal)
 	}
 
 	principalID, err := findPrincipalIDByUserName(db, username)

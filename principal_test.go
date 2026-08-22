@@ -15,7 +15,7 @@ import (
 func TestCreatePrincipal(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "testuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "testuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestCreatePrincipal(t *testing.T) {
 		return "", "", "", fmt.Errorf("user not found")
 	}
 
-	result, err := createPrincipal(app.DB, "testuser")
+	result, err := createPrincipal(app.DB, "testuser", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestCreatePrincipalUnknownOSUser(t *testing.T) {
 		return "", "", "", fmt.Errorf("user not found")
 	}
 
-	_, err := createPrincipal(app.DB, "nonexistent")
+	_, err := createPrincipal(app.DB, "nonexistent", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for unknown OS user")
 	}
@@ -72,7 +72,7 @@ func TestCreatePrincipalUnknownOSUser(t *testing.T) {
 func TestCreatePrincipalDuplicate(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "dupuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dupuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -83,11 +83,11 @@ func TestCreatePrincipalDuplicate(t *testing.T) {
 		return "1002", "1002", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "dupuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "dupuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("first createPrincipal() error: %v", err)
 	}
 
-	_, err := createPrincipal(app.DB, "dupuser")
+	_, err := createPrincipal(app.DB, "dupuser", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for duplicate principal")
 	}
@@ -99,7 +99,7 @@ func TestCreatePrincipalDuplicate(t *testing.T) {
 func TestCreatePrincipalDefaultRoot(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "rootuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "rootuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestCreatePrincipalDefaultRoot(t *testing.T) {
 		return "1003", "1003", home, nil
 	}
 
-	result, err := createPrincipal(app.DB, "rootuser")
+	result, err := createPrincipal(app.DB, "rootuser", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
@@ -126,11 +126,11 @@ func TestCreatePrincipalDefaultRoot(t *testing.T) {
 func TestCreatePrincipalDefaultRootCanonicalized(t *testing.T) {
 	app := newTestApp(t)
 
-	realHome := filepath.Join(app.Config.AllowedRoot, "home", "canonuser")
+	realHome := filepath.Join(app.Config.AllowedRoots[0], "home", "canonuser")
 	if err := os.MkdirAll(realHome, 0755); err != nil {
 		t.Fatal(err)
 	}
-	symlinkHome := filepath.Join(app.Config.AllowedRoot, "home-link")
+	symlinkHome := filepath.Join(app.Config.AllowedRoots[0], "home-link")
 	if err := os.Symlink(realHome, symlinkHome); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestCreatePrincipalDefaultRootCanonicalized(t *testing.T) {
 		return "1050", "1050", symlinkHome, nil
 	}
 
-	result, err := createPrincipal(app.DB, "canonuser")
+	result, err := createPrincipal(app.DB, "canonuser", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestCreatePrincipalDefaultRootCanonicalized(t *testing.T) {
 func TestShowPrincipal(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "showuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "showuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestShowPrincipal(t *testing.T) {
 		return "1004", "1004", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "showuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "showuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestShowPrincipalNotFound(t *testing.T) {
 func TestAddAllowedRootDuplicate(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "duprootuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "duprootuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -211,11 +211,11 @@ func TestAddAllowedRootDuplicate(t *testing.T) {
 		return "1008", "1008", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "duprootuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "duprootuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	changed, _, err := addAllowedRoot(app.DB, "duprootuser", home)
+	changed, _, err := addAllowedRoot(app.DB, "duprootuser", home, app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatalf("addAllowedRoot() error: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestAddAllowedRootDuplicate(t *testing.T) {
 func TestAddAllowedRootTildeRejected(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "tildeuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "tildeuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -238,11 +238,11 @@ func TestAddAllowedRootTildeRejected(t *testing.T) {
 		return "1010", "1010", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "tildeuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "tildeuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	_, _, err := addAllowedRoot(app.DB, "tildeuser", "~/some/path")
+	_, _, err := addAllowedRoot(app.DB, "tildeuser", "~/some/path", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for tilde path")
 	}
@@ -254,12 +254,12 @@ func TestAddAllowedRootTildeRejected(t *testing.T) {
 func TestRemoveAllowedRoot(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "remuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "remuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra2")
+	extraRoot := filepath.Join(app.Config.AllowedRoots[0], "extra2")
 	if err := os.MkdirAll(extraRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -270,11 +270,11 @@ func TestRemoveAllowedRoot(t *testing.T) {
 		return "1010", "1010", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "remuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "remuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "remuser", extraRoot); err != nil {
+	if _, _, err := addAllowedRoot(app.DB, "remuser", extraRoot, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("addAllowedRoot() error: %v", err)
 	}
 
@@ -298,12 +298,12 @@ func TestRemoveAllowedRoot(t *testing.T) {
 func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "deluser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deluser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra-del")
+	extraRoot := filepath.Join(app.Config.AllowedRoots[0], "extra-del")
 	if err := os.MkdirAll(extraRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -314,11 +314,11 @@ func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 		return "1030", "1030", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "deluser"); err != nil {
+	if _, err := createPrincipal(app.DB, "deluser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "deluser", extraRoot); err != nil {
+	if _, _, err := addAllowedRoot(app.DB, "deluser", extraRoot, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("addAllowedRoot() error: %v", err)
 	}
 
@@ -348,7 +348,7 @@ func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 func TestRemoveAllowedRootAbsent(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "absuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "absuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -359,11 +359,11 @@ func TestRemoveAllowedRootAbsent(t *testing.T) {
 		return "1011", "1011", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "absuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "absuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	nonRoot := filepath.Join(app.Config.AllowedRoot, "never-added")
+	nonRoot := filepath.Join(app.Config.AllowedRoots[0], "never-added")
 	changed, _, err := removeAllowedRoot(app.DB, "absuser", nonRoot)
 	if err != nil {
 		t.Fatalf("removeAllowedRoot() error: %v", err)
@@ -376,7 +376,7 @@ func TestRemoveAllowedRootAbsent(t *testing.T) {
 func TestPrincipalAdminAuth(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "authuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "authuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestPrincipalAdminAuth(t *testing.T) {
 func TestPrincipalCaseSensitive(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "caseuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "caseuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestPrincipalCaseSensitive(t *testing.T) {
 		return "1024", "1024", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "caseuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "caseuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestPrincipalCaseSensitive(t *testing.T) {
 	}
 
 	// Different case should be allowed as separate principal (if OS user exists).
-	home2 := filepath.Join(app.Config.AllowedRoot, "home", "CASEUSER")
+	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "CASEUSER")
 	if err := os.MkdirAll(home2, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +448,7 @@ func TestPrincipalCaseSensitive(t *testing.T) {
 		return "1024", "1024", home, nil
 	}
 
-	result, err := createPrincipal(app.DB, "CASEUSER")
+	result, err := createPrincipal(app.DB, "CASEUSER", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatalf("createPrincipal('CASEUSER') error: %v", err)
 	}
@@ -460,7 +460,7 @@ func TestPrincipalCaseSensitive(t *testing.T) {
 func TestPrincipalHTTPCreate(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "httpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "httpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestPrincipalHTTPCreate(t *testing.T) {
 func TestPrincipalHTTPShow(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "showhttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "showhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestPrincipalHTTPShow(t *testing.T) {
 		return "1014", "1014", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "showhttpuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "showhttpuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -536,7 +536,7 @@ func TestPrincipalHTTPShow(t *testing.T) {
 func TestPrincipalHTTPSetEnabled(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "sethttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sethttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +547,7 @@ func TestPrincipalHTTPSetEnabled(t *testing.T) {
 		return "1015", "1015", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "sethttpuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "sethttpuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -579,7 +579,7 @@ func TestPrincipalHTTPSetEnabled(t *testing.T) {
 func TestPrincipalHTTPSetEnabledIdempotent(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "idemhttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "idemhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +590,7 @@ func TestPrincipalHTTPSetEnabledIdempotent(t *testing.T) {
 		return "1016", "1016", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "idemhttpuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "idemhttpuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -622,12 +622,12 @@ func TestPrincipalHTTPSetEnabledIdempotent(t *testing.T) {
 func TestPrincipalHTTPAddAllowedRoot(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "addroothttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "addroothttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra3")
+	extraRoot := filepath.Join(app.Config.AllowedRoots[0], "extra3")
 	if err := os.MkdirAll(extraRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +638,7 @@ func TestPrincipalHTTPAddAllowedRoot(t *testing.T) {
 		return "1017", "1017", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "addroothttpuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "addroothttpuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -669,7 +669,7 @@ func TestPrincipalHTTPAddAllowedRoot(t *testing.T) {
 func TestPrincipalHTTPAddAllowedRootRelativeRejected(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "relhttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "relhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestPrincipalHTTPAddAllowedRootRelativeRejected(t *testing.T) {
 		return "1040", "1040", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "relhttpuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "relhttpuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -703,12 +703,12 @@ func TestPrincipalHTTPAddAllowedRootRelativeRejected(t *testing.T) {
 func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "delhttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra-del-http")
+	extraRoot := filepath.Join(app.Config.AllowedRoots[0], "extra-del-http")
 	if err := os.MkdirAll(extraRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -719,11 +719,11 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 		return "1041", "1041", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "delhttpuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "delhttpuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "delhttpuser", extraRoot); err != nil {
+	if _, _, err := addAllowedRoot(app.DB, "delhttpuser", extraRoot, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("addAllowedRoot() error: %v", err)
 	}
 
@@ -759,7 +759,7 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "nonexistuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "nonexistuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -770,7 +770,7 @@ func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
 		return "1042", "1042", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "nonexistuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "nonexistuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -805,12 +805,12 @@ func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
 func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "fileuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "fileuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	regFile := filepath.Join(app.Config.AllowedRoot, "a-file")
+	regFile := filepath.Join(app.Config.AllowedRoots[0], "a-file")
 	if err := os.WriteFile(regFile, []byte("data"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -821,7 +821,7 @@ func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
 		return "1043", "1043", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "fileuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "fileuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -856,7 +856,7 @@ func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
 func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "relremuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "relremuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -867,7 +867,7 @@ func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
 		return "1044", "1044", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "relremuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "relremuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -908,7 +908,7 @@ func TestCreatePrincipalRelativeHomeRejected(t *testing.T) {
 		return "1050", "1050", "relative/home", nil
 	}
 
-	_, err := createPrincipal(app.DB, "relhomeuser")
+	_, err := createPrincipal(app.DB, "relhomeuser", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for relative home")
 	}
@@ -1057,7 +1057,7 @@ func TestPrincipalCLISetEnabledOnlyTrueFalse(t *testing.T) {
 func TestPrincipalErrorWrapping(t *testing.T) {
 	app := newTestApp(t)
 
-	_, err := createPrincipal(app.DB, "")
+	_, err := createPrincipal(app.DB, "", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for empty username")
 	}
@@ -1072,12 +1072,12 @@ func TestPrincipalErrorWrapping(t *testing.T) {
 		t.Fatal("expected error for empty username in update")
 	}
 
-	_, _, err = addAllowedRoot(app.DB, "", "/tmp")
+	_, _, err = addAllowedRoot(app.DB, "", "/tmp", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for empty username in addAllowedRoot")
 	}
 
-	_, _, err = addAllowedRoot(app.DB, "user", "")
+	_, _, err = addAllowedRoot(app.DB, "user", "", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for empty path in addAllowedRoot")
 	}
@@ -1136,7 +1136,7 @@ func TestResolveOSUserNotFound(t *testing.T) {
 func TestPrincipalWithRootsEmptySlice(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "emptyuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "emptyuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1147,7 +1147,7 @@ func TestPrincipalWithRootsEmptySlice(t *testing.T) {
 		return "1027", "1027", home, nil
 	}
 
-	result, err := createPrincipal(app.DB, "emptyuser")
+	result, err := createPrincipal(app.DB, "emptyuser", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
@@ -1160,12 +1160,12 @@ func TestPrincipalWithRootsEmptySlice(t *testing.T) {
 func TestPrincipalCascadeDelete(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "cascadeuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "cascadeuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra8")
+	extraRoot := filepath.Join(app.Config.AllowedRoots[0], "extra8")
 	if err := os.MkdirAll(extraRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1176,11 +1176,11 @@ func TestPrincipalCascadeDelete(t *testing.T) {
 		return "1030", "1030", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "cascadeuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "cascadeuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "cascadeuser", extraRoot); err != nil {
+	if _, _, err := addAllowedRoot(app.DB, "cascadeuser", extraRoot, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("addAllowedRoot() error: %v", err)
 	}
 
@@ -1227,7 +1227,7 @@ func TestPrincipalHTTPCreateUnknownOSUser(t *testing.T) {
 func TestPrincipalHTTPCreateDuplicate(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "duphttpuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "duphttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1281,12 +1281,12 @@ func TestPrincipalHTTPShowNotFound(t *testing.T) {
 func TestPrincipalAllowedRootPathResolution(t *testing.T) {
 	app := newTestApp(t)
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "pathresuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "pathresuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	extraRoot := filepath.Join(app.Config.AllowedRoot, "extra7")
+	extraRoot := filepath.Join(app.Config.AllowedRoots[0], "extra7")
 	if err := os.MkdirAll(extraRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1297,11 +1297,11 @@ func TestPrincipalAllowedRootPathResolution(t *testing.T) {
 		return "1026", "1026", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "pathresuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "pathresuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	changed, _, err := addAllowedRoot(app.DB, "pathresuser", extraRoot+"/")
+	changed, _, err := addAllowedRoot(app.DB, "pathresuser", extraRoot+"/", app.Config.AllowedRoots)
 	if err != nil {
 		t.Fatalf("addAllowedRoot() error: %v", err)
 	}
@@ -1334,20 +1334,20 @@ func TestListPrincipalSummaries(t *testing.T) {
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
 		switch username {
 		case "alice":
-			return "1001", "1001", filepath.Join(app.Config.AllowedRoot, "home", "alice"), nil
+			return "1001", "1001", filepath.Join(app.Config.AllowedRoots[0], "home", "alice"), nil
 		case "bob":
-			return "1002", "1002", filepath.Join(app.Config.AllowedRoot, "home", "bob"), nil
+			return "1002", "1002", filepath.Join(app.Config.AllowedRoots[0], "home", "bob"), nil
 		default:
 			return "", "", "", os.ErrNotExist
 		}
 	}
 
 	for _, user := range []string{"alice", "bob"} {
-		home := filepath.Join(app.Config.AllowedRoot, "home", user)
+		home := filepath.Join(app.Config.AllowedRoots[0], "home", user)
 		if err := os.MkdirAll(home, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := createPrincipal(app.DB, user); err != nil {
+		if _, err := createPrincipal(app.DB, user, app.Config.AllowedRoots); err != nil {
 			t.Fatalf("createPrincipal(%q) error: %v", user, err)
 		}
 	}
@@ -1373,7 +1373,7 @@ func TestListPrincipalSummaries(t *testing.T) {
 		Username: "alice",
 		UID:      1001,
 		GID:      1001,
-		Home:     filepath.Join(app.Config.AllowedRoot, "home", "alice"),
+		Home:     filepath.Join(app.Config.AllowedRoots[0], "home", "alice"),
 		Enabled:  true,
 	}
 	if summaries[0] != wantAlice {
@@ -1389,17 +1389,17 @@ func TestPrincipalHTTPList(t *testing.T) {
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
 		switch username {
 		case "carol":
-			return "1003", "1003", filepath.Join(app.Config.AllowedRoot, "home", "carol"), nil
+			return "1003", "1003", filepath.Join(app.Config.AllowedRoots[0], "home", "carol"), nil
 		default:
 			return "", "", "", os.ErrNotExist
 		}
 	}
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "carol")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "carol")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createPrincipal(app.DB, "carol"); err != nil {
+	if _, err := createPrincipal(app.DB, "carol", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
@@ -1463,17 +1463,17 @@ func TestPrincipalHTTPListDisabledIncluded(t *testing.T) {
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
 		switch username {
 		case "dave":
-			return "1004", "1004", filepath.Join(app.Config.AllowedRoot, "home", "dave"), nil
+			return "1004", "1004", filepath.Join(app.Config.AllowedRoots[0], "home", "dave"), nil
 		default:
 			return "", "", "", os.ErrNotExist
 		}
 	}
 
-	home := filepath.Join(app.Config.AllowedRoot, "home", "dave")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dave")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createPrincipal(app.DB, "dave"); err != nil {
+	if _, err := createPrincipal(app.DB, "dave", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 	if _, err := updatePrincipalEnabled(app.DB, "dave", false); err != nil {
@@ -1508,7 +1508,7 @@ func TestPrincipalListAuth(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	// Session token (legacy admin session).
-	sessionResult, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoot))
+	sessionResult, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -1519,15 +1519,15 @@ func TestPrincipalListAuth(t *testing.T) {
 	defer func() { OSUserLookup = orig }()
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
 		if username == "launchuser" {
-			return "1005", "1005", filepath.Join(app.Config.AllowedRoot, "home", "launchuser"), nil
+			return "1005", "1005", filepath.Join(app.Config.AllowedRoots[0], "home", "launchuser"), nil
 		}
 		return "", "", "", os.ErrNotExist
 	}
-	home := filepath.Join(app.Config.AllowedRoot, "home", "launchuser")
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "launchuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := createPrincipal(app.DB, "launchuser"); err != nil {
+	if _, err := createPrincipal(app.DB, "launchuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 	_, credentialToken, err := createCredential(app.DB, "launchuser", "oc")

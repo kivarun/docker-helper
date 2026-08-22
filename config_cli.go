@@ -308,8 +308,8 @@ func configShowAll(stdout, stderr io.Writer) int {
 	databasePath := filepath.Join(stateDir, "docker-helper.db")
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
-	result := map[string]any{
-		"allowed_root":            fc.AllowedRoot,
+		result := map[string]any{
+			"allowed_roots":         fc.AllowedRoots,
 		"session_ttl":             fc.SessionTTL,
 		"log_level":               ec.LogLevel,
 		"audit_enabled":           ec.AuditEnabled,
@@ -455,8 +455,9 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	stateDir := getStateDir()
 
 	switch field {
-	case "allowed_root":
-		fmt.Fprintln(stdout, fc.AllowedRoot)
+	case "allowed_roots":
+		data, _ := json.MarshalIndent(fc.AllowedRoots, "", "  ")
+		fmt.Fprintln(stdout, string(data))
 	case "session_ttl":
 		fmt.Fprintln(stdout, fc.SessionTTL)
 	case "log_level":
@@ -521,28 +522,13 @@ func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *conf
 
 	switch field {
 	case "allowed_root":
-		if value == "" {
-			fmt.Fprintf(stderr, "error: allowed_root must be a non-empty path\n")
-			return 2
-		}
-		if !filepath.IsAbs(value) {
-			fmt.Fprintf(stderr, "error: allowed_root must be a non-empty absolute path\n")
-			return 2
-		}
-		var canonical string
-		var err error
-		if seam != nil && seam.canonicalizeRoot != nil {
-			canonical, err = seam.canonicalizeRoot(value)
-		} else {
-			canonical, err = canonicalizeWorkspaceRootForAdd(value)
-		}
-		if err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 2
-		}
-		// Persist the canonical form so the stored value cannot later be
-		// retargeted through symlink manipulation.
-		value = canonical
+		fmt.Fprintln(stderr, "error: allowed_root is no longer settable as a scalar")
+		fmt.Fprintln(stderr, "use: docker-helper config allowed-root add PATH")
+		return 2
+	case "allowed_roots":
+		fmt.Fprintln(stderr, "error: allowed_roots is managed via structured commands")
+		fmt.Fprintln(stderr, "use: docker-helper config allowed-root add/remove/list")
+		return 2
 	case "session_ttl":
 		if _, err := time.ParseDuration(value); err != nil {
 			fmt.Fprintf(stderr, "error: invalid duration %q: %v\n", value, err)
@@ -608,8 +594,6 @@ func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *conf
 	// Compute the JSON-encoded value for the field.
 	var newValue json.RawMessage
 	switch field {
-	case "allowed_root":
-		newValue, _ = json.Marshal(value)
 	case "session_ttl":
 		newValue, _ = json.Marshal(value)
 	case "log_level":
@@ -636,37 +620,7 @@ func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *conf
 		newValue, _ = json.Marshal(value)
 	}
 
-	// SELinux workspace preparation for allowed_root in system mode.
-	// Prepare the label BEFORE committing the config transaction.
-	// Once ensureWorkspaceLabel succeeds, the mapping is managed durable state
-	// (monotonic R2 lifecycle). We do NOT roll it back on config failure.
-	if field == "allowed_root" && resolveDeploymentMode() == ModeSystem {
-		var backend LSMBackend
-		var err error
-		if seam != nil && seam.detectBackend != nil {
-			backend, err = seam.detectBackend()
-		} else {
-			backend, err = detectLSM()
-		}
-		if err != nil {
-			fmt.Fprintf(stderr, "error: cannot determine MAC backend: %v\n", err)
-			return 1
-		}
-		if backend == LSMSelinux && !isHomeRoot(value) {
-			if seam != nil && seam.selinuxEnsure != nil {
-				if _, err := seam.selinuxEnsure(value); err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-			} else {
-				selMgr := newSELinuxWorkspaceManager()
-				if _, err := selMgr.ensureWorkspaceLabel(value); err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-			}
-		}
-	}
+	// SELinux preparation is handled by config allowed-root add.
 
 	return applyConfigChangeTransactionally(
 		configOpSet,

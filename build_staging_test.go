@@ -60,7 +60,7 @@ func TestBuildDockerReceivesStagedPaths(t *testing.T) {
 
 	// Last arg should be the staged context, not the workspace.
 	lastArg := capturedArgs[len(capturedArgs)-1]
-	if lastArg == app.Config.AllowedRoot {
+	if lastArg == app.Config.AllowedRoots[0] {
 		t.Error("Docker should receive staged context path, not workspace path")
 	}
 }
@@ -679,7 +679,7 @@ func TestBuildDockerfileDotSlash(t *testing.T) {
 func TestBuildDockerfileDotDotPath(t *testing.T) {
 	app, _, result, token := setupBuildTest(t)
 
-	subdir := filepath.Join(app.Config.AllowedRoot, "subdir")
+	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
