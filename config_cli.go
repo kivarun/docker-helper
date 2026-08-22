@@ -32,6 +32,7 @@ var configCommand = &Command{
 		configShowCommand,
 		configSetCommand,
 		configUnsetCommand,
+		configAllowedRootCommand,
 	},
 }
 
@@ -76,7 +77,7 @@ The general JSON output redacts admin_token.
 "config show admin_token" intentionally prints the complete real token.
 
 Fields:
-  allowed_root
+  allowed_roots
   session_ttl
   log_level
   audit_enabled
@@ -118,7 +119,6 @@ var configSetCommand = &Command{
 	MinPosArgs: 2,
 	MaxPosArgs: 2,
 	Help: `Writable fields:
-  allowed_root            non-empty absolute path (required)
   session_ttl             positive Go duration, for example 30m or 12h (required)
   log_level               debug, info, warn, or error
   audit_enabled           true or false
@@ -129,6 +129,10 @@ var configSetCommand = &Command{
   trusted_ca_path         absolute path to a single PEM X.509 CA file (optional)
   trusted_ca_injection    "disabled" or "auto" (default "disabled")
   http_address            127.0.0.1:PORT, system mode only, restart required
+
+Allowed roots:
+  Use "docker-helper config allowed-root add/remove/list" to manage global roots.
+  "config set allowed_root" is no longer supported; use the structured commands.
 
 Trusted CA injection:
   To enable, set trusted_ca_path first, then set trusted_ca_injection to auto.
@@ -191,6 +195,371 @@ will apply on the next start.`,
 			},
 		}
 	},
+}
+
+// configAllowedRootCommand manages the global allowed_roots array.
+var configAllowedRootCommand = &Command{
+	Name:       "allowed-root",
+	Summary:    "Manage global allowed roots",
+	Usage:      "docker-helper config allowed-root <list|add|remove> [args]",
+	MinPosArgs: 1,
+	MaxPosArgs: 2,
+	Help: `Manage the global allowed_roots array.
+
+Subcommands:
+  list                          list all allowed roots
+  add PATH                      add an allowed root
+  remove PATH                   remove an allowed root
+
+The global allowed_roots is the coarse authorization ceiling for new sessions.
+Every new session workspace must be under at least one allowed root.
+
+add:
+  - canonicalizes and validates the path;
+  - idempotent (prints "already present" if the root exists);
+  - preserves existing roots;
+  - in system mode with SELinux, prepares the managed label.
+
+remove:
+  - resolves/matches the stored canonical form;
+  - idempotent (prints "not found" if the root does not exist);
+  - rejects removal of the final global root.
+
+list:
+  - one canonical root per line.`,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				args := fs.Args()
+				switch args[0] {
+				case "list":
+					return configAllowedRootList(stdout, stderr)
+				case "add":
+					if len(args) < 2 {
+						fmt.Fprintln(stderr, "error: path is required")
+						fmt.Fprintln(stderr, "usage: docker-helper config allowed-root add PATH")
+						return 2
+					}
+					return configAllowedRootAdd(args[1], stdout, stderr)
+				case "remove":
+					if len(args) < 2 {
+						fmt.Fprintln(stderr, "error: path is required")
+						fmt.Fprintln(stderr, "usage: docker-helper config allowed-root remove PATH")
+						return 2
+					}
+					return configAllowedRootRemove(args[1], stdout, stderr)
+				default:
+					fmt.Fprintf(stderr, "error: unknown subcommand %q\n", args[0])
+					fmt.Fprintln(stderr, "usage: docker-helper config allowed-root <list|add|remove> [args]")
+					return 2
+				}
+			},
+		}
+	},
+}
+
+// configAllowedRootList prints all allowed roots, one per line.
+func configAllowedRootList(stdout, stderr io.Writer) int {
+	raw, _, err := loadRawConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fc, err := decodeFileConfig(raw)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	for _, r := range resolvedRoots {
+		fmt.Fprintln(stdout, r)
+	}
+	return 0
+}
+
+// configAllowedRootAdd adds a root to allowed_roots.
+func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
+	if path == "" {
+		fmt.Fprintln(stderr, "error: path is required")
+		return 2
+	}
+	if !filepath.IsAbs(path) {
+		fmt.Fprintln(stderr, "error: path must be absolute")
+		return 2
+	}
+
+	canonical, err := canonicalizeWorkspaceRootForAdd(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 2
+	}
+
+	configPath := getConfigPathFunc()
+
+	// Acquire process-level lock BEFORE reading config.
+	lockFile, err := acquireConfigChangeLock(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer lockFile.Close()
+
+	// Read current config under lock.
+	raw, err := loadRawConfigFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Resolve current roots (handles legacy migration).
+	fc, err := decodeFileConfig(raw)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Check if already present.
+	for _, r := range resolvedRoots {
+		if r == canonical {
+			fmt.Fprintf(stdout, "already present %s\n", canonical)
+			return 0
+		}
+	}
+
+	// SELinux workspace preparation in system mode.
+	if resolveDeploymentMode() == ModeSystem && !isHomeRoot(canonical) {
+		backend, err := detectLSM()
+		if err != nil {
+			fmt.Fprintf(stderr, "error: cannot determine MAC backend: %v\n", err)
+			return 1
+		}
+		if backend == LSMSelinux {
+			selMgr := newSELinuxWorkspaceManager()
+			if _, err := selMgr.ensureWorkspaceLabel(canonical); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+		}
+	}
+
+	// Add the new root.
+	newRoots := append(resolvedRoots, canonical)
+
+	// Migrate: remove legacy allowed_root, write canonical allowed_roots.
+	delete(raw, "allowed_root")
+	rawBytes, _ := json.Marshal(newRoots)
+	raw["allowed_roots"] = rawBytes
+
+	// Save original bytes for rollback.
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
+		return 1
+	}
+
+	// Encode new config.
+	newData, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	newData = append(newData, '\n')
+
+	// Validate before writing.
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := validateCAConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Atomically write new config.
+	if err := safeWriteConfig(configPath, newData); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "added %s\n", canonical)
+
+	// Attempt reload.
+	outcome := attemptReload()
+	switch outcome.result {
+	case reloadSuccess:
+		return 0
+	case reloadDaemonNotRunning:
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
+		return 0
+	case reloadRejected, reloadTransportError:
+		reloadErrStr := formatReloadError(outcome)
+		if rollErr := safeWriteConfig(configPath, original); rollErr != nil {
+			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+			fmt.Fprintf(stderr, "error: rollback write failed: %v\n", rollErr)
+			return 1
+		}
+		reOutcome := attemptReload()
+		if reOutcome.result != reloadSuccess {
+			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReReloadError(reOutcome))
+			return 1
+		}
+		fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+		fmt.Fprintln(stderr, "error: config rolled back")
+		return 1
+	}
+	return 0
+}
+
+// configAllowedRootRemove removes a root from allowed_roots.
+func configAllowedRootRemove(path string, stdout, stderr io.Writer) int {
+	if path == "" {
+		fmt.Fprintln(stderr, "error: path is required")
+		return 2
+	}
+	if !filepath.IsAbs(path) {
+		fmt.Fprintln(stderr, "error: path must be absolute")
+		return 2
+	}
+
+	// For REMOVE, we do NOT require the path to exist on the filesystem.
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: cannot resolve path: %v\n", err)
+		return 2
+	}
+	if canonical, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = canonical
+	}
+
+	configPath := getConfigPathFunc()
+
+	// Acquire process-level lock BEFORE reading config.
+	lockFile, err := acquireConfigChangeLock(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	defer lockFile.Close()
+
+	// Read current config under lock.
+	raw, err := loadRawConfigFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Resolve current roots (handles legacy migration).
+	fc, err := decodeFileConfig(raw)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Find and remove the root.
+	found := false
+	newRoots := make([]string, 0, len(resolvedRoots))
+	for _, r := range resolvedRoots {
+		if r == resolved {
+			found = true
+			continue
+		}
+		newRoots = append(newRoots, r)
+	}
+
+	if !found {
+		fmt.Fprintf(stdout, "not found %s\n", resolved)
+		return 0
+	}
+
+	// Reject removal of the final global root.
+	if len(newRoots) == 0 {
+		fmt.Fprintln(stderr, "error: cannot remove the last allowed root")
+		return 2
+	}
+
+	// Migrate: remove legacy allowed_root, write canonical allowed_roots.
+	delete(raw, "allowed_root")
+	rawBytes, _ := json.Marshal(newRoots)
+	raw["allowed_roots"] = rawBytes
+
+	// Save original bytes for rollback.
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
+		return 1
+	}
+
+	// Encode new config.
+	newData, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	newData = append(newData, '\n')
+
+	// Validate before writing.
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := validateCAConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Atomically write new config.
+	if err := safeWriteConfig(configPath, newData); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "removed %s\n", resolved)
+
+	// Attempt reload.
+	outcome := attemptReload()
+	switch outcome.result {
+	case reloadSuccess:
+		return 0
+	case reloadDaemonNotRunning:
+		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
+		return 0
+	case reloadRejected, reloadTransportError:
+		reloadErrStr := formatReloadError(outcome)
+		if rollErr := safeWriteConfig(configPath, original); rollErr != nil {
+			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+			fmt.Fprintf(stderr, "error: rollback write failed: %v\n", rollErr)
+			return 1
+		}
+		reOutcome := attemptReload()
+		if reOutcome.result != reloadSuccess {
+			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReReloadError(reOutcome))
+			return 1
+		}
+		fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
+		fmt.Fprintln(stderr, "error: config rolled back")
+		return 1
+	}
+	return 0
 }
 
 // loadRawConfig reads config.json from disk as a raw JSON map.
@@ -294,6 +663,13 @@ func configShowAll(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Resolve effective allowed_roots (handles legacy migration).
+	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
 	ec := resolveEffectiveConfig(*fc)
 
 	configDir := filepath.Dir(configPath)
@@ -308,8 +684,8 @@ func configShowAll(stdout, stderr io.Writer) int {
 	databasePath := filepath.Join(stateDir, "docker-helper.db")
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
-		result := map[string]any{
-			"allowed_roots":         fc.AllowedRoots,
+	result := map[string]any{
+		"allowed_roots":           resolvedRoots,
 		"session_ttl":             fc.SessionTTL,
 		"log_level":               ec.LogLevel,
 		"audit_enabled":           ec.AuditEnabled,
@@ -450,13 +826,20 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Resolve effective allowed_roots (handles legacy migration).
+	resolvedRoots, err := resolveAllowedRootsForShow(raw, fc)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
 	ec := resolveEffectiveConfig(*fc)
 
 	stateDir := getStateDir()
 
 	switch field {
 	case "allowed_roots":
-		data, _ := json.MarshalIndent(fc.AllowedRoots, "", "  ")
+		data, _ := json.MarshalIndent(resolvedRoots, "", "  ")
 		fmt.Fprintln(stdout, string(data))
 	case "session_ttl":
 		fmt.Fprintln(stdout, fc.SessionTTL)
@@ -810,6 +1193,23 @@ func applyConfigChangeTransactionally(
 	if err != nil {
 		fmt.Fprintf(stderr, "error: cannot read current config: %v\n", err)
 		return 1
+	}
+
+	// Migrate legacy allowed_root to allowed_roots if present.
+	// This ensures every successful mutation produces canonical config.
+	if _, hasLegacy := raw["allowed_root"]; hasLegacy {
+		if _, hasNew := raw["allowed_roots"]; !hasNew {
+			// Migrate: decode legacy value, write as allowed_roots array.
+			var legacyVal string
+			if err := json.Unmarshal(raw["allowed_root"], &legacyVal); err == nil {
+				newRoots, _ := json.Marshal([]string{legacyVal})
+				raw["allowed_roots"] = newRoots
+			}
+			delete(raw, "allowed_root")
+		} else {
+			// Both present: already rejected by validateRawConfig, but clean up.
+			delete(raw, "allowed_root")
+		}
 	}
 
 	// Apply modification.

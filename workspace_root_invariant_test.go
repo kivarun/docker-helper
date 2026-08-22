@@ -199,49 +199,6 @@ func TestReloadSymlinkBypassKeepsOldConfig(t *testing.T) {
 	}
 }
 
-// TestConfigSetAllowedRootStoresCanonical verifies that config set persists
-// the canonical target, not the symlink spelling.
-func TestConfigSetAllowedRootStoresCanonical(t *testing.T) {
-	base := testAllowedRootDir(t)
-	target := filepath.Join(base, "target")
-	if err := os.MkdirAll(target, 0755); err != nil {
-		t.Fatal(err)
-	}
-	linkPath := filepath.Join(base, "link")
-	if err := os.Symlink(target, linkPath); err != nil {
-		t.Fatalf("cannot create symlink: %v", err)
-	}
-	canonicalTarget, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := map[string]any{
-		"allowed_root": base,
-		"session_ttl":  "12h",
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	configPath := setupConfigTestWithData(t, data)
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "allowed_root", linkPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("config set exited %d, stderr: %s", code, stderr.String())
-	}
-
-	raw := readConfigJSON(t, configPath)
-	var stored string
-	if err := json.Unmarshal(raw["allowed_root"], &stored); err != nil {
-		t.Fatalf("cannot parse stored allowed_root: %v", err)
-	}
-	if stored != canonicalTarget {
-		t.Errorf("stored allowed_root = %q, want canonical %q", stored, canonicalTarget)
-	}
-}
-
 // TestConfigSetAllowedRootForbiddenSymlink verifies that config set rejects
 // a symlink into a forbidden tree with exit code 2 and leaves the config
 // file unchanged.

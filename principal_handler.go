@@ -593,6 +593,8 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+		case isErrCredentialExists(err):
+			writeError(ctx, w, http.StatusConflict, "credential_exists", "credential already exists")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		case errors.Is(err, ErrPrincipalRootOutsideGlobal):

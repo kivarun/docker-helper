@@ -499,7 +499,7 @@ func TestReloadEndpointInvalidConfig(t *testing.T) {
 	waitForDialReady(t, "unix", socketPath)
 
 	// Write invalid config
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root": "not-absolute"}`), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"allowed_roots": ["not-absolute"]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1290,7 +1290,7 @@ func TestReloadInvalidConfigNoLeak(t *testing.T) {
 	waitForDialReady(t, "unix", socketPath)
 
 	// Write invalid config that will produce a descriptive internal error
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root": "not-absolute"}`), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"allowed_roots": ["not-absolute"]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2307,9 +2307,9 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 	app := &App{
 		Config: &Config{
 			AllowedRoots: []string{"/home"},
-			SessionTTL:  12 * time.Hour,
-			LogLevel:    slog.LevelInfo,
-			Mode:        ModeSystem,
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
 		},
 		DB:             db,
 		AdminTokenHash: adminHash,
@@ -2327,9 +2327,9 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 			loadConfigCalled = true
 			return &Config{
 				AllowedRoots: []string{"/home"},
-				SessionTTL:  12 * time.Hour,
-				LogLevel:    slog.LevelInfo,
-				Mode:        ModeSystem,
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
 			}, nil
 		},
 		deploymentMode: func() DeploymentMode {

@@ -42,7 +42,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots: []string{allowedRoot},
+		AllowedRoots:          []string{allowedRoot},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,
@@ -165,7 +165,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	cfg := &Config{
-		AllowedRoots: []string{allowedRoot},
+		AllowedRoots:          []string{allowedRoot},
 		SessionTTL:            24 * time.Hour,
 		SocketPath:            filepath.Join(dir, "test.sock"),
 		StateDir:              dir,

@@ -13,7 +13,7 @@ import (
 func TestCAInjectionDefaultDisabled(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
+  "allowed_roots": ["%s"],
   "session_ttl": "12h"
 }`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))
@@ -93,7 +93,7 @@ func TestCAConfigShowSetUnset(t *testing.T) {
 func TestCAConfigInvalidMode(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
+  "allowed_roots": ["%s"],
   "session_ttl": "12h",
   "trusted_ca_injection": "invalid"
 }`, allowedRoot)
@@ -113,7 +113,7 @@ func TestCAConfigInvalidMode(t *testing.T) {
 func TestCAConfigAutoWithoutPath(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
+  "allowed_roots": ["%s"],
   "session_ttl": "12h",
   "trusted_ca_injection": "auto"
 }`, allowedRoot)
@@ -133,7 +133,7 @@ func TestCAConfigAutoWithoutPath(t *testing.T) {
 func TestCAConfigRelativePath(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
+  "allowed_roots": ["%s"],
   "session_ttl": "12h",
   "trusted_ca_path": "relative/path.crt",
   "trusted_ca_injection": "disabled"
@@ -239,7 +239,7 @@ func TestCAConfigInvalidCA(t *testing.T) {
 func TestCAConfigAutoEmptyPath(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
+  "allowed_roots": ["%s"],
   "session_ttl": "12h",
   "trusted_ca_path": "",
   "trusted_ca_injection": "auto"
@@ -370,7 +370,7 @@ func TestCAConfigShowAllIncludesNewFields(t *testing.T) {
 func TestCAConfigShowDefaults(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
+  "allowed_roots": ["%s"],
   "session_ttl": "12h"
 }`, allowedRoot)
 	setupConfigTestWithData(t, []byte(cfg))

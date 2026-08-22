@@ -34,7 +34,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 	}
 
 	if _, _, err := addAllowedRoot(app.DB, "deluser", home, app.Config.AllowedRoots); err != nil {
-	t.Fatalf("addAllowedRoot: %v", err)
+		t.Fatalf("addAllowedRoot: %v", err)
 	}
 
 	_, credToken, err := createCredential(app.DB, "deluser", "laptop")

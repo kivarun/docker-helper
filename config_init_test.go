@@ -22,7 +22,7 @@ func TestInitCoreCreatesConfig(t *testing.T) {
 	defer func() { getConfigPathFunc = origGetConfig }()
 
 	// Use a real directory for the allowed root
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	var stdout, stderr bytes.Buffer
 	result, err := initCore(rootDir, &stdout, &stderr)
@@ -69,7 +69,7 @@ func TestInitCoreExistingTokenFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 	var stdout, stderr bytes.Buffer
 	_, err := initCore(rootDir, &stdout, &stderr)
 	if err == nil {
@@ -210,7 +210,7 @@ func TestInitSystemCoreFailureNoRollbackWhenNotChanged(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	rollbackCalled := false
 	addRoot := func(path string) (rootResult, error) {
@@ -322,7 +322,7 @@ func TestInitSystemExistingConfigMismatch(t *testing.T) {
 	}
 
 	// Verify exact error message with canonical paths
-	expectedMsg := fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", oldRoot, newRoot)
+	expectedMsg := fmt.Sprintf("existing configuration allowed_roots [%s] do not include %s", oldRoot, newRoot)
 	if err.Error() != expectedMsg {
 		t.Errorf("exact mismatch error expected\ngot:  %s\nwant: %s", err.Error(), expectedMsg)
 	}
@@ -385,13 +385,10 @@ func TestInitSystemExistingTokenNoAppArmor(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Create existing token
-	tokenPath := filepath.Join(dir, "docker-helper", "admin.token")
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		t.Fatal(err)
-	}
+	tokenPath := filepath.Join(dir, "admin.token")
 	if err := os.WriteFile(tokenPath, []byte("existing\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +459,7 @@ func TestInitUserModeNoAppArmor(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Save and restore EffectiveUID
 	origUID := EffectiveUID
@@ -643,7 +640,7 @@ func TestInitCLIInputErrorExitCode(t *testing.T) {
 func TestInitCLIAppArmorInputErrorExit2(t *testing.T) {
 	dir := t.TempDir()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Mock system mode, config path, and inject fake AppArmor that returns inputError
 	origUID := EffectiveUID
@@ -788,7 +785,7 @@ func TestInitSystemConfigPathIsDirectory(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Create config.json as a directory
 	configPath := filepath.Join(dir, "config.json")
@@ -834,14 +831,14 @@ func TestInitSystemExistingConfigReadError(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Create config file without read permissions
 	configPath := filepath.Join(dir, "config.json")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte(`{"allowed_root": "`+rootDir+`", "session_ttl": "12h"}`), 0000); err != nil {
+	if err := os.WriteFile(configPath, []byte(`{"allowed_roots": ["`+rootDir+`"], "session_ttl": "12h"}`), 0000); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { os.Chmod(configPath, 0600) }() // Cleanup
@@ -884,7 +881,7 @@ func TestInitSystemExistingConfigInvalid(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := t.TempDir()
+	rootDir := testAllowedRootDir(t)
 
 	// Create invalid config
 	configPath := filepath.Join(dir, "config.json")

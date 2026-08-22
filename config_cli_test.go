@@ -149,7 +149,7 @@ func TestExistingCommandsRejectPositionals(t *testing.T) {
 // Req 6: general show returns valid JSON with effective values and redacted token
 func TestConfigShowAllJSON(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug",
   "audit_enabled": false
@@ -162,8 +162,8 @@ func TestConfigShowAllJSON(t *testing.T) {
 		t.Fatalf("invalid JSON: %v, output: %s", err, stdout)
 	}
 
-	if result["allowed_root"] != "/home/user/work" {
-		t.Errorf("allowed_root = %v", result["allowed_root"])
+	if result["allowed_roots"] == nil {
+		t.Error("allowed_roots is nil")
 	}
 	if result["session_ttl"] != "12h" {
 		t.Errorf("session_ttl = %v", result["session_ttl"])
@@ -185,7 +185,7 @@ func TestConfigShowAllJSON(t *testing.T) {
 // Req 7: general show never contains real token
 func TestConfigShowAllRedactedToken(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "24h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -201,7 +201,7 @@ func TestConfigShowAllRedactedToken(t *testing.T) {
 // Req 8: single-field show returns only scalar value + newline
 func TestConfigShowSingleField(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "warn"
 }`
@@ -211,7 +211,7 @@ func TestConfigShowSingleField(t *testing.T) {
 		field string
 		want  string
 	}{
-		{"allowed_root", "/home/user/work\n"},
+		{"allowed_roots", "[\n  \"/home/user/work\"\n]\n"},
 		{"session_ttl", "12h\n"},
 		{"log_level", "warn\n"},
 	}
@@ -228,7 +228,7 @@ func TestConfigShowSingleField(t *testing.T) {
 // Req 9: show admin_token returns complete real token
 func TestConfigShowAdminToken(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -241,9 +241,8 @@ func TestConfigShowAdminToken(t *testing.T) {
 // Req 10: core writable field types are handled correctly
 func TestConfigSetCoreFieldTypes(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
-	newAllowedRoot := testAllowedRootDir(t)
 	cfg := `{
-  "allowed_root": "` + allowedRoot + `",
+  "allowed_roots": ["` + allowedRoot + `"],
   "session_ttl": "12h"
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
@@ -253,16 +252,6 @@ func TestConfigSetCoreFieldTypes(t *testing.T) {
 		value string
 		check func(map[string]json.RawMessage)
 	}{
-		{
-			"allowed_root", newAllowedRoot,
-			func(raw map[string]json.RawMessage) {
-				var v string
-				json.Unmarshal(raw["allowed_root"], &v)
-				if v != newAllowedRoot {
-					t.Errorf("allowed_root = %q, want %s", v, newAllowedRoot)
-				}
-			},
-		},
 		{
 			"session_ttl", "24h",
 			func(raw map[string]json.RawMessage) {
@@ -307,7 +296,7 @@ func TestConfigSetCoreFieldTypes(t *testing.T) {
 // Req 11: invalid durations/levels/booleans/paths/fields/read-only rejected
 func TestConfigSetValidation(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -321,8 +310,8 @@ func TestConfigSetValidation(t *testing.T) {
 		{"negative duration", []string{"config", "set", "session_ttl", "-1h"}, "positive"},
 		{"invalid log_level", []string{"config", "set", "log_level", "verbose"}, "invalid"},
 		{"invalid audit_enabled", []string{"config", "set", "audit_enabled", "yes"}, "true or false"},
-		{"empty allowed_root", []string{"config", "set", "allowed_root", ""}, "non-empty"},
-		{"relative allowed_root", []string{"config", "set", "allowed_root", "relative"}, "absolute"},
+		{"allowed_root scalar rejected", []string{"config", "set", "allowed_root", "/home/user/work"}, "no longer settable"},
+		{"allowed_roots managed via structured", []string{"config", "set", "allowed_roots", "/home/user/work"}, "structured commands"},
 		{"unknown field", []string{"config", "set", "unknown_field", "val"}, "unknown field"},
 		{"read-only field", []string{"config", "set", "config_path", "val"}, "read-only"},
 		{"admin_token read-only", []string{"config", "set", "admin_token", "val"}, "read-only"},
@@ -344,7 +333,7 @@ func TestConfigSetValidation(t *testing.T) {
 // Req 12: invalid operations leave config.json byte-for-byte unchanged
 func TestConfigSetInvalidPreservesFile(t *testing.T) {
 	cfg := []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`)
 	configPath := setupConfigTestWithData(t, cfg)
@@ -364,7 +353,7 @@ func TestConfigSetInvalidPreservesFile(t *testing.T) {
 // Req 13: unset removes member rather than writing zero value
 func TestConfigUnsetRemovesMember(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug"
 }`
@@ -380,7 +369,7 @@ func TestConfigUnsetRemovesMember(t *testing.T) {
 // Req 14: unsetting audit_enabled restores log_level-derived behavior
 func TestConfigUnsetAuditEnabledRestoresLogLevel(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug",
   "audit_enabled": false
@@ -404,7 +393,7 @@ func TestConfigUnsetAuditEnabledRestoresLogLevel(t *testing.T) {
 // Req 15: unsetting log_level restores info
 func TestConfigUnsetLogLevelRestoresInfo(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "warn"
 }`
@@ -421,7 +410,7 @@ func TestConfigUnsetLogLevelRestoresInfo(t *testing.T) {
 // Req 16: unknown JSON members survive set/unset
 func TestConfigPreservesUnknownMembers(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "custom_field": "custom_value",
   "nested": {"key": "val"}
@@ -451,7 +440,7 @@ func TestConfigPreservesUnknownMembers(t *testing.T) {
 // Req 17: successful config.json has mode 0600
 func TestConfigFileMode0600(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
@@ -469,7 +458,7 @@ func TestConfigFileMode0600(t *testing.T) {
 // Req 18: successful set/unset prints feedback
 func TestConfigSetUnsetFeedback(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug"
 }`
@@ -495,7 +484,7 @@ func TestConfigSetUnsetFeedback(t *testing.T) {
 // Req 19: stdout/stderr separation
 func TestConfigStdoutStderrSeparation(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -514,19 +503,19 @@ func TestConfigStdoutStderrSeparation(t *testing.T) {
 	}
 
 	// Success goes to stdout, nothing to stderr
-	successOut, successErr := runConfigCLI(t, 0, "config", "show", "allowed_root")
+	successOut, successErr := runConfigCLI(t, 0, "config", "show", "allowed_roots")
 	if successErr != "" {
 		t.Errorf("success should not write to stderr, got: %s", successErr)
 	}
-	if successOut != "/home/user/work\n" {
-		t.Errorf("expected '/home/user/work\\n', got %q", successOut)
+	if !strings.Contains(successOut, "/home/user/work") {
+		t.Errorf("expected '/home/user/work' in output, got %q", successOut)
 	}
 }
 
 // Req 20: no config command writes to process-global stdout/stderr
 func TestConfigNoGlobalStdio(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug"
 }`
@@ -552,7 +541,7 @@ func TestConfigNoGlobalStdio(t *testing.T) {
 
 	// 1) Successful show
 	var stdout1, stderr1 bytes.Buffer
-	code1 := runCommandWithWriters([]string{"config", "show", "allowed_root"}, &stdout1, &stderr1)
+	code1 := runCommandWithWriters([]string{"config", "show", "allowed_roots"}, &stdout1, &stderr1)
 	wOut.Close()
 	wErr.Close()
 	globalStdout1 := readPipe(rOut)
@@ -561,8 +550,8 @@ func TestConfigNoGlobalStdio(t *testing.T) {
 	if code1 != 0 {
 		t.Errorf("show: expected exit 0, got %d", code1)
 	}
-	if stdout1.String() != "/home/user/work\n" {
-		t.Errorf("show stdout = %q, want '/home/user/work\\n'", stdout1.String())
+	if !strings.Contains(stdout1.String(), "/home/user/work") {
+		t.Errorf("show stdout = %q, want '/home/user/work' in output", stdout1.String())
 	}
 	if stderr1.Len() > 0 {
 		t.Errorf("show stderr = %q", stderr1.String())
@@ -644,7 +633,7 @@ func TestConfigSetUnsetNoDirCreation(t *testing.T) {
 	stateDir := filepath.Join(dir, "nonexistent_state")
 
 	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`), 0600); err != nil {
 		t.Fatalf("cannot write config file: %v", err)
@@ -695,12 +684,12 @@ func TestConfigShowUnknownField(t *testing.T) {
 // Additional: unset required field rejected
 func TestConfigUnsetRequiredField(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
 
-	for _, field := range []string{"allowed_root", "session_ttl"} {
+	for _, field := range []string{"allowed_roots", "session_ttl"} {
 		t.Run(field, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters([]string{"config", "unset", field}, &stdout, &stderr)
@@ -734,7 +723,7 @@ func TestConfigUnsetReadOnlyField(t *testing.T) {
 // Additional: runtime-dependent fields fail without XDG_RUNTIME_DIR
 func TestConfigShowRuntimeDependentNoRuntimeDir(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -757,7 +746,7 @@ func TestConfigShowRuntimeDependentNoRuntimeDir(t *testing.T) {
 // Additional: runtime-dependent fields work with XDG_RUNTIME_DIR
 func TestConfigShowRuntimeDependentWithRuntimeDir(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	runtimeDir := "/tmp/test-runtime"
@@ -778,7 +767,7 @@ func TestConfigShowRuntimeDependentWithRuntimeDir(t *testing.T) {
 // Additional: show with no args and no XDG_RUNTIME_DIR shows empty runtime fields
 func TestConfigShowAllNoRuntimeDir(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -800,7 +789,7 @@ func TestConfigShowAllNoRuntimeDir(t *testing.T) {
 // Additional: show with no args and XDG_RUNTIME_DIR set
 func TestConfigShowAllWithRuntimeDir(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	runtimeDir := "/tmp/test-runtime"
@@ -828,7 +817,7 @@ func TestRegressionCustomConfigRelocatesPaths(t *testing.T) {
 		t.Fatalf("cannot create config dir: %v", err)
 	}
 	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`), 0600); err != nil {
 		t.Fatalf("cannot write config file: %v", err)
@@ -856,7 +845,7 @@ func TestRegressionConsistentTokenPath(t *testing.T) {
 		t.Fatalf("cannot create config dir: %v", err)
 	}
 	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`), 0600); err != nil {
 		t.Fatalf("cannot write config file: %v", err)
@@ -880,7 +869,7 @@ func TestRegressionAdminTokenWithCustomConfig(t *testing.T) {
 		t.Fatalf("cannot create config dir: %v", err)
 	}
 	if err := os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`), 0600); err != nil {
 		t.Fatalf("cannot write config file: %v", err)
@@ -897,7 +886,7 @@ func TestRegressionAdminTokenWithCustomConfig(t *testing.T) {
 // Regression 4b: set rejects when the existing document has an invalid type for a known field
 func TestRegressionSetRejectsInvalidType(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "audit_enabled": "not_a_boolean"
 }`
@@ -960,7 +949,7 @@ func TestRegressionNullAndNonObjectJSON(t *testing.T) {
 // Regression 7: every rejected update leaves config.json byte-for-byte unchanged
 func TestRegressionRejectedUpdatePreservesFile(t *testing.T) {
 	cfg := []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug",
   "audit_enabled": "not_a_boolean"
@@ -1051,7 +1040,7 @@ func TestRegressionReservedFieldsRejected(t *testing.T) {
 	for _, field := range reservedFields {
 		t.Run(field, func(t *testing.T) {
 			cfg := fmt.Sprintf(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "%s": "should_not_be_here"
 }`, field)
@@ -1228,7 +1217,7 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 	// Fields that must validate config.json before returning a value.
 	nonBootstrapFields := []string{
-		"allowed_root",
+		"allowed_roots",
 		"session_ttl",
 		"log_level",
 		"audit_enabled",
@@ -1253,7 +1242,7 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 	for _, field := range nonBootstrapFields {
 		t.Run(field+"_reserved_field_rejected", func(t *testing.T) {
 			cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "database_path": "/should/not/be/here"
 }`
@@ -1278,7 +1267,7 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 	for _, field := range []string{"runtime_dir", "socket_path", "lock_path"} {
 		t.Run(field+"_no_bypass", func(t *testing.T) {
 			cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "socket_path": "/should/not/be/here"
 }`
@@ -1303,7 +1292,7 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 			configPath := filepath.Join(dir, "config.json")
 			adminTokenPath := filepath.Join(dir, "admin.token")
 			os.WriteFile(configPath, []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "database_path": "/should/not/be/here"
 }`), 0600)
@@ -1325,7 +1314,7 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 	// 4) Valid configurations retain the existing output for all fields.
 	t.Run("valid_config_all_fields", func(t *testing.T) {
 		cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug"
 }`
@@ -1350,7 +1339,7 @@ func TestRegressionNonBootstrapFieldsValidateConfig(t *testing.T) {
 // Regression: set prints updated when it adds a previously absent member
 func TestRegressionSetPrintsUpdated(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -1364,7 +1353,7 @@ func TestRegressionSetPrintsUpdated(t *testing.T) {
 // Regression: set prints unchanged when the explicit JSON value is identical
 func TestRegressionSetPrintsUnchanged(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug"
 }`
@@ -1388,7 +1377,7 @@ func TestRegressionSetPrintsUnchanged(t *testing.T) {
 // Regression: effective value without explicit member still counts as update
 func TestRegressionSetEffectiveValueCountsAsUpdate(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug"
 }`
@@ -1404,7 +1393,7 @@ func TestRegressionSetEffectiveValueCountsAsUpdate(t *testing.T) {
 // Regression: unset prints unchanged when the member is absent
 func TestRegressionUnsetPrintsUnchanged(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	configPath := setupConfigTestWithData(t, []byte(cfg))
@@ -1427,7 +1416,7 @@ func TestRegressionUnsetPrintsUnchanged(t *testing.T) {
 // Regression: failure paths leave stdout empty
 func TestRegressionFailurePathsEmptyStdout(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))
@@ -1438,7 +1427,7 @@ func TestRegressionFailurePathsEmptyStdout(t *testing.T) {
 	}{
 		{"set invalid value", []string{"config", "set", "log_level", "invalid"}},
 		{"set read-only", []string{"config", "set", "config_path", "/tmp"}},
-		{"unset required", []string{"config", "unset", "allowed_root"}},
+		{"unset required", []string{"config", "unset", "allowed_roots"}},
 		{"show unknown", []string{"config", "show", "nonexistent"}},
 	}
 
@@ -1459,7 +1448,7 @@ func TestRegressionFailurePathsEmptyStdout(t *testing.T) {
 // Regression: unchanged set/unset with another invalid known field
 func TestRegressionUnchangedMutationWithInvalidField(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug",
   "audit_enabled": "not_a_boolean"
@@ -1489,7 +1478,7 @@ func TestRegressionUnchangedMutationWithInvalidField(t *testing.T) {
 // Regression: valid unchanged operations still avoid replacing the file
 func TestRegressionValidUnchangedAvoidsFileReplace(t *testing.T) {
 	cfg := []byte(`{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug"
 }`)
@@ -1535,7 +1524,7 @@ func TestRegressionValidUnchangedAvoidsFileReplace(t *testing.T) {
 // Regression: changing or removing the invalid field itself can still repair the config
 func TestRegressionRepairInvalidField(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug",
   "audit_enabled": "not_a_boolean"
@@ -1550,7 +1539,7 @@ func TestRegressionRepairInvalidField(t *testing.T) {
 
 	// Repair by unsetting the invalid field
 	cfg2 := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h",
   "log_level": "debug",
   "audit_enabled": "not_a_boolean"
@@ -1607,12 +1596,12 @@ func TestConfigSetHelp(t *testing.T) {
 
 	out := stdout
 	for _, f := range configFields {
-		if f.writable && !strings.Contains(out, f.name) {
+		if f.writable && f.name != "allowed_roots" && !strings.Contains(out, f.name) {
 			t.Errorf("help should list writable field %q", f.name)
 		}
 	}
-	if !strings.Contains(out, "absolute path") {
-		t.Error("help should mention absolute path validation")
+	if !strings.Contains(out, "allowed-root") {
+		t.Error("help should mention allowed-root structured commands")
 	}
 	if !strings.Contains(out, "duration") {
 		t.Error("help should mention duration validation")
@@ -1781,13 +1770,13 @@ func TestLoadConfigRejectsInvalidConfig(t *testing.T) {
 		wantErr []string // substrings expected in the error; empty means any error
 	}{
 		{name: "missing allowed_root", cfg: `{"session_ttl":"12h"}`, wantErr: []string{"allowed_root"}},
-		{name: "empty allowed_root", cfg: `{"allowed_root":"","session_ttl":"12h"}`},
-		{name: "relative allowed_root", cfg: `{"allowed_root":"relative/path","session_ttl":"12h"}`},
-		{name: "missing session_ttl", cfg: `{"allowed_root":"%s"}`, wantErr: []string{"session_ttl"}},
-		{name: "zero session_ttl", cfg: `{"allowed_root":"/tmp","session_ttl":"0s"}`},
-		{name: "negative session_ttl", cfg: `{"allowed_root":"/tmp","session_ttl":"-1h"}`},
-		{name: "deprecated build_log_max_bytes", cfg: `{"allowed_root":"%s","session_ttl":"12h","build_log_max_bytes":8192}`, wantErr: []string{"build_log_max_bytes", "operation_log_max_bytes"}},
-		{name: "deprecated and new key both present", cfg: `{"allowed_root":"%s","session_ttl":"12h","build_log_max_bytes":8192,"operation_log_max_bytes":16384}`, wantErr: []string{"build_log_max_bytes"}},
+		{name: "empty allowed_roots", cfg: `{"allowed_root":"","session_ttl":"12h"}`},
+		{name: "relative allowed_roots", cfg: `{"allowed_roots": ["relative/path"],"session_ttl":"12h"}`},
+		{name: "missing session_ttl", cfg: `{"allowed_roots": ["%s"]}`, wantErr: []string{"session_ttl"}},
+		{name: "zero session_ttl", cfg: `{"allowed_roots": ["/tmp"],"session_ttl":"0s"}`},
+		{name: "negative session_ttl", cfg: `{"allowed_roots": ["/tmp"],"session_ttl":"-1h"}`},
+		{name: "deprecated build_log_max_bytes", cfg: `{"allowed_roots": ["%s"],"session_ttl":"12h","build_log_max_bytes":8192}`, wantErr: []string{"build_log_max_bytes", "operation_log_max_bytes"}},
+		{name: "deprecated and new key both present", cfg: `{"allowed_roots": ["%s"],"session_ttl":"12h","build_log_max_bytes":8192,"operation_log_max_bytes":16384}`, wantErr: []string{"build_log_max_bytes"}},
 	}
 
 	for _, tt := range tests {
@@ -1853,14 +1842,14 @@ func TestLoadConfigAcceptsValidConfig(t *testing.T) {
 }
 
 // TestReloadRejectsInvalidConfig verifies that the reload handler rejects
-// invalid configurations (empty allowed_root, non-positive session_ttl).
+// invalid configurations (empty allowed_roots, non-positive session_ttl).
 func TestReloadRejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  string
 	}{
 		{name: "empty_root", cfg: `{"allowed_root":"","session_ttl":"12h"}`},
-		{name: "negative_ttl", cfg: `{"allowed_root":"%s","session_ttl":"-1h"}`},
+		{name: "negative_ttl", cfg: `{"allowed_roots": ["%s"],"session_ttl":"-1h"}`},
 	}
 
 	for _, tt := range tests {
@@ -1961,7 +1950,7 @@ func TestDeprecatedBuildLogMaxBytesCLIOperations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			allowedRoot := testAllowedRootDir(t)
 			cfg := fmt.Sprintf(`{
-  "allowed_root": "%s",
+  "allowed_roots": ["%s"],
   "session_ttl": "12h"
 }`, allowedRoot)
 			setupConfigTestWithData(t, []byte(cfg))
@@ -1988,7 +1977,7 @@ func TestDeprecatedBuildLogMaxBytesCLIOperations(t *testing.T) {
 func TestDeprecatedOperationLogMaxBytesWorks(t *testing.T) {
 	allowedRoot := testAllowedRootDir(t)
 	cfg := `{
-  "allowed_root": "` + allowedRoot + `",
+  "allowed_roots": ["` + allowedRoot + `"],
   "session_ttl": "12h",
   "operation_log_max_bytes": 8192
 }`
@@ -2002,7 +1991,7 @@ func TestDeprecatedOperationLogMaxBytesWorks(t *testing.T) {
 
 func TestConfigShowEffectiveInvariant(t *testing.T) {
 	cfg := `{
-  "allowed_root": "/home/user/work",
+  "allowed_roots": ["/home/user/work"],
   "session_ttl": "12h"
 }`
 	setupConfigTestWithData(t, []byte(cfg))

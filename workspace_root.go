@@ -136,6 +136,41 @@ func canonicalizeWorkspaceRootForAdd(path string) (string, error) {
 	return canonical, nil
 }
 
+// canonicalizeWorkspaceRootForInit canonicalizes a workspace root path for
+// init. It performs path canonicalization without the workspace root security
+// policy check, as the policy is enforced at session creation time.
+func canonicalizeWorkspaceRootForInit(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("workspace root must be a non-empty path")
+	}
+
+	path = expandTilde(path)
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve workspace root to absolute path: %w", err)
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("workspace root does not exist: %s", abs)
+		}
+		return "", fmt.Errorf("cannot stat workspace root: %w", err)
+	}
+
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace root is not a directory: %s", abs)
+	}
+
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve workspace root symlinks: %w", err)
+	}
+
+	return canonical, nil
+}
+
 // validateWorkspaceRootPolicy checks a canonical path against the workspace root
 // security policy without filesystem access. This is the pure policy check that
 // can be tested deterministically.

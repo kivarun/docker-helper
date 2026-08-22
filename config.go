@@ -73,8 +73,8 @@ type Config struct {
 // AllowedRoots is the canonical new schema.
 // AllowedRootLegacy is the legacy scalar for migration compatibility only.
 type fileConfig struct {
-	AllowedRoots          []string `json:"allowed_roots"`
-	AllowedRootLegacy     string   `json:"allowed_root"`
+	AllowedRoots          []string `json:"allowed_roots,omitempty"`
+	AllowedRootLegacy     string   `json:"allowed_root,omitempty"`
 	SessionTTL            string   `json:"session_ttl"`
 	Level                 string   `json:"log_level,omitempty"`
 	AuditEnabled          *bool    `json:"audit_enabled,omitempty"`
@@ -114,7 +114,7 @@ type configFieldSpec struct {
 
 var configFields = []configFieldSpec{
 	{name: "allowed_roots", writable: true, required: true},
-	{name: "allowed_root", writable: false, required: false},
+	{name: "allowed_root", writable: true, required: false},
 	{name: "session_ttl", writable: true, required: true},
 	{name: "log_level", writable: true},
 	{name: "audit_enabled", writable: true},
@@ -402,6 +402,8 @@ func resolveTrustedCAInjection(s string) string {
 }
 
 // resolveAllowedRoots resolves allowed_roots from raw config with legacy migration.
+// canonicalize=true means full canonicalization (for loading config).
+// canonicalize=false means just resolve legacy migration (for config show).
 func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {
 	hasLegacy := raw["allowed_root"] != nil
 	hasNew := raw["allowed_roots"] != nil
@@ -437,6 +439,46 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]stri
 		}
 		seen[canon] = true
 		result = append(result, canon)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	return result, nil
+}
+
+// resolveAllowedRootsForShow resolves allowed_roots for config show.
+// It does not canonicalize paths, just resolves legacy migration.
+func resolveAllowedRootsForShow(raw map[string]json.RawMessage, fc *fileConfig) ([]string, error) {
+	hasLegacy := raw["allowed_root"] != nil
+	hasNew := raw["allowed_roots"] != nil
+	if hasLegacy && hasNew {
+		return nil, fmt.Errorf("ambiguous configuration: both allowed_root and allowed_roots are present; migrate to allowed_roots and remove allowed_root")
+	}
+	var roots []string
+	if hasNew {
+		roots = fc.AllowedRoots
+	} else if hasLegacy {
+		roots = []string{fc.AllowedRootLegacy}
+	} else {
+		return nil, fmt.Errorf("allowed_roots is required")
+	}
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
+	}
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(roots))
+	for _, r := range roots {
+		if r == "" {
+			return nil, fmt.Errorf("allowed_roots contains an empty entry")
+		}
+		if !filepath.IsAbs(r) {
+			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", r)
+		}
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		result = append(result, r)
 	}
 	if len(result) == 0 {
 		return nil, fmt.Errorf("allowed_roots must contain at least one entry")
@@ -643,8 +685,13 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// Canonicalize the allowed root before writing (no policy check for init).
+		canonRoot, err := canonicalizeWorkspaceRootForInit(allowedRoot)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed root: %w", err)
+		}
 		defaultConfig := fileConfig{
-			AllowedRoots:          []string{allowedRoot},
+			AllowedRoots:          []string{canonRoot},
 			SessionTTL:            "12h",
 			Level:                 "info",
 			ShutdownTimeout:       "30s",
@@ -770,13 +817,22 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Preflight 3: check for mismatch with existing config.
+	// The requested bootstrap root must be present in the existing config.
 	if configExists && len(existingRoots) > 0 {
-		existingCanonical, err := resolveAllowedRoot(existingRoots[0])
-		if err != nil {
-			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
+		// Check if the requested root is already in the existing config.
+		found := false
+		for _, er := range existingRoots {
+			existingCanonical, err := resolveAllowedRoot(er)
+			if err != nil {
+				return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
+			}
+			if existingCanonical == effectiveAllowedRoot {
+				found = true
+				break
+			}
 		}
-		if existingCanonical != effectiveAllowedRoot {
-			return &inputError{msg: fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", existingCanonical, effectiveAllowedRoot)}
+		if !found {
+			return &inputError{msg: fmt.Sprintf("existing configuration allowed_roots %v do not include %s", existingRoots, effectiveAllowedRoot)}
 		}
 	}
 
@@ -884,13 +940,21 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Preflight 3: check for mismatch with existing config.
+	// The requested bootstrap root must be present in the existing config.
 	if configExists && len(existingRoots) > 0 {
-		existingCanonical, err := resolveRoot(existingRoots[0])
-		if err != nil {
-			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
+		found := false
+		for _, er := range existingRoots {
+			existingCanonical, err := resolveRoot(er)
+			if err != nil {
+				return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
+			}
+			if existingCanonical == effectiveAllowedRoot {
+				found = true
+				break
+			}
 		}
-		if existingCanonical != effectiveAllowedRoot {
-			return &inputError{msg: fmt.Sprintf("existing configuration allowed_root is %s, but init requested %s", existingCanonical, effectiveAllowedRoot)}
+		if !found {
+			return &inputError{msg: fmt.Sprintf("existing configuration allowed_roots %v do not include %s", existingRoots, effectiveAllowedRoot)}
 		}
 	}
 
@@ -1130,8 +1194,11 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		return fmt.Errorf("configuration is not a JSON object")
 	}
 
-	// Reject reserved/computed fields.
+	// Reject reserved/computed fields (allowed_root is legacy input, not computed).
 	for field := range raw {
+		if field == "allowed_root" {
+			continue // legacy migration input, handled below
+		}
 		if isReadOnlyField(field) {
 			return fmt.Errorf("%s is computed and cannot be configured", field)
 		}
