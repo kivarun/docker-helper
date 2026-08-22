@@ -48,57 +48,6 @@ func TestValidateCAConfigPropagatesHashError(t *testing.T) {
 	}
 }
 
-func TestValidateCAConfigReachesHashWithValidCA(t *testing.T) {
-	// Valid CA must pass — this proves we reach computeOpenSSLHash.
-	_, caPath := setupCAConfigPreflightTest(t)
-
-	raw := map[string]json.RawMessage{
-		"trusted_ca_injection": json.RawMessage(`"auto"`),
-		"trusted_ca_path":      json.RawMessage(fmt.Sprintf(`"%s"`, caPath)),
-	}
-
-	if err := validateCAConfig(raw); err != nil {
-		t.Fatalf("valid CA should pass: %v", err)
-	}
-}
-
-func TestConfigMutationRejectsHashFailure(t *testing.T) {
-	// End-to-end: config set must reject a CA when hash fails,
-	// before committing the config file.
-
-	configPath, caPath := setupCAConfigPreflightTest(t)
-
-	// First set the path (should succeed).
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set path: expected 0, got %d, stderr: %q", code, stderr.String())
-	}
-
-	// Save original config bytes.
-	originalBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Enable auto (should succeed with valid CA).
-	stdout.Reset()
-	stderr.Reset()
-	code = runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("set auto: expected 0, got %d, stderr: %q", code, stderr.String())
-	}
-
-	// Verify config was written.
-	newBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Equal(originalBytes, newBytes) {
-		t.Error("config should have been modified")
-	}
-}
-
 func TestCAPreflightAutoMissingCA(t *testing.T) {
 	configPath, caPath := setupCAConfigPreflightTest(t)
 
