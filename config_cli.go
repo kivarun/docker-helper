@@ -27,6 +27,10 @@ type configMutationResult struct {
 	SkipWrite   bool   // true: skip write/reload, print message and return
 	Message     string // success message to print (may be empty if SkipWrite)
 	StartupOnly bool   // true: skip reload, print "restart required" after message
+	// Preflight is an optional operation-specific preparation step.
+	// It runs after config validation, before write.
+	// If it returns an error, the transaction aborts without writing.
+	Preflight func() error
 }
 
 // configMutation is a callback that modifies the raw config under the lock.
@@ -335,19 +339,14 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// SELinux workspace preparation in system mode (always, even if already present).
-	if resolveDeploymentMode() == ModeSystem && !isHomeRoot(canonical) {
-		backend, err := detectLSM()
+	// Detect LSM backend outside the transaction (no lock needed).
+	needsSELinux := resolveDeploymentMode() == ModeSystem && !isHomeRoot(canonical)
+	var selBackend LSMBackend
+	if needsSELinux {
+		selBackend, err = detectLSM()
 		if err != nil {
 			fmt.Fprintf(stderr, "error: cannot determine MAC backend: %v\n", err)
 			return 1
-		}
-		if backend == LSMSelinux {
-			selMgr := newSELinuxWorkspaceManager()
-			if _, err := selMgr.ensureWorkspaceLabel(canonical); err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				return 1
-			}
 		}
 	}
 
@@ -384,7 +383,22 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		// Add new root to canonical roots list.
 		rawBytes, _ := json.Marshal(append(existingRoots, canonical))
 		raw["allowed_roots"] = rawBytes
-		return configMutationResult{Message: fmt.Sprintf("added %s\n", canonical)}, nil
+
+		var preflight func() error
+		if needsSELinux && selBackend == LSMSelinux {
+			preflight = func() error {
+				selMgr := newSELinuxWorkspaceManager()
+				if _, err := selMgr.ensureWorkspaceLabel(canonical); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
+
+		return configMutationResult{
+			Message:   fmt.Sprintf("added %s\n", canonical),
+			Preflight: preflight,
+		}, nil
 	})
 }
 
@@ -1131,6 +1145,18 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 		return 1
 	}
 
+	// Validate before allowing SkipWrite or proceeding to write.
+	// This prevents no-op callbacks (allowed-root "already present"/"not found")
+	// from reporting success on an otherwise invalid configuration.
+	if err := validateRawConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if err := validateCAConfig(raw); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
 	// Skip write: print message and return.
 	if result.SkipWrite {
 		if result.Message != "" {
@@ -1139,14 +1165,14 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 		return 0
 	}
 
-	// Validate before writing.
-	if err := validateRawConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	if err := validateCAConfig(raw); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
+	// Operation-specific preflight (e.g., SELinux workspace preparation).
+	// Runs after validation, before write. If it fails, the transaction
+	// aborts without modifying the config file.
+	if result.Preflight != nil {
+		if err := result.Preflight(); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
 	}
 
 	// Save original bytes for rollback.
