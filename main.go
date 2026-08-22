@@ -245,7 +245,11 @@ func runServe(stdout, stderr io.Writer) error {
 	// System mode with SELinux: verify non-home allowed_root workspace label.
 	// This is a read-only check — no semanage/restorecon mutation on startup.
 	if cfg.Mode == ModeSystem {
-		backend, _ := detectLSM()
+		backend, err := detectLSM()
+		if err != nil {
+			serveStartupError(err, "")
+			return err
+		}
 		if backend == LSMSelinux && !isHomeRoot(cfg.AllowedRoot) {
 			selMgr := newSELinuxWorkspaceManager()
 			if err := selMgr.verifyWorkspaceLabel(cfg.AllowedRoot); err != nil {

@@ -20,6 +20,7 @@ overrides:
       - systemd
       - apparmor-parser
       - policycoreutils
+      - policycoreutils-python-utils
     scripts:
       postinstall: packaging/scripts/rpm/postinstall.sh
       preremove: packaging/scripts/rpm/preremove.sh

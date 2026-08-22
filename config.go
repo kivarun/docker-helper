@@ -769,9 +769,11 @@ func initSystemWithAppArmor(allowedRoot string, stdout, stderr io.Writer,
 // If core init fails after a new mapping was created, it rolls back.
 // mgr is the SELinux workspace manager (injectable for testing).
 // core is the file-based init function (injectable for testing).
+// resolveRoot is the canonical root resolver (injectable for testing).
 func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 	mgr *selinuxWorkspaceManager,
 	core func(string, io.Writer, io.Writer) error,
+	resolveRoot func(string) (string, error),
 ) error {
 	configPath := getConfigPathFunc()
 	configDir := filepath.Dir(configPath)
@@ -819,14 +821,14 @@ func initSystemSELinux(allowedRoot string, stdout, stderr io.Writer,
 	}
 
 	// Canonicalize the allowed root for comparison.
-	effectiveAllowedRoot, err := resolveAllowedRoot(allowedRoot)
+	effectiveAllowedRoot, err := resolveRoot(allowedRoot)
 	if err != nil {
 		return err
 	}
 
 	// Preflight 3: check for mismatch with existing config.
 	if configExists && existingAllowedRoot != "" {
-		existingCanonical, err := resolveAllowedRoot(existingAllowedRoot)
+		existingCanonical, err := resolveRoot(existingAllowedRoot)
 		if err != nil {
 			return fmt.Errorf("cannot canonicalize existing allowed_root: %w", err)
 		}
@@ -911,6 +913,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err
 			},
+			resolveAllowedRoot,
 		)
 	default:
 		return fmt.Errorf("unknown MAC backend: %s", backend)

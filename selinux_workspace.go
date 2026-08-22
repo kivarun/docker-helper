@@ -5,13 +5,14 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
 	selinuxWorkspaceType = "docker_helper_workspace_t"
 	semanagePath         = "/usr/sbin/semanage"
 	restoreconPath       = "/usr/sbin/restorecon"
-	matchpathconPath     = "/usr/bin/matchpathcon"
 )
 
 // isHomeRoot returns true if the canonical path is /home or under /home.
@@ -27,56 +28,40 @@ func isHomeRoot(canonical string) bool {
 // non-home system allowed_roots. It uses semanage fcontext + restorecon to
 // create persistent mappings that survive reboot and restorecon.
 //
-// Test seams: runCommand, readPathCon, and selinuxEnabled are package-level
-// vars that can be replaced in tests.
+// Test seams: runCommand, readPathCon, and selinuxActive are injectable.
 type selinuxWorkspaceManager struct {
-	semanagePath     string
-	restoreconPath   string
-	matchpathconPath string
-	runCommand       func(string, ...string) ([]byte, error)
-	readPathCon      func(string) (string, error)
-	selinuxActive    func() (bool, bool, error) // (active, enforcing, error)
+	semanagePath   string
+	restoreconPath string
+	runCommand     func(string, ...string) ([]byte, error)
+	readPathCon    func(string) (string, error)
+	selinuxActive  func() (bool, bool, error) // (active, enforcing, error)
 }
 
 func newSELinuxWorkspaceManager() *selinuxWorkspaceManager {
+	rc := func(cmd string, args ...string) ([]byte, error) {
+		c := exec.Command(cmd, args...)
+		out, err := c.CombinedOutput()
+		return out, err
+	}
 	return &selinuxWorkspaceManager{
-		semanagePath:     semanagePath,
-		restoreconPath:   restoreconPath,
-		matchpathconPath: matchpathconPath,
-		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			c := exec.Command(cmd, args...)
-			out, err := c.CombinedOutput()
-			return out, err
-		},
-		readPathCon: func(path string) (string, error) {
-			return readPathSELinuxType(path)
-		},
-		selinuxActive: selinuxEnabled,
+		semanagePath:   semanagePath,
+		restoreconPath: restoreconPath,
+		runCommand:     rc,
+		readPathCon:    readPathSELinuxType,
+		selinuxActive:  selinuxEnabled,
 	}
 }
 
 // readPathSELinuxType returns the SELinux type component of the given path's
-// current label. Uses stat(2) to get the raw context, then parses the type.
+// current label by reading the security.selinux xattr. This reads the ACTUAL
+// on-disk label, not the policy-default context.
 func readPathSELinuxType(path string) (string, error) {
-	// Use matchpathcon to get the expected context, then parse the type.
-	// This avoids needing root to read the actual label on arbitrary paths.
-	out, err := exec.Command(matchpathconPath, path).CombinedOutput()
+	buf := make([]byte, 1024)
+	n, err := unix.Lgetxattr(path, "security.selinux", buf)
 	if err != nil {
-		// Fallback: try stat -c %C (requires root)
-		out2, err2 := exec.Command("stat", "-c", "%C", path).CombinedOutput()
-		if err2 != nil {
-			return "", fmt.Errorf("cannot read SELinux context for %s: matchpathcon: %v; stat: %v (%s)", path, err, err2, strings.TrimSpace(string(out2)))
-		}
-		ctx := strings.TrimSpace(string(out2))
-		return parseSELinuxType(ctx)
+		return "", fmt.Errorf("cannot read SELinux context for %s: %w", path, err)
 	}
-	// matchpathcon output format: "context  (match type)"
-	line := strings.TrimSpace(string(out))
-	if idx := strings.Index(line, " "); idx > 0 {
-		ctx := line[:idx]
-		return parseSELinuxType(ctx)
-	}
-	return "", fmt.Errorf("unexpected matchpathcon output for %s: %s", path, line)
+	return parseSELinuxType(string(buf[:n]))
 }
 
 // escapeFcontextPath escapes a filesystem path for use in a semanage fcontext
@@ -85,8 +70,7 @@ func readPathSELinuxType(path string) (string, error) {
 func escapeFcontextPath(path string) string {
 	// semanage fcontext uses regex syntax. Escape all regex metacharacters.
 	// The path is already canonicalized (absolute, clean, no symlinks).
-	escaped := regexp.QuoteMeta(path)
-	return escaped
+	return regexp.QuoteMeta(path)
 }
 
 // fcontextPattern returns the full regex pattern for the fcontext rule.
@@ -99,81 +83,111 @@ func fcontextPattern(root string) string {
 
 // ensureWorkspaceLabel ensures that the canonical root has a persistent
 // SELinux mapping to docker_helper_workspace_t. It:
-//  1. Checks for existing matching fcontext rules;
+//  1. Checks for existing local fcontext rules;
 //  2. If no matching rule exists, adds one;
 //  3. If an existing rule maps to a different type, fails closed;
 //  4. Runs restorecon recursively;
-//  5. Verifies the resulting type.
+//  5. Verifies the actual on-disk type.
 //
 // Returns whether a new mapping was created (true) or already existed (false).
 // If it returns (true, nil), the caller must roll back on subsequent failure.
+// If it returns (false, nil) for an existing mapping, restorecon and verification
+// have already succeeded.
 func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
 		return false, fmt.Errorf("cannot determine SELinux status: %w", err)
 	}
 	if !active || !enforcing {
-		// SELinux not enforcing: nothing to do.
 		return false, nil
 	}
 
 	pattern := fcontextPattern(root)
 
-	// Check existing rules.
-	existing, err := m.listFcontextRules(root)
+	// Check existing local fcontext rules.
+	existing, err := m.listLocalFcontextRules()
 	if err != nil {
-		return false, fmt.Errorf("cannot list existing fcontext rules: %w", err)
+		return false, fmt.Errorf("cannot list local fcontext rules: %w", err)
 	}
 
-	for _, rule := range existing {
+	ourRuleIdx := -1
+	for i, rule := range existing {
 		if rule.pattern == pattern {
-			if rule.fileType == selinuxWorkspaceType {
-				// Exact match already exists — idempotent.
-				return false, nil
+			ourRuleIdx = i
+			break
+		}
+	}
+
+	if ourRuleIdx >= 0 {
+		// Existing rule found.
+		if existing[ourRuleIdx].fileType == selinuxWorkspaceType {
+			// Exact match already exists - idempotent path.
+			// Still need to run restorecon and verify.
+			if err := m.restoreconRecursive(root); err != nil {
+				return false, fmt.Errorf("restorecon failed for existing mapping %s: %w", root, err)
 			}
-			// Conflicting local rule.
+			if err := m.verifyActualType(root); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		// Conflicting local rule.
+		return false, fmt.Errorf(
+			"conflicting SELinux fcontext rule exists for %s: pattern %s maps to %s (expected %s); remove the conflicting rule before proceeding",
+			root, existing[ourRuleIdx].pattern, existing[ourRuleIdx].fileType, selinuxWorkspaceType,
+		)
+	}
+
+	// Check for nested operator-local rules that our broad rule would override.
+	for _, rule := range existing {
+		if rule.pattern != pattern && strings.HasPrefix(rule.pattern, escapeFcontextPath(root)) {
 			return false, fmt.Errorf(
-				"conflicting SELinux fcontext rule exists for %s: pattern %s maps to %s (expected %s); remove the conflicting rule before proceeding",
-				root, rule.pattern, rule.fileType, selinuxWorkspaceType,
+				"operator-local fcontext rule %s would be overridden by %s; remove the local rule before proceeding",
+				rule.pattern, pattern,
 			)
 		}
 	}
 
-	// No matching rule — add ours.
+	// No matching rule - add ours.
 	if err := m.addFcontextRule(pattern, selinuxWorkspaceType); err != nil {
 		return false, fmt.Errorf("cannot add fcontext rule for %s: %w", root, err)
 	}
 
 	// Apply restorecon recursively.
 	if err := m.restoreconRecursive(root); err != nil {
-		// Rollback: remove the rule we just added.
-		if rbErr := m.removeFcontextRule(pattern); rbErr != nil {
+		// Rollback: remove the rule we just added and restore labels.
+		if rbErr := m.rollbackWorkspaceLabel(root); rbErr != nil {
 			return false, fmt.Errorf("restorecon failed: %v; rollback also failed: %v", err, rbErr)
 		}
 		return false, fmt.Errorf("restorecon failed for %s: %w", root, err)
 	}
 
-	// Verify the resulting type.
+	// Verify the actual on-disk type.
+	if err := m.verifyActualType(root); err != nil {
+		// Rollback.
+		if rbErr := m.rollbackWorkspaceLabel(root); rbErr != nil {
+			return false, fmt.Errorf("verification failed: %v; rollback also failed: %v", err, rbErr)
+		}
+		return false, err
+	}
+
+	return true, nil
+}
+
+// verifyActualType reads the actual on-disk SELinux type for the root and
+// verifies it matches docker_helper_workspace_t.
+func (m *selinuxWorkspaceManager) verifyActualType(root string) error {
 	actualType, err := m.readPathCon(root)
 	if err != nil {
-		// Rollback.
-		if rbErr := m.removeFcontextRule(pattern); rbErr != nil {
-			return false, fmt.Errorf("verification failed: %v; rollback also failed: %v; restorecon also failed: %v", err, rbErr, err)
-		}
-		return false, fmt.Errorf("cannot verify SELinux type for %s: %w", root, err)
+		return fmt.Errorf("cannot verify SELinux type for %s: %w", root, err)
 	}
 	if actualType != selinuxWorkspaceType {
-		// Rollback.
-		if rbErr := m.removeFcontextRule(pattern); rbErr != nil {
-			return false, fmt.Errorf("type mismatch (got %s): rollback also failed: %v", actualType, rbErr)
-		}
-		return false, fmt.Errorf(
+		return fmt.Errorf(
 			"SELinux type for %s is %s, expected %s after restorecon",
 			root, actualType, selinuxWorkspaceType,
 		)
 	}
-
-	return true, nil
+	return nil
 }
 
 // verifyWorkspaceLabel checks that the canonical root has the expected
@@ -216,13 +230,17 @@ func (m *selinuxWorkspaceManager) verifyWorkspaceLabel(root string) error {
 // by this invocation.
 func (m *selinuxWorkspaceManager) rollbackWorkspaceLabel(root string) error {
 	pattern := fcontextPattern(root)
+
+	// First remove the fcontext rule.
 	if err := m.removeFcontextRule(pattern); err != nil {
 		return fmt.Errorf("cannot remove fcontext rule for %s: %w", root, err)
 	}
-	// Restorecon to revert labels to the policy default.
+
+	// Then restore labels to policy defaults.
 	if err := m.restoreconRecursive(root); err != nil {
-		return fmt.Errorf("restorecon rollback for %s: %w", root, err)
+		return fmt.Errorf("restorecon rollback for %s after rule removal: %w", root, err)
 	}
+
 	return nil
 }
 
@@ -232,11 +250,12 @@ type fcontextRule struct {
 	fileType string
 }
 
-// listFcontextRules returns rules that match the given root path.
-func (m *selinuxWorkspaceManager) listFcontextRules(root string) ([]fcontextRule, error) {
-	out, err := m.runCommand(m.semanagePath, "fcontext", "-l")
+// listLocalFcontextRules returns local custom fcontext rules.
+// Uses -C -n to inspect only local customizations, not base policy.
+func (m *selinuxWorkspaceManager) listLocalFcontextRules() ([]fcontextRule, error) {
+	out, err := m.runCommand(m.semanagePath, "fcontext", "-l", "-C", "-n")
 	if err != nil {
-		return nil, fmt.Errorf("semanage fcontext -l: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("semanage fcontext -l -C -n: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	var rules []fcontextRule
@@ -245,33 +264,36 @@ func (m *selinuxWorkspaceManager) listFcontextRules(root string) ([]fcontextRule
 		if line == "" {
 			continue
 		}
-		// Parse the line to find rules matching our root.
-		// Format: <path_regex>  gen_context(system_u:object_r:<type>:s0)
-		rule, matched := parseFcontextLine(line, root)
-		if matched {
+		rule, ok := parseFcontextLine(line)
+		if ok {
 			rules = append(rules, rule)
 		}
 	}
 	return rules, nil
 }
 
-// parseFcontextLine parses a single line from semanage fcontext -l output.
-// Returns the rule and whether it matches the given root path.
-func parseFcontextLine(line string, root string) (fcontextRule, bool) {
+// parseFcontextLine parses a single line from semanage fcontext output.
+// Returns the rule and whether it was successfully parsed.
+func parseFcontextLine(line string) (fcontextRule, bool) {
 	// Format: <path_regex>  gen_context(system_u:object_r:<type>:s0)
 	// or:     <path_regex>  system_u:object_r:<type>:s0
-	parts := strings.Fields(line)
-	if len(parts) < 2 {
+	// The pattern and context are separated by multiple spaces.
+	// We need to handle paths with spaces, so we can't just use strings.Fields.
+
+	// Find the context part by looking for the gen_context or user:role:type pattern.
+	// The pattern is everything before the double-space separator.
+	idx := strings.Index(line, "  ")
+	if idx < 0 {
 		return fcontextRule{}, false
 	}
 
-	pattern := parts[0]
-	ctx := parts[len(parts)-1]
+	pattern := strings.TrimSpace(line[:idx])
+	ctxPart := strings.TrimSpace(line[idx+2:])
 
 	// Extract type from context
 	var typ string
-	if idx := strings.Index(ctx, "object_r:"); idx >= 0 {
-		rest := ctx[idx+len("object_r:"):]
+	if idx2 := strings.Index(ctxPart, "object_r:"); idx2 >= 0 {
+		rest := ctxPart[idx2+len("object_r:"):]
 		if colon := strings.Index(rest, ":"); colon >= 0 {
 			typ = rest[:colon]
 		} else {
@@ -279,37 +301,35 @@ func parseFcontextLine(line string, root string) (fcontextRule, bool) {
 		}
 	}
 
-	// Check if this pattern matches our root.
-	// The pattern is a regex like "/data(/.*)?" or "/data"
-	// We need to check if the pattern, when applied, would match our root.
-	// For exact matching, we compare the escaped prefix.
-	escapedRoot := escapeFcontextPath(root)
-	if strings.HasPrefix(pattern, escapedRoot) {
-		return fcontextRule{pattern: pattern, fileType: typ}, true
+	if pattern == "" || typ == "" {
+		return fcontextRule{}, false
 	}
-	return fcontextRule{}, false
+
+	return fcontextRule{pattern: pattern, fileType: typ}, true
 }
 
 func (m *selinuxWorkspaceManager) addFcontextRule(pattern, fileType string) error {
-	_, err := m.runCommand(m.semanagePath, "fcontext", "-a", "-t", fileType, "-s", "targeted", pattern)
+	// semanage fcontext -a -t TYPE PATTERN
+	out, err := m.runCommand(m.semanagePath, "fcontext", "-a", "-t", fileType, pattern)
 	if err != nil {
-		return fmt.Errorf("semanage fcontext -a: %w", err)
+		return fmt.Errorf("semanage fcontext -a: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
 func (m *selinuxWorkspaceManager) removeFcontextRule(pattern string) error {
-	_, err := m.runCommand(m.semanagePath, "fcontext", "-d", "-s", "targeted", pattern)
+	// semanage fcontext -d PATTERN
+	out, err := m.runCommand(m.semanagePath, "fcontext", "-d", pattern)
 	if err != nil {
-		return fmt.Errorf("semanage fcontext -d: %w", err)
+		return fmt.Errorf("semanage fcontext -d: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
 func (m *selinuxWorkspaceManager) restoreconRecursive(root string) error {
-	_, err := m.runCommand(m.restoreconPath, "-R", "-F", root)
+	out, err := m.runCommand(m.restoreconPath, "-R", "-F", root)
 	if err != nil {
-		return fmt.Errorf("restorecon -R -F: %w", err)
+		return fmt.Errorf("restorecon -R -F: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

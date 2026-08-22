@@ -616,7 +616,11 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 	// SELinux workspace preparation for allowed_root in system mode.
 	// Prepare the label BEFORE committing the config transaction.
 	if field == "allowed_root" && resolveDeploymentMode() == ModeSystem {
-		backend, _ := detectLSM()
+		backend, err := detectLSM()
+		if err != nil {
+			fmt.Fprintf(stderr, "error: cannot determine MAC backend: %v\n", err)
+			return 1
+		}
 		if backend == LSMSelinux && !isHomeRoot(value) {
 			selMgr := newSELinuxWorkspaceManager()
 			selinuxNewlyCreated, err := selMgr.ensureWorkspaceLabel(value)

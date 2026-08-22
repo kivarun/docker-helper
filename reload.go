@@ -80,7 +80,24 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	// System mode with SELinux: verify non-home allowed_root workspace label.
 	// This is a read-only check — no semanage/restorecon mutation on reload.
 	if resolveDeploymentMode() == ModeSystem {
-		backend, _ := detectLSM()
+		backend, err := detectLSM()
+		if err != nil {
+			duration := time.Since(started).Round(time.Millisecond).String()
+			opLog(ctx).Error("reload SELinux detection failed",
+				slog.String("operation", "reload"),
+				slog.String("error", err.Error()),
+			)
+			writeAuditWithRequestID(ctx, auditRecord{
+				Event:    "config.reload",
+				Result:   "selinux_detection_failed",
+				Duration: duration,
+			})
+			writeError(ctx, w, http.StatusBadRequest,
+				"selinux_detection_failed",
+				err.Error(),
+			)
+			return
+		}
 		if backend == LSMSelinux && !isHomeRoot(newCfg.AllowedRoot) {
 			selMgr := newSELinuxWorkspaceManager()
 			if err := selMgr.verifyWorkspaceLabel(newCfg.AllowedRoot); err != nil {

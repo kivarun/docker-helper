@@ -3,53 +3,13 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
-
-// testNonHomeAllowedRoot creates a directory that passes workspace-root
-// policy and is NOT under /home (so isHomeRoot returns false).
-// It tries bases that are not under /home or forbidden system trees.
-// If no suitable base is available, the test is skipped.
-func testNonHomeAllowedRoot(t *testing.T) string {
-	t.Helper()
-
-	// Candidates: try bases that are not under /home or forbidden trees.
-	// /srv, /opt, /mnt are not in the forbidden list.
-	candidates := []string{"/srv", "/opt", "/mnt"}
-
-	for _, base := range candidates {
-		if _, err := os.Stat(base); err != nil {
-			continue
-		}
-		dir, err := os.MkdirTemp(base, "docker-helper-test-*")
-		if err != nil {
-			continue
-		}
-		canonical, err := filepath.EvalSymlinks(dir)
-		if err != nil {
-			os.RemoveAll(dir)
-			continue
-		}
-		if err := validateWorkspaceRootPolicy(canonical); err != nil {
-			os.RemoveAll(dir)
-			continue
-		}
-		if isHomeRoot(canonical) {
-			os.RemoveAll(dir)
-			continue
-		}
-		t.Cleanup(func() { os.RemoveAll(canonical) })
-		return canonical
-	}
-
-	t.Skip("no writable non-home base for SELinux workspace test (need /srv, /opt, or /mnt)")
-	return ""
-}
 
 // --- Policy/static tests ---
 
@@ -211,9 +171,7 @@ func TestFcontextPattern(t *testing.T) {
 
 func TestEnsureWorkspaceLabelNotEnforcing(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return false, false, nil },
+		selinuxActive: func() (bool, bool, error) { return false, false, nil },
 	}
 	created, err := mgr.ensureWorkspaceLabel("/data")
 	if err != nil {
@@ -226,9 +184,7 @@ func TestEnsureWorkspaceLabelNotEnforcing(t *testing.T) {
 
 func TestEnsureWorkspaceLabelPermissive(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, false, nil },
+		selinuxActive: func() (bool, bool, error) { return true, false, nil },
 	}
 	created, err := mgr.ensureWorkspaceLabel("/data")
 	if err != nil {
@@ -240,26 +196,15 @@ func TestEnsureWorkspaceLabelPermissive(t *testing.T) {
 }
 
 func TestEnsureWorkspaceLabelNewRule(t *testing.T) {
-	var addedRules []string
-	var restoreconCalled bool
-	var allCalls []string
+	var calls [][]string
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			allCalls = append(allCalls, cmd+" "+strings.Join(args, " "))
-			if strings.HasSuffix(cmd, "semanage") {
-				if len(args) > 0 && args[0] == "fcontext" {
-					if len(args) > 1 && args[1] == "-a" {
-						addedRules = append(addedRules, strings.Join(args, " "))
-					} else if len(args) > 1 && args[1] == "-l" {
-						return []byte{}, nil
-					}
+			calls = append(calls, args)
+			if len(args) > 0 && args[0] == "fcontext" {
+				if args[1] == "-l" {
+					return []byte{}, nil
 				}
-			}
-			if strings.HasSuffix(cmd, "restorecon") {
-				restoreconCalled = true
 			}
 			return []byte{}, nil
 		},
@@ -274,29 +219,42 @@ func TestEnsureWorkspaceLabelNewRule(t *testing.T) {
 	if !created {
 		t.Error("expected newly created mapping")
 	}
-	if len(addedRules) != 1 {
-		t.Errorf("expected 1 added rule, got %d (all calls: %v)", len(addedRules), allCalls)
+	var addCall []string
+	for _, c := range calls {
+		if len(c) > 0 && c[0] == "fcontext" && c[1] == "-a" {
+			addCall = c
+			break
+		}
 	}
-	if len(addedRules) > 0 && !strings.Contains(addedRules[0], "/data(/.*)?") {
-		t.Errorf("rule should contain escaped path, got: %s", addedRules[0])
+	if len(addCall) == 0 {
+		t.Fatal("no fcontext -a call found")
 	}
-	if !restoreconCalled {
+	if !reflect.DeepEqual(addCall, []string{"fcontext", "-a", "-t", selinuxWorkspaceType, "/data(/.*)?"}) {
+		t.Errorf("add argv = %v", addCall)
+	}
+	var restoreconCall []string
+	for _, c := range calls {
+		if len(c) > 0 && c[0] == "-R" {
+			restoreconCall = c
+			break
+		}
+	}
+	if len(restoreconCall) == 0 {
 		t.Error("restorecon should have been called")
 	}
 }
 
 func TestEnsureWorkspaceLabelIdempotent(t *testing.T) {
-	var addedRules []string
+	var addCalled bool
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" {
-				if args[1] == "-a" {
-					addedRules = append(addedRules, strings.Join(args, " "))
-				} else if args[1] == "-l" {
+			if len(args) > 0 && args[0] == "fcontext" {
+				if args[1] == "-l" {
 					return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
+				}
+				if args[1] == "-a" {
+					addCalled = true
 				}
 			}
 			return []byte{}, nil
@@ -312,24 +270,19 @@ func TestEnsureWorkspaceLabelIdempotent(t *testing.T) {
 	if created {
 		t.Error("should not create new mapping when rule already exists")
 	}
-	if len(addedRules) > 0 {
+	if addCalled {
 		t.Error("should not add rule when one already exists")
 	}
 }
 
 func TestEnsureWorkspaceLabelConflictingRule(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			if len(args) > 0 && args[0] == "fcontext" && len(args) > 1 && args[1] == "-l" {
 				return []byte("/data(/.*)?  gen_context(system_u:object_r:default_t:s0)"), nil
 			}
 			return []byte{}, nil
-		},
-		readPathCon: func(path string) (string, error) {
-			return "default_t", nil
 		},
 	}
 	_, err := mgr.ensureWorkspaceLabel("/data")
@@ -341,25 +294,46 @@ func TestEnsureWorkspaceLabelConflictingRule(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelRestoreconFails(t *testing.T) {
-	var ruleRemoved bool
+func TestEnsureWorkspaceLabelNestedOperatorRule(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" {
+			if len(args) > 0 && args[0] == "fcontext" && len(args) > 1 && args[1] == "-l" {
+				return []byte("/data/secrets(/.*)?  gen_context(system_u:object_r:ssh_home_t:s0)"), nil
+			}
+			return []byte{}, nil
+		},
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for nested operator rule")
+	}
+	if !strings.Contains(err.Error(), "overridden") {
+		t.Errorf("expected 'overridden' in error, got: %v", err)
+	}
+}
+
+func TestEnsureWorkspaceLabelRestoreconFails(t *testing.T) {
+	var deleteCalled bool
+	var restoreconCalls int
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" {
 				if args[1] == "-l" {
 					return []byte{}, nil
-				} else if args[1] == "-a" {
-					return []byte{}, nil
-				} else if args[1] == "-d" {
-					ruleRemoved = true
+				}
+				if args[1] == "-d" {
+					deleteCalled = true
 					return []byte{}, nil
 				}
 			}
-			if strings.HasSuffix(cmd, "restorecon") {
-				return []byte{}, errors.New("restorecon failed")
+			if len(args) > 0 && args[0] == "-R" {
+				restoreconCalls++
+				if restoreconCalls == 1 {
+					return []byte{}, errors.New("restorecon failed")
+				}
+				return []byte{}, nil
 			}
 			return []byte{}, nil
 		},
@@ -371,29 +345,31 @@ func TestEnsureWorkspaceLabelRestoreconFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for restorecon failure")
 	}
-	if !ruleRemoved {
+	if !deleteCalled {
 		t.Error("fcontext rule should be removed on restorecon failure")
+	}
+	if restoreconCalls != 2 {
+		t.Errorf("expected 2 restorecon calls, got %d", restoreconCalls)
 	}
 }
 
 func TestEnsureWorkspaceLabelVerifyFails(t *testing.T) {
-	var ruleRemoved bool
+	var deleteCalled bool
+	var restoreconCalls int
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" {
+			if len(args) > 0 && args[0] == "fcontext" {
 				if args[1] == "-l" {
 					return []byte{}, nil
-				} else if args[1] == "-a" {
-					return []byte{}, nil
-				} else if args[1] == "-d" {
-					ruleRemoved = true
+				}
+				if args[1] == "-d" {
+					deleteCalled = true
 					return []byte{}, nil
 				}
 			}
-			if strings.HasSuffix(cmd, "restorecon") {
+			if len(args) > 0 && args[0] == "-R" {
+				restoreconCalls++
 				return []byte{}, nil
 			}
 			return []byte{}, nil
@@ -409,24 +385,26 @@ func TestEnsureWorkspaceLabelVerifyFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "default_t") {
 		t.Errorf("expected type in error, got: %v", err)
 	}
-	if !ruleRemoved {
+	if !deleteCalled {
 		t.Error("fcontext rule should be removed on verification failure")
+	}
+	if restoreconCalls != 2 {
+		t.Errorf("expected 2 restorecon calls, got %d", restoreconCalls)
 	}
 }
 
-func TestEnsureWorkspaceLabelMultiLineSemanageOutput(t *testing.T) {
-	var addedRules []string
+func TestEnsureWorkspaceLabelExistingMappingRunsRestorecon(t *testing.T) {
+	var restoreconCalled bool
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" {
+			if len(args) > 0 && args[0] == "fcontext" {
 				if args[1] == "-l" {
-					return []byte("/var/lib/docker-helper(/.*)?  gen_context(system_u:object_r:docker_helper_state_t:s0)\n/etc/docker-helper(/.*)?  gen_context(system_u:object_r:docker_helper_config_t:s0)"), nil
-				} else if args[1] == "-a" {
-					addedRules = append(addedRules, strings.Join(args, " "))
+					return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
 				}
+			}
+			if len(args) > 0 && args[0] == "-R" {
+				restoreconCalled = true
 			}
 			return []byte{}, nil
 		},
@@ -438,11 +416,35 @@ func TestEnsureWorkspaceLabelMultiLineSemanageOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil, got: %v", err)
 	}
-	if !created {
-		t.Error("expected newly created mapping")
+	if created {
+		t.Error("should not create new mapping when rule already exists")
 	}
-	if len(addedRules) != 1 {
-		t.Errorf("expected 1 added rule, got %d", len(addedRules))
+	if !restoreconCalled {
+		t.Error("restorecon should be called even for existing mapping")
+	}
+}
+
+func TestEnsureWorkspaceLabelExistingMappingVerifyFails(t *testing.T) {
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			if len(args) > 0 && args[0] == "fcontext" {
+				if args[1] == "-l" {
+					return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
+				}
+			}
+			return []byte{}, nil
+		},
+		readPathCon: func(path string) (string, error) {
+			return "default_t", nil
+		},
+	}
+	_, err := mgr.ensureWorkspaceLabel("/data")
+	if err == nil {
+		t.Fatal("expected error for type mismatch on existing mapping")
+	}
+	if strings.Contains(err.Error(), "rollback") {
+		t.Error("pre-existing rule should not be removed on failure")
 	}
 }
 
@@ -450,9 +452,7 @@ func TestEnsureWorkspaceLabelMultiLineSemanageOutput(t *testing.T) {
 
 func TestVerifyWorkspaceLabelOK(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		readPathCon: func(path string) (string, error) {
 			return selinuxWorkspaceType, nil
 		},
@@ -464,9 +464,7 @@ func TestVerifyWorkspaceLabelOK(t *testing.T) {
 
 func TestVerifyWorkspaceLabelWrongType(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		readPathCon: func(path string) (string, error) {
 			return "default_t", nil
 		},
@@ -483,9 +481,7 @@ func TestVerifyWorkspaceLabelWrongType(t *testing.T) {
 func TestVerifyWorkspaceLabelHomeRoot(t *testing.T) {
 	var readCalled bool
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		readPathCon: func(path string) (string, error) {
 			readCalled = true
 			return "user_home_t", nil
@@ -501,9 +497,7 @@ func TestVerifyWorkspaceLabelHomeRoot(t *testing.T) {
 
 func TestVerifyWorkspaceLabelNotEnforcing(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return false, false, nil },
+		selinuxActive: func() (bool, bool, error) { return false, false, nil },
 	}
 	if err := mgr.verifyWorkspaceLabel("/data"); err != nil {
 		t.Fatalf("expected nil when not enforcing, got: %v", err)
@@ -513,9 +507,7 @@ func TestVerifyWorkspaceLabelNotEnforcing(t *testing.T) {
 func TestVerifyWorkspaceLabelNoMutation(t *testing.T) {
 	var runCommandCalled bool
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
 			runCommandCalled = true
 			return []byte{}, nil
@@ -535,20 +527,14 @@ func TestVerifyWorkspaceLabelNoMutation(t *testing.T) {
 // --- Manager: rollback tests ---
 
 func TestRollbackWorkspaceLabel(t *testing.T) {
-	var removedPatterns []string
+	var deleteCalled bool
 	var restoreconCalled bool
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" && args[1] == "-d" {
-				for _, a := range args {
-					if a != "-d" && a != "-s" && len(a) > 0 && a[0] == '/' {
-						removedPatterns = append(removedPatterns, a)
-					}
-				}
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-d" {
+				deleteCalled = true
 			}
-			if strings.HasSuffix(cmd, "restorecon") {
+			if len(args) > 0 && args[0] == "-R" {
 				restoreconCalled = true
 			}
 			return []byte{}, nil
@@ -557,11 +543,8 @@ func TestRollbackWorkspaceLabel(t *testing.T) {
 	if err := mgr.rollbackWorkspaceLabel("/data"); err != nil {
 		t.Fatalf("rollback failed: %v", err)
 	}
-	if len(removedPatterns) != 1 {
-		t.Errorf("expected 1 removed pattern, got %d", len(removedPatterns))
-	}
-	if removedPatterns[0] != "/data(/.*)?" {
-		t.Errorf("removed pattern = %q, want %q", removedPatterns[0], "/data(/.*)?")
+	if !deleteCalled {
+		t.Error("fcontext -d should be called")
 	}
 	if !restoreconCalled {
 		t.Error("restorecon should be called during rollback")
@@ -570,8 +553,6 @@ func TestRollbackWorkspaceLabel(t *testing.T) {
 
 func TestRollbackWorkspaceLabelError(t *testing.T) {
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
 			return []byte{}, errors.New("semanage failed")
 		},
@@ -582,108 +563,43 @@ func TestRollbackWorkspaceLabelError(t *testing.T) {
 	}
 }
 
-// --- Manager: seam tests ---
-
-func TestSELinuxManagerSeams(t *testing.T) {
-	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
-		runCommand:     func(cmd string, args ...string) ([]byte, error) { return []byte{}, nil },
-		readPathCon:    func(path string) (string, error) { return selinuxWorkspaceType, nil },
-	}
-	created, err := mgr.ensureWorkspaceLabel("/data")
-	if err != nil {
-		t.Fatalf("ensureWorkspaceLabel failed: %v", err)
-	}
-	if !created {
-		t.Error("expected newly created mapping")
-	}
-	if err := mgr.verifyWorkspaceLabel("/data"); err != nil {
-		t.Fatalf("verifyWorkspaceLabel failed: %v", err)
-	}
-	if err := mgr.rollbackWorkspaceLabel("/data"); err != nil {
-		t.Fatalf("rollbackWorkspaceLabel failed: %v", err)
-	}
-}
-
-func TestSELinuxManagerReadPathConError(t *testing.T) {
-	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
-		runCommand:     func(cmd string, args ...string) ([]byte, error) { return []byte{}, nil },
-		readPathCon:    func(path string) (string, error) { return "", errors.New("cannot read context") },
-	}
-	_, err := mgr.ensureWorkspaceLabel("/data")
-	if err == nil {
-		t.Fatal("expected error for readPathCon failure")
-	}
-	if !strings.Contains(err.Error(), "cannot read context") {
-		t.Errorf("expected 'cannot read context' in error, got: %v", err)
-	}
-}
-
-func TestSELinuxManagerSELinuxActiveError(t *testing.T) {
-	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive: func() (bool, bool, error) {
-			return false, false, errors.New("cannot read SELinux status")
-		},
-	}
-	_, err := mgr.ensureWorkspaceLabel("/data")
-	if err == nil {
-		t.Fatal("expected error for SELinux status failure")
-	}
-	if !strings.Contains(err.Error(), "cannot read SELinux status") {
-		t.Errorf("expected 'cannot read SELinux status' in error, got: %v", err)
-	}
-}
-
 // --- Parse fcontext line tests ---
 
 func TestParseFcontextLine(t *testing.T) {
 	tests := []struct {
 		line    string
-		root    string
 		want    fcontextRule
 		matched bool
 	}{
 		{
 			"/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)",
-			"/data",
 			fcontextRule{pattern: "/data(/.*)?", fileType: "docker_helper_workspace_t"},
 			true,
 		},
 		{
 			"/opt(/.*)?  gen_context(system_u:object_r:default_t:s0)",
-			"/opt",
 			fcontextRule{pattern: "/opt(/.*)?", fileType: "default_t"},
 			true,
 		},
 		{
-			"/var/lib(/.*)?  gen_context(system_u:object_r:var_t:s0)",
-			"/data",
-			fcontextRule{},
-			false,
-		},
-		{
 			"/data(/.*)?  system_u:object_r:default_t:s0",
-			"/data",
 			fcontextRule{pattern: "/data(/.*)?", fileType: "default_t"},
 			true,
 		},
 		{
 			"/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0:c100.c200)",
-			"/data",
 			fcontextRule{pattern: "/data(/.*)?", fileType: "docker_helper_workspace_t"},
 			true,
+		},
+		{
+			"invalid line",
+			fcontextRule{},
+			false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.line[:min(30, len(tc.line))], func(t *testing.T) {
-			got, matched := parseFcontextLine(tc.line, tc.root)
+			got, matched := parseFcontextLine(tc.line)
 			if matched != tc.matched {
 				t.Errorf("matched = %v, want %v", matched, tc.matched)
 			}
@@ -699,7 +615,64 @@ func TestParseFcontextLine(t *testing.T) {
 	}
 }
 
-// --- Init integration tests ---
+// --- Fcontext argv tests ---
+
+func TestFcontextAddExactArgv(t *testing.T) {
+	var lastArgs []string
+	mgr := &selinuxWorkspaceManager{
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			lastArgs = args
+			return []byte{}, nil
+		},
+	}
+	if err := mgr.addFcontextRule("/data(/.*)?", selinuxWorkspaceType); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"fcontext", "-a", "-t", selinuxWorkspaceType, "/data(/.*)?"}
+	if !reflect.DeepEqual(lastArgs, want) {
+		t.Errorf("argv = %v, want %v", lastArgs, want)
+	}
+}
+
+func TestFcontextDeleteExactArgv(t *testing.T) {
+	var lastArgs []string
+	mgr := &selinuxWorkspaceManager{
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			lastArgs = args
+			return []byte{}, nil
+		},
+	}
+	if err := mgr.removeFcontextRule("/data(/.*)?"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"fcontext", "-d", "/data(/.*)?"}
+	if !reflect.DeepEqual(lastArgs, want) {
+		t.Errorf("argv = %v, want %v", lastArgs, want)
+	}
+}
+
+func TestFcontextListLocalArgv(t *testing.T) {
+	var lastArgs []string
+	mgr := &selinuxWorkspaceManager{
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			lastArgs = args
+			return []byte{}, nil
+		},
+	}
+	if _, err := mgr.listLocalFcontextRules(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"fcontext", "-l", "-C", "-n"}
+	if !reflect.DeepEqual(lastArgs, want) {
+		t.Errorf("argv = %v, want %v", lastArgs, want)
+	}
+}
+
+// --- Init integration tests (using injection seams) ---
+
+func syntheticResolveRoot(path string) (string, error) {
+	return path, nil
+}
 
 func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 	dir := t.TempDir()
@@ -707,15 +680,11 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	nonHomeRoot := testNonHomeAllowedRoot(t)
-
 	var ensureCalled bool
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
+			if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
 				return []byte{}, nil
 			}
 			return []byte{}, nil
@@ -727,19 +696,19 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 	}
 
 	var coreCalled bool
-	err := initSystemSELinux(nonHomeRoot, &bytes.Buffer{}, &bytes.Buffer{},
+	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		mgr,
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
-			_, err := initCore(ar, so, se)
-			return err
+			return nil
 		},
+		syntheticResolveRoot,
 	)
 	if err != nil {
 		t.Fatalf("initSystemSELinux failed: %v", err)
 	}
 	if !ensureCalled {
-		t.Error("ensureWorkspaceLabel should be called for non-home root (readPathCon tracks this)")
+		t.Error("ensureWorkspaceLabel should be called for non-home root")
 	}
 	if !coreCalled {
 		t.Error("core should be called after SELinux preparation")
@@ -747,23 +716,34 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 }
 
 func TestInitSELinuxHomeRootNoSELinuxPrep(t *testing.T) {
+	dir := t.TempDir()
 	origGetConfig := getConfigPathFunc
-	allowedRoot := testAllowedRootDir(t)
-	configPath := filepath.Join(allowedRoot, "config.json")
-	getConfigPathFunc = func() string { return configPath }
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// nil manager skips SELinux prep entirely.
+	var ensureCalled bool
+	mgr := &selinuxWorkspaceManager{
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand: func(cmd string, args ...string) ([]byte, error) {
+			ensureCalled = true
+			return []byte{}, nil
+		},
+	}
+
 	var coreCalled bool
-	err := initSystemSELinux(allowedRoot, &bytes.Buffer{}, &bytes.Buffer{},
-		nil,
+	err := initSystemSELinux("/home/alice", &bytes.Buffer{}, &bytes.Buffer{},
+		mgr,
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
 		},
+		syntheticResolveRoot,
 	)
 	if err != nil {
 		t.Fatalf("initSystemSELinux failed: %v", err)
+	}
+	if ensureCalled {
+		t.Error("ensureWorkspaceLabel should NOT be called for home root")
 	}
 	if !coreCalled {
 		t.Error("core should be called")
@@ -776,34 +756,27 @@ func TestInitSELinuxPreparationFailureBlocksCore(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	nonHomeRoot := testNonHomeAllowedRoot(t)
-
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" {
-				if len(args) > 1 && args[1] == "-l" {
+			if len(args) > 0 && args[0] == "fcontext" {
+				if args[1] == "-l" {
 					return []byte{}, nil
 				}
-				// Fail on -a call
 				return []byte{}, errors.New("semanage failed")
 			}
 			return []byte{}, nil
 		},
-		readPathCon: func(path string) (string, error) {
-			return selinuxWorkspaceType, nil
-		},
 	}
 
 	coreCalled := false
-	err := initSystemSELinux(nonHomeRoot, &bytes.Buffer{}, &bytes.Buffer{},
+	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		mgr,
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
 		},
+		syntheticResolveRoot,
 	)
 	if err == nil {
 		t.Fatal("expected error for SELinux preparation failure")
@@ -819,26 +792,16 @@ func TestInitSELinuxCoreFailureRollsBackNewMapping(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	nonHomeRoot := testNonHomeAllowedRoot(t)
-
 	var rollbackCalled bool
-	var allCalls []string
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			allCalls = append(allCalls, cmd+" "+strings.Join(args, " "))
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" {
-				if len(args) > 1 && args[1] == "-l" {
+			if len(args) > 0 && args[0] == "fcontext" {
+				if args[1] == "-l" {
 					return []byte{}, nil
 				}
-				if len(args) > 1 && args[1] == "-a" {
-					return []byte{}, nil
-				}
-				if len(args) > 1 && args[1] == "-d" {
+				if args[1] == "-d" {
 					rollbackCalled = true
-					return []byte{}, nil
 				}
 			}
 			return []byte{}, nil
@@ -848,17 +811,18 @@ func TestInitSELinuxCoreFailureRollsBackNewMapping(t *testing.T) {
 		},
 	}
 
-	err := initSystemSELinux(nonHomeRoot, &bytes.Buffer{}, &bytes.Buffer{},
+	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		mgr,
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		},
+		syntheticResolveRoot,
 	)
 	if err == nil {
 		t.Fatal("expected error for core failure")
 	}
 	if !rollbackCalled {
-		t.Errorf("rollback should be called when core fails after new mapping (all calls: %v)", allCalls)
+		t.Error("rollback should be called when core fails after new mapping")
 	}
 }
 
@@ -868,22 +832,15 @@ func TestInitSELinuxCoreFailureNoRollbackWhenNotNew(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := testAllowedRootDir(t)
-	nonHomeRoot := filepath.Join(rootDir, "data")
-	if err := os.MkdirAll(nonHomeRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	var rollbackCalled bool
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
-			if strings.HasSuffix(cmd, "semanage") && len(args) > 0 && args[0] == "fcontext" {
+			if len(args) > 0 && args[0] == "fcontext" {
 				if args[1] == "-l" {
 					return []byte("/data(/.*)?  gen_context(system_u:object_r:docker_helper_workspace_t:s0)"), nil
-				} else if args[1] == "-d" {
+				}
+				if args[1] == "-d" {
 					rollbackCalled = true
 				}
 			}
@@ -894,11 +851,12 @@ func TestInitSELinuxCoreFailureNoRollbackWhenNotNew(t *testing.T) {
 		},
 	}
 
-	err := initSystemSELinux(nonHomeRoot, &bytes.Buffer{}, &bytes.Buffer{},
+	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		mgr,
 		func(ar string, so, se io.Writer) error {
 			return errors.New("core init failed")
 		},
+		syntheticResolveRoot,
 	)
 	if err == nil {
 		t.Fatal("expected error for core failure")
@@ -908,26 +866,26 @@ func TestInitSELinuxCoreFailureNoRollbackWhenNotNew(t *testing.T) {
 	}
 }
 
-func TestInitSELinuxNilManagerHomeRoot(t *testing.T) {
+func TestInitSELinuxNilManager(t *testing.T) {
+	dir := t.TempDir()
 	origGetConfig := getConfigPathFunc
-	allowedRoot := testAllowedRootDir(t)
-	configPath := filepath.Join(allowedRoot, "config.json")
-	getConfigPathFunc = func() string { return configPath }
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
 	var coreCalled string
-	err := initSystemSELinux(allowedRoot, &bytes.Buffer{}, &bytes.Buffer{},
+	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		nil,
 		func(ar string, so, se io.Writer) error {
 			coreCalled = ar
 			return nil
 		},
+		syntheticResolveRoot,
 	)
 	if err != nil {
 		t.Fatalf("initSystemSELinux failed: %v", err)
 	}
-	if coreCalled != allowedRoot {
-		t.Errorf("core called with %q, want %q", coreCalled, allowedRoot)
+	if coreCalled != "/data" {
+		t.Errorf("core called with %q, want %q", coreCalled, "/data")
 	}
 }
 
@@ -937,34 +895,26 @@ func TestInitSELinuxExistingConfigMatch(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	rootDir := testAllowedRootDir(t)
-	nonHomeRoot := filepath.Join(rootDir, "data")
-	if err := os.MkdirAll(nonHomeRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-
 	configPath := filepath.Join(dir, "config.json")
-	configData := fmt.Sprintf(`{"allowed_root": %q, "session_ttl": "12h"}`, nonHomeRoot)
+	configData := `{"allowed_root": "/data", "session_ttl": "12h"}`
 	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
-		runCommand:     func(cmd string, args ...string) ([]byte, error) { return []byte{}, nil },
-		readPathCon:    func(path string) (string, error) { return selinuxWorkspaceType, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand:    func(cmd string, args ...string) ([]byte, error) { return []byte{}, nil },
+		readPathCon:   func(path string) (string, error) { return selinuxWorkspaceType, nil },
 	}
 
 	var coreCalled bool
-	err := initSystemSELinux(nonHomeRoot, &bytes.Buffer{}, &bytes.Buffer{},
+	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		mgr,
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
-			_, err := initCore(ar, so, se)
-			return err
+			return nil
 		},
+		syntheticResolveRoot,
 	)
 	if err != nil {
 		t.Fatalf("initSystemSELinux failed: %v", err)
@@ -980,36 +930,26 @@ func TestInitSELinuxExistingConfigMismatch(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	baseDir := testAllowedRootDir(t)
-	oldRoot := filepath.Join(baseDir, "old")
-	newRoot := filepath.Join(baseDir, "new")
-	for _, d := range []string{oldRoot, newRoot} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	configPath := filepath.Join(dir, "config.json")
-	configData := fmt.Sprintf(`{"allowed_root": %q, "session_ttl": "12h"}`, oldRoot)
+	configData := `{"allowed_root": "/old", "session_ttl": "12h"}`
 	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
-		runCommand:     func(cmd string, args ...string) ([]byte, error) { return []byte{}, nil },
-		readPathCon:    func(path string) (string, error) { return selinuxWorkspaceType, nil },
+		selinuxActive: func() (bool, bool, error) { return true, true, nil },
+		runCommand:    func(cmd string, args ...string) ([]byte, error) { return []byte{}, nil },
+		readPathCon:   func(path string) (string, error) { return selinuxWorkspaceType, nil },
 	}
 
 	coreCalled := false
-	err := initSystemSELinux(newRoot, &bytes.Buffer{}, &bytes.Buffer{},
+	err := initSystemSELinux("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		mgr,
 		func(ar string, so, se io.Writer) error {
 			coreCalled = true
 			return nil
 		},
+		syntheticResolveRoot,
 	)
 	if err == nil {
 		t.Fatal("expected error for config mismatch")
@@ -1027,25 +967,6 @@ func TestSELinuxWorkspaceTypeConstant(t *testing.T) {
 	}
 }
 
-// --- Home root not required for docker_helper_workspace_t ---
-
-func TestSELinuxWorkspaceTypeNotRequiredForHome(t *testing.T) {
-	mgr := &selinuxWorkspaceManager{
-		semanagePath:   "/usr/sbin/semanage",
-		restoreconPath: "/usr/sbin/restorecon",
-		selinuxActive:  func() (bool, bool, error) { return true, true, nil },
-		readPathCon: func(path string) (string, error) {
-			return "user_home_t", nil
-		},
-	}
-	if err := mgr.verifyWorkspaceLabel("/home"); err != nil {
-		t.Fatalf("expected nil for /home, got: %v", err)
-	}
-	if err := mgr.verifyWorkspaceLabel("/home/alice"); err != nil {
-		t.Fatalf("expected nil for /home/alice, got: %v", err)
-	}
-}
-
 // --- Fcontext regex no over-match ---
 
 func TestFcontextRegexNoOverMatch(t *testing.T) {
@@ -1054,5 +975,18 @@ func TestFcontextRegexNoOverMatch(t *testing.T) {
 	}
 	if pattern := fcontextPattern("/data.test"); pattern != "/data\\.test(/.*)?" {
 		t.Errorf("pattern = %q, want %q", pattern, "/data\\.test(/.*)?")
+	}
+}
+
+// --- Packaging: semanage dependency ---
+
+func TestRPMRequiresSemanageProvider(t *testing.T) {
+	data, err := os.ReadFile("packaging/nfpm.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "policycoreutils-python-utils") {
+		t.Error("RPM must depend on policycoreutils-python-utils (provides semanage)")
 	}
 }

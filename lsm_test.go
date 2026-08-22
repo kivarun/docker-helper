@@ -752,6 +752,7 @@ func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
 			coreCalled = ar
 			return nil
 		},
+		func(path string) (string, error) { return path, nil },
 	)
 	if err != nil {
 		t.Fatalf("initSystemSELinux failed: %v", err)
