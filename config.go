@@ -37,7 +37,8 @@ const systemUserUnitPath = "/usr/lib/systemd/user/docker-helper.service"
 var EffectiveUID = func() int { return os.Geteuid() }
 
 // resolveDeploymentMode determines the deployment mode from the effective UID.
-func resolveDeploymentMode() DeploymentMode {
+// Can be replaced in tests.
+var resolveDeploymentMode = func() DeploymentMode {
 	if EffectiveUID() == 0 {
 		return ModeSystem
 	}

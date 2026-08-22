@@ -339,16 +339,10 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// Detect LSM backend outside the transaction (no lock needed).
+	// Determine whether SELinux preparation may be needed.
+	// The actual detectLSM + ensureWorkspaceLabel run inside the
+	// transaction preflight, after config validation.
 	needsSELinux := resolveDeploymentMode() == ModeSystem && !isHomeRoot(canonical)
-	var selBackend LSMBackend
-	if needsSELinux {
-		selBackend, err = detectLSM()
-		if err != nil {
-			fmt.Fprintf(stderr, "error: cannot determine MAC backend: %v\n", err)
-			return 1
-		}
-	}
 
 	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
@@ -372,28 +366,33 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 			}
 		}
 
+		// SELinux preflight: runs after validation, before write or SkipWrite.
+		// SELinux preparation runs even when the root is already present.
+		var preflight func() error
+		if needsSELinux {
+			preflight = func() error {
+				return selinuxAllowedRootPreflight(canonical)
+			}
+		}
+
 		if present {
 			if !migrated {
-				return configMutationResult{SkipWrite: true, Message: fmt.Sprintf("already present %s\n", canonical)}, nil
+				return configMutationResult{
+					SkipWrite: true,
+					Message:   fmt.Sprintf("already present %s\n", canonical),
+					Preflight: preflight,
+				}, nil
 			}
 			// Legacy migration needed: write migrated config.
-			return configMutationResult{Message: fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical)}, nil
+			return configMutationResult{
+				Message:   fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
+				Preflight: preflight,
+			}, nil
 		}
 
 		// Add new root to canonical roots list.
 		rawBytes, _ := json.Marshal(append(existingRoots, canonical))
 		raw["allowed_roots"] = rawBytes
-
-		var preflight func() error
-		if needsSELinux && selBackend == LSMSelinux {
-			preflight = func() error {
-				selMgr := newSELinuxWorkspaceManager()
-				if _, err := selMgr.ensureWorkspaceLabel(canonical); err != nil {
-					return err
-				}
-				return nil
-			}
-		}
 
 		return configMutationResult{
 			Message:   fmt.Sprintf("added %s\n", canonical),
@@ -815,6 +814,23 @@ type configSetSeam struct {
 	selinuxEnsure func(root string) (bool, error)
 }
 
+// selinuxAllowedRootPreflight performs the SELinux workspace preparation
+// for allowed-root ADD. It can be replaced in tests to track invocation.
+var selinuxAllowedRootPreflight = func(root string) error {
+	backend, err := detectLSM()
+	if err != nil {
+		return fmt.Errorf("cannot determine MAC backend: %w", err)
+	}
+	if backend != LSMSelinux {
+		return nil
+	}
+	selMgr := newSELinuxWorkspaceManager()
+	if _, err := selMgr.ensureWorkspaceLabel(root); err != nil {
+		return err
+	}
+	return nil
+}
+
 // configSetWithSeam is the internal implementation of configSet that
 // respects the injection seam. The public configSet delegates here.
 func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *configSetSeam) int {
@@ -1157,22 +1173,23 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 		return 1
 	}
 
+	// Operation-specific preflight (e.g., SELinux workspace preparation).
+	// Runs after common validation, before the SkipWrite decision.
+	// This ensures SELinux preparation runs even for idempotent ADD
+	// ("already present") and only after the config is validated.
+	if result.Preflight != nil {
+		if err := result.Preflight(); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+	}
+
 	// Skip write: print message and return.
 	if result.SkipWrite {
 		if result.Message != "" {
 			fmt.Fprint(stdout, result.Message)
 		}
 		return 0
-	}
-
-	// Operation-specific preflight (e.g., SELinux workspace preparation).
-	// Runs after validation, before write. If it fails, the transaction
-	// aborts without modifying the config file.
-	if result.Preflight != nil {
-		if err := result.Preflight(); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
 	}
 
 	// Save original bytes for rollback.
@@ -1334,7 +1351,8 @@ func applyConfigChangeTransactionally(
 }
 
 // attemptReload calls POST /reload and returns a structured result with error.
-func attemptReload() reloadOutcome {
+// Can be replaced in tests.
+var attemptReload = func() reloadOutcome {
 	client, resolveErr := resolveOperatorClient(operatorClientOptions{})
 	if resolveErr != nil {
 		return reloadOutcome{reloadTransportError, resolveErr}
