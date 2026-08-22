@@ -22,8 +22,7 @@ const (
 
 // isHomeRoot returns true if the canonical path is /home or under /home.
 // The path must already be canonicalized (absolute, no symlinks).
-// Can be replaced in tests.
-var isHomeRoot = func(canonical string) bool {
+func isHomeRoot(canonical string) bool {
 	if canonical == "/home" {
 		return true
 	}

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-var (
+const (
 	systemRuntimeDir = "/run/docker-helper"
 	systemConfigDir  = "/etc/docker-helper"
 )

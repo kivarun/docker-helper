@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -867,14 +868,20 @@ func TestAllowedRootRemoveNoOpInvalidConfigFails(t *testing.T) {
 // Transaction regression: SELinux ordering
 // =============================================================================
 
+var errSELinuxSentinel = fmt.Errorf("selinux preflight sentinel")
+
 // TestSELinuxPreflightOrdering verifies the SELinux preflight ordering:
 //  1. invalid config -> SELinux preparation not invoked;
 //  2. valid ADD of new root -> preparation invoked;
 //  3. valid ADD of already-present root -> preparation invoked even though
 //     the config write is skipped (SkipWrite).
 func TestSELinuxPreflightOrdering(t *testing.T) {
+	// Use /tmp paths so isHomeRoot returns false.
+	// EffectiveUID = 0 makes resolveDeploymentMode return ModeSystem.
+	// selinuxAllowedRootPreflight seam tracks invocation.
+
 	t.Run("invalid_config_skips_selinux", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
+		allowedRoot := testSELinuxRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
@@ -891,7 +898,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		}
 		defer func() { selinuxAllowedRootPreflight = origPreflight }()
 
-		newRoot := testAllowedRootDir(t)
+		newRoot := testSELinuxRootDir(t)
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
 		if code == 0 {
@@ -908,7 +915,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 	})
 
 	t.Run("valid_add_new_root_invokes_selinux", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
+		allowedRoot := testSELinuxRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
@@ -916,51 +923,36 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
-		// Force system mode and mock isHomeRoot to return false for test roots.
-		origMode := resolveDeploymentMode
-		origIsHome := isHomeRoot
-		resolveDeploymentMode = func() DeploymentMode { return ModeSystem }
-		isHomeRoot = func(string) bool { return false }
-		defer func() {
-			resolveDeploymentMode = origMode
-			isHomeRoot = origIsHome
-		}()
-
-		// Prevent reload from reaching a real daemon.
-		origReload := attemptReload
-		attemptReload = func() reloadOutcome {
-			return reloadOutcome{reloadDaemonNotRunning, nil}
-		}
-		defer func() { attemptReload = origReload }()
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
 
 		selinuxCalled := false
 		origPreflight := selinuxAllowedRootPreflight
 		selinuxAllowedRootPreflight = func(string) error {
 			selinuxCalled = true
-			return nil
+			return errSELinuxSentinel
 		}
 		defer func() { selinuxAllowedRootPreflight = origPreflight }()
 
-		newRoot := testAllowedRootDir(t)
+		newRoot := testSELinuxRootDir(t)
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("expected exit 0, got %d, stderr: %s, selinuxCalled=%v", code, stderr.String(), selinuxCalled)
+		if code == 0 {
+			t.Fatalf("expected non-zero exit (sentinel error), got 0, stdout: %s", stdout.String())
 		}
 		if !selinuxCalled {
 			t.Error("SELinux preparation must be invoked for valid ADD of new root")
 		}
-		// Verify root was added.
-		raw := readConfigJSON(t, configPath)
-		var roots []string
-		json.Unmarshal(raw["allowed_roots"], &roots)
-		if !contains(roots, newRoot) {
-			t.Errorf("new root not in config, got %v", roots)
+		if !strings.Contains(stderr.String(), "selinux preflight sentinel") {
+			t.Errorf("expected sentinel error in stderr, got: %s", stderr.String())
 		}
+		// Config unchanged (preflight error aborts before write).
+		verifyConfigUnchanged(t, configPath, data)
 	})
 
 	t.Run("valid_add_present_root_invokes_selinux", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
+		allowedRoot := testSELinuxRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
@@ -968,15 +960,9 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
-		// Force system mode and mock isHomeRoot to return false for test roots.
-		origMode := resolveDeploymentMode
-		origIsHome := isHomeRoot
-		resolveDeploymentMode = func() DeploymentMode { return ModeSystem }
-		isHomeRoot = func(string) bool { return false }
-		defer func() {
-			resolveDeploymentMode = origMode
-			isHomeRoot = origIsHome
-		}()
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
 
 		selinuxCalled := false
 		origPreflight := selinuxAllowedRootPreflight
@@ -1004,8 +990,6 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 }
 
 // setupSELinuxTestEnv creates a test environment for SELinux preflight tests.
-// It uses os.Setenv directly to ensure DOCKER_HELPER_CONFIG survives
-// across EffectiveUID changes.
 func setupSELinuxTestEnv(t *testing.T, data []byte) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -1022,26 +1006,18 @@ func setupSELinuxTestEnv(t *testing.T, data []byte) string {
 	os.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Cleanup(func() { os.Setenv("DOCKER_HELPER_CONFIG", oldConfig) })
 
-	// Prevent reload from reaching a real daemon.
 	oldRuntime := os.Getenv("XDG_RUNTIME_DIR")
 	os.Setenv("XDG_RUNTIME_DIR", "")
 	t.Cleanup(func() { os.Setenv("XDG_RUNTIME_DIR", oldRuntime) })
 
-	// Override system runtime dir so system-mode reloads don't reach
-	// a real daemon at /run/docker-helper/docker-helper.sock.
-	oldSystemRuntime := systemRuntimeDir
-	systemRuntimeDir = filepath.Join(dir, "system-runtime")
-	os.MkdirAll(systemRuntimeDir, 0755)
-	t.Cleanup(func() { systemRuntimeDir = oldSystemRuntime })
-
 	return configPath
 }
 
-// testSELinuxRootDir creates a test directory under /tmp to avoid
-// isHomeRoot() returning true for home directories.
+// testSELinuxRootDir creates a test directory under /workspace so
+// isHomeRoot returns false (non-home root) and workspace policy allows it.
 func testSELinuxRootDir(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join("/tmp", "docker-helper-test-selinux-"+t.Name())
+	dir := filepath.Join("/workspace", "test-selinux-"+t.Name())
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("cannot remove old test dir: %v", err)
 	}

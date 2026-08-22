@@ -1351,8 +1351,7 @@ func applyConfigChangeTransactionally(
 }
 
 // attemptReload calls POST /reload and returns a structured result with error.
-// Can be replaced in tests.
-var attemptReload = func() reloadOutcome {
+func attemptReload() reloadOutcome {
 	client, resolveErr := resolveOperatorClient(operatorClientOptions{})
 	if resolveErr != nil {
 		return reloadOutcome{reloadTransportError, resolveErr}
