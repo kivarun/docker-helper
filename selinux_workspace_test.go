@@ -11,6 +11,46 @@ import (
 	"testing"
 )
 
+// testNonHomeAllowedRoot creates a directory that passes workspace-root
+// policy and is NOT under /home (so isHomeRoot returns false).
+// It tries bases that are not under /home or forbidden system trees.
+// If no suitable base is available, the test is skipped.
+func testNonHomeAllowedRoot(t *testing.T) string {
+	t.Helper()
+
+	// Candidates: try bases that are not under /home or forbidden trees.
+	// /srv, /opt, /mnt are not in the forbidden list.
+	candidates := []string{"/srv", "/opt", "/mnt"}
+
+	for _, base := range candidates {
+		if _, err := os.Stat(base); err != nil {
+			continue
+		}
+		dir, err := os.MkdirTemp(base, "docker-helper-test-*")
+		if err != nil {
+			continue
+		}
+		canonical, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			os.RemoveAll(dir)
+			continue
+		}
+		if err := validateWorkspaceRootPolicy(canonical); err != nil {
+			os.RemoveAll(dir)
+			continue
+		}
+		if isHomeRoot(canonical) {
+			os.RemoveAll(dir)
+			continue
+		}
+		t.Cleanup(func() { os.RemoveAll(canonical) })
+		return canonical
+	}
+
+	t.Skip("no writable non-home base for SELinux workspace test (need /srv, /opt, or /mnt)")
+	return ""
+}
+
 // --- Policy/static tests ---
 
 func TestSELinuxPolicyHasWorkspaceType(t *testing.T) {
@@ -667,13 +707,7 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Create a non-home root path explicitly (not under /home).
-	// Use /workspace which is not a forbidden system tree.
-	nonHomeRoot := "/workspace/test-selinux-nhroot"
-	if err := os.MkdirAll(nonHomeRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(nonHomeRoot) })
+	nonHomeRoot := testNonHomeAllowedRoot(t)
 
 	var ensureCalled bool
 	mgr := &selinuxWorkspaceManager{
@@ -742,12 +776,7 @@ func TestInitSELinuxPreparationFailureBlocksCore(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Create a non-home root path explicitly (not under /home).
-	nonHomeRoot := "/workspace/test-selinux-prepfail"
-	if err := os.MkdirAll(nonHomeRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(nonHomeRoot) })
+	nonHomeRoot := testNonHomeAllowedRoot(t)
 
 	mgr := &selinuxWorkspaceManager{
 		semanagePath:   "/usr/sbin/semanage",
@@ -790,12 +819,7 @@ func TestInitSELinuxCoreFailureRollsBackNewMapping(t *testing.T) {
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Create a non-home root path explicitly (not under /home).
-	nonHomeRoot := "/workspace/test-selinux-rollback"
-	if err := os.MkdirAll(nonHomeRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(nonHomeRoot) })
+	nonHomeRoot := testNonHomeAllowedRoot(t)
 
 	var rollbackCalled bool
 	var allCalls []string
