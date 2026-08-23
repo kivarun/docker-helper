@@ -629,7 +629,9 @@ func (a *App) waitRunCompletion(op *operation, started time.Time) {
 	// Clean up pinned mounts after cmd.Wait completes.
 	cleanupErr := cleanupPinnedMounts(op)
 	if cleanupErr != nil {
-		opLog(context.Background()).Error("pinned mount cleanup failed",
+		ctx := withSessionID(context.Background(), op.SessionID)
+		opLog(ctx).Error("pinned mount cleanup failed",
+			slog.String("operation", "run"),
 			slog.String("operation_id", op.ID),
 			slog.String("error", cleanupErr.Error()),
 		)

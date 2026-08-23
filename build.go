@@ -186,14 +186,12 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 	// Cleanup staging directory regardless of outcome.
 	if op.stagedCtx != nil {
 		if cerr := op.stagedCtx.Cleanup(); cerr != nil {
-			l := logging.snapshotLogger()
-			if l != nil {
-				l.Error("staging cleanup failed",
-					slog.String("operation", "build"),
-					slog.String("operation_id", op.ID),
-					slog.String("error", cerr.Error()),
-				)
-			}
+			ctx := withSessionID(context.Background(), op.SessionID)
+			opLog(ctx).Error("staging cleanup failed",
+				slog.String("operation", "build"),
+				slog.String("operation_id", op.ID),
+				slog.String("error", cerr.Error()),
+			)
 		}
 	}
 

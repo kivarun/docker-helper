@@ -650,14 +650,6 @@ func TestCompletionAllowedRootPartialActionNoPathCompletion(t *testing.T) {
 	if len(results) != 1 || results[0] != "list" {
 		t.Errorf("expected [list], got %v", results)
 	}
-
-	// After partial action "li" and a path, the generic completion returns
-	// all subcommands because "li" is not a recognized subcommand.
-	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "li", "/some/path", ""})
-	// With the command tree, unrecognized partial actions fall through to
-	// generic subcommand completion which returns all subcommands.
-	// This is acceptable: the user should use a valid subcommand.
-	_ = results // no assertion needed; behavior is documented
 }
 
 func TestCompletionNoWorkspaceRoot(t *testing.T) {

@@ -977,3 +977,233 @@ func countAuditEvents(buf *bytes.Buffer, event, result string) int {
 	}
 	return count
 }
+
+// TestRunPinnedMountCleanupCorrelation verifies that when pinned mount cleanup
+// fails during run completion, the operational log contains the correct
+// correlation fields: operation=run, operation_id, session_id, error.
+func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	defer logging.reset()
+
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+	app.Config.Mode = ModeSystem
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	token := result.Token
+
+	// Inject a pinned mount with a failing Cleanup.
+	sentinelErr := errors.New("injected pinned mount cleanup error")
+	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			HostPath: "/tmp/test-mount",
+			cleanup: func() error {
+				return sentinelErr
+			},
+		}, nil
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":".","target":"/workspace"}]}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	// Wait for the operation to complete.
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+	op.Wait()
+
+	// Parse operational JSON and find the cleanup log.
+	opOutput := opBuf.String()
+	foundCleanup := false
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		msg, _ := rec["msg"].(string)
+		if msg != "pinned mount cleanup failed" {
+			continue
+		}
+		foundCleanup = true
+
+		// Assert operation == "run".
+		opField, ok := rec["operation"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing operation field")
+		}
+		if opField != "run" {
+			t.Errorf("cleanup log operation = %q, want \"run\"", opField)
+		}
+
+		// Assert operation_id is non-empty and matches.
+		opIDField, ok := rec["operation_id"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing operation_id field")
+		}
+		if opIDField == "" {
+			t.Error("cleanup log operation_id is empty")
+		}
+		if opIDField != opID {
+			t.Errorf("operation_id = %q, want %q", opIDField, opID)
+		}
+
+		// Assert session_id is non-empty and matches.
+		sid, ok := rec["session_id"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing session_id field")
+		}
+		if sid == "" {
+			t.Error("cleanup log session_id is empty")
+		}
+		if sid != result.Session.ID {
+			t.Errorf("session_id = %q, want %q", sid, result.Session.ID)
+		}
+
+		// Assert the error contains our sentinel.
+		errField, _ := rec["error"].(string)
+		if !strings.Contains(errField, sentinelErr.Error()) {
+			t.Errorf("cleanup log error = %q, expected to contain %q", errField, sentinelErr.Error())
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
+	}
+}
+
+// TestBuildStagingCleanupCorrelation verifies that when staging cleanup
+// fails during build completion, the operational log contains the correct
+// correlation fields: operation=build, operation_id, session_id, error.
+func TestBuildStagingCleanupCorrelation(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	defer logging.reset()
+
+	app, _, result, token := setupBuildTest(t)
+
+	// Inject a staging seam with a failing Cleanup.
+	sentinelErr := errors.New("injected staging cleanup error")
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelErr)
+
+	// Create a real build context so staging succeeds.
+	ctxDir := result.Session.Workspace
+	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	// Wait for the operation to complete.
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+	op.Wait()
+
+	// Parse operational JSON and find the cleanup log.
+	opOutput := opBuf.String()
+	foundCleanup := false
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		msg, _ := rec["msg"].(string)
+		if msg != "staging cleanup failed" {
+			continue
+		}
+		foundCleanup = true
+
+		// Assert operation == "build".
+		opField, ok := rec["operation"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing operation field")
+		}
+		if opField != "build" {
+			t.Errorf("cleanup log operation = %q, want \"build\"", opField)
+		}
+
+		// Assert operation_id is non-empty and matches.
+		opIDField, ok := rec["operation_id"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing operation_id field")
+		}
+		if opIDField == "" {
+			t.Error("cleanup log operation_id is empty")
+		}
+		if opIDField != opID {
+			t.Errorf("operation_id = %q, want %q", opIDField, opID)
+		}
+
+		// Assert session_id is non-empty and matches.
+		sid, ok := rec["session_id"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing session_id field")
+		}
+		if sid == "" {
+			t.Error("cleanup log session_id is empty")
+		}
+		if sid != result.Session.ID {
+			t.Errorf("session_id = %q, want %q", sid, result.Session.ID)
+		}
+
+		// Assert the error contains our sentinel.
+		errField, _ := rec["error"].(string)
+		if !strings.Contains(errField, sentinelErr.Error()) {
+			t.Errorf("cleanup log error = %q, expected to contain %q", errField, sentinelErr.Error())
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
+	}
+}
