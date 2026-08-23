@@ -49,9 +49,10 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 		{"under proc", "/proc/1", true, "under forbidden system directory"},
 		{"under sys", "/sys/kernel", true, "under forbidden system directory"},
 
-		// Forbidden wide namespaces (exact match only) — /home
-		// is exempted for root via admin bypass. /opt is now allowed.
+		// Forbidden wide namespaces (exact match only) — /home and /opt
+		// are exempted for root via admin bypass.
 		{"wide namespace home", "/home", !isRoot, "too broad"},
+		{"wide namespace opt", "/opt", !isRoot, "too broad"},
 		{"wide namespace srv", "/srv", true, "too broad"},
 		{"wide namespace mnt", "/mnt", true, "too broad"},
 		{"wide namespace media", "/media", true, "too broad"},
@@ -60,7 +61,7 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 		{"sub of home", "/home/user", false, ""},
 		{"sub of home deep", "/home/user/workspaces", false, ""},
 		{"sub of opt", "/opt/project", false, ""},
-		{"opt allowed", "/opt", false, ""},
+		{"sub of opt deep", "/opt/docker-helper", false, ""},
 		{"sub of srv", "/srv/data", false, ""},
 		{"sub of mnt", "/mnt/data", false, ""},
 		{"sub of media", "/media/usb", false, ""},
@@ -105,12 +106,12 @@ func TestValidateWorkspaceRootPolicy(t *testing.T) {
 		{"relative path dot", "./path", true},
 		{"valid abs", "/data/work", false},
 		{"valid home subdir", "/home/user/work", false},
-		{"valid opt", "/opt", false},
 		{"valid opt subdir", "/opt/agents", false},
 		{"forbidden root", "/", true},
 		{"forbidden system", "/etc", true},
 		{"forbidden under system", "/etc/passwd", true},
-		{"forbidden wide ns", "/home", !isRoot},
+		{"forbidden wide ns home", "/home", !isRoot},
+		{"forbidden wide ns opt", "/opt", !isRoot},
 		{"forbidden tmp", "/tmp", true},
 		{"forbidden under tmp", "/tmp/work", true},
 	}
@@ -252,17 +253,122 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 		}
 	})
 
-	t.Run("opt allowed for root", func(t *testing.T) {
+	t.Run("root allowed opt", func(t *testing.T) {
 		EffectiveUID = func() int { return 0 }
 		if err := isForbiddenWorkspaceRoot("/opt"); err != nil {
 			t.Errorf("root /opt should be allowed, got: %v", err)
 		}
 	})
 
-	t.Run("opt allowed for non-root", func(t *testing.T) {
+	t.Run("non-root blocked opt", func(t *testing.T) {
 		EffectiveUID = func() int { return 1000 }
-		if err := isForbiddenWorkspaceRoot("/opt"); err != nil {
-			t.Errorf("non-root /opt should be allowed, got: %v", err)
+		err := isForbiddenWorkspaceRoot("/opt")
+		if err == nil {
+			t.Error("non-root /opt should be blocked")
 		}
 	})
+}
+
+// TestWideNamespaceExactRootPolicy tests the exact /home and /opt root-only
+// rule with explicit EffectiveUID mocking, covering both root and non-root
+// scenarios for both paths plus preserved representative policy.
+func TestWideNamespaceExactRootPolicy(t *testing.T) {
+	original := EffectiveUID
+	defer func() { EffectiveUID = original }()
+
+	tests := []struct {
+		name    string
+		uid     int
+		path    string
+		wantErr bool
+		errSub  string
+	}{
+		// Non-root: exact /home and /opt rejected
+		{"non-root /home", 1000, "/home", true, "too broad"},
+		{"non-root /opt", 1000, "/opt", true, "too broad"},
+		// Non-root: descendants allowed
+		{"non-root /home/alice", 1000, "/home/alice", false, ""},
+		{"non-root /opt/workspaces", 1000, "/opt/workspaces", false, ""},
+		// Root: exact /home and /opt allowed
+		{"root /home", 0, "/home", false, ""},
+		{"root /opt", 0, "/opt", false, ""},
+		// Root: descendants still allowed
+		{"root /home/alice", 0, "/home/alice", false, ""},
+		{"root /opt/workspaces", 0, "/opt/workspaces", false, ""},
+		// Preserved representative policy
+		{"non-root /", 1000, "/", true, "filesystem root"},
+		{"non-root /etc", 1000, "/etc", true, "forbidden system directory"},
+		{"non-root /etc/foo", 1000, "/etc/foo", true, "under forbidden system directory"},
+		{"non-root /srv", 1000, "/srv", true, "too broad"},
+		{"non-root /srv/workspaces", 1000, "/srv/workspaces", false, ""},
+		{"root /srv", 0, "/srv", true, "too broad"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			EffectiveUID = func() int { return tt.uid }
+			err := isForbiddenWorkspaceRoot(tt.path)
+			if tt.wantErr && err == nil {
+				t.Errorf("isForbiddenWorkspaceRoot(%q) = nil, want error", tt.path)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("isForbiddenWorkspaceRoot(%q) = %v, want nil", tt.path, err)
+			}
+			if tt.wantErr && tt.errSub != "" && err != nil {
+				if !strings.Contains(err.Error(), tt.errSub) {
+					t.Errorf("error = %q, want contains %q", err.Error(), tt.errSub)
+				}
+			}
+		})
+	}
+}
+
+// TestCanonicalSymlinkToExactWideNamespace verifies that a symlink whose
+// canonical target is exact /home or /opt is rejected for non-root.
+func TestCanonicalSymlinkToExactWideNamespace(t *testing.T) {
+	original := EffectiveUID
+	defer func() { EffectiveUID = original }()
+
+	EffectiveUID = func() int { return 1000 }
+
+	linkParent := testAllowedRootDir(t)
+
+	// Symlink to exact /home
+	linkPath := filepath.Join(linkParent, "home-link")
+	if err := os.Symlink("/home", linkPath); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	defer os.Remove(linkPath)
+
+	_, err := canonicalizeWorkspaceRootForAdd(linkPath)
+	if err == nil {
+		t.Error("symlink to exact /home should be rejected for non-root")
+	}
+
+	// Symlink to exact /opt
+	linkPath2 := filepath.Join(linkParent, "opt-link")
+	if err := os.Symlink("/opt", linkPath2); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	defer os.Remove(linkPath2)
+
+	_, err = canonicalizeWorkspaceRootForAdd(linkPath2)
+	if err == nil {
+		t.Error("symlink to exact /opt should be rejected for non-root")
+	}
+}
+
+// TestInitRejectsExactOptNonRoot proves that the shared workspace-root
+// validator is used by the init path: non-root cannot use exact /opt
+// as an allowed root during initialization.
+func TestInitRejectsExactOptNonRoot(t *testing.T) {
+	original := EffectiveUID
+	defer func() { EffectiveUID = original }()
+
+	EffectiveUID = func() int { return 1000 }
+
+	_, err := resolveAllowedRoot("/opt")
+	if err == nil {
+		t.Error("non-root resolveAllowedRoot(/opt) should be rejected")
+	}
 }

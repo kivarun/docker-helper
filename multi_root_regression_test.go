@@ -886,6 +886,12 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
+		// Mock root so /opt passes the workspace root check;
+		// the test is about config validation, not root policy.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
 		selinuxCalled := false
 		origPreflight := selinuxAllowedRootPreflight
 		selinuxAllowedRootPreflight = func(string) error {

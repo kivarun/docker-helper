@@ -33,6 +33,7 @@ var forbiddenSystemTrees = []string{
 // workspace roots themselves, but their subdirectories are allowed.
 var forbiddenWideNamespaces = []string{
 	"/home",
+	"/opt",
 	"/srv",
 	"/mnt",
 	"/media",
@@ -42,6 +43,7 @@ var forbiddenWideNamespaces = []string{
 // as workspace roots. Non-root users are still blocked.
 var adminWideNamespaceOverrides = []string{
 	"/home",
+	"/opt",
 }
 
 func isAdminWideNamespaceOverride(ns string) bool {
@@ -58,8 +60,7 @@ func isAdminWideNamespaceOverride(ns string) bool {
 // of wide namespaces (e.g., /home/user is allowed, /home is not).
 // It DOES reject system trees and everything under them (e.g., /var/lib/foo is
 // rejected because /var is a system tree).
-// When running as root (uid 0), /home is permitted as a workspace root.
-// /opt is now an ordinary allowed namespace for both root and non-root.
+// When running as root (uid 0), /home and /opt are permitted as workspace roots.
 func isForbiddenWorkspaceRoot(canonical string) error {
 	if canonical == "/" {
 		return fmt.Errorf("workspace root cannot be the filesystem root /")
