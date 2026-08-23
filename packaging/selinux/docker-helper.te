@@ -2,8 +2,18 @@
 #
 # Model: docker-helper validates and accesses workspaces that retain their
 # normal host labels (user_home_type) for /home paths. Non-home system
-# allowed_roots (e.g., /opt, /data) are persistently managed under
-# docker_helper_workspace_t via semanage fcontext + restorecon.
+# workspace roots are persistently managed under docker_helper_workspace_t
+# via semanage fcontext + restorecon when explicitly prepared by
+# docker-helper workspace-root add or docker-helper init.
+#
+# allowed_roots is an authorization ceiling only. It does not implicitly
+# become a managed relabel boundary. The common workflow:
+#
+#   docker-helper config allowed-root add /opt
+#       authorization-only (no MAC state change)
+#
+#   docker-helper workspace-root add /opt/workspaces
+#       authorization + explicit managed relabel for that subtree
 #
 # Integration mechanism: raw checkmodule policy with container-selinux
 # attributes. docker_helper_container_t carries both container_domain and
@@ -20,7 +30,7 @@
 #   - container_file_t rootfs access (full create/write/rename/unlink,
 #     directory management, ELF mmap/execute, Unix sockets)
 #   - user_home_type workspace access (for /home paths)
-#   - docker_helper_workspace_t workspace access (for non-home system roots)
+#   - docker_helper_workspace_t workspace access (for managed non-home roots)
 #
 # Why raw checkmodule (not m4/refpolicy):
 #   - The module is a small addition to the existing container-selinux policy.
@@ -98,9 +108,9 @@ type docker_helper_config_t, file_type;
 type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
 
-# Dedicated workspace type for non-home system allowed_roots.
-# Managed persistently via semanage fcontext + restorecon by docker-helper init
-# and config set. /home paths use user_home_type and are NOT relabelled.
+# Dedicated workspace type for explicitly managed non-home system roots.
+# Applied via semanage fcontext + restorecon by docker-helper workspace-root add
+# and docker-helper init. /home paths use user_home_type and are NOT relabelled.
 type docker_helper_workspace_t, file_type;
 
 # Custom container domain for docker-helper containers.
@@ -194,7 +204,7 @@ allow docker_helper_t user_home_dir_t:dir { getattr search };
 
 # Non-home system workspace access (docker_helper_workspace_t).
 # Same read/traversal permissions as user_home_type for the daemon.
-# Applied persistently via semanage fcontext + restorecon for non-home roots.
+# Applied persistently via semanage fcontext + restorecon for managed non-home roots.
 
 # docker_helper_workspace_t:dir — workspace directory traversal and access
 allow docker_helper_t docker_helper_workspace_t:dir { getattr search read open };
@@ -259,15 +269,62 @@ allow docker_helper_container_t container_file_t:chr_file { create getattr read 
 allow docker_helper_container_t container_file_t:blk_file { create getattr read append ioctl };
 allow docker_helper_container_t container_file_t:fifo_file { create getattr read write append ioctl watch };
 
-# docker_helper_container_t can access user_home_type workspaces (bind-mounted).
-# This is the ONLY extra permission beyond standard container-selinux policy
-# for /home paths.
-allow docker_helper_container_t user_home_type:dir { getattr search read open write add_name remove_name create rmdir };
-allow docker_helper_container_t user_home_type:file { read open getattr create write setattr lock unlink rename };
-allow docker_helper_container_t user_home_type:lnk_file { read create unlink };
+# --- Container workspace access ---
+#
+# Both user_home_type (for /home paths) and docker_helper_workspace_t
+# (for explicitly managed non-home roots) receive equivalent container-side
+# development-tree semantics: regular file management, directory management,
+# symlink lifecycle, chmod/setattr, executable build/run, mmap/ELF loading,
+# Unix sockets, and FIFOs.
 
-# docker_helper_container_t can access docker_helper_workspace_t workspaces (bind-mounted).
-# Same read/write permissions as user_home_type for non-home system roots.
-allow docker_helper_container_t docker_helper_workspace_t:dir { getattr search read open write add_name remove_name create rmdir };
-allow docker_helper_container_t docker_helper_workspace_t:file { read open getattr create write setattr lock unlink rename };
-allow docker_helper_container_t docker_helper_workspace_t:lnk_file { read create unlink };
+# user_home_type: regular files — create, read/write, build, execute
+allow docker_helper_container_t user_home_type:file {
+	read write create getattr setattr lock open ioctl append
+	unlink rename execute execute_no_trans map
+};
+
+# user_home_type: directories — normal POSIX tree management
+allow docker_helper_container_t user_home_type:dir {
+	read open search add_name remove_name create rmdir getattr setattr write ioctl
+};
+
+# user_home_type: symlinks — normal development-tree symlink lifecycle
+allow docker_helper_container_t user_home_type:lnk_file {
+	read create getattr unlink write
+};
+
+# user_home_type: Unix-domain socket filesystem nodes
+allow docker_helper_container_t user_home_type:sock_file {
+	create getattr read write append ioctl setattr unlink
+};
+
+# user_home_type: FIFOs
+allow docker_helper_container_t user_home_type:fifo_file {
+	create getattr read write append ioctl watch
+};
+
+# docker_helper_workspace_t: regular files — create, read/write, build, execute
+allow docker_helper_container_t docker_helper_workspace_t:file {
+	read write create getattr setattr lock open ioctl append
+	unlink rename execute execute_no_trans map
+};
+
+# docker_helper_workspace_t: directories — normal POSIX tree management
+allow docker_helper_container_t docker_helper_workspace_t:dir {
+	read open search add_name remove_name create rmdir getattr setattr write ioctl
+};
+
+# docker_helper_workspace_t: symlinks — normal development-tree symlink lifecycle
+allow docker_helper_container_t docker_helper_workspace_t:lnk_file {
+	read create getattr unlink write
+};
+
+# docker_helper_workspace_t: Unix-domain socket filesystem nodes
+allow docker_helper_container_t docker_helper_workspace_t:sock_file {
+	create getattr read write append ioctl setattr unlink
+};
+
+# docker_helper_workspace_t: FIFOs
+allow docker_helper_container_t docker_helper_workspace_t:fifo_file {
+	create getattr read write append ioctl watch
+};
