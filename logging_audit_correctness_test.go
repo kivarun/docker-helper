@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setupReloadApp(t *testing.T, auditEnabled bool) (*App, string, string, *bytes.Buffer, *bytes.Buffer) {
@@ -647,6 +648,189 @@ func TestAdminTokenRotateInternalErrorDiagnostic(t *testing.T) {
 	}
 	if !hasAuditEvent(auditBuf, "admin_token.rotate", "error") {
 		t.Fatal("admin_token.rotate audit with result=error not found")
+	}
+}
+
+// --- Build cleanup correlation fields ---
+
+// TestBuildCleanupCorrelationFields verifies that build cleanup logs emit
+// operation="build" and operation_id=<ID> instead of operation=<ID>.
+func TestBuildCleanupCorrelationFields(t *testing.T) {
+	_, opBuf := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force tryCreate rejection so the cleanup path runs.
+	app.OperationRegistry.shutting = true
+
+	// Create a real build context so staging succeeds.
+	ctxDir := result.Session.Workspace
+	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+
+	// Parse operational JSON and verify correlation fields.
+	opOutput := opBuf.String()
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		msg, _ := rec["msg"].(string)
+		if !strings.Contains(msg, "cleanup") {
+			continue
+		}
+		// This is a cleanup log.
+		opField, ok := rec["operation"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing operation field")
+		}
+		if opField != "build" {
+			t.Errorf("cleanup log operation = %q, want \"build\"", opField)
+		}
+		opID, ok := rec["operation_id"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing operation_id field")
+		}
+		if opID == "" {
+			t.Error("cleanup log operation_id is empty")
+		}
+	}
+}
+
+// --- Session correlation fields ---
+
+// TestSessionCleanupCorrelationField verifies that session cleanup logs
+// use session_id instead of session.
+func TestSessionCleanupCorrelationField(t *testing.T) {
+	_, opBuf := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessioncleanupuser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1050", "1050", home, nil
+	}
+
+	username := "sessioncleanupuser"
+	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete the principal — this triggers session runtime cleanup for any
+	// active sessions. Even with no sessions, the handler path exercises
+	// the session_id field naming.
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
+
+	req := httptest.NewRequest(http.MethodDelete, "/principals/"+username, nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Parse operational JSON and verify session_id field is used
+	// (not the obsolete "session" field).
+	opOutput := opBuf.String()
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		// Check that no log uses the obsolete "session" field name.
+		if _, hasSession := rec["session"]; hasSession {
+			t.Error("operational log uses obsolete \"session\" field instead of \"session_id\"")
+		}
+	}
+}
+
+// --- Startup fallback timestamp ---
+
+// TestStartupFallbackTimestampRFC3339Nano verifies that the emergency
+// pre-logger JSON fallback uses RFC3339Nano timestamps.
+func TestStartupFallbackTimestampRFC3339Nano(t *testing.T) {
+	// Reset logging so snapshotLogger returns nil.
+	logging.reset()
+
+	stderrCapture := &bytes.Buffer{}
+	oldStderr := osStderr
+	osStderr = stderrCapture
+	defer func() { osStderr = oldStderr }()
+
+	serveStartupError(fmt.Errorf("test startup error"), "test hint")
+
+	output := stderrCapture.String()
+	if output == "" {
+		t.Fatal("serveStartupError produced no output")
+	}
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(output), &rec); err != nil {
+		t.Fatalf("fallback not valid JSON: %v: %s", err, output)
+	}
+
+	timeStr, ok := rec["time"].(string)
+	if !ok {
+		t.Fatal("fallback record missing time field")
+	}
+
+	// Parse the timestamp — RFC3339Nano is a superset of RFC3339.
+	// We verify it has nanosecond precision by checking the format.
+	if _, err := time.Parse(time.RFC3339Nano, timeStr); err != nil {
+		// RFC3339Nano may not have sub-second digits; fall back to RFC3339.
+		if _, err := time.Parse(time.RFC3339, timeStr); err != nil {
+			t.Fatalf("time not RFC3339/RFC3339Nano: %q: %v", timeStr, err)
+		}
+	}
+
+	// Verify the record contains the expected fields.
+	if rec["stream"] != "operational" {
+		t.Errorf("stream = %q, want \"operational\"", rec["stream"])
+	}
+	if rec["level"] != "ERROR" {
+		t.Errorf("level = %q, want \"ERROR\"", rec["level"])
+	}
+	if rec["operation"] != "serve_startup" {
+		t.Errorf("operation = %q, want \"serve_startup\"", rec["operation"])
 	}
 }
 

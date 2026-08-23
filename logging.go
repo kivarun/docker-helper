@@ -263,7 +263,7 @@ func serveStartupError(err error, hint string) {
 	// Fallback before logging is initialized: emit structured JSON to stderr.
 	record := map[string]any{
 		"stream":    "operational",
-		"time":      time.Now().UTC().Format(time.RFC3339),
+		"time":      time.Now().UTC().Format(time.RFC3339Nano),
 		"level":     "ERROR",
 		"msg":       "daemon startup failed",
 		"operation": "serve_startup",

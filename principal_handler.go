@@ -248,7 +248,7 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 			if err := cleanupSessionRuntimeDir(a.Config.RuntimeDir, sessionID); err != nil {
 				opLog(ctx).Warn("failed to clean up session runtime directory",
 					slog.String("operation", "principal_disable"),
-					slog.String("session", sessionID),
+					slog.String("session_id", sessionID),
 					slog.String("error", err.Error()),
 				)
 			}
@@ -807,7 +807,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 		if err := cleanupSessionRuntimeDir(a.Config.RuntimeDir, sessionID); err != nil {
 			opLog(ctx).Warn("failed to clean up session runtime directory",
 				slog.String("operation", "principal_delete"),
-				slog.String("session", sessionID),
+				slog.String("session_id", sessionID),
 				slog.String("error", err.Error()),
 			)
 		}

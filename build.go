@@ -83,7 +83,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if !a.OperationRegistry.tryCreate(op) {
 			if err := staged.Cleanup(); err != nil {
 				opLog(ctx).Error("staging cleanup failed after tryCreate rejection",
-					slog.String("operation", op.ID),
+					slog.String("operation", "build"),
+					slog.String("operation_id", op.ID),
 					slog.String("error", err.Error()),
 				)
 			}
@@ -131,7 +132,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err := staged.Cleanup(); err != nil {
 			opLog(ctx).Error("staging cleanup failed after pre-start termination",
-				slog.String("operation", op.ID),
+				slog.String("operation", "build"),
+				slog.String("operation_id", op.ID),
 				slog.String("error", err.Error()),
 			)
 		}
@@ -149,7 +151,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		if err := staged.Cleanup(); err != nil {
 			opLog(ctx).Error("staging cleanup failed after start error",
-				slog.String("operation", op.ID),
+				slog.String("operation", "build"),
+				slog.String("operation_id", op.ID),
 				slog.String("error", err.Error()),
 			)
 		}
@@ -186,7 +189,8 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 			l := logging.snapshotLogger()
 			if l != nil {
 				l.Error("staging cleanup failed",
-					slog.String("operation", op.ID),
+					slog.String("operation", "build"),
+					slog.String("operation_id", op.ID),
 					slog.String("error", cerr.Error()),
 				)
 			}
