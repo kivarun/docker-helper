@@ -228,319 +228,6 @@ func insertTestSessionTx(db *sql.DB, sessionID, workspace string) error {
 	return err
 }
 
-// TestBuildTryCreateStagingBeforeLease verifies that in the build tryCreate
-// rejection path, staging cleanup happens before the lease is released.
-// This tests the code ordering in build.go.
-func TestBuildTryCreateStagingBeforeLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
-	})
-	if err != nil {
-		t.Fatalf("CreateSessionBinding: %v", err)
-	}
-
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
-	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
-	}
-
-	// Create staging directory.
-	stagedDir := filepath.Join(app.Config.RuntimeDir, "staged-test")
-	if err := os.MkdirAll(stagedDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	staged := &stagedBuildContext{
-		ContextPath:    stagedDir,
-		DockerfilePath: filepath.Join(stagedDir, "Dockerfile"),
-		cleanupPath:    stagedDir,
-	}
-
-	// Set registry to shutting down to simulate tryCreate rejection.
-	app.OperationRegistry.setShuttingDown()
-
-	// Track cleanup order.
-	var cleanupOrder []string
-
-	// Override removeAll to track order.
-	staged.removeAll = func(path string) error {
-		cleanupOrder = append(cleanupOrder, "staging_cleanup")
-		return os.RemoveAll(path)
-	}
-
-	// Override lease release to track order.
-	origLeaseRelease := leaseRelease
-	leaseRelease = func() {
-		cleanupOrder = append(cleanupOrder, "lease_release")
-		origLeaseRelease()
-	}
-
-	// Simulate the tryCreate rejection path (from build.go):
-	// Cleanup staging before releasing lease.
-	if err := staged.Cleanup(); err != nil {
-		t.Logf("staging cleanup error: %v", err)
-	}
-	if leaseRelease != nil {
-		leaseRelease()
-	}
-
-	// Verify order: staging cleanup before lease release.
-	if len(cleanupOrder) != 2 {
-		t.Fatalf("expected 2 cleanup events, got %d: %v", len(cleanupOrder), cleanupOrder)
-	}
-	if cleanupOrder[0] != "staging_cleanup" {
-		t.Errorf("expected staging_cleanup first, got %v", cleanupOrder)
-	}
-	if cleanupOrder[1] != "lease_release" {
-		t.Errorf("expected lease_release second, got %v", cleanupOrder)
-	}
-}
-
-// TestRunPinFailurePinsBeforeLease verifies that in the run pinMount failure
-// path, pins are cleaned up before the lease is released.
-func TestRunPinFailurePinsBeforeLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
-	})
-	if err != nil {
-		t.Fatalf("CreateSessionBinding: %v", err)
-	}
-
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
-	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
-	}
-
-	// Create a pinned mount with tracked cleanup.
-	pinDir := filepath.Join(app.Config.RuntimeDir, "pin-test")
-	if err := os.MkdirAll(pinDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pinFile := filepath.Join(pinDir, "pin")
-	if err := os.WriteFile(pinFile, []byte("test"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var cleanupOrder []string
-	pinnedMounts := []*pinnedMount{
-		{
-			HostPath: pinFile,
-			cleanup: func() error {
-				cleanupOrder = append(cleanupOrder, "pin_cleanup")
-				return os.Remove(pinFile)
-			},
-		},
-	}
-
-	// Override lease release to track order.
-	origLeaseRelease := leaseRelease
-	leaseRelease = func() {
-		cleanupOrder = append(cleanupOrder, "lease_release")
-		origLeaseRelease()
-	}
-
-	// Simulate the pinMount failure path (from run.go):
-	// Cleanup pins before releasing lease.
-	for j := len(pinnedMounts) - 1; j >= 0; j-- {
-		if ce := pinnedMounts[j].Cleanup(); ce != nil {
-			t.Logf("pin cleanup error: %v", ce)
-		}
-	}
-	if leaseRelease != nil {
-		leaseRelease()
-	}
-
-	// Verify order: pin cleanup before lease release.
-	if len(cleanupOrder) != 2 {
-		t.Fatalf("expected 2 cleanup events, got %d: %v", len(cleanupOrder), cleanupOrder)
-	}
-	if cleanupOrder[0] != "pin_cleanup" {
-		t.Errorf("expected pin_cleanup first, got %v", cleanupOrder)
-	}
-	if cleanupOrder[1] != "lease_release" {
-		t.Errorf("expected lease_release second, got %v", cleanupOrder)
-	}
-}
-
-// TestRunTryCreatePinsBeforeLease verifies that in the run tryCreate rejection
-// path, pins are cleaned up before the lease is released.
-func TestRunTryCreatePinsBeforeLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
-	})
-	if err != nil {
-		t.Fatalf("CreateSessionBinding: %v", err)
-	}
-
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
-	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
-	}
-
-	// Create a pinned mount with tracked cleanup.
-	pinDir := filepath.Join(app.Config.RuntimeDir, "pin-test")
-	if err := os.MkdirAll(pinDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pinFile := filepath.Join(pinDir, "pin")
-	if err := os.WriteFile(pinFile, []byte("test"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var cleanupOrder []string
-	pinnedMounts := []*pinnedMount{
-		{
-			HostPath: pinFile,
-			cleanup: func() error {
-				cleanupOrder = append(cleanupOrder, "pin_cleanup")
-				return os.Remove(pinFile)
-			},
-		},
-	}
-
-	// Override lease release to track order.
-	origLeaseRelease := leaseRelease
-	leaseRelease = func() {
-		cleanupOrder = append(cleanupOrder, "lease_release")
-		origLeaseRelease()
-	}
-
-	// Simulate the tryCreate rejection path (from run.go):
-	// Cleanup pins before releasing lease.
-	for j := len(pinnedMounts) - 1; j >= 0; j-- {
-		if ce := pinnedMounts[j].Cleanup(); ce != nil {
-			t.Logf("pin cleanup error: %v", ce)
-		}
-	}
-	if leaseRelease != nil {
-		leaseRelease()
-	}
-
-	// Verify order: pin cleanup before lease release.
-	if len(cleanupOrder) != 2 {
-		t.Fatalf("expected 2 cleanup events, got %d: %v", len(cleanupOrder), cleanupOrder)
-	}
-	if cleanupOrder[0] != "pin_cleanup" {
-		t.Errorf("expected pin_cleanup first, got %v", cleanupOrder)
-	}
-	if cleanupOrder[1] != "lease_release" {
-		t.Errorf("expected lease_release second, got %v", cleanupOrder)
-	}
-}
-
-// TestRunStartFailureCleanupBeforeLease verifies that in the run start error
-// and pre-start termination paths, cidfile and pin cleanup happens before
-// the lease is released.
-func TestRunStartFailureCleanupBeforeLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
-	})
-	if err != nil {
-		t.Fatalf("CreateSessionBinding: %v", err)
-	}
-
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
-	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
-	}
-
-	// Create operation with cidfile.
-	op := newRunOperation("sess-1", "alpine", 4*1024*1024, "")
-	op.cidfile = filepath.Join(app.Config.RuntimeDir, "test.cid")
-	if err := os.WriteFile(op.cidfile, []byte("container-id"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	op.macLeaseRelease = leaseRelease
-
-	// Create a pinned mount with tracked cleanup.
-	pinDir := filepath.Join(app.Config.RuntimeDir, "pin-test")
-	if err := os.MkdirAll(pinDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pinFile := filepath.Join(pinDir, "pin")
-	if err := os.WriteFile(pinFile, []byte("test"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var cleanupOrder []string
-	op.pinnedMounts = []*pinnedMount{
-		{
-			HostPath: pinFile,
-			cleanup: func() error {
-				cleanupOrder = append(cleanupOrder, "pin_cleanup")
-				return os.Remove(pinFile)
-			},
-		},
-	}
-
-	// Override lease release to track order.
-	origLeaseRelease := op.macLeaseRelease
-	op.macLeaseRelease = func() {
-		cleanupOrder = append(cleanupOrder, "lease_release")
-		origLeaseRelease()
-	}
-
-	// Simulate the start error / pre-start termination path (from run.go):
-	// Cleanup cidfile and pins before releasing lease.
-	cleanupCidfile(op)
-	cleanupOrder = append(cleanupOrder, "cidfile_cleanup")
-	if ce := cleanupPinnedMounts(op); ce != nil {
-		t.Logf("pin cleanup error: %v", ce)
-	}
-	if op.macLeaseRelease != nil {
-		op.macLeaseRelease()
-	}
-
-	// Verify order: cidfile and pin cleanup before lease release.
-	if len(cleanupOrder) != 3 {
-		t.Fatalf("expected 3 cleanup events, got %d: %v", len(cleanupOrder), cleanupOrder)
-	}
-	if cleanupOrder[2] != "lease_release" {
-		t.Errorf("expected lease_release last, got %v", cleanupOrder)
-	}
-}
-
 // TestDBInsertFailurePreservesOwnership verifies that when a session DB insert
 // fails and boundary removal also fails, ownership metadata is preserved.
 func TestDBInsertFailurePreservesOwnership(t *testing.T) {
@@ -2253,7 +1940,8 @@ func TestSELinuxRealBackendEnsureCreatesNewBoundary(t *testing.T) {
 }
 
 func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
-	// No persistent boundary -> verifyCoverage fails -> ensureCoverage creates it.
+	// No persistent boundary -> ReconcileLiveSessions calls verifyCoverage (fails)
+	// -> ensureCoverage (succeeds) -> durable coverage created.
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -2266,8 +1954,7 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	// Start with no boundary, verify fails.
-	// After ensureWorkspaceLabel, boundary exists.
+	// Seam: no persistent boundary initially, ensureCoverage creates one.
 	seam := &selinuxSeam{
 		coveringBoundaries: nil,
 		actualTypeErr:      nil,
@@ -2275,35 +1962,48 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 		ensureErr:          nil,
 	}
 	backend := &macBackendSELinux{mgr: seam}
+	mac := newWorkspaceMACLifecycle(db, backend)
 
-	// verifyCoverage must fail (no persistent boundary).
-	_, err = backend.verifyCoverage("/data/workspace")
-	if err == nil {
-		t.Fatal("verifyCoverage must fail without persistent boundary")
-	}
-
-	// ensureCoverage creates the persistent boundary.
-	cov, changed, err := backend.ensureCoverage("/data/workspace")
+	// Insert a live session so ReconcileLiveSessions has something to reconcile.
+	workspace := "/data/workspace"
+	_, err = db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		"sess-reconcile", "hash", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
 	if err != nil {
-		t.Fatalf("ensureCoverage failed: %v", err)
-	}
-	if !changed {
-		t.Error("ensureCoverage should report changed")
-	}
-	if cov.Boundary != "/data/workspace" {
-		t.Errorf("expected boundary /data/workspace, got %s", cov.Boundary)
+		t.Fatalf("insert session: %v", err)
 	}
 
-	// Update seam to reflect the new boundary.
-	seam.coveringBoundaries = []string{"/data/workspace"}
-
-	// Now verifyCoverage succeeds.
-	cov, err = backend.verifyCoverage("/data/workspace")
+	// ReconcileLiveSessions must call verifyCoverage (fails) then ensureCoverage (succeeds).
+	err = mac.ReconcileLiveSessions()
 	if err != nil {
-		t.Fatalf("verifyCoverage should succeed after ensureCoverage: %v", err)
+		t.Fatalf("ReconcileLiveSessions failed: %v", err)
 	}
-	if cov.Boundary != "/data/workspace" {
-		t.Errorf("expected boundary /data/workspace, got %s", cov.Boundary)
+
+	// Verify: the session binding was created with the new boundary.
+	mac.mu.Lock()
+	binding, hasBinding := mac.sessionBindings["sess-reconcile"]
+	active := mac.activeBoundaries[workspace]
+	mac.mu.Unlock()
+
+	if !hasBinding {
+		t.Fatal("session binding must exist after reconciliation")
+	}
+	if binding.Boundary != workspace {
+		t.Errorf("boundary = %q, want %q", binding.Boundary, workspace)
+	}
+	if active != 1 {
+		t.Errorf("activeBoundaries = %d, want 1", active)
+	}
+
+	// Update seam to reflect the new boundary now exists.
+	seam.coveringBoundaries = []string{workspace}
+
+	// Verify: verifyCoverage now succeeds.
+	cov, err := backend.verifyCoverage(workspace)
+	if err != nil {
+		t.Fatalf("verifyCoverage should succeed after reconciliation: %v", err)
+	}
+	if cov.Boundary != workspace {
+		t.Errorf("expected boundary %s, got %s", workspace, cov.Boundary)
 	}
 }
 
@@ -2388,9 +2088,8 @@ func TestMACBoundariesAtomicMigration(t *testing.T) {
 // =============================================================================
 
 func TestDeferredStaleBoundaryCleanup(t *testing.T) {
-	// An owned boundary with no direct consumer but removal blocked by an
-	// overlapping live binding/lease should be registered in deferredBoundaries.
-	// After the last intersecting consumer disappears, it must be retried.
+	// Construct an owned stale boundary that is NOT already in deferredBoundaries,
+	// then prove cleanupStaleBoundaries itself adds it.
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -2409,7 +2108,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 	parentWS := "/data/parent"
 	childWS := "/data/parent/child"
 
-	// Create parent session binding.
+	// Create parent session binding (the only live consumer).
 	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov macCoverage) error {
 		return insertTestSessionTx(db, "sess-parent", parentWS)
 	})
@@ -2417,49 +2116,45 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 		t.Fatalf("CreateSessionBinding parent: %v", err)
 	}
 
-	// Create child session binding.
-	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov macCoverage) error {
-		return insertTestSessionTx(db, "sess-child", childWS)
-	})
+	// Manually insert a child boundary into mac_boundaries so it is owned
+	// by docker-helper but has no active consumer and is not in deferredBoundaries.
+	_, err = db.Exec(`INSERT INTO mac_boundaries (backend, boundary) VALUES (?, ?)`,
+		backend.backendType(), childWS)
 	if err != nil {
-		t.Fatalf("CreateSessionBinding child: %v", err)
+		t.Fatalf("insert child boundary: %v", err)
 	}
 
-	// Delete child first.
-	mac.ReleaseSessionBoundary("sess-child")
-
-	// Child boundary should be deferred (parent still overlaps).
+	// Verify: child is NOT in deferredBoundaries before cleanupStaleBoundaries.
 	mac.mu.Lock()
-	childDeferred := mac.deferredBoundaries[childWS]
+	childInDeferredBefore := mac.deferredBoundaries[childWS]
 	mac.mu.Unlock()
-
-	if !childDeferred {
-		t.Error("child boundary should be deferred after release (parent still overlaps)")
+	if childInDeferredBefore {
+		t.Fatal("child must not be in deferredBoundaries before cleanupStaleBoundaries")
 	}
 
-	// Simulate cleanupStaleBoundaries: it should register the child boundary
-	// as deferred because isBoundaryStillNeeded returns true (parent overlaps).
+	// Call cleanupStaleBoundaries: it must discover the orphaned child boundary
+	// and register it as deferred because the parent still overlaps.
 	err = mac.cleanupStaleBoundaries()
 	if err != nil {
 		t.Fatalf("cleanupStaleBoundaries: %v", err)
 	}
 
-	// Child should still be deferred (parent still active).
+	// Prove: cleanupStaleBoundaries added the child to deferredBoundaries.
 	mac.mu.Lock()
-	childDeferredAfterCleanup := mac.deferredBoundaries[childWS]
+	childInDeferredAfter := mac.deferredBoundaries[childWS]
 	mac.mu.Unlock()
-
-	if !childDeferredAfterCleanup {
-		t.Error("child should still be deferred after cleanupStaleBoundaries (parent overlaps)")
+	if !childInDeferredAfter {
+		t.Fatal("cleanupStaleBoundaries must add orphaned child to deferredBoundaries (parent overlaps)")
 	}
 
-	// Delete parent — this should trigger retry of deferred boundaries.
+	// Delete parent — this triggers retryDeferredBoundaries which should
+	// clean up the deferred child boundary.
 	mac.ReleaseSessionBoundary("sess-parent")
 
 	// Both boundaries should now be gone.
 	mac.mu.Lock()
 	parentDeferred := mac.deferredBoundaries[parentWS]
-	childDeferred = mac.deferredBoundaries[childWS]
+	childDeferred := mac.deferredBoundaries[childWS]
 	mac.mu.Unlock()
 
 	if parentDeferred {
