@@ -4790,9 +4790,9 @@ func TestRunSELinuxContainerSecurityOpt(t *testing.T) {
 		t.Error("run.go must use docker_helper_container_t for SELinux system mode")
 	}
 
-	// Must check for LSMSelinux before using custom type
-	if !strings.Contains(content, "LSMSelinux") {
-		t.Error("run.go must check for LSMSelinux before using custom container type")
+	// Must check for LSMSELinux before using custom type
+	if !strings.Contains(content, "LSMSELinux") {
+		t.Error("run.go must check for LSMSELinux before using custom container type")
 	}
 }
 

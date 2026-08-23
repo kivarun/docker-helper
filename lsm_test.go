@@ -37,7 +37,7 @@ func TestDetectLSMMatrix(t *testing.T) {
 			apparmorActive:   false,
 			selinuxActive:    true,
 			selinuxEnforcing: true,
-			wantBackend:      LSMSelinux,
+			wantBackend:      LSMSELinux,
 			wantErr:          false,
 		},
 		{
@@ -89,7 +89,7 @@ func TestDetectLSMMatrix(t *testing.T) {
 			apparmorErr:      os.ErrNotExist,
 			selinuxActive:    true,
 			selinuxEnforcing: true,
-			wantBackend:      LSMSelinux,
+			wantBackend:      LSMSELinux,
 			wantErr:          false,
 		},
 		{
@@ -962,7 +962,7 @@ func TestDetectLSMAppArmorReadError(t *testing.T) {
 	}
 }
 
-func TestDetectLSMSelinuxReadError(t *testing.T) {
+func TestDetectLSMSELinuxReadError(t *testing.T) {
 	origAA := apparmorLSMActive
 	origSEL := selinuxEnabled
 	apparmorLSMActive = func() (bool, error) { return false, nil }

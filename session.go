@@ -70,13 +70,13 @@ func intersectRoots(globalRoots, principalRoots []string) []string {
 					seen[pRoot] = true
 					result = append(result, pRoot)
 				}
-			} else if isInside(gRoot, pRoot) {
+			} else if pathWithin(gRoot, pRoot) {
 				// principal root inside global root -> principal root is effective
 				if !seen[pRoot] {
 					seen[pRoot] = true
 					result = append(result, pRoot)
 				}
-			} else if isInside(pRoot, gRoot) {
+			} else if pathWithin(pRoot, gRoot) {
 				// global root inside principal root -> global root is effective
 				if !seen[gRoot] {
 					seen[gRoot] = true
@@ -154,7 +154,7 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 		if absWorkspace == root {
 			continue
 		}
-		if isInside(root, absWorkspace) {
+		if pathWithin(root, absWorkspace) {
 			inside = true
 			break
 		}
@@ -187,10 +187,10 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 		principalID = nil
 	}
 
-	// Acquire lifecycle serialization and prepare MAC.
+	// Acquire coordinator serialization and prepare MAC.
 	// CreateSessionBinding holds the lock through DB insert and rollback.
-	if a.MACLifecycle != nil {
-		_, err := a.MACLifecycle.CreateSessionBinding(absWorkspace, sessionID, func(coverage macCoverage) error {
+	if a.MACCoordinator != nil {
+		_, err := a.MACCoordinator.CreateSessionBinding(absWorkspace, sessionID, func(coverage macCoverage) error {
 			_, err := a.DB.Exec(
 				`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
 				 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -356,8 +356,8 @@ func (a *App) deleteSession(id string) (*Session, error) {
 	}
 
 	// Release MAC boundary for the deleted session.
-	if a.MACLifecycle != nil {
-		a.MACLifecycle.ReleaseSessionBoundary(id)
+	if a.MACCoordinator != nil {
+		a.MACCoordinator.ReleaseSessionBoundary(id)
 	}
 
 	return &s, nil
@@ -408,8 +408,8 @@ func (a *App) deleteSessionForPrincipal(id string, principalID int64) (*Session,
 	}
 
 	// Release MAC boundary for the deleted session.
-	if a.MACLifecycle != nil {
-		a.MACLifecycle.ReleaseSessionBoundary(id)
+	if a.MACCoordinator != nil {
+		a.MACCoordinator.ReleaseSessionBoundary(id)
 	}
 
 	return &s, nil

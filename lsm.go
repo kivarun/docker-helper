@@ -13,7 +13,7 @@ type LSMBackend string
 const (
 	LSMNone     LSMBackend = ""
 	LSMAppArmor LSMBackend = "apparmor"
-	LSMSelinux  LSMBackend = "selinux"
+	LSMSELinux  LSMBackend = "selinux"
 )
 
 const (
@@ -83,7 +83,7 @@ func parseSELinuxType(ctx string) (string, error) {
 //
 // Returns:
 //   - (LSMAppArmor, nil) when only AppArmor is active
-//   - (LSMSelinux, nil) when only enforcing SELinux is active
+//   - (LSMSELinux, nil) when only enforcing SELinux is active
 //   - (LSMNone, nil) when no supported backend is active
 //   - (LSMNone, error) when both backends are active (unsupported),
 //     SELinux is permissive, SELinux enforce value is malformed,
@@ -115,7 +115,7 @@ func detectLSM() (LSMBackend, error) {
 	}
 
 	if selinuxActive && selinuxEnforcing {
-		return LSMSelinux, nil
+		return LSMSELinux, nil
 	}
 
 	if selinuxActive && !selinuxEnforcing {
@@ -154,7 +154,7 @@ func requireMACConfinement() error {
 	switch backend {
 	case LSMAppArmor:
 		return requireAppArmorConfinement()
-	case LSMSelinux:
+	case LSMSELinux:
 		return requireSELinuxConfinement()
 	default:
 		return fmt.Errorf("unknown MAC backend: %s", backend)

@@ -199,32 +199,6 @@ func TestFcontextStem(t *testing.T) {
 	}
 }
 
-// --- isProperDescendant tests ---
-
-func TestIsProperDescendant(t *testing.T) {
-	tests := []struct {
-		child  string
-		parent string
-		want   bool
-	}{
-		{"/data/sub", "/data", true},
-		{"/data", "/data", false},
-		{"/data2", "/data", false},
-		{"/data.test2", "/data.test", false},
-		{"/data.test/sub", "/data.test", true},
-		{"/project[1]/sub", "/project[1]", true},
-		{"/foo+bar/sub", "/foo+bar", true},
-		{"/foo+bar2", "/foo+bar", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.child+"|"+tc.parent, func(t *testing.T) {
-			if got := isProperDescendant(tc.child, tc.parent); got != tc.want {
-				t.Errorf("isProperDescendant(%q, %q) = %v, want %v", tc.child, tc.parent, got, tc.want)
-			}
-		})
-	}
-}
-
 // --- Manager: ensureWorkspaceLabel tests ---
 
 func TestEnsureWorkspaceLabelNotEnforcing(t *testing.T) {

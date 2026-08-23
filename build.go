@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -32,9 +31,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// Acquire workspace-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
-	if a.MACLifecycle != nil {
+	if a.MACCoordinator != nil {
 		var leaseErr error
-		_, leaseRelease, leaseErr = a.MACLifecycle.AcquireUse(session.ID, session.Workspace)
+		_, leaseRelease, leaseErr = a.MACCoordinator.AcquireUse(session.ID, session.Workspace)
 		if leaseErr != nil {
 			opLog(ctx).Error("cannot acquire workspace-use lease",
 				slog.String("operation", "build"),
@@ -469,7 +468,7 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 		return "", "", fmt.Errorf("cannot resolve context: %w", err)
 	}
 
-	if !isInside(workspace, contextPath) {
+	if !pathWithin(workspace, contextPath) {
 		return "", "", fmt.Errorf("context must be inside workspace: %s", req.Context)
 	}
 
@@ -487,7 +486,7 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 		return "", "", fmt.Errorf("cannot resolve dockerfile: %w", err)
 	}
 
-	if !isInside(contextPath, dockerfilePath) {
+	if !pathWithin(contextPath, dockerfilePath) {
 		return "", "", errors.New("dockerfile escapes build context")
 	}
 
@@ -500,16 +499,6 @@ func validateBuildRequest(workspace string, req buildRequest) (string, string, e
 	}
 
 	return contextPath, dockerfilePath, nil
-}
-
-func isInside(parent, child string) bool {
-	relative, err := filepath.Rel(parent, child)
-	if err != nil {
-		return false
-	}
-
-	return relative != ".." &&
-		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // validateBuildArgs validates build-arg names and returns sorted keys.

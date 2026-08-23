@@ -1077,7 +1077,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 				return err
 			},
 		)
-	case LSMSelinux:
+	case LSMSELinux:
 		return initSystem(allowedRoot, stdout, stderr,
 			newSELinuxSystemInitBackend(newSELinuxWorkspaceManager(), nil),
 			func(ar string, so, se io.Writer) error {

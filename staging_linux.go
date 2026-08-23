@@ -90,7 +90,7 @@ func stageBuildContextInternal(
 	}
 
 	// Validate contextPath is inside workspace.
-	if !isInside(workspace, contextPath) {
+	if !pathWithin(workspace, contextPath) {
 		return nil, fmt.Errorf("context path escapes workspace: %s", contextPath)
 	}
 

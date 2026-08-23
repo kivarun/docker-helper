@@ -307,7 +307,7 @@ func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) ([]string
 // isUnderAnyRoot returns true if path is equal to or under at least one root.
 func isUnderAnyRoot(path string, roots []string) bool {
 	for _, r := range roots {
-		if path == r || isInside(r, path) {
+		if path == r || pathWithin(r, path) {
 			return true
 		}
 	}

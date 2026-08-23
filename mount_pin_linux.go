@@ -102,7 +102,7 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 	}
 
 	// Verify sourcePath is still inside workspace.
-	if !isInside(workspace, sourcePath) {
+	if !pathWithin(workspace, sourcePath) {
 		return nil, fmt.Errorf("source escapes workspace: %s", sourcePath)
 	}
 

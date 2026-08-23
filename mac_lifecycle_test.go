@@ -20,8 +20,8 @@ import (
 	"time"
 )
 
-// testMACBackend is a mock macBackend for testing the lifecycle owner.
-type testMACBackend struct {
+// testWorkspaceMACDriver is a mock workspaceMACDriver for testing the lifecycle owner.
+type testWorkspaceMACDriver struct {
 	mu                sync.Mutex
 	coverageMap       map[string]string // workspace -> boundary
 	managedBoundaries map[string]bool   // boundary -> is managed
@@ -29,8 +29,8 @@ type testMACBackend struct {
 	boundaryType      string
 }
 
-func newTestMACBackend(backendType string) *testMACBackend {
-	return &testMACBackend{
+func newTestWorkspaceMACDriver(backendType string) *testWorkspaceMACDriver {
+	return &testWorkspaceMACDriver{
 		coverageMap:       make(map[string]string),
 		managedBoundaries: make(map[string]bool),
 		removeErrors:      make(map[string]bool),
@@ -38,7 +38,7 @@ func newTestMACBackend(backendType string) *testMACBackend {
 	}
 }
 
-func (b *testMACBackend) ensureCoverage(workspace string) (macCoverage, bool, error) {
+func (b *testWorkspaceMACDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -51,7 +51,7 @@ func (b *testMACBackend) ensureCoverage(workspace string) (macCoverage, bool, er
 	return macCoverage{Boundary: workspace, Managed: true}, true, nil
 }
 
-func (b *testMACBackend) verifyCoverage(workspace string) (macCoverage, error) {
+func (b *testWorkspaceMACDriver) verifyCoverage(workspace string) (macCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -61,7 +61,7 @@ func (b *testMACBackend) verifyCoverage(workspace string) (macCoverage, error) {
 	return macCoverage{}, fmt.Errorf("no coverage for %s", workspace)
 }
 
-func (b *testMACBackend) removeBoundary(boundary string) error {
+func (b *testWorkspaceMACDriver) removeBoundary(boundary string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -73,7 +73,7 @@ func (b *testMACBackend) removeBoundary(boundary string) error {
 	return nil
 }
 
-func (b *testMACBackend) listManagedBoundaries() ([]string, error) {
+func (b *testWorkspaceMACDriver) listManagedBoundaries() ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -84,12 +84,12 @@ func (b *testMACBackend) listManagedBoundaries() ([]string, error) {
 	return result, nil
 }
 
-func (b *testMACBackend) backendType() string {
+func (b *testWorkspaceMACDriver) backendType() string {
 	return b.boundaryType
 }
 
-// setupTestMACLifecycle creates a test app with a MAC lifecycle and mock backend.
-func setupTestMACLifecycle(t *testing.T) (*App, *workspaceMACLifecycle, *testMACBackend) {
+// setupTestMACCoordinator creates a test app with a MAC coordinator and mock driver.
+func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testWorkspaceMACDriver) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -104,8 +104,8 @@ func setupTestMACLifecycle(t *testing.T) (*App, *workspaceMACLifecycle, *testMAC
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	allowedRoot := testAllowedRootDir(t)
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -128,9 +128,9 @@ func setupTestMACLifecycle(t *testing.T) (*App, *workspaceMACLifecycle, *testMAC
 	}
 
 	app := &App{
-		Config:       cfg,
-		DB:           db,
-		MACLifecycle: mac,
+		Config:         cfg,
+		DB:             db,
+		MACCoordinator: mac,
 	}
 
 	return app, mac, backend
@@ -153,7 +153,7 @@ func insertTestSession(t *testing.T, db *sql.DB, sessionID, workspace string) {
 // deleted while an operation is running, the operation's lease release
 // triggers conditional boundary cleanup.
 func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
-	app, mac, backend := setupTestMACLifecycle(t)
+	app, mac, backend := setupTestMACCoordinator(t)
 
 	allowedRoot := app.Config.AllowedRoots[0]
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
@@ -231,7 +231,7 @@ func insertTestSessionTx(db *sql.DB, sessionID, workspace string) error {
 // TestDBInsertFailurePreservesOwnership verifies that when a session DB insert
 // fails and boundary removal also fails, ownership metadata is preserved.
 func TestDBInsertFailurePreservesOwnership(t *testing.T) {
-	app, mac, backend := setupTestMACLifecycle(t)
+	app, mac, backend := setupTestMACCoordinator(t)
 
 	allowedRoot := app.Config.AllowedRoots[0]
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
@@ -265,7 +265,7 @@ func TestDBInsertFailurePreservesOwnership(t *testing.T) {
 // TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval verifies that when
 // a session DB insert fails and boundary removal succeeds, ownership is removed.
 func TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
+	app, mac, _ := setupTestMACCoordinator(t)
 
 	allowedRoot := app.Config.AllowedRoots[0]
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
@@ -309,11 +309,11 @@ func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
 	}
 
 	// Simulate pre-existing managed boundary (in fragment but not in mac_boundaries).
-	backend := newTestMACBackend("apparmor")
+	backend := newTestWorkspaceMACDriver("apparmor")
 	backend.coverageMap["/data/workspace"] = "/data"
 	backend.managedBoundaries["/data"] = true
 
-	mac := newWorkspaceMACLifecycle(db, backend)
+	mac := newSessionMACCoordinator(db, backend)
 
 	// Directly call importManagedBoundaries to test the import logic.
 	mac.mu.Lock()
@@ -366,7 +366,7 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 		},
 	}
 
-	backend := &macBackendSELinux{mgr: mgr}
+	backend := &selinuxWorkspaceMACDriver{mgr: mgr}
 
 	// ensureCoverage should fail when listCoveringBoundaries fails.
 	_, _, err = backend.ensureCoverage("/data/workspace")
@@ -397,8 +397,8 @@ func TestMACPreparationErrorClassification(t *testing.T) {
 	}
 
 	// Create a backend that fails on ensureCoverage.
-	backend := &failingMACBackend{err: fmt.Errorf("MAC setup failed")}
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := &failingWorkspaceMACDriver{err: fmt.Errorf("MAC setup failed")}
+	mac := newSessionMACCoordinator(db, backend)
 
 	// CreateSessionBinding should return an error wrapped with ErrMACPreparation.
 	_, err = mac.CreateSessionBinding("/data/workspace", "sess-1", func(cov macCoverage) error {
@@ -424,7 +424,7 @@ func TestMACPreparationErrorClassification(t *testing.T) {
 // TestDBInsertErrorRemainsDatabaseError verifies that DB insert errors from
 // CreateSessionBinding remain classified as ErrDatabase.
 func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
+	app, mac, _ := setupTestMACCoordinator(t)
 
 	allowedRoot := app.Config.AllowedRoots[0]
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
@@ -446,28 +446,28 @@ func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
 	}
 }
 
-// failingMACBackend is a mock backend that always fails on ensureCoverage.
-type failingMACBackend struct {
+// failingWorkspaceMACDriver is a mock backend that always fails on ensureCoverage.
+type failingWorkspaceMACDriver struct {
 	err error
 }
 
-func (b *failingMACBackend) ensureCoverage(workspace string) (macCoverage, bool, error) {
+func (b *failingWorkspaceMACDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
 	return macCoverage{}, false, b.err
 }
 
-func (b *failingMACBackend) verifyCoverage(workspace string) (macCoverage, error) {
+func (b *failingWorkspaceMACDriver) verifyCoverage(workspace string) (macCoverage, error) {
 	return macCoverage{}, b.err
 }
 
-func (b *failingMACBackend) removeBoundary(boundary string) error {
+func (b *failingWorkspaceMACDriver) removeBoundary(boundary string) error {
 	return nil
 }
 
-func (b *failingMACBackend) listManagedBoundaries() ([]string, error) {
+func (b *failingWorkspaceMACDriver) listManagedBoundaries() ([]string, error) {
 	return nil, nil
 }
 
-func (b *failingMACBackend) backendType() string {
+func (b *failingWorkspaceMACDriver) backendType() string {
 	return "test"
 }
 
@@ -475,8 +475,8 @@ func (b *failingMACBackend) backendType() string {
 // Issue 1: SELinux verifyCoverage/ensureCoverage with actual type verification
 // =============================================================================
 
-// selinuxTestBackend is a mock SELinux backend for testing actual type verification.
-type selinuxTestBackend struct {
+// selinuxTestDriver is a mock SELinux backend for testing actual type verification.
+type selinuxTestDriver struct {
 	mu                   sync.Mutex
 	coveringBoundaries   map[string][]string // workspace -> covering boundaries
 	actualType           string              // returned type for verifyActualType
@@ -485,7 +485,7 @@ type selinuxTestBackend struct {
 	verifyActualTypeFail bool
 }
 
-func (b *selinuxTestBackend) ensureCoverage(workspace string) (macCoverage, bool, error) {
+func (b *selinuxTestDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -505,7 +505,7 @@ func (b *selinuxTestBackend) ensureCoverage(workspace string) (macCoverage, bool
 	return macCoverage{Boundary: workspace, Managed: true}, true, nil
 }
 
-func (b *selinuxTestBackend) verifyCoverage(workspace string) (macCoverage, error) {
+func (b *selinuxTestDriver) verifyCoverage(workspace string) (macCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -524,23 +524,23 @@ func (b *selinuxTestBackend) verifyCoverage(workspace string) (macCoverage, erro
 	return macCoverage{Boundary: workspace, Managed: false}, nil
 }
 
-func (b *selinuxTestBackend) removeBoundary(boundary string) error {
+func (b *selinuxTestDriver) removeBoundary(boundary string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return nil
 }
 
-func (b *selinuxTestBackend) listManagedBoundaries() ([]string, error) {
+func (b *selinuxTestDriver) listManagedBoundaries() ([]string, error) {
 	return nil, nil
 }
 
-func (b *selinuxTestBackend) backendType() string {
+func (b *selinuxTestDriver) backendType() string {
 	return "selinux"
 }
 
 func TestSELinuxAncestorRuleCorrectType(t *testing.T) {
 	// Existing ancestor rule + correct actual type -> verify succeeds.
-	backend := &selinuxTestBackend{
+	backend := &selinuxTestDriver{
 		coveringBoundaries: map[string][]string{
 			"/data/workspace": {"/data"},
 		},
@@ -558,7 +558,7 @@ func TestSELinuxAncestorRuleCorrectType(t *testing.T) {
 
 func TestSELinuxAncestorRuleWrongType(t *testing.T) {
 	// Existing ancestor rule + wrong actual type -> verify fails.
-	backend := &selinuxTestBackend{
+	backend := &selinuxTestDriver{
 		coveringBoundaries: map[string][]string{
 			"/data/workspace": {"/data"},
 		},
@@ -576,7 +576,7 @@ func TestSELinuxAncestorRuleWrongType(t *testing.T) {
 
 func TestSELinuxEnsureExistingAncestorWrongType(t *testing.T) {
 	// ensure on existing ancestor rule + wrong actual type -> restorecon/verify fails.
-	backend := &selinuxTestBackend{
+	backend := &selinuxTestDriver{
 		coveringBoundaries: map[string][]string{
 			"/data/workspace": {"/data"},
 		},
@@ -607,14 +607,14 @@ func TestSELinuxRestoreconFailureFailsClosed(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := &selinuxTestBackend{
+	backend := &selinuxTestDriver{
 		coveringBoundaries: map[string][]string{
 			"/data/workspace": {"/data"},
 		},
 		restoreconFail: true,
 	}
 
-	mac := newWorkspaceMACLifecycle(db, backend)
+	mac := newSessionMACCoordinator(db, backend)
 
 	_, err = mac.CreateSessionBinding("/data/workspace", "sess-1", func(cov macCoverage) error {
 		return insertTestSessionTx(db, "sess-1", "/data/workspace")
@@ -632,7 +632,7 @@ func TestSELinuxRestoreconFailureFailsClosed(t *testing.T) {
 // =============================================================================
 
 func TestLeaseReleaseIdempotent(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
+	app, mac, _ := setupTestMACCoordinator(t)
 
 	allowedRoot := app.Config.AllowedRoots[0]
 	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
@@ -667,7 +667,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	countAfterFirst := mac.activeBoundaries[workspace]
 	leaseCountAfterFirst := len(mac.leases)
 	boundaryRemoved := func() bool {
-		_, err := mac.backend.verifyCoverage(workspace)
+		_, err := mac.driver.verifyCoverage(workspace)
 		return err != nil
 	}()
 	mac.mu.Unlock()
@@ -679,7 +679,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	countAfterSecond := mac.activeBoundaries[workspace]
 	leaseCountAfterSecond := len(mac.leases)
 	boundaryRemovedSecond := func() bool {
-		_, err := mac.backend.verifyCoverage(workspace)
+		_, err := mac.driver.verifyCoverage(workspace)
 		return err != nil
 	}()
 	mac.mu.Unlock()
@@ -722,8 +722,8 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	parentWS := "/data/parent"
 	childWS := "/data/parent/child"
@@ -813,8 +813,8 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	parentWS := "/data/parent"
 	childWS := "/data/parent/child"
@@ -894,8 +894,8 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	workspace := "/data/workspace"
 
@@ -980,8 +980,8 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	}
 
 	// Create lifecycle with "apparmor" backend.
-	apparmorBackend := newTestMACBackend("apparmor")
-	mac1 := newWorkspaceMACLifecycle(db, apparmorBackend)
+	apparmorBackend := newTestWorkspaceMACDriver("apparmor")
+	mac1 := newSessionMACCoordinator(db, apparmorBackend)
 
 	workspace := "/data/workspace"
 
@@ -1008,8 +1008,8 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	mac1.ReleaseSessionBoundary("sess-1")
 
 	// Now create lifecycle with "selinux" backend.
-	selinuxBackend := newTestMACBackend("selinux")
-	mac2 := newWorkspaceMACLifecycle(db, selinuxBackend)
+	selinuxBackend := newTestWorkspaceMACDriver("selinux")
+	mac2 := newSessionMACCoordinator(db, selinuxBackend)
 
 	// selinux should NOT see apparmor's ownership.
 	mac2.mu.Lock()
@@ -1079,8 +1079,8 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
@@ -1105,7 +1105,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	app := &App{
 		Config:            cfg,
 		DB:                db,
-		MACLifecycle:      mac,
+		MACCoordinator:    mac,
 		OperationRegistry: newOperationRegistry(),
 	}
 
@@ -1209,8 +1209,8 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
@@ -1235,7 +1235,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	app := &App{
 		Config:            cfg,
 		DB:                db,
-		MACLifecycle:      mac,
+		MACCoordinator:    mac,
 		OperationRegistry: newOperationRegistry(),
 	}
 
@@ -1325,8 +1325,8 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
@@ -1350,7 +1350,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	app := &App{
 		Config:            cfg,
 		DB:                db,
-		MACLifecycle:      mac,
+		MACCoordinator:    mac,
 		OperationRegistry: newOperationRegistry(),
 	}
 
@@ -1458,8 +1458,8 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
@@ -1483,7 +1483,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	app := &App{
 		Config:            cfg,
 		DB:                db,
-		MACLifecycle:      mac,
+		MACCoordinator:    mac,
 		OperationRegistry: newOperationRegistry(),
 	}
 
@@ -1587,8 +1587,8 @@ func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
@@ -1613,7 +1613,7 @@ func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
 	app := &App{
 		Config:            cfg,
 		DB:                db,
-		MACLifecycle:      mac,
+		MACCoordinator:    mac,
 		OperationRegistry: newOperationRegistry(),
 	}
 
@@ -1696,8 +1696,8 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	runtimeDir := filepath.Join(dir, "runtime")
 	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
@@ -1721,7 +1721,7 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 	app := &App{
 		Config:            cfg,
 		DB:                db,
-		MACLifecycle:      mac,
+		MACCoordinator:    mac,
 		OperationRegistry: newOperationRegistry(),
 	}
 
@@ -1807,11 +1807,11 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 }
 
 // =============================================================================
-// Issue 1 (continued): SELinux durable coverage with real macBackendSELinux
+// Issue 1 (continued): SELinux durable coverage with real selinuxWorkspaceMACDriver
 // =============================================================================
 
 // selinuxSeam is an injectable mock selinuxWorkspaceManager for testing
-// the real macBackendSELinux path.
+// the real selinuxWorkspaceMACDriver path.
 type selinuxSeam struct {
 	coveringBoundaries []string // returned by listCoveringBoundaries
 	boundaryErr        error    // returned by listCoveringBoundaries
@@ -1851,7 +1851,7 @@ func TestSELinuxRealBackendAncestorCorrectType(t *testing.T) {
 		coveringBoundaries: []string{"/data"},
 		actualTypeErr:      nil,
 	}
-	backend := &macBackendSELinux{mgr: seam}
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
 
 	cov, err := backend.verifyCoverage("/data/workspace")
 	if err != nil {
@@ -1868,7 +1868,7 @@ func TestSELinuxRealBackendAncestorWrongType(t *testing.T) {
 		coveringBoundaries: []string{"/data"},
 		actualTypeErr:      errors.New("wrong type"),
 	}
-	backend := &macBackendSELinux{mgr: seam}
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
 
 	_, err := backend.verifyCoverage("/data/workspace")
 	if err == nil {
@@ -1886,7 +1886,7 @@ func TestSELinuxRealBackendNoBoundaryCorrectXattrFails(t *testing.T) {
 		coveringBoundaries: nil,
 		actualTypeErr:      nil, // correct type but no persistent boundary
 	}
-	backend := &macBackendSELinux{mgr: seam}
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
 
 	_, err := backend.verifyCoverage("/data/workspace")
 	if err == nil {
@@ -1904,7 +1904,7 @@ func TestSELinuxRealBackendEnsureRepairsWrongType(t *testing.T) {
 		restoreconErr:      nil,
 		actualTypeErr:      nil,
 	}
-	backend := &macBackendSELinux{mgr: seam}
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
 
 	cov, changed, err := backend.ensureCoverage("/data/workspace")
 	if err != nil {
@@ -1925,7 +1925,7 @@ func TestSELinuxRealBackendEnsureCreatesNewBoundary(t *testing.T) {
 		ensureCreated:      true,
 		ensureErr:          nil,
 	}
-	backend := &macBackendSELinux{mgr: seam}
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
 
 	cov, changed, err := backend.ensureCoverage("/data/workspace")
 	if err != nil {
@@ -1961,8 +1961,8 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 		ensureCreated:      true,
 		ensureErr:          nil,
 	}
-	backend := &macBackendSELinux{mgr: seam}
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
+	mac := newSessionMACCoordinator(db, backend)
 
 	// Insert a live session so ReconcileLiveSessions has something to reconcile.
 	workspace := "/data/workspace"
@@ -2102,8 +2102,8 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	backend := newTestMACBackend("test")
-	mac := newWorkspaceMACLifecycle(db, backend)
+	backend := newTestWorkspaceMACDriver("test")
+	mac := newSessionMACCoordinator(db, backend)
 
 	parentWS := "/data/parent"
 	childWS := "/data/parent/child"
@@ -2172,5 +2172,61 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 	_, err = backend.verifyCoverage(childWS)
 	if err == nil {
 		t.Error("child boundary should be removed from backend")
+	}
+}
+
+// =============================================================================
+// Canonical path containment API tests
+// =============================================================================
+
+func TestPathWithin(t *testing.T) {
+	tests := []struct {
+		name, root, path string
+		want             bool
+	}{
+		{"equal", "/data", "/data", true},
+		{"child", "/data", "/data/foo", true},
+		{"deep child", "/data", "/data/foo/bar", true},
+		{"sibling", "/data", "/data2", false},
+		{"sibling child", "/data", "/other/foo", false},
+		{"prefix trap", "/data", "/data2", false},
+		{"prefix trap child", "/data", "/data2/foo", false},
+		{"root slash", "/", "/data", true},
+		{"root slash equal", "/", "/", true},
+		{"nested", "/a/b/c", "/a/b/c/d", true},
+		{"nested sibling", "/a/b/c", "/a/b/d", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathWithin(tc.root, tc.path); got != tc.want {
+				t.Errorf("pathWithin(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPathStrictlyWithin(t *testing.T) {
+	tests := []struct {
+		name, root, path string
+		want             bool
+	}{
+		{"equal", "/data", "/data", false},
+		{"child", "/data", "/data/foo", true},
+		{"deep child", "/data", "/data/foo/bar", true},
+		{"sibling", "/data", "/data2", false},
+		{"sibling child", "/data", "/other/foo", false},
+		{"prefix trap", "/data", "/data2", false},
+		{"prefix trap child", "/data", "/data2/foo", false},
+		{"root slash", "/", "/data", true},
+		{"root slash equal", "/", "/", false},
+		{"nested", "/a/b/c", "/a/b/c/d", true},
+		{"nested sibling", "/a/b/c", "/a/b/d", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pathStrictlyWithin(tc.root, tc.path); got != tc.want {
+				t.Errorf("pathStrictlyWithin(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
+			}
+		})
 	}
 }

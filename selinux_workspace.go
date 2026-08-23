@@ -363,7 +363,7 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 		}
 
 		// Rule stem is a descendant of our root: our broad rule would override it.
-		if isProperDescendant(ruleStem, ourStem) {
+		if pathStrictlyWithin(ourStem, ruleStem) {
 			return fmt.Errorf(
 				"operator-local fcontext rule %s (stem %s) would be overridden by %s; remove the local rule before proceeding",
 				rule.pattern, ruleStem, ourPattern,
@@ -371,7 +371,7 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 		}
 
 		// Rule stem is an ancestor of our root: its semantics would be overridden.
-		if isProperDescendant(ourStem, ruleStem) {
+		if pathStrictlyWithin(ruleStem, ourStem) {
 			return fmt.Errorf(
 				"operator-local fcontext rule %s (stem %s) is an ancestor of %s; removing it would change operator policy",
 				rule.pattern, ruleStem, ourPattern,
@@ -391,7 +391,7 @@ func (m *selinuxWorkspaceManager) checkEquivalenceOverlap(root string, rule fcon
 
 	// Check if DEST overlaps with ROOT.
 	if dest != "" {
-		if dest == root || isProperDescendant(dest, root) || isProperDescendant(root, dest) {
+		if dest == root || pathStrictlyWithin(root, dest) || pathStrictlyWithin(dest, root) {
 			return fmt.Errorf(
 				"SELinux fcontext equivalence destination %s overlaps with %s; remove or classify it before proceeding",
 				dest, root,
@@ -401,7 +401,7 @@ func (m *selinuxWorkspaceManager) checkEquivalenceOverlap(root string, rule fcon
 
 	// Check if SOURCE overlaps with ROOT.
 	if source != "" {
-		if source == root || isProperDescendant(source, root) || isProperDescendant(root, source) {
+		if source == root || pathStrictlyWithin(root, source) || pathStrictlyWithin(source, root) {
 			return fmt.Errorf(
 				"SELinux fcontext equivalence source %s overlaps with %s; remove or classify it before proceeding",
 				source, root,
@@ -410,19 +410,6 @@ func (m *selinuxWorkspaceManager) checkEquivalenceOverlap(root string, rule fcon
 	}
 
 	return nil
-}
-
-// isProperDescendant returns true if child is a proper descendant of parent.
-// Both child and parent are literal filesystem paths (not regex-escaped).
-// This correctly handles /data vs /data2: /data2 is NOT a descendant of /data.
-func isProperDescendant(child, parent string) bool {
-	if !strings.HasPrefix(child, parent) {
-		return false
-	}
-	if len(child) == len(parent) {
-		return false
-	}
-	return child[len(parent)] == '/'
 }
 
 // verifyActualType reads the actual on-disk SELinux type for the root and

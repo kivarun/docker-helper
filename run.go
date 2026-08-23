@@ -213,7 +213,7 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 		return nil, fmt.Errorf("mount source contains unsupported character: %s", sourcePath)
 	}
 
-	if !isInside(workspace, sourcePath) {
+	if !pathWithin(workspace, sourcePath) {
 		return nil, fmt.Errorf("mount source escapes workspace: %s", mount.Source)
 	}
 
@@ -290,9 +290,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Acquire workspace-use lease BEFORE any filesystem access that depends
 	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
 	var leaseRelease func()
-	if a.MACLifecycle != nil {
+	if a.MACCoordinator != nil {
 		var leaseErr error
-		_, leaseRelease, leaseErr = a.MACLifecycle.AcquireUse(session.ID, session.Workspace)
+		_, leaseRelease, leaseErr = a.MACCoordinator.AcquireUse(session.ID, session.Workspace)
 		if leaseErr != nil {
 			opLog(ctx).Error("cannot acquire workspace-use lease",
 				slog.String("operation", "run"),
@@ -438,7 +438,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch backend {
-		case LSMSelinux:
+		case LSMSELinux:
 			securityOpt = "label=type:docker_helper_container_t"
 		case LSMAppArmor:
 			securityOpt = "label=disable"

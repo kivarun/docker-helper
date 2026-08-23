@@ -268,16 +268,16 @@ func runServe(stdout, stderr io.Writer) error {
 			return err
 		}
 
-		// Create MAC lifecycle owner and reconcile live sessions.
-		macBackend, err := newMACBackend(cfg.Mode, detectLSM)
+		// Create MAC coordinator and reconcile live sessions.
+		macDriver, err := newWorkspaceMACDriver(cfg.Mode, detectLSM)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
 		}
-		macLifecycle := newWorkspaceMACLifecycle(db, macBackend)
+		macCoordinator := newSessionMACCoordinator(db, macDriver)
 
 		// Reconcile: ensure all live sessions have valid MAC state.
-		if err := macLifecycle.ReconcileLiveSessions(); err != nil {
+		if err := macCoordinator.ReconcileLiveSessions(); err != nil {
 			serveStartupError(err, "MAC state for live sessions cannot be reconciled")
 			return err
 		}
@@ -296,7 +296,7 @@ func runServe(stdout, stderr io.Writer) error {
 			DB:                db,
 			AdminTokenHash:    adminHash,
 			OperationRegistry: newOperationRegistry(),
-			MACLifecycle:      macLifecycle,
+			MACCoordinator:    macCoordinator,
 		}
 
 		mux := http.NewServeMux()
