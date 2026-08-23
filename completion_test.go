@@ -1,35 +1,89 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// getCompletionBinary returns the path to a docker-helper binary for testing.
-func getCompletionBinary(t *testing.T) string {
-	t.Helper()
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "docker-helper")
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build docker-helper: %v\n%s", err, out)
-	}
-	return binPath
+// completionFixture holds the package-lifetime cached completion binary
+// and script. Built once, reused by all completion tests.
+var (
+	completionFixtureOnce sync.Once
+	completionFixture     completionFixtureResult
+	completionFixtureErr  error
+)
+
+type completionFixtureResult struct {
+	binPath string
+	script  string
+	tmpDir  string
 }
 
-func completionScript(t *testing.T) string {
-	t.Helper()
-	binPath := getCompletionBinary(t)
-	cmd := exec.Command(binPath, "completion", "bash")
+// initCompletionFixture builds the docker-helper binary and generates the
+// bash completion script once for the lifetime of the test process.
+func initCompletionFixture() {
+	res := completionFixtureResult{}
+
+	res.tmpDir, completionFixtureErr = os.MkdirTemp("", "completion-test-*")
+	if completionFixtureErr != nil {
+		return
+	}
+
+	res.binPath = filepath.Join(res.tmpDir, "docker-helper")
+	cmd := exec.Command("go", "build", "-o", res.binPath, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		completionFixtureErr = fmt.Errorf("failed to build docker-helper: %w: %s", err, out)
+		return
+	}
+
+	cmd = exec.Command(res.binPath, "completion", "bash")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("docker-helper completion bash failed: %v\n%s", err, out)
+		completionFixtureErr = fmt.Errorf("docker-helper completion bash failed: %w: %s", err, out)
+		return
 	}
-	return string(out)
+	res.script = string(out)
+
+	completionFixture = res
+}
+
+// cleanupCompletionFixture removes the package-lifetime temporary directory.
+func cleanupCompletionFixture() {
+	if completionFixture.tmpDir != "" {
+		os.RemoveAll(completionFixture.tmpDir)
+	}
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	cleanupCompletionFixture()
+	os.Exit(code)
+}
+
+// getCompletionBinary returns the path to the cached docker-helper binary.
+func getCompletionBinary(t *testing.T) string {
+	t.Helper()
+	completionFixtureOnce.Do(initCompletionFixture)
+	if completionFixtureErr != nil {
+		t.Fatalf("completion fixture init failed: %v", completionFixtureErr)
+	}
+	return completionFixture.binPath
+}
+
+// completionScript returns the cached bash completion script.
+func completionScript(t *testing.T) string {
+	t.Helper()
+	completionFixtureOnce.Do(initCompletionFixture)
+	if completionFixtureErr != nil {
+		t.Fatalf("completion fixture init failed: %v", completionFixtureErr)
+	}
+	return completionFixture.script
 }
 
 func runCompletion(t *testing.T, script string, compWords []string) []string {
