@@ -287,22 +287,47 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Get config for deployment mode and trusted CA injection.
 	cfg := a.getConfig()
 
+	// Acquire workspace-use lease BEFORE any filesystem access that depends
+	// on workspace MAC coverage. This reserves MAC state through pre-registration work.
+	var leaseRelease func()
+	if a.MACLifecycle != nil {
+		var leaseErr error
+		_, leaseRelease, leaseErr = a.MACLifecycle.AcquireUse(session.ID, session.Workspace)
+		if leaseErr != nil {
+			opLog(ctx).Error("cannot acquire workspace-use lease",
+				slog.String("operation", "run"),
+				slog.String("error", leaseErr.Error()),
+			)
+			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			return
+		}
+	}
+
 	targetSeen := make(map[string]bool)
 	resolvedMounts := make([]resolvedMount, 0, len(req.Mounts))
 
 	for _, mount := range req.Mounts {
 		resolved, err := resolveMount(mount, session.Workspace)
 		if err != nil {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
 			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 
 		if cfg.Mode == ModeUser && resolved.HostPath != session.Workspace {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
 			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 
 		if targetSeen[resolved.Target] {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
 			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
@@ -315,6 +340,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if cfg.TrustedCAInjection == "auto" {
 		for _, m := range req.Mounts {
 			if isTrustedCAMountOverlap(m.Target) {
+				if leaseRelease != nil {
+					leaseRelease()
+				}
 				writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 				return
 			}
@@ -366,6 +394,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Failure here means no operation is created and docker is not called.
 	execUID, execGID, err := resolveSessionExecutionIdentity(a.DB, session)
 	if err != nil {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
 		opLog(ctx).Error("cannot resolve session execution identity",
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
@@ -378,6 +409,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// the operation so that a failure here does not leave a zombie operation.
 	dockerDir, err := ensureSessionDockerDir(cfg.RuntimeDir, session.ID)
 	if err != nil {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
 		opLog(ctx).Error("cannot create session Docker directory",
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
@@ -386,27 +420,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Acquire workspace-use lease to reserve MAC state through pre-registration work.
-	var leaseRelease func()
-	if a.MACLifecycle != nil {
-		a.MACLifecycle.mu.Lock()
-		_, leaseRelease, err = a.MACLifecycle.acquireUse("", session.Workspace)
-		a.MACLifecycle.mu.Unlock()
-		if err != nil {
-			opLog(ctx).Error("cannot acquire workspace-use lease",
-				slog.String("operation", "run"),
-				slog.String("error", err.Error()),
-			)
-			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
-			return
-		}
-	}
-
 	// In system mode, determine the MAC backend before pin creation,
 	// operation registration, and run.start audit.
-	// Note: ensureSessionDockerDir() above is a filesystem side effect
-	// that occurs before detection; it is idempotent and safe to create
-	// early. Detection failure still prevents Docker invocation.
 	// A detection failure or unsupported configuration must fail closed.
 	securityOpt := ""
 	if cfg.Mode == ModeSystem {

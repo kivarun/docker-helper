@@ -277,7 +277,7 @@ func runServe(stdout, stderr io.Writer) error {
 		macLifecycle := newWorkspaceMACLifecycle(db, macBackend)
 
 		// Reconcile: ensure all live sessions have valid MAC state.
-		if err := macLifecycle.reconcileLiveSessions(); err != nil {
+		if err := macLifecycle.ReconcileLiveSessions(); err != nil {
 			serveStartupError(err, "MAC state for live sessions cannot be reconciled")
 			return err
 		}

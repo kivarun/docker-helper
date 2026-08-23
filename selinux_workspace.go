@@ -315,10 +315,12 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 // our exact rule already exists.
 //
 // Contract:
-// - operator-local customization definitely inside ROOT: fail closed;
-// - operator-local customization whose target is an ancestor of ROOT: fail closed;
-// - unrelated sibling roots: allowed;
-// - if an arbitrary regex/equivalence cannot be proven disjoint safely: fail closed.
+//   - operator-local customization definitely inside ROOT: fail closed;
+//   - operator-local customization whose target is an ancestor of ROOT: fail closed;
+//   - unrelated sibling roots: allowed;
+//   - if an arbitrary regex/equivalence cannot be proven disjoint safely: fail closed;
+//   - rules mapping to docker_helper_workspace_t are compatible (docker-helper-owned or
+//     operator-compatible) and are allowed to overlap.
 func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, existing []fcontextRule) error {
 	ourStem := root // the literal unescaped root
 
@@ -342,6 +344,12 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 				"unclassifiable SELinux fcontext equivalence record %s may overlap with %s; remove or classify it before proceeding",
 				rule.pattern, ourPattern,
 			)
+		}
+
+		// Rules mapping to docker_helper_workspace_t are compatible
+		// (docker-helper-owned or operator-compatible). Allow overlap.
+		if rule.fileType == selinuxWorkspaceType {
+			continue
 		}
 
 		// Extract literal stem from the rule pattern.
@@ -660,4 +668,29 @@ func (m *selinuxWorkspaceManager) restoreconRecursive(root string) error {
 		return fmt.Errorf("restorecon -R: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// listCoveringBoundaries returns all existing fcontext boundaries that cover
+// the given workspace path. Returns only boundaries that map to
+// docker_helper_workspace_t. The caller determines ownership via mac_boundaries.
+func (m *selinuxWorkspaceManager) listCoveringBoundaries(workspace string) ([]string, error) {
+	rules, err := m.listLocalFcontextRules()
+	if err != nil {
+		return nil, err
+	}
+
+	var covering []string
+	for _, rule := range rules {
+		if rule.fileType != selinuxWorkspaceType {
+			continue
+		}
+		stem := fcontextStem(rule.pattern)
+		if stem == "" {
+			continue
+		}
+		if boundaryCoversWorkspace(stem, workspace) {
+			covering = append(covering, stem)
+		}
+	}
+	return covering, nil
 }

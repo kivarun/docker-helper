@@ -91,9 +91,9 @@ func TestInitSystemCallsAddRoot(t *testing.T) {
 
 	rootDir := testAllowedRootDir(t)
 
-	var addCalledPath string
+	addCalled := false
 	addRoot := func(path string) (rootResult, error) {
-		addCalledPath = path
+		addCalled = true
 		return rootResult{Path: path, Changed: true}, nil
 	}
 	removeRoot := func(path string) (rootResult, error) {
@@ -110,13 +110,10 @@ func TestInitSystemCallsAddRoot(t *testing.T) {
 		t.Fatalf("initSystem failed: %v", err)
 	}
 
-	if addCalledPath != rootDir {
-		t.Errorf("expected addRoot called with %s, got %s", rootDir, addCalledPath)
-	}
-
-	// Verify AppArmor status message
-	if !strings.Contains(stdout.String(), "AppArmor workspace root added") {
-		t.Errorf("expected AppArmor status message, got: %s", stdout.String())
+	// System init no longer prepares MAC for the bootstrap allowed root.
+	// MAC preparation is handled at session creation time.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
 	}
 }
 
@@ -131,10 +128,11 @@ func TestInitSystemAddRootFailure(t *testing.T) {
 
 	coreCalled := false
 	addRoot := func(path string) (rootResult, error) {
+		// Must NOT be called during system init.
+		t.Error("addRoot must NOT be called during system init")
 		return rootResult{}, errors.New("AppArmor add failed")
 	}
 	removeRoot := func(path string) (rootResult, error) {
-		t.Error("removeRoot should not be called on add failure")
 		return rootResult{}, nil
 	}
 
@@ -144,18 +142,13 @@ func TestInitSystemAddRootFailure(t *testing.T) {
 			coreCalled = true
 			return nil
 		})
-	if err == nil {
-		t.Fatal("expected error for AppArmor add failure")
+	if err != nil {
+		t.Fatalf("initSystem failed: %v", err)
 	}
 
-	if coreCalled {
-		t.Error("core should not be called on AppArmor add failure")
-	}
-
-	// Verify no config created
-	configPath := filepath.Join(dir, "config.json")
-	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
-		t.Error("config should not be created on AppArmor failure")
+	// System init no longer prepares MAC; core should be called.
+	if !coreCalled {
+		t.Error("core should be called during system init")
 	}
 }
 
@@ -167,18 +160,13 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 	defer func() { getConfigPathFunc = origGetConfig }()
 
 	rootDir := testAllowedRootDir(t)
-	// Distinct path that addRoot returns to prove rollback uses result.Path
-	distinctPath := filepath.Join(rootDir, "distinct-apparmor-path")
 
-	var rollbackCalled bool
-	var rollbackPath string
+	addCalled := false
 	addRoot := func(path string) (rootResult, error) {
-		// Return a different path than requested to prove rollback uses result.Path
-		return rootResult{Path: distinctPath, Changed: true}, nil
+		addCalled = true
+		return rootResult{Path: path, Changed: true}, nil
 	}
 	removeRoot := func(path string) (rootResult, error) {
-		rollbackCalled = true
-		rollbackPath = path
 		return rootResult{Path: path, Changed: true}, nil
 	}
 
@@ -191,15 +179,9 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 		t.Fatal("expected error for core failure")
 	}
 
-	if !rollbackCalled {
-		t.Error("removeRoot should have been called for rollback")
-	}
-	if rollbackPath != distinctPath {
-		t.Errorf("expected rollback with addRoot result.Path %s, got %s", distinctPath, rollbackPath)
-	}
-	// Verify rollback did NOT use the original requested path
-	if rollbackPath == rootDir {
-		t.Error("rollback should use addRoot result.Path, not original requested path")
+	// System init no longer prepares MAC; addRoot must NOT be called.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
 	}
 }
 
@@ -212,13 +194,12 @@ func TestInitSystemCoreFailureNoRollbackWhenNotChanged(t *testing.T) {
 
 	rootDir := testAllowedRootDir(t)
 
-	rollbackCalled := false
+	addCalled := false
 	addRoot := func(path string) (rootResult, error) {
-		// Simulate idempotent add (already present)
+		addCalled = true
 		return rootResult{Path: path, Changed: false}, nil
 	}
 	removeRoot := func(path string) (rootResult, error) {
-		rollbackCalled = true
 		return rootResult{Path: path, Changed: true}, nil
 	}
 
@@ -231,8 +212,9 @@ func TestInitSystemCoreFailureNoRollbackWhenNotChanged(t *testing.T) {
 		t.Fatal("expected error for core failure")
 	}
 
-	if rollbackCalled {
-		t.Error("removeRoot should not be called when root was already present")
+	// System init no longer prepares MAC; addRoot must NOT be called.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
 	}
 }
 
@@ -245,7 +227,9 @@ func TestInitSystemRollbackFailureReportsBothErrors(t *testing.T) {
 
 	rootDir := testAllowedRootDir(t)
 
+	addCalled := false
 	addRoot := func(path string) (rootResult, error) {
+		addCalled = true
 		return rootResult{Path: path, Changed: true}, nil
 	}
 	removeRoot := func(path string) (rootResult, error) {
@@ -261,12 +245,9 @@ func TestInitSystemRollbackFailureReportsBothErrors(t *testing.T) {
 		t.Fatal("expected error for core failure")
 	}
 
-	errMsg := err.Error()
-	if !strings.Contains(errMsg, "core init failed") {
-		t.Errorf("expected original error in message, got: %s", errMsg)
-	}
-	if !strings.Contains(errMsg, "rollback") {
-		t.Errorf("expected rollback error in message, got: %s", errMsg)
+	// System init no longer prepares MAC; addRoot must NOT be called.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
 	}
 }
 
@@ -369,12 +350,9 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 	}
 
 	if !addRootCalled {
-		t.Error("addRoot should be called even with matching config")
-	}
-
-	// Verify AppArmor already present message
-	if !strings.Contains(stdout.String(), "AppArmor workspace root already present") {
-		t.Errorf("expected 'already present' message, got: %s", stdout.String())
+		// System init no longer prepares MAC; addRoot must NOT be called.
+	} else {
+		t.Error("addRoot must NOT be called during system init")
 	}
 }
 
@@ -405,13 +383,14 @@ func TestInitSystemMultiRootPreflight(t *testing.T) {
 	// Track what backend receives and what core receives.
 	var backendReceived string
 	var coreReceived string
+	addCalled := false
 
 	addRoot := func(path string) (rootResult, error) {
+		addCalled = true
 		backendReceived = path
 		return rootResult{Path: path, Changed: true}, nil
 	}
 	removeRoot := func(path string) (rootResult, error) {
-		t.Error("removeRoot should not be called")
 		return rootResult{}, nil
 	}
 
@@ -425,9 +404,12 @@ func TestInitSystemMultiRootPreflight(t *testing.T) {
 		t.Fatalf("initSystem with rootB failed: %v", err)
 	}
 
-	// Prove rootB was accepted (not rejected as "not first").
-	if backendReceived != rootB {
-		t.Errorf("backend received %q, want canonical rootB %q", backendReceived, rootB)
+	// System init no longer prepares MAC; addRoot must NOT be called.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
+	}
+	if backendReceived != "" {
+		t.Errorf("backend must NOT receive path, got %q", backendReceived)
 	}
 	if coreReceived != rootB {
 		t.Errorf("core received %q, want rootB %q", coreReceived, rootB)
@@ -483,11 +465,12 @@ func TestInitSystemAlreadyPresent(t *testing.T) {
 
 	rootDir := testAllowedRootDir(t)
 
+	addCalled := false
 	addRoot := func(path string) (rootResult, error) {
+		addCalled = true
 		return rootResult{Path: path, Changed: false}, nil
 	}
 	removeRoot := func(path string) (rootResult, error) {
-		t.Error("removeRoot should not be called")
 		return rootResult{}, nil
 	}
 
@@ -501,8 +484,9 @@ func TestInitSystemAlreadyPresent(t *testing.T) {
 		t.Fatalf("initSystem failed: %v", err)
 	}
 
-	if !strings.Contains(stdout.String(), "already present") {
-		t.Errorf("expected 'already present' message, got: %s", stdout.String())
+	// System init no longer prepares MAC; addRoot must NOT be called.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
 	}
 }
 
@@ -577,28 +561,28 @@ func TestInitSystemInvalidAppArmorPath(t *testing.T) {
 
 	rootDir := testAllowedRootDir(t)
 
+	addCalled := false
 	addRoot := func(path string) (rootResult, error) {
-		// Simulate AppArmor rejecting the path with input error
+		addCalled = true
 		return rootResult{}, &inputError{msg: "path contains invalid character"}
 	}
 	removeRoot := func(path string) (rootResult, error) {
-		t.Error("removeRoot should not be called on input error from addRoot")
 		return rootResult{}, nil
 	}
 
 	var stdout, stderr bytes.Buffer
 	err := initSystem(rootDir, &stdout, &stderr, newAppArmorSystemInitBackend(addRoot, removeRoot),
 		func(ar string, so, se io.Writer) error {
-			t.Error("core should not be called on input error from addRoot")
-			return nil
+			_, err := initCore(ar, so, se)
+			return err
 		})
-	if err == nil {
-		t.Fatal("expected error for invalid AppArmor path")
+	if err != nil {
+		t.Fatalf("initSystem failed: %v", err)
 	}
 
-	var ie *inputError
-	if !errors.As(err, &ie) {
-		t.Error("expected inputError")
+	// System init no longer prepares MAC; addRoot must NOT be called.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
 	}
 }
 
@@ -615,7 +599,9 @@ func TestInitSystemOrderingAddRootBeforeCore(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 
 	var order []string
+	addCalled := false
 	addRoot := func(path string) (rootResult, error) {
+		addCalled = true
 		order = append(order, "addRoot")
 		return rootResult{Path: path, Changed: true}, nil
 	}
@@ -635,9 +621,12 @@ func TestInitSystemOrderingAddRootBeforeCore(t *testing.T) {
 		t.Fatalf("initSystem failed: %v", err)
 	}
 
-	// Verify ordering: addRoot before core
-	if len(order) < 2 || order[0] != "addRoot" || order[1] != "core" {
-		t.Errorf("expected addRoot before core, got order: %v", order)
+	// System init no longer prepares MAC; only core should be called.
+	if addCalled {
+		t.Error("addRoot must NOT be called during system init")
+	}
+	if len(order) != 1 || order[0] != "core" {
+		t.Errorf("expected only core, got order: %v", order)
 	}
 }
 
@@ -691,80 +680,15 @@ func TestInitCLIInputErrorExitCode(t *testing.T) {
 }
 
 func TestInitCLIAppArmorInputErrorExit2(t *testing.T) {
-	dir := t.TempDir()
-
-	rootDir := testAllowedRootDir(t)
-
-	// Mock system mode, config path, and inject fake AppArmor that returns inputError
-	origUID := EffectiveUID
-	origGetConfig := getConfigPathFunc
-	origAdd := appArmorAddRoot
-	origRemove := appArmorRemoveRoot
-	EffectiveUID = func() int { return 0 }
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	appArmorAddRoot = func() func(string) (rootResult, error) {
-		return func(path string) (rootResult, error) {
-			return rootResult{}, &inputError{msg: "path contains invalid character"}
-		}
-	}
-	appArmorRemoveRoot = func() func(string) (rootResult, error) {
-		return func(path string) (rootResult, error) {
-			t.Error("removeRoot should not be called on add failure")
-			return rootResult{}, nil
-		}
-	}
-	defer func() {
-		EffectiveUID = origUID
-		getConfigPathFunc = origGetConfig
-		appArmorAddRoot = origAdd
-		appArmorRemoveRoot = origRemove
-	}()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--allowed-root", rootDir}, &stdout, &stderr)
-	if code != 2 {
-		t.Errorf("expected exit code 2 for typed inputError, got %d (stderr: %s)", code, stderr.String())
-	}
+	// System init no longer prepares MAC. This test is no longer relevant.
+	// MAC preparation happens at session creation time, not during init.
+	t.Skip("system init no longer prepares MAC")
 }
 
 func TestInitCLIAppArmorOperationalErrorExit1(t *testing.T) {
-	dir := t.TempDir()
-
-	rootDir := testAllowedRootDir(t)
-
-	mockApparmorActive(t, true)
-	mockSELinuxInactive(t)
-
-	// Mock system mode, config path, and inject fake AppArmor that returns operational error
-	origUID := EffectiveUID
-	origGetConfig := getConfigPathFunc
-	origAdd := appArmorAddRoot
-	origRemove := appArmorRemoveRoot
-	EffectiveUID = func() int { return 0 }
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	appArmorAddRoot = func() func(string) (rootResult, error) {
-		return func(path string) (rootResult, error) {
-			return rootResult{}, errors.New("parser failed")
-		}
-	}
-	appArmorRemoveRoot = func() func(string) (rootResult, error) {
-		return func(path string) (rootResult, error) {
-			t.Error("removeRoot should not be called on add failure")
-			return rootResult{}, nil
-		}
-	}
-	defer func() {
-		EffectiveUID = origUID
-		getConfigPathFunc = origGetConfig
-		appArmorAddRoot = origAdd
-		appArmorRemoveRoot = origRemove
-	}()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--allowed-root", rootDir}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 for operational error, got %d (stderr: %s)", code, stderr.String())
-	}
+	// System init no longer prepares MAC. This test is no longer relevant.
+	// MAC preparation happens at session creation time, not during init.
+	t.Skip("system init no longer prepares MAC")
 }
 
 func TestInitHelpContainsAutomationBoundary(t *testing.T) {

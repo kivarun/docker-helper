@@ -37,11 +37,8 @@ func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
 // reloadDeps are the production dependencies for handleReload.
 // Tests may inject their own to avoid real filesystem or LSM calls.
 type reloadDeps struct {
-	loadConfig             func() (*Config, error)
-	deploymentMode         func() DeploymentMode
-	detectLSM              func() (LSMBackend, error)
-	verifySELinuxWorkspace func(string) error
-	apparmorListRoots      func() ([]string, error)
+	loadConfig     func() (*Config, error)
+	deploymentMode func() DeploymentMode
 }
 
 // handleReload reloads the configuration from disk and updates the daemon's
@@ -59,11 +56,8 @@ type reloadDeps struct {
 // configuration and returns an error.
 func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	a.handleReloadWithDeps(w, r, reloadDeps{
-		loadConfig:             loadConfig,
-		deploymentMode:         resolveDeploymentMode,
-		detectLSM:              detectLSM,
-		verifySELinuxWorkspace: newSELinuxWorkspaceManager().verifyWorkspaceLabel,
-		apparmorListRoots:      apparmorManagedRoots,
+		loadConfig:     loadConfig,
+		deploymentMode: resolveDeploymentMode,
 	})
 }
 
@@ -152,81 +146,4 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 		OK:      true,
 		Message: "configuration reloaded",
 	})
-}
-
-// verifyAllowedRootsMAC verifies that configured global allowed_roots are
-// usable under the active MAC backend. It is the shared internal verifier
-// used by both runServe startup and handleReload.
-//
-// SELinux: /home roots require no managed label; non-home roots use
-// verifyWorkspaceLabel.
-//
-// AppArmor: every configured global allowed root must be covered by at least
-// one managed AppArmor root. Coverage means configured == managed or
-// configured is a descendant of managed. Extra/stale managed roots are
-// acceptable (confinement metadata, not authorization).
-func verifyAllowedRootsMAC(
-	roots []string,
-	mode DeploymentMode,
-	detectLSM func() (LSMBackend, error),
-	verifySELinuxWorkspace func(string) error,
-	apparmorListRoots func() ([]string, error),
-) error {
-	if mode != ModeSystem {
-		return nil
-	}
-
-	backend, err := detectLSM()
-	if err != nil {
-		return err
-	}
-
-	switch backend {
-	case LSMSelinux:
-		for _, root := range roots {
-			if isHomeRoot(root) {
-				continue
-			}
-			if err := verifySELinuxWorkspace(root); err != nil {
-				return err
-			}
-		}
-		return nil
-
-	case LSMAppArmor:
-		managed, err := apparmorListRoots()
-		if err != nil {
-			return fmt.Errorf("cannot read managed AppArmor roots: %w", err)
-		}
-		for _, root := range roots {
-			if !apparmorRootCovered(root, managed) {
-				return fmt.Errorf(
-					"allowed root %s is not covered by managed AppArmor roots; add it via: docker-helper config allowed-root add %s",
-					root, root,
-				)
-			}
-		}
-		return nil
-
-	case LSMNone:
-		return fmt.Errorf("no MAC backend active (system mode requires AppArmor or enforcing SELinux)")
-
-	default:
-		return fmt.Errorf("unknown MAC backend: %s", backend)
-	}
-}
-
-// apparmorRootCovered returns true if root is covered by at least one
-// managed AppArmor root. Coverage means root equals managed or root is
-// a descendant of managed.
-func apparmorRootCovered(root string, managed []string) bool {
-	for _, m := range managed {
-		if root == m {
-			return true
-		}
-		if isProperDescendant(root, m) {
-			return true
-		}
-	}
-	return false
 }

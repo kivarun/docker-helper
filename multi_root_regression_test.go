@@ -1059,7 +1059,7 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		verifyConfigUnchanged(t, configPath, data)
 	})
 
-	t.Run("preflight_runs_before_auth_write", func(t *testing.T) {
+	t.Run("add_performs_zero_mac_calls", func(t *testing.T) {
 		testRoot := testAllowedRootDir(t)
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
@@ -1069,79 +1069,20 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
-		// Track preflight invocation and verify auth state at that point.
-		preflightCalled := false
-		authNotYetWidened := false
-
-		preflight := func() error {
-			preflightCalled = true
-			// Read config and verify the new root is NOT yet present.
-			rawData, err := os.ReadFile(configPath)
-			if err != nil {
-				return err
-			}
-			var cfg map[string]any
-			if err := json.Unmarshal(rawData, &cfg); err != nil {
-				return err
-			}
-			if roots, ok := cfg["allowed_roots"].([]any); ok {
-				for _, r := range roots {
-					if r == testRoot {
-						return fmt.Errorf("authorization was widened before preflight ran")
-					}
-				}
-				authNotYetWidened = true
-			}
-			return nil
-		}
-
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := addAllowedRootToConfig(testRoot, preflight, &stdout, &stderr)
+		code := addAllowedRootToConfig(testRoot, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
-		if !preflightCalled {
-			t.Error("preflight must be invoked")
-		}
-		if !authNotYetWidened {
-			t.Error("preflight must observe authorization NOT yet widened")
-		}
-		// Config should now have the root added.
 		newData, _ := os.ReadFile(configPath)
 		if bytes.Equal(origData, newData) {
 			t.Error("config should have been updated with the new root")
 		}
 	})
 
-	t.Run("preflight_failure_no_auth_change", func(t *testing.T) {
-		testRoot := testAllowedRootDir(t)
-		allowedRoot := testAllowedRootDir(t)
-		cfg := map[string]any{
-			"allowed_roots": []string{allowedRoot},
-			"session_ttl":   "12h",
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
-
-		preflight := func() error {
-			return errSELinuxSentinel
-		}
-
-		var stdout, stderr bytes.Buffer
-		code := addAllowedRootToConfig(testRoot, preflight, &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit, got 0")
-		}
-		if !strings.Contains(stderr.String(), "selinux preflight sentinel") {
-			t.Errorf("expected sentinel error in stderr, got: %s", stderr.String())
-		}
-		// Config unchanged (preflight failure prevents authorization change).
-		verifyConfigUnchanged(t, configPath, data)
-	})
-
-	t.Run("already_present_runs_preflight", func(t *testing.T) {
+	t.Run("already_present_no_mac_calls", func(t *testing.T) {
 		testRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{testRoot},
@@ -1150,113 +1091,25 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
-		preflightCalled := false
-		preflight := func() error {
-			preflightCalled = true
-			return nil
-		}
-
 		var stdout, stderr bytes.Buffer
-		code := addAllowedRootToConfig(testRoot, preflight, &stdout, &stderr)
+		code := addAllowedRootToConfig(testRoot, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
-		if !preflightCalled {
-			t.Error("preflight must still run when root is already present")
-		}
-		// Config unchanged (SkipWrite for already present).
 		verifyConfigUnchanged(t, configPath, data)
 	})
 }
 
-// TestAllowedRootPreflightDispatch verifies that allowedRootPreflight
-// correctly dispatches to the SELinux managed-label path for non-home roots,
-// skips it for home roots, and rejects exact /opt.
-// This test is below canonicalizeWorkspaceRootForAdd and does not require
-// real filesystem directories.
-func TestAllowedRootPreflightDispatch(t *testing.T) {
-	// Mock root for system mode.
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = origUID }()
-
-	// Mock SELinux detection.
-	origSEL := selinuxEnabled
-	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	defer func() { selinuxEnabled = origSEL }()
-	origAA := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = origAA }()
-
-	t.Run("non_home_root_invokes_selinux", func(t *testing.T) {
-		var receivedPath string
-		origEnsure := selinuxEnsureWorkspaceLabel
-		selinuxEnsureWorkspaceLabel = func(path string) (bool, error) {
-			receivedPath = path
-			return false, nil
-		}
-		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
-
-		var stderr bytes.Buffer
-		err := allowedRootPreflight("/data/docker-helper-test", &stderr)
-		if err != nil {
-			t.Fatalf("expected nil error, got: %v", err)
-		}
-		if receivedPath != "/data/docker-helper-test" {
-			t.Errorf("expected /data/docker-helper-test, got: %s", receivedPath)
-		}
-	})
-
-	t.Run("home_root_skips_selinux", func(t *testing.T) {
-		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceLabel
-		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
-			selinuxCalled = true
-			return false, nil
-		}
-		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
-
-		var stderr bytes.Buffer
-		err := allowedRootPreflight("/home/alice/workspaces", &stderr)
-		if err != nil {
-			t.Fatalf("expected nil error, got: %v", err)
-		}
-		if selinuxCalled {
-			t.Error("SELinux managed-label must NOT be called for home roots")
-		}
-	})
-
-	t.Run("exact_opt_skips_selinux_mac_prep", func(t *testing.T) {
-		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceLabel
-		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
-			selinuxCalled = true
-			return false, nil
-		}
-		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
-
-		var stderr bytes.Buffer
-		err := allowedRootPreflight("/opt", &stderr)
-		if err != nil {
-			t.Fatalf("expected nil for /opt as authorization root, got: %v", err)
-		}
-		if selinuxCalled {
-			t.Error("SELinux MAC preparation must NOT be called for /opt")
-		}
-	})
-}
-
-// TestAllowedRootPreflightNoMACBackend verifies that system-mode
-// config allowed-root add fails closed when no MAC backend is active.
-func TestAllowedRootPreflightNoMACBackend(t *testing.T) {
-	// Mock attemptReload to return "daemon not running".
+// TestConfigAllowedRootAddZeroMAC verifies that config allowed-root add
+// performs zero MAC calls. MAC preparation is handled at session creation time.
+func TestConfigAllowedRootAddZeroMAC(t *testing.T) {
 	origAttemptReload := attemptReload
 	attemptReload = func() reloadOutcome {
 		return reloadOutcome{reloadDaemonNotRunning, nil}
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("system_mode_no_backend_fails", func(t *testing.T) {
+	t.Run("system_mode_no_backend_succeeds", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -1265,12 +1118,10 @@ func TestAllowedRootPreflightNoMACBackend(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
-		// Mock root for system mode.
 		origUID := EffectiveUID
 		EffectiveUID = func() int { return 0 }
 		defer func() { EffectiveUID = origUID }()
 
-		// Mock: neither backend active.
 		origSEL := selinuxEnabled
 		selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 		defer func() { selinuxEnabled = origSEL }()
@@ -1281,80 +1132,13 @@ func TestAllowedRootPreflightNoMACBackend(t *testing.T) {
 		newRoot := testAllowedRootDir(t)
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit, got 0")
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "no MAC backend active") {
-			t.Errorf("expected 'no MAC backend active' in stderr, got: %s", stderr.String())
+		newData, _ := os.ReadFile(configPath)
+		if bytes.Equal(data, newData) {
+			t.Error("config should have been updated with the new root")
 		}
-		// Config unchanged.
-		verifyConfigUnchanged(t, configPath, data)
-	})
-
-	t.Run("permissive_selinux_fails", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
-		cfg := map[string]any{
-			"allowed_roots": []string{allowedRoot},
-			"session_ttl":   "12h",
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
-
-		origUID := EffectiveUID
-		EffectiveUID = func() int { return 0 }
-		defer func() { EffectiveUID = origUID }()
-
-		// Mock: SELinux active but permissive.
-		origSEL := selinuxEnabled
-		selinuxEnabled = func() (bool, bool, error) { return true, false, nil }
-		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { apparmorLSMActive = origAA }()
-
-		newRoot := testAllowedRootDir(t)
-		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit, got 0")
-		}
-		if !strings.Contains(stderr.String(), "permissive") {
-			t.Errorf("expected permissive error in stderr, got: %s", stderr.String())
-		}
-		verifyConfigUnchanged(t, configPath, data)
-	})
-
-	t.Run("both_backends_active_fails", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
-		cfg := map[string]any{
-			"allowed_roots": []string{allowedRoot},
-			"session_ttl":   "12h",
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
-
-		origUID := EffectiveUID
-		EffectiveUID = func() int { return 0 }
-		defer func() { EffectiveUID = origUID }()
-
-		// Mock: both backends active.
-		origSEL := selinuxEnabled
-		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return true, nil }
-		defer func() { apparmorLSMActive = origAA }()
-
-		newRoot := testAllowedRootDir(t)
-		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit, got 0")
-		}
-		if !strings.Contains(stderr.String(), "both AppArmor and SELinux") {
-			t.Errorf("expected 'both AppArmor and SELinux' in stderr, got: %s", stderr.String())
-		}
-		verifyConfigUnchanged(t, configPath, data)
 	})
 }
 

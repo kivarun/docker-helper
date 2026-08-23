@@ -349,7 +349,8 @@ func TestInitSystemModePassesCanonicalToCore(t *testing.T) {
 	if coreRoot != canonicalTarget {
 		t.Errorf("core received allowed_root = %q, want canonical %q", coreRoot, canonicalTarget)
 	}
-	if apparmorRoot != canonicalTarget {
-		t.Errorf("AppArmor root = %q, want canonical %q", apparmorRoot, canonicalTarget)
+	// System init no longer prepares MAC; addRoot must NOT be called.
+	if apparmorRoot != "" {
+		t.Errorf("AppArmor addRoot must NOT be called, got %q", apparmorRoot)
 	}
 }

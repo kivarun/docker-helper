@@ -1056,11 +1056,12 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initSystem failed: %v", err)
 	}
-	if !ensureCalled {
-		t.Error("ensureWorkspaceLabel should be called for non-home root")
+	// System init no longer prepares MAC; ensureWorkspaceLabel must NOT be called.
+	if ensureCalled {
+		t.Error("ensureWorkspaceLabel must NOT be called during system init")
 	}
 	if !coreCalled {
-		t.Error("core should be called after SELinux preparation")
+		t.Error("core should be called during system init")
 	}
 }
 

@@ -27,10 +27,6 @@ type configMutationResult struct {
 	SkipWrite   bool   // true: skip write/reload, print message and return
 	Message     string // success message to print (may be empty if SkipWrite)
 	StartupOnly bool   // true: skip reload, print "restart required" after message
-	// Preflight is an optional operation-specific preparation step.
-	// It runs after config validation, before write.
-	// If it returns an error, the transaction aborts without writing.
-	Preflight func() error
 }
 
 // configMutation is a callback that modifies the raw config under the lock.
@@ -243,12 +239,8 @@ The global allowed_roots is the coarse authorization ceiling for new
 sessions. Every new session workspace must be under at least one allowed
 root. Principal allowed roots further narrow the ceiling per principal.
 
-In system mode, docker-helper prepares the active MAC backend
-(AppArmor or SELinux) as part of the add operation. This preparation
-runs after config validation and before the config write. If preparation
-fails, the root is not added.
-
-In user mode, only the authorization change is performed.
+MAC preparation (AppArmor or SELinux) is handled at session creation time,
+not when adding an allowed root.
 
 remove does not invalidate already-issued sessions.`,
 	Subcommands: []*Command{
@@ -344,7 +336,7 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 }
 
 // configAllowedRootAdd adds a root to allowed_roots.
-// In system mode, MAC preparation runs as part of the transaction preflight.
+// MAC preparation is now handled at session creation time, not at config time.
 func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
@@ -361,9 +353,7 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	return addAllowedRootToConfig(canonical, func() error {
-		return allowedRootPreflight(canonical, stderr)
-	}, stdout, stderr)
+	return addAllowedRootToConfig(canonical, stdout, stderr)
 }
 
 // configAllowedRootRemove removes a root from allowed_roots.
@@ -764,75 +754,9 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// allowedRootPreflight performs backend-specific MAC preparation for a
-// global allowed root in system mode. This is the internal implementation
-// detail associated with making a new global allowed root usable.
-//
-// In user mode: no-op.
-// In AppArmor system mode: adds root to managed AppArmor policy.
-// In SELinux system mode: prepares managed label for non-home roots;
-// rejects exact /opt (backend-specific confinement limitation).
-func allowedRootPreflight(canonical string, stderr io.Writer) error {
-	if resolveDeploymentMode() != ModeSystem {
-		return nil
-	}
-
-	backend, err := detectLSM()
-	if err != nil {
-		return fmt.Errorf("cannot determine MAC backend: %w", err)
-	}
-
-	switch backend {
-	case LSMAppArmor:
-		mgr := newProductionApparmorManager()
-		result, err := mgr.addRoot(canonical)
-		if err != nil {
-			return err
-		}
-		if result.Changed {
-			fmt.Fprintf(stderr, "AppArmor workspace root added: %s\n", canonical)
-		} else {
-			fmt.Fprintf(stderr, "AppArmor workspace root already present: %s\n", canonical)
-		}
-		return nil
-
-	case LSMSelinux:
-		// /opt is a valid authorization ceiling but must not be
-		// relabeled as a managed workspace boundary. Skip MAC
-		// preparation for /opt; session-level MAC preparation
-		// handles concrete workspaces under /opt.
-		if !selinuxManagedRootAllowed(canonical) {
-			return nil
-		}
-		// /home and descendants use existing user_home_type labels.
-		if isHomeRoot(canonical) {
-			return nil
-		}
-		changed, err := selinuxEnsureWorkspaceLabel(canonical)
-		if err != nil {
-			return err
-		}
-		if changed {
-			fmt.Fprintf(stderr, "SELinux workspace label prepared: %s\n", canonical)
-		} else {
-			fmt.Fprintf(stderr, "SELinux workspace label already present: %s\n", canonical)
-		}
-		return nil
-
-	case LSMNone:
-		return fmt.Errorf("no MAC backend active (system mode requires AppArmor or enforcing SELinux)")
-
-	default:
-		return fmt.Errorf("unknown MAC backend: %s", backend)
-	}
-}
-
 // addAllowedRootToConfig adds a root to allowed_roots using the shared
 // config transaction owner.
-//
-// preflight is an optional MAC preparation function. When non-nil, it runs
-// after config validation but before the write.
-func addAllowedRootToConfig(canonical string, preflight func() error, stdout, stderr io.Writer) int {
+func addAllowedRootToConfig(canonical string, stdout, stderr io.Writer) int {
 	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
@@ -859,13 +783,11 @@ func addAllowedRootToConfig(canonical string, preflight func() error, stdout, st
 				return configMutationResult{
 					SkipWrite: true,
 					Message:   fmt.Sprintf("already present %s\n", canonical),
-					Preflight: preflight,
 				}, nil
 			}
 			// Legacy migration needed: write migrated config.
 			return configMutationResult{
-				Message:   fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
-				Preflight: preflight,
+				Message: fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
 			}, nil
 		}
 
@@ -874,8 +796,7 @@ func addAllowedRootToConfig(canonical string, preflight func() error, stdout, st
 		raw["allowed_roots"] = rawBytes
 
 		return configMutationResult{
-			Message:   fmt.Sprintf("added %s\n", canonical),
-			Preflight: preflight,
+			Message: fmt.Sprintf("added %s\n", canonical),
 		}, nil
 	})
 }
@@ -1214,17 +1135,6 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 	if err := validateCAConfig(raw); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
-	}
-
-	// Operation-specific preflight (e.g., SELinux workspace preparation).
-	// Runs after common validation, before the SkipWrite decision.
-	// This ensures SELinux preparation runs even for idempotent ADD
-	// ("already present") and only after the config is validated.
-	if result.Preflight != nil {
-		if err := result.Preflight(); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
 	}
 
 	// Skip write: print message and return.

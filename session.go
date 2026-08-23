@@ -163,39 +163,17 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 		return nil, fmt.Errorf("workspace must be inside an allowed root: %w", ErrInvalidWorkspace)
 	}
 
-	// Authorization succeeded. Now acquire lifecycle serialization and prepare MAC.
-	if a.MACLifecycle != nil {
-		a.MACLifecycle.mu.Lock()
-		boundary, err := a.MACLifecycle.prepare(absWorkspace)
-		if err != nil {
-			a.MACLifecycle.mu.Unlock()
-			return nil, fmt.Errorf("MAC preparation failed: %w: %w", err, ErrMAC)
-		}
-		// MAC is prepared; boundary is tracked in activeBoundaries.
-		// If DB insertion fails below, we release it.
-		_ = boundary // boundary tracked internally
-	}
-
-	// Generate session ID and token.
+	// Generate session ID and token before entering lifecycle critical section.
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
-		if a.MACLifecycle != nil {
-			a.MACLifecycle.mu.Unlock()
-			a.MACLifecycle.conditionalRelease(absWorkspace)
-		}
 		return nil, fmt.Errorf("cannot generate session ID: %w: %w", err, ErrSystem)
 	}
 	sessionID := "dhs_" + hex.EncodeToString(idBytes)
 
 	token, err := generateToken()
 	if err != nil {
-		if a.MACLifecycle != nil {
-			a.MACLifecycle.mu.Unlock()
-			a.MACLifecycle.conditionalRelease(absWorkspace)
-		}
 		return nil, fmt.Errorf("cannot generate session token: %w: %w", err, ErrSystem)
 	}
-
 	tokenHash := sha256.Sum256([]byte(token))
 	tokenHashHex := hex.EncodeToString(tokenHash[:])
 
@@ -209,27 +187,39 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 		principalID = nil
 	}
 
-	_, err = a.DB.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sessionID,
-		tokenHashHex,
-		absWorkspace,
-		now.Unix(),
-		expiresAt.Unix(),
-		principalID,
-	)
-	if err != nil {
-		if a.MACLifecycle != nil {
-			a.MACLifecycle.conditionalRelease(absWorkspace)
-			a.MACLifecycle.mu.Unlock()
-		}
-		return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
-	}
-
-	// Session committed — release lifecycle lock.
+	// Acquire lifecycle serialization and prepare MAC.
+	// CreateSessionBinding holds the lock through DB insert and rollback.
 	if a.MACLifecycle != nil {
-		a.MACLifecycle.mu.Unlock()
+		_, err := a.MACLifecycle.CreateSessionBinding(absWorkspace, sessionID, func(coverage macCoverage) error {
+			_, err := a.DB.Exec(
+				`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+				sessionID,
+				tokenHashHex,
+				absWorkspace,
+				now.Unix(),
+				expiresAt.Unix(),
+				principalID,
+			)
+			return err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
+		}
+	} else {
+		_, err := a.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			sessionID,
+			tokenHashHex,
+			absWorkspace,
+			now.Unix(),
+			expiresAt.Unix(),
+			principalID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
+		}
 	}
 
 	return &CreatedSession{
@@ -363,9 +353,7 @@ func (a *App) deleteSession(id string) (*Session, error) {
 
 	// Release MAC boundary for the deleted session.
 	if a.MACLifecycle != nil {
-		a.MACLifecycle.mu.Lock()
-		a.MACLifecycle.releaseSessionBoundary(s.Workspace)
-		a.MACLifecycle.mu.Unlock()
+		a.MACLifecycle.ReleaseSessionBoundary(id)
 	}
 
 	return &s, nil
@@ -417,9 +405,7 @@ func (a *App) deleteSessionForPrincipal(id string, principalID int64) (*Session,
 
 	// Release MAC boundary for the deleted session.
 	if a.MACLifecycle != nil {
-		a.MACLifecycle.mu.Lock()
-		a.MACLifecycle.releaseSessionBoundary(s.Workspace)
-		a.MACLifecycle.mu.Unlock()
+		a.MACLifecycle.ReleaseSessionBoundary(id)
 	}
 
 	return &s, nil

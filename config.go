@@ -880,43 +880,22 @@ type systemInitPrepareResult struct {
 }
 
 // newAppArmorSystemInitBackend constructs the AppArmor backend for
-// system-mode init. addRoot and removeRoot are the confinement hooks.
-// Production uses getAppArmorAddRoot/getAppArmorRemoveRoot; tests inject
-// mock functions.
+// system-mode init. System init no longer prepares MAC for the bootstrap
+// allowed root; MAC preparation is handled at session creation time.
 func newAppArmorSystemInitBackend(
 	addRoot func(string) (rootResult, error),
 	removeRoot func(string) (rootResult, error),
 ) *systemInitBackend {
 	return &systemInitBackend{
 		prepare: func(canonical string) (*systemInitPrepareResult, error) {
-			addResult, err := addRoot(canonical)
-			if err != nil {
-				return nil, err
-			}
-			pr := &systemInitPrepareResult{
-				rollbackLabel: "AppArmor",
-				OnSuccess: func(stdout io.Writer) {
-					if addResult.Changed {
-						fmt.Fprintf(stdout, "AppArmor workspace root added: %s\n", addResult.Path)
-					} else {
-						fmt.Fprintf(stdout, "AppArmor workspace root already present: %s\n", addResult.Path)
-					}
-				},
-			}
-			if addResult.Changed {
-				pr.RollbackOnCoreFailure = func() error {
-					_, rbErr := removeRoot(addResult.Path)
-					return rbErr
-				}
-			}
-			return pr, nil
+			return &systemInitPrepareResult{}, nil
 		},
 	}
 }
 
 // newSELinuxSystemInitBackend constructs the SELinux backend for
-// system-mode init. mgr is the workspace manager (nil to skip preparation).
-// resolveRoot is the canonical root resolver (nil to use production default).
+// system-mode init. System init no longer prepares MAC for the bootstrap
+// allowed root; MAC preparation is handled at session creation time.
 func newSELinuxSystemInitBackend(
 	mgr *selinuxWorkspaceManager,
 	resolveRoot func(string) (string, error),
@@ -924,18 +903,6 @@ func newSELinuxSystemInitBackend(
 	return &systemInitBackend{
 		resolveRoot: resolveRoot,
 		prepare: func(canonical string) (*systemInitPrepareResult, error) {
-			// /opt is a valid authorization ceiling but must not be
-			// relabeled as a managed workspace boundary. Skip MAC
-			// preparation for /opt; session-level MAC preparation
-			// handles concrete workspaces under /opt.
-			if !selinuxManagedRootAllowed(canonical) {
-				return &systemInitPrepareResult{}, nil
-			}
-			if mgr != nil && !isHomeRoot(canonical) {
-				if _, err := mgr.ensureWorkspaceLabel(canonical); err != nil {
-					return nil, err
-				}
-			}
 			return &systemInitPrepareResult{}, nil
 		},
 	}

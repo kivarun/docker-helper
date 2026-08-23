@@ -422,8 +422,8 @@ func TestHelpConfigAllowedRootGlobalCeiling(t *testing.T) {
 	if strings.Contains(stdout.String(), "workspace-root add") {
 		t.Error("config allowed-root help must not mention workspace-root add")
 	}
-	// Must mention system mode MAC preparation
-	if !strings.Contains(stdout.String(), "system mode") {
-		t.Error("config allowed-root help must mention system mode MAC preparation")
+	// Must NOT mention MAC preparation (handled at session creation time)
+	if strings.Contains(stdout.String(), "prepares the active MAC backend") {
+		t.Error("config allowed-root help must not mention MAC preparation")
 	}
 }

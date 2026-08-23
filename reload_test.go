@@ -2485,19 +2485,6 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 		deploymentMode: func() DeploymentMode {
 			return ModeSystem
 		},
-		detectLSM: func() (LSMBackend, error) {
-			// Must NOT be called during reload.
-			t.Fatal("detectLSM must not be called during reload")
-			return LSMNone, nil
-		},
-		verifySELinuxWorkspace: func(string) error {
-			t.Fatal("verifySELinuxWorkspace must not be called during reload")
-			return nil
-		},
-		apparmorListRoots: func() ([]string, error) {
-			t.Fatal("apparmorListRoots must not be called during reload")
-			return nil, nil
-		},
 	}
 
 	recorder := httptest.NewRecorder()
