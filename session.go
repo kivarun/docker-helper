@@ -49,14 +49,36 @@ type CreatedSession struct {
 	Token   string
 }
 
-// intersectRoots returns principal roots that are under at least one global root.
+// intersectRoots returns the effective root set: the mathematical intersection
+// of global and principal allowed roots. For each overlapping pair:
+//   - equal roots contribute that root;
+//   - principal inside global contributes the principal root;
+//   - global inside principal contributes the global root;
+//   - disjoint roots contribute nothing.
+//
+// Results are deduplicated and deterministic.
 func intersectRoots(globalRoots, principalRoots []string) []string {
-	result := make([]string, 0, len(principalRoots))
+	seen := make(map[string]bool)
+	var result []string
 	for _, pRoot := range principalRoots {
 		for _, gRoot := range globalRoots {
-			if pRoot == gRoot || isInside(gRoot, pRoot) {
-				result = append(result, pRoot)
-				break
+			if pRoot == gRoot {
+				if !seen[pRoot] {
+					seen[pRoot] = true
+					result = append(result, pRoot)
+				}
+			} else if isInside(gRoot, pRoot) {
+				// principal root inside global root -> principal root is effective
+				if !seen[pRoot] {
+					seen[pRoot] = true
+					result = append(result, pRoot)
+				}
+			} else if isInside(pRoot, gRoot) {
+				// global root inside principal root -> global root is effective
+				if !seen[gRoot] {
+					seen[gRoot] = true
+					result = append(result, gRoot)
+				}
 			}
 		}
 	}

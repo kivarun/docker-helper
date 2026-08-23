@@ -1562,3 +1562,52 @@ func TestPrincipalListAuth(t *testing.T) {
 		})
 	}
 }
+
+func TestPrincipalHTTPAddAllowedRootOutsideGlobal(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "outsideglobaluser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1060", "1060", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "outsideglobaluser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Path outside any global allowed root: create a sibling directory
+	// under the same parent as the allowed root.
+	parent := filepath.Dir(app.Config.AllowedRoots[0])
+	outsidePath := filepath.Join(parent, "outside-global-test")
+	if err := os.MkdirAll(outsidePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+
+	reqBody, _ := json.Marshal(allowedRootRequest{Path: outsidePath})
+	req := httptest.NewRequest(http.MethodPost, "/principals/outsideglobaluser/allowed-roots", bytes.NewReader(reqBody))
+	withAuth(req)
+	w := httptest.NewRecorder()
+
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d, body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode error response: %v", err)
+	}
+	if resp.Code != "outside_global_root" {
+		t.Errorf("expected error code outside_global_root, got %q", resp.Code)
+	}
+}

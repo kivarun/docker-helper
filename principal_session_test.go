@@ -1283,3 +1283,143 @@ func TestCredentialSessionListAudit(t *testing.T) {
 		t.Errorf("list audit should contain credential ID: %s", raw)
 	}
 }
+
+func TestGlobalPolicyNarrowing(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	broadRoot := filepath.Join(app.Config.AllowedRoots[0], "broad")
+	narrowRoot := filepath.Join(broadRoot, "narrow")
+	otherDir := filepath.Join(broadRoot, "other")
+	if err := os.MkdirAll(filepath.Join(narrowRoot, "project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(otherDir, "project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	home := filepath.Join(broadRoot, "home")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1050", "1050", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "narrowuser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Add the broad root to the principal.
+	if _, _, err := addAllowedRoot(app.DB, "narrowuser", broadRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addAllowedRoot() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "narrowuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	// Narrow global policy to the narrower root.
+	app.setConfig(&Config{
+		AllowedRoots:          []string{narrowRoot},
+		SessionTTL:            app.Config.SessionTTL,
+		LogLevel:              app.Config.LogLevel,
+		AuditEnabled:          app.Config.AuditEnabled,
+		ShutdownTimeout:       app.Config.ShutdownTimeout,
+		OperationRetentionTTL: app.Config.OperationRetentionTTL,
+		OperationMaxCompleted: app.Config.OperationMaxCompleted,
+		OperationLogMaxBytes:  app.Config.OperationLogMaxBytes,
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	// Session inside the narrow global root should succeed.
+	reqBody := map[string]string{"workspace": filepath.Join(narrowRoot, "project")}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("session in narrow root: expected %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+
+	// Session in broad root but outside narrow global should be rejected.
+	reqBody = map[string]string{"workspace": filepath.Join(otherDir, "project")}
+	body, _ = json.Marshal(reqBody)
+	req = httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("session outside narrow global: expected %d, got %d, body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	staleRoot := filepath.Join(app.Config.AllowedRoots[0], "stale")
+	newGlobalRoot := filepath.Join(app.Config.AllowedRoots[0], "newglobal")
+	if err := os.MkdirAll(filepath.Join(staleRoot, "project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(newGlobalRoot, "project"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "staleuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1051", "1051", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "staleuser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	// Add a root that will become stale.
+	if _, _, err := addAllowedRoot(app.DB, "staleuser", staleRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addAllowedRoot() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "staleuser", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	// Change global policy so staleRoot is no longer covered.
+	app.setConfig(&Config{
+		AllowedRoots:          []string{newGlobalRoot},
+		SessionTTL:            app.Config.SessionTTL,
+		LogLevel:              app.Config.LogLevel,
+		AuditEnabled:          app.Config.AuditEnabled,
+		ShutdownTimeout:       app.Config.ShutdownTimeout,
+		OperationRetentionTTL: app.Config.OperationRetentionTTL,
+		OperationMaxCompleted: app.Config.OperationMaxCompleted,
+		OperationLogMaxBytes:  app.Config.OperationLogMaxBytes,
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	// Session under stale principal root (outside new global) must be rejected.
+	reqBody := map[string]string{"workspace": filepath.Join(staleRoot, "project")}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("stale root session: expected %d, got %d, body: %s", http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}

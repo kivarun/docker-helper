@@ -339,6 +339,8 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
+		case errors.Is(err, ErrPrincipalRootOutsideGlobal):
+			writeError(ctx, w, http.StatusBadRequest, "outside_global_root", "path is not under any global allowed root")
 		default:
 			opLog(ctx).Error("principal allowed_root_add failed",
 				slog.String("operation", "principal_allowed_root_add"),
@@ -597,8 +599,6 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusConflict, "credential_exists", "credential already exists")
 		case isErrInvalidAllowedRoot(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
-		case errors.Is(err, ErrPrincipalRootOutsideGlobal):
-			writeError(ctx, w, http.StatusBadRequest, "outside_global_root", "path is not under any global allowed root")
 		default:
 			opLog(ctx).Error("credential create failed",
 				slog.String("operation", "credential_create"),

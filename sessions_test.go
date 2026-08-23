@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 )
@@ -165,5 +166,56 @@ func TestHTTPCreateSessionRFC3339(t *testing.T) {
 
 	if _, err := time.Parse(time.RFC3339, resp.Session.ExpiresAt); err != nil {
 		t.Errorf("expires_at is not RFC3339: %v", err)
+	}
+}
+
+func TestIntersectRootsGlobalInsidePrincipal(t *testing.T) {
+	// global = /root/project, principal = /root
+	// effective should be /root/project
+	global := []string{"/root/project"}
+	principal := []string{"/root"}
+	result := intersectRoots(global, principal)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
+	}
+}
+
+func TestIntersectRootsPrincipalInsideGlobal(t *testing.T) {
+	// global = /root, principal = /root/project
+	// effective should be /root/project
+	global := []string{"/root"}
+	principal := []string{"/root/project"}
+	result := intersectRoots(global, principal)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
+	}
+}
+
+func TestIntersectRootsEqual(t *testing.T) {
+	global := []string{"/root/project"}
+	principal := []string{"/root/project"}
+	result := intersectRoots(global, principal)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
+	}
+}
+
+func TestIntersectRootsDisjoint(t *testing.T) {
+	global := []string{"/a"}
+	principal := []string{"/b"}
+	result := intersectRoots(global, principal)
+	if len(result) != 0 {
+		t.Errorf("expected [], got %v", result)
+	}
+}
+
+func TestIntersectRootsNoDuplicates(t *testing.T) {
+	// Two principal roots both contain the same global root
+	global := []string{"/root/project"}
+	principal := []string{"/root", "/root/parent"}
+	result := intersectRoots(global, principal)
+	sort.Strings(result)
+	if len(result) != 1 || result[0] != "/root/project" {
+		t.Errorf("expected [/root/project], got %v", result)
 	}
 }
