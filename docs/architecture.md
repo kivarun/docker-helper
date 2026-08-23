@@ -213,7 +213,7 @@ POST /sessions  (launcher credential)
     │
     ├── validates credential
     ├── resolves principal_id
-    ├── validates workspace inside principal.allowed_roots
+    ├── validates workspace inside global allowed_roots intersected with principal allowed roots
     ├── generates session ID + token
     ├── stores session with principal_id
     └── returns session + token

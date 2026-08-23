@@ -242,24 +242,17 @@ func runServe(stdout, stderr io.Writer) error {
 	// Audit JSONL -> stdout; operational JSONL -> stderr.
 	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
 
-	// System mode with SELinux: verify non-home allowed_roots workspace labels.
+	// System mode: verify configured allowed_roots are usable under the active MAC backend.
 	if cfg.Mode == ModeSystem {
-		backend, err := detectLSM()
-		if err != nil {
+		if err := verifyAllowedRootsMAC(
+			cfg.AllowedRoots,
+			cfg.Mode,
+			detectLSM,
+			newSELinuxWorkspaceManager().verifyWorkspaceLabel,
+			apparmorManagedRoots,
+		); err != nil {
 			serveStartupError(err, "")
 			return err
-		}
-		if backend == LSMSelinux {
-			selMgr := newSELinuxWorkspaceManager()
-			for _, root := range cfg.AllowedRoots {
-				if isHomeRoot(root) {
-					continue
-				}
-				if err := selMgr.verifyWorkspaceLabel(root); err != nil {
-					serveStartupError(err, "")
-					return err
-				}
-			}
 		}
 	}
 

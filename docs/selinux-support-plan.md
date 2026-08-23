@@ -35,7 +35,7 @@ daemon and container domain the necessary workspace permissions.
 
 ### Non-home system allowed_roots
 
-A non-home system `allowed_root` (e.g., `/data`, `/projects/agents`,
+A non-home system global allowed root (e.g., `/data`, `/projects/agents`,
 `/opt/docker-helper-workspaces`) is managed by docker-helper under a
 dedicated SELinux type:
 
@@ -49,7 +49,7 @@ for workspace access, equivalent to what they have for `user_home_type`.
 
 #### Persistent labeling
 
-When docker-helper initializes or changes a non-home `allowed_root` under
+When docker-helper initializes or changes a non-home global allowed root under
 active SELinux, it:
 
 1. Creates a persistent `semanage fcontext` rule for the canonical root and
@@ -107,7 +107,7 @@ The SELinux labeling is managed natively through `semanage fcontext` and
 
 #### Previously managed roots
 
-When an `allowed_root` is removed, docker-helper does NOT automatically remove or
+When a global allowed root is removed, docker-helper does NOT automatically remove or
 relabel the previous root. Existing sessions may still reference the old root,
 and the `docker_helper_workspace_t` label may persist. This is acceptable
 because SELinux labeling is confinement metadata, not authorization. The

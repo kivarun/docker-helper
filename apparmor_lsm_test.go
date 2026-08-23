@@ -263,6 +263,13 @@ func TestServeSystemModePreflightEnforce(t *testing.T) {
 	}
 	getConfigPathFunc = func() string { return configPath }
 
+	// Mock managed AppArmor roots to cover the configured root.
+	origManagedRoots := apparmorManagedRoots
+	apparmorManagedRoots = func() ([]string, error) {
+		return []string{allowedRoot}, nil
+	}
+	defer func() { apparmorManagedRoots = origManagedRoots }()
+
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
 	if code != 1 {

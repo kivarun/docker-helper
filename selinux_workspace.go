@@ -453,14 +453,14 @@ func (m *selinuxWorkspaceManager) verifyWorkspaceLabel(root string) error {
 	actualType, err := m.readPathCon(root)
 	if err != nil {
 		return fmt.Errorf(
-			"cannot read SELinux type for allowed_root %s: %v; "+
+			"cannot read SELinux type for allowed root %s: %v; "+
 				"ensure the root is prepared via docker-helper init or docker-helper config allowed-root add PATH",
 			root, err,
 		)
 	}
 	if actualType != selinuxWorkspaceType {
 		return fmt.Errorf(
-			"allowed_root %s has SELinux type %s, expected %s; "+
+			"allowed root %s has SELinux type %s, expected %s; "+
 				"prepare the root via docker-helper init or docker-helper config allowed-root add PATH",
 			root, actualType, selinuxWorkspaceType,
 		)
@@ -472,9 +472,9 @@ func (m *selinuxWorkspaceManager) verifyWorkspaceLabel(root string) error {
 // restorecon to revert labels. Only called internally when the manager
 // itself cannot complete its transition before returning success.
 //
-// Outer callers (init, config set) MUST NOT call this on a mapping that
-// was previously returned as successful. Once ensureWorkspaceLabel returns
-// success, the mapping is managed durable state.
+// Outer callers (init, config allowed-root add) MUST NOT call this on a
+// mapping that was previously returned as successful. Once
+// ensureWorkspaceLabel returns success, the mapping is managed durable state.
 func (m *selinuxWorkspaceManager) rollbackWorkspaceLabel(root string) error {
 	pattern := fcontextPattern(root)
 

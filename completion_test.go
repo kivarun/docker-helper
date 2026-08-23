@@ -1,8 +1,10 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -44,7 +46,7 @@ func runCompletion(t *testing.T, script string, compWords []string) []string {
 		sb.WriteString(" '" + w + "'")
 	}
 	sb.WriteString(")\n")
-	sb.WriteString("COMP_CWORD=" + string(rune('0'+cword)) + "\n")
+	sb.WriteString("COMP_CWORD=" + strconv.Itoa(cword) + "\n")
 	sb.WriteString("COMPREPLY=()\n")
 	sb.WriteString("_docker_helper_completion\n")
 	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
@@ -678,5 +680,166 @@ func TestCompletionNoWorkspaceRoot(t *testing.T) {
 	results = runCompletion(t, script, []string{"docker-helper", "completion", ""})
 	if len(results) != 1 || results[0] != "bash" {
 		t.Errorf("expected [bash], got %v", results)
+	}
+}
+
+// TestCompletionAllowedRootAddDirectoryOnlyBehavioral verifies that
+// "config allowed-root add" completes only directories, not files.
+func TestCompletionAllowedRootAddDirectoryOnlyBehavioral(t *testing.T) {
+	script := completionScript(t)
+
+	// Create a temp structure with a directory and a regular file.
+	tmpDir := t.TempDir()
+	dirName := "workspaces"
+	fileName := "config.json"
+	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(")
+	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'add' ''")
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=4\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("cd " + tmpDir + "\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash completion failed: %v\n%s", err, out)
+	}
+
+	output := strings.TrimSpace(string(out))
+
+	// Must contain the directory name.
+	if !strings.Contains(output, dirName) {
+		t.Errorf("expected directory %q in completions, got: %s", dirName, output)
+	}
+
+	// Must NOT contain the regular file name.
+	if strings.Contains(output, fileName) {
+		t.Errorf("regular file %q must NOT appear in 'add' completions, got: %s", fileName, output)
+	}
+}
+
+// TestCompletionAllowedRootRemoveFilesystemBehavioral verifies that
+// "config allowed-root remove" completes filesystem entries.
+func TestCompletionAllowedRootRemoveFilesystemBehavioral(t *testing.T) {
+	script := completionScript(t)
+
+	tmpDir := t.TempDir()
+	dirName := "workspaces"
+	fileName := "config.json"
+	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(")
+	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'remove' ''")
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=4\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("cd " + tmpDir + "\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash completion failed: %v\n%s", err, out)
+	}
+
+	output := strings.TrimSpace(string(out))
+
+	// Must contain both directory and file.
+	if !strings.Contains(output, dirName) {
+		t.Errorf("expected directory %q in 'remove' completions, got: %s", dirName, output)
+	}
+	if !strings.Contains(output, fileName) {
+		t.Errorf("expected file %q in 'remove' completions, got: %s", fileName, output)
+	}
+}
+
+// TestCompletionAllowedRootListNoSuggestionsBehavioral verifies that
+// "config allowed-root list" produces no action or path suggestions.
+func TestCompletionAllowedRootListNoSuggestionsBehavioral(t *testing.T) {
+	script := completionScript(t)
+
+	tmpDir := t.TempDir()
+
+	var sb strings.Builder
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(")
+	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'list' ''")
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=4\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash completion failed: %v\n%s", err, out)
+	}
+
+	output := strings.TrimSpace(string(out))
+
+	// Must not contain action words.
+	for _, sub := range []string{"list", "add", "remove"} {
+		if strings.Contains(output, sub) {
+			t.Errorf("'list' completion must not suggest action %q, got: %s", sub, output)
+		}
+	}
+}
+
+// TestCompletionAllowedRootAfterPathNoSuggestionsBehavioral verifies that
+// after the PATH argument, no further positional suggestions are produced.
+func TestCompletionAllowedRootAfterPathNoSuggestionsBehavioral(t *testing.T) {
+	script := completionScript(t)
+
+	tmpDir := t.TempDir()
+
+	var sb strings.Builder
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(")
+	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'add' '/some/path' ''")
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=5\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	cmd.Dir = tmpDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash completion failed: %v\n%s", err, out)
+	}
+
+	output := strings.TrimSpace(string(out))
+
+	// Must not contain action words.
+	for _, sub := range []string{"list", "add", "remove"} {
+		if strings.Contains(output, sub) {
+			t.Errorf("after PATH, must not suggest action %q, got: %s", sub, output)
+		}
 	}
 }

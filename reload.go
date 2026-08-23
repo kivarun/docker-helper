@@ -41,15 +41,19 @@ type reloadDeps struct {
 	deploymentMode         func() DeploymentMode
 	detectLSM              func() (LSMBackend, error)
 	verifySELinuxWorkspace func(string) error
+	apparmorListRoots      func() ([]string, error)
 }
 
 // handleReload reloads the configuration from disk and updates the daemon's
-// runtime configuration. Configurable fields updated: allowed_root,
+// runtime configuration. Configurable fields updated: allowed_roots,
 // session_ttl, log_level, audit_enabled, shutdown_timeout,
 // operation_retention_ttl, operation_max_completed, operation_log_max_bytes,
 // trusted_ca_path, trusted_ca_injection.
 // Computed paths (socket, database, etc.) and startup-only fields (http_address)
 // remain unchanged.
+//
+// In system mode, verifies configured allowed_roots are usable under the
+// active MAC backend (SELinux workspace labels or AppArmor managed roots).
 //
 // If the new configuration is invalid, the daemon keeps its current
 // configuration and returns an error.
@@ -59,6 +63,7 @@ func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 		deploymentMode:         resolveDeploymentMode,
 		detectLSM:              detectLSM,
 		verifySELinuxWorkspace: newSELinuxWorkspaceManager().verifyWorkspaceLabel,
+		apparmorListRoots:      apparmorManagedRoots,
 	})
 }
 
@@ -97,50 +102,29 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 		return
 	}
 
-	// System mode with SELinux: verify non-home allowed_roots workspace labels.
-	if deps.deploymentMode() == ModeSystem {
-		backend, err := deps.detectLSM()
-		if err != nil {
-			duration := time.Since(started).Round(time.Millisecond).String()
-			opLog(ctx).Error("reload SELinux detection failed",
-				slog.String("operation", "reload"),
-				slog.String("error", err.Error()),
-			)
-			writeAuditWithRequestID(ctx, auditRecord{
-				Event:    "config.reload",
-				Result:   "selinux_detection_failed",
-				Duration: duration,
-			})
-			writeError(ctx, w, http.StatusBadRequest,
-				"selinux_detection_failed",
-				err.Error(),
-			)
-			return
-		}
-		if backend == LSMSelinux {
-			for _, root := range newCfg.AllowedRoots {
-				if isHomeRoot(root) {
-					continue
-				}
-				if err := deps.verifySELinuxWorkspace(root); err != nil {
-					duration := time.Since(started).Round(time.Millisecond).String()
-					opLog(ctx).Error("reload SELinux workspace verification failed",
-						slog.String("operation", "reload"),
-						slog.String("error", err.Error()),
-					)
-					writeAuditWithRequestID(ctx, auditRecord{
-						Event:    "config.reload",
-						Result:   "selinux_workspace_verification_failed",
-						Duration: duration,
-					})
-					writeError(ctx, w, http.StatusBadRequest,
-						"selinux_workspace_verification_failed",
-						err.Error(),
-					)
-					return
-				}
-			}
-		}
+	// System mode: verify configured allowed_roots are usable under the active MAC backend.
+	if err := verifyAllowedRootsMAC(
+		newCfg.AllowedRoots,
+		deps.deploymentMode(),
+		deps.detectLSM,
+		deps.verifySELinuxWorkspace,
+		deps.apparmorListRoots,
+	); err != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		opLog(ctx).Error("reload MAC verification failed",
+			slog.String("operation", "reload"),
+			slog.String("error", err.Error()),
+		)
+		writeAuditWithRequestID(ctx, auditRecord{
+			Event:    "config.reload",
+			Result:   "mac_verification_failed",
+			Duration: duration,
+		})
+		writeError(ctx, w, http.StatusBadRequest,
+			"mac_verification_failed",
+			err.Error(),
+		)
+		return
 	}
 
 	// Preserve startup-only fields that cannot be changed at runtime.
@@ -193,4 +177,81 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 		OK:      true,
 		Message: "configuration reloaded",
 	})
+}
+
+// verifyAllowedRootsMAC verifies that configured global allowed_roots are
+// usable under the active MAC backend. It is the shared internal verifier
+// used by both runServe startup and handleReload.
+//
+// SELinux: /home roots require no managed label; non-home roots use
+// verifyWorkspaceLabel.
+//
+// AppArmor: every configured global allowed root must be covered by at least
+// one managed AppArmor root. Coverage means configured == managed or
+// configured is a descendant of managed. Extra/stale managed roots are
+// acceptable (confinement metadata, not authorization).
+func verifyAllowedRootsMAC(
+	roots []string,
+	mode DeploymentMode,
+	detectLSM func() (LSMBackend, error),
+	verifySELinuxWorkspace func(string) error,
+	apparmorListRoots func() ([]string, error),
+) error {
+	if mode != ModeSystem {
+		return nil
+	}
+
+	backend, err := detectLSM()
+	if err != nil {
+		return err
+	}
+
+	switch backend {
+	case LSMSelinux:
+		for _, root := range roots {
+			if isHomeRoot(root) {
+				continue
+			}
+			if err := verifySELinuxWorkspace(root); err != nil {
+				return err
+			}
+		}
+		return nil
+
+	case LSMAppArmor:
+		managed, err := apparmorListRoots()
+		if err != nil {
+			return fmt.Errorf("cannot read managed AppArmor roots: %w", err)
+		}
+		for _, root := range roots {
+			if isHomeRoot(root) {
+				continue
+			}
+			if !apparmorRootCovered(root, managed) {
+				return fmt.Errorf(
+					"allowed root %s is not covered by managed AppArmor roots; add it via: docker-helper config allowed-root add %s",
+					root, root,
+				)
+			}
+		}
+		return nil
+
+	default:
+		return nil
+	}
+}
+
+// apparmorRootCovered returns true if root is covered by at least one
+// managed AppArmor root. Coverage means root equals managed or root is
+// a descendant of managed.
+func apparmorRootCovered(root string, managed []string) bool {
+	for _, m := range managed {
+		if root == m {
+			return true
+		}
+		if isProperDescendant(root, m) {
+			return true
+		}
+	}
+	return false
 }

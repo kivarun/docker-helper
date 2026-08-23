@@ -1334,7 +1334,7 @@ func TestAllowedRootPreflightNoMACBackend(t *testing.T) {
 	})
 }
 
-// TestManagedRootOptPolicyShared verifies that init and workspace-root add
+// TestManagedRootOptPolicyShared verifies that init and config allowed-root add
 // use the same exact /opt managed-root policy.
 func TestManagedRootOptPolicyShared(t *testing.T) {
 	// Mock attemptReload to return "daemon not running".

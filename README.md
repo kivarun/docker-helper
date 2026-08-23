@@ -1129,11 +1129,13 @@ sudo docker-helper principal show --system alice
 # 3. Add a global allowed root.
 #    config allowed-root add prepares the MAC backend (AppArmor or SELinux)
 #    and raises the system-wide authorization ceiling.
+sudo mkdir -p /srv/workspaces
 sudo docker-helper config allowed-root add /srv/workspaces
 
 # 4. Narrow the principal's authorization to a subdirectory.
 #    principal allowed-root add does NOT prepare MAC; it only defines
 #    which paths this principal may select at session creation time.
+sudo mkdir -p /srv/workspaces/alice
 sudo docker-helper principal allowed-root add \
     --system alice /srv/workspaces/alice
 

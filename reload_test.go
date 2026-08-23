@@ -2343,6 +2343,9 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 			verifyCalled = true
 			return fmt.Errorf("verifySELinuxWorkspace must not be called")
 		},
+		apparmorListRoots: func() ([]string, error) {
+			return nil, fmt.Errorf("apparmorListRoots must not be called")
+		},
 	}
 
 	// Use httptest to avoid real Unix listener.
@@ -2362,7 +2365,7 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 		t.Error("injected detectLSM was not called")
 	}
 
-	// 3. response code is selinux_detection_failed.
+	// 3. response code is mac_verification_failed.
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
@@ -2372,8 +2375,8 @@ func TestReloadDetectLSMErrorDirect(t *testing.T) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatalf("invalid JSON: %s", body)
 	}
-	if code, ok := result["code"].(string); !ok || code != "selinux_detection_failed" {
-		t.Fatalf("expected code=selinux_detection_failed, got: %s", body)
+	if code, ok := result["code"].(string); !ok || code != "mac_verification_failed" {
+		t.Fatalf("expected code=mac_verification_failed, got: %s", body)
 	}
 
 	// 4. runtime app.Config remains unchanged.
@@ -2544,5 +2547,486 @@ func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
 	opLogs := opBuf.String()
 	if !strings.Contains(opLogs, systemCASourceRoot) {
 		t.Errorf("expected reload error log to contain %q (system CA source policy), got:\n%s", systemCASourceRoot, opLogs)
+	}
+}
+
+// TestMACVerificationAppArmorRootMissing verifies that when a configured
+// allowed root is not covered by any managed AppArmor root, reload fails
+// with a clear diagnostic.
+func TestMACVerificationAppArmorRootMissing(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
+	app := &App{
+		Config: &Config{
+			AllowedRoots: []string{"/home"},
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
+		},
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	originalConfig := app.getConfig()
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			return &Config{
+				AllowedRoots: []string{"/data/agents"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			return LSMAppArmor, nil
+		},
+		verifySELinuxWorkspace: func(string) error {
+			return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+		},
+		apparmorListRoots: func() ([]string, error) {
+			// Managed roots do not cover /data/agents
+			return []string{"/srv/workspaces"}, nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+
+	body := recorder.Body.Bytes()
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %s", body)
+	}
+	if code, ok := result["code"].(string); !ok || code != "mac_verification_failed" {
+		t.Fatalf("expected code=mac_verification_failed, got: %s", body)
+	}
+
+	// Config unchanged.
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
+	}
+}
+
+// TestMACVerificationAppArmorExactMatch verifies that when a configured
+// allowed root exactly matches a managed AppArmor root, reload passes.
+func TestMACVerificationAppArmorExactMatch(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
+	app := &App{
+		Config: &Config{
+			AllowedRoots: []string{"/home"},
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
+		},
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			return &Config{
+				AllowedRoots: []string{"/data/agents"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			return LSMAppArmor, nil
+		},
+		verifySELinuxWorkspace: func(string) error {
+			return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+		},
+		apparmorListRoots: func() ([]string, error) {
+			// Managed root exactly matches configured root
+			return []string{"/data/agents"}, nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", recorder.Code, recorder.Body.String())
+	}
+
+	// Config updated.
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != "/data/agents" {
+		t.Errorf("AllowedRoot not updated: got %q, want %q", currentConfig.AllowedRoots[0], "/data/agents")
+	}
+}
+
+// TestMACVerificationAppArmorDescendantOfManaged verifies that when a
+// configured allowed root is a descendant of a managed AppArmor root,
+// reload passes.
+func TestMACVerificationAppArmorDescendantOfManaged(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
+	app := &App{
+		Config: &Config{
+			AllowedRoots: []string{"/home"},
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
+		},
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			return &Config{
+				AllowedRoots: []string{"/data/agents/project-a"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			return LSMAppArmor, nil
+		},
+		verifySELinuxWorkspace: func(string) error {
+			return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+		},
+		apparmorListRoots: func() ([]string, error) {
+			// Managed root is parent of configured root
+			return []string{"/data"}, nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", recorder.Code, recorder.Body.String())
+	}
+
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != "/data/agents/project-a" {
+		t.Errorf("AllowedRoot not updated: got %q", currentConfig.AllowedRoots[0])
+	}
+}
+
+// TestMACVerificationAppArmorStaleExtraManaged verifies that extra/stale
+// managed AppArmor roots do not cause verification failure.
+func TestMACVerificationAppArmorStaleExtraManaged(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
+	app := &App{
+		Config: &Config{
+			AllowedRoots: []string{"/home"},
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
+		},
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			return &Config{
+				AllowedRoots: []string{"/data/agents"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			return LSMAppArmor, nil
+		},
+		verifySELinuxWorkspace: func(string) error {
+			return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+		},
+		apparmorListRoots: func() ([]string, error) {
+			// Extra stale managed root present alongside the needed one
+			return []string{"/data/agents", "/old/stale-root"}, nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", recorder.Code, recorder.Body.String())
+	}
+
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != "/data/agents" {
+		t.Errorf("AllowedRoot not updated: got %q", currentConfig.AllowedRoots[0])
+	}
+}
+
+// TestMACVerificationSELinuxUnchanged verifies that SELinux workspace
+// verification behavior is preserved through the shared verifier.
+func TestMACVerificationSELinuxUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
+	app := &App{
+		Config: &Config{
+			AllowedRoots: []string{"/home"},
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
+		},
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	originalConfig := app.getConfig()
+	verifyCalled := false
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			return &Config{
+				AllowedRoots: []string{"/data"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			return LSMSelinux, nil
+		},
+		verifySELinuxWorkspace: func(root string) error {
+			verifyCalled = true
+			if root != "/data" {
+				return fmt.Errorf("expected /data, got %s", root)
+			}
+			return fmt.Errorf("simulated SELinux verification failure")
+		},
+		apparmorListRoots: func() ([]string, error) {
+			return nil, fmt.Errorf("apparmorListRoots must not be called for SELinux")
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+
+	if !verifyCalled {
+		t.Error("verifySELinuxWorkspace must be called for SELinux backend")
+	}
+
+	body := recorder.Body.Bytes()
+	var result map[string]any
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("invalid JSON: %s", body)
+	}
+	if code, ok := result["code"].(string); !ok || code != "mac_verification_failed" {
+		t.Fatalf("expected code=mac_verification_failed, got: %s", body)
+	}
+
+	// Config unchanged.
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
+	}
+}
+
+// TestMACVerificationAppArmorHomeRoot verifies that home roots are not
+// verified under AppArmor (same as SELinux behavior).
+func TestMACVerificationAppArmorHomeRoot(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
+	app := &App{
+		Config: &Config{
+			AllowedRoots: []string{"/home"},
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
+		},
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			return &Config{
+				AllowedRoots: []string{"/home"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			return LSMAppArmor, nil
+		},
+		verifySELinuxWorkspace: func(string) error {
+			return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+		},
+		apparmorListRoots: func() ([]string, error) {
+			// No managed roots, but /home should still pass
+			// because it's a home root
+			return []string{}, nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body: %s", recorder.Code, recorder.Body.String())
 	}
 }
