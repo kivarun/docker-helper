@@ -78,13 +78,13 @@ module docker_helper 1.0;
 
 		role system_r;
 
-		class file { append create execute execute_no_trans getattr ioctl lock open read rename setattr unlink write entrypoint mounton map };
-		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton map relabelfrom relabelto };
-		class sock_file { append create getattr ioctl read setattr unlink write };
-		class lnk_file { create getattr read unlink write };
+		class file { append create execute execute_no_trans getattr ioctl lock open read rename setattr unlink write entrypoint mounton map link };
+		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton map relabelfrom relabelto lock link unlink rename reparent };
+		class sock_file { append create getattr ioctl read setattr unlink write open rename link lock };
+		class lnk_file { create getattr read unlink write setattr append rename link ioctl lock };
 		class chr_file { append create getattr ioctl read watch };
 		class blk_file { append create getattr ioctl read };
-		class fifo_file { append create getattr ioctl read watch write };
+		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock };
 		class filesystem { mount remount unmount };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
@@ -280,51 +280,53 @@ allow docker_helper_container_t container_file_t:fifo_file { create getattr read
 # user_home_type: regular files — create, read/write, build, execute
 allow docker_helper_container_t user_home_type:file {
 	read write create getattr setattr lock open ioctl append
-	unlink rename execute execute_no_trans map
+	unlink rename execute execute_no_trans map link
 };
 
 # user_home_type: directories — normal POSIX tree management
 allow docker_helper_container_t user_home_type:dir {
 	read open search add_name remove_name create rmdir getattr setattr write ioctl
+	lock link unlink rename reparent
 };
 
 # user_home_type: symlinks — normal development-tree symlink lifecycle
 allow docker_helper_container_t user_home_type:lnk_file {
-	read create getattr unlink write
+	read create getattr setattr unlink write append rename link ioctl lock
 };
 
 # user_home_type: Unix-domain socket filesystem nodes
 allow docker_helper_container_t user_home_type:sock_file {
-	create getattr read write append ioctl setattr unlink
+	create open getattr setattr read write append rename link unlink ioctl lock
 };
 
 # user_home_type: FIFOs
 allow docker_helper_container_t user_home_type:fifo_file {
-	create getattr read write append ioctl watch
+	create open getattr setattr read write append rename link unlink ioctl lock
 };
 
 # docker_helper_workspace_t: regular files — create, read/write, build, execute
 allow docker_helper_container_t docker_helper_workspace_t:file {
 	read write create getattr setattr lock open ioctl append
-	unlink rename execute execute_no_trans map
+	unlink rename execute execute_no_trans map link
 };
 
 # docker_helper_workspace_t: directories — normal POSIX tree management
 allow docker_helper_container_t docker_helper_workspace_t:dir {
 	read open search add_name remove_name create rmdir getattr setattr write ioctl
+	lock link unlink rename reparent
 };
 
 # docker_helper_workspace_t: symlinks — normal development-tree symlink lifecycle
 allow docker_helper_container_t docker_helper_workspace_t:lnk_file {
-	read create getattr unlink write
+	read create getattr setattr unlink write append rename link ioctl lock
 };
 
 # docker_helper_workspace_t: Unix-domain socket filesystem nodes
 allow docker_helper_container_t docker_helper_workspace_t:sock_file {
-	create getattr read write append ioctl setattr unlink
+	create open getattr setattr read write append rename link unlink ioctl lock
 };
 
 # docker_helper_workspace_t: FIFOs
 allow docker_helper_container_t docker_helper_workspace_t:fifo_file {
-	create getattr read write append ioctl watch
+	create open getattr setattr read write append rename link unlink ioctl lock
 };
