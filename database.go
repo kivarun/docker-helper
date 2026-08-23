@@ -88,14 +88,52 @@ func initializeDatabase(db *sql.DB) error {
 	}
 
 	// Additive migration: mac_boundaries tracks docker-helper-owned MAC boundaries.
+	// Primary key is (backend, boundary) so that stale ownership for another LSM
+	// cannot silently block current backend ownership for the same filesystem boundary.
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS mac_boundaries (
-			boundary TEXT PRIMARY KEY,
-			backend TEXT NOT NULL
+			backend TEXT NOT NULL,
+			boundary TEXT NOT NULL,
+			PRIMARY KEY (backend, boundary)
 		);
 	`)
 	if err != nil {
 		return fmt.Errorf("cannot create mac_boundaries table: %w", err)
+	}
+
+	// Additive migration: if the table existed with the old schema (boundary as
+	// sole PK), migrate to the new composite key schema.
+	var colCount int
+	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('mac_boundaries') WHERE name='backend' AND pk > 0;`).Scan(&colCount)
+	if err != nil {
+		return fmt.Errorf("cannot check mac_boundaries schema: %w", err)
+	}
+	if colCount == 0 {
+		// Old schema: boundary is the sole PK. Migrate to (backend, boundary).
+		_, err = db.Exec(`
+			CREATE TABLE mac_boundaries_new (
+				backend TEXT NOT NULL,
+				boundary TEXT NOT NULL,
+				PRIMARY KEY (backend, boundary)
+			);
+		`)
+		if err != nil {
+			return fmt.Errorf("cannot create new mac_boundaries table: %w", err)
+		}
+		_, err = db.Exec(`INSERT OR IGNORE INTO mac_boundaries_new SELECT backend, boundary FROM mac_boundaries`)
+		if err != nil {
+			// Best-effort cleanup.
+			db.Exec(`DROP TABLE IF EXISTS mac_boundaries_new`)
+			return fmt.Errorf("cannot migrate mac_boundaries data: %w", err)
+		}
+		_, err = db.Exec(`DROP TABLE mac_boundaries`)
+		if err != nil {
+			return fmt.Errorf("cannot drop old mac_boundaries table: %w", err)
+		}
+		_, err = db.Exec(`ALTER TABLE mac_boundaries_new RENAME TO mac_boundaries`)
+		if err != nil {
+			return fmt.Errorf("cannot rename mac_boundaries table: %w", err)
+		}
 	}
 
 	return nil

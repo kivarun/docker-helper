@@ -485,16 +485,22 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			pm, err := a.pinMount(session.Workspace, m.HostPath, cfg.RuntimeDir, op.ID, i)
 			if err != nil {
 				// Cleanup pins before releasing lease.
+				pinCleanupErr := false
 				for j := len(pinnedMounts) - 1; j >= 0; j-- {
 					if ce := pinnedMounts[j].Cleanup(); ce != nil {
 						opLog(ctx).Error("pin cleanup failed",
 							slog.String("operation", "run"),
 							slog.String("error", ce.Error()),
 						)
+						pinCleanupErr = true
 					}
 				}
-				if leaseRelease != nil {
+				if !pinCleanupErr && leaseRelease != nil {
 					leaseRelease()
+				} else if pinCleanupErr {
+					opLog(ctx).Error("MAC lease intentionally retained because workspace-dependent pin cleanup did not complete",
+						slog.String("operation", "run"),
+					)
 				}
 				opLog(ctx).Error("cannot pin mount source",
 					slog.String("operation", "run"),
@@ -514,16 +520,22 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
 			// Cleanup pins before releasing lease.
+			pinCleanupErr := false
 			for j := len(pinnedMounts) - 1; j >= 0; j-- {
 				if ce := pinnedMounts[j].Cleanup(); ce != nil {
 					opLog(ctx).Error("pin cleanup failed",
 						slog.String("operation", "run"),
 						slog.String("error", ce.Error()),
 					)
+					pinCleanupErr = true
 				}
 			}
-			if leaseRelease != nil {
+			if !pinCleanupErr && leaseRelease != nil {
 				leaseRelease()
+			} else if pinCleanupErr {
+				opLog(ctx).Error("MAC lease intentionally retained because workspace-dependent pin cleanup did not complete",
+					slog.String("operation", "run"),
+				)
 			}
 			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
@@ -611,13 +623,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		// Cleanup cidfile and pins before releasing lease.
 		cleanupCidfile(op)
-		if ce := cleanupPinnedMounts(op); ce != nil {
-			opLog(ctx).Error("pin cleanup failed",
+		cleanupErr := cleanupPinnedMounts(op)
+		if cleanupErr != nil {
+			opLog(ctx).Error("pin cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 				slog.String("operation", "run"),
-				slog.String("error", ce.Error()),
+				slog.String("error", cleanupErr.Error()),
 			)
 		}
-		if op.macLeaseRelease != nil {
+		if cleanupErr == nil && op.macLeaseRelease != nil {
 			op.macLeaseRelease()
 		}
 		msg := "run cancelled: daemon is shutting down"
@@ -634,13 +647,14 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		cancel()
 		// Cleanup cidfile and pins before releasing lease.
 		cleanupCidfile(op)
-		if ce := cleanupPinnedMounts(op); ce != nil {
-			opLog(ctx).Error("pin cleanup failed",
+		cleanupErr := cleanupPinnedMounts(op)
+		if cleanupErr != nil {
+			opLog(ctx).Error("pin cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 				slog.String("operation", "run"),
-				slog.String("error", ce.Error()),
+				slog.String("error", cleanupErr.Error()),
 			)
 		}
-		if op.macLeaseRelease != nil {
+		if cleanupErr == nil && op.macLeaseRelease != nil {
 			op.macLeaseRelease()
 		}
 		opLog(ctx).Error("cannot start run process",
@@ -686,15 +700,17 @@ func (a *App) waitRunCompletion(op *operation, started time.Time) {
 	cleanupErr := cleanupPinnedMounts(op)
 	if cleanupErr != nil {
 		ctx := withSessionID(context.Background(), op.SessionID)
-		opLog(ctx).Error("pinned mount cleanup failed",
+		opLog(ctx).Error("pinned mount cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 			slog.String("operation", "run"),
 			slog.String("operation_id", op.ID),
 			slog.String("error", cleanupErr.Error()),
 		)
 	}
 
-	// Release workspace-use lease.
-	if op.macLeaseRelease != nil {
+	// Release workspace-use lease only if pinned mount cleanup succeeded.
+	// If cleanup failed, the MAC lease/boundary is intentionally retained
+	// to preserve confinement while a pinned workspace mount remains.
+	if cleanupErr == nil && op.macLeaseRelease != nil {
 		op.macLeaseRelease()
 	}
 

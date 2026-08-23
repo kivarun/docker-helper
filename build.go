@@ -113,14 +113,15 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
 			// Cleanup staging before releasing lease.
-			if err := staged.Cleanup(); err != nil {
-				opLog(ctx).Error("staging cleanup failed after tryCreate rejection",
+			cleanupErr := staged.Cleanup()
+			if cleanupErr != nil {
+				opLog(ctx).Error("staging cleanup failed after tryCreate rejection — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 					slog.String("operation", "build"),
 					slog.String("operation_id", op.ID),
-					slog.String("error", err.Error()),
+					slog.String("error", cleanupErr.Error()),
 				)
 			}
-			if leaseRelease != nil {
+			if cleanupErr == nil && leaseRelease != nil {
 				leaseRelease()
 			}
 			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
@@ -170,14 +171,15 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if result.Terminated {
 		cancel()
 		// Release lease AFTER cleaning up staged resources.
-		if err := staged.Cleanup(); err != nil {
-			opLog(ctx).Error("staging cleanup failed after pre-start termination",
+		cleanupErr := staged.Cleanup()
+		if cleanupErr != nil {
+			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 				slog.String("operation", "build"),
 				slog.String("operation_id", op.ID),
-				slog.String("error", err.Error()),
+				slog.String("error", cleanupErr.Error()),
 			)
 		}
-		if op.macLeaseRelease != nil {
+		if cleanupErr == nil && op.macLeaseRelease != nil {
 			op.macLeaseRelease()
 		}
 		msg := "build cancelled: daemon is shutting down"
@@ -193,14 +195,15 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if result.Err != nil {
 		cancel()
 		// Release lease AFTER cleaning up staged resources.
-		if err := staged.Cleanup(); err != nil {
-			opLog(ctx).Error("staging cleanup failed after start error",
+		cleanupErr := staged.Cleanup()
+		if cleanupErr != nil {
+			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 				slog.String("operation", "build"),
 				slog.String("operation_id", op.ID),
-				slog.String("error", err.Error()),
+				slog.String("error", cleanupErr.Error()),
 			)
 		}
-		if op.macLeaseRelease != nil {
+		if cleanupErr == nil && op.macLeaseRelease != nil {
 			op.macLeaseRelease()
 		}
 		opLog(ctx).Error("cannot start build process",
@@ -231,19 +234,21 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 	err := op.cmd.Wait()
 
 	// Cleanup staging directory regardless of outcome.
+	cleanupErr := error(nil)
 	if op.stagedCtx != nil {
-		if cerr := op.stagedCtx.Cleanup(); cerr != nil {
+		cleanupErr = op.stagedCtx.Cleanup()
+		if cleanupErr != nil {
 			ctx := withSessionID(context.Background(), op.SessionID)
-			opLog(ctx).Error("staging cleanup failed",
+			opLog(ctx).Error("staging cleanup failed — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 				slog.String("operation", "build"),
 				slog.String("operation_id", op.ID),
-				slog.String("error", cerr.Error()),
+				slog.String("error", cleanupErr.Error()),
 			)
 		}
 	}
 
-	// Release workspace-use lease.
-	if op.macLeaseRelease != nil {
+	// Release workspace-use lease only if staging cleanup succeeded.
+	if cleanupErr == nil && op.macLeaseRelease != nil {
 		op.macLeaseRelease()
 	}
 

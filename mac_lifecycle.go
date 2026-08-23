@@ -55,8 +55,13 @@ type workspaceMACLifecycle struct {
 	// sessionBindings maps session ID to the exact MAC coverage boundary.
 	sessionBindings map[string]macCoverage
 
-	// activeBoundaries maps boundary path to consumer count.
+	// activeBoundaries maps boundary path to direct consumer count.
 	activeBoundaries map[string]int
+
+	// deferredBoundaries tracks helper-owned boundaries that cannot yet be
+	// removed because an intersecting session/boundary is live. These are
+	// retried for cleanup when any consumer disappears.
+	deferredBoundaries map[string]bool
 
 	// leases maps unique lease key to workspace.
 	leases map[string]string
@@ -64,11 +69,12 @@ type workspaceMACLifecycle struct {
 
 func newWorkspaceMACLifecycle(db *sql.DB, backend macBackend) *workspaceMACLifecycle {
 	return &workspaceMACLifecycle{
-		db:               db,
-		backend:          backend,
-		sessionBindings:  make(map[string]macCoverage),
-		activeBoundaries: make(map[string]int),
-		leases:           make(map[string]string),
+		db:                 db,
+		backend:            backend,
+		sessionBindings:    make(map[string]macCoverage),
+		activeBoundaries:   make(map[string]int),
+		deferredBoundaries: make(map[string]bool),
+		leases:             make(map[string]string),
 	}
 }
 
@@ -154,6 +160,8 @@ func (l *workspaceMACLifecycle) ReleaseSessionBoundary(sessionID string) {
 	}
 
 	l.conditionalReleaseBoundary(coverage.Boundary, coverage.Managed)
+	// Retry cleanup of previously deferred boundaries now that a consumer disappeared.
+	l.retryDeferredBoundaries()
 }
 
 // AcquireUse acquires a workspace-use lease for an operation.
@@ -186,13 +194,20 @@ func (l *workspaceMACLifecycle) AcquireUse(sessionID, workspace string) (leaseKe
 	leaseKey = generateLeaseKey()
 	l.leases[leaseKey] = workspace
 
+	// Idempotent release: use sync.Once so the release function affects
+	// lifecycle state exactly once.
+	var releaseOnce sync.Once
 	release = func() {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		delete(l.leases, leaseKey)
-		if l.backend != nil {
-			l.conditionalReleaseBoundary(coverage.Boundary, coverage.Managed)
-		}
+		releaseOnce.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			delete(l.leases, leaseKey)
+			if l.backend != nil {
+				l.conditionalReleaseBoundary(coverage.Boundary, coverage.Managed)
+			}
+			// Retry cleanup of previously deferred boundaries.
+			l.retryDeferredBoundaries()
+		})
 	}
 
 	return leaseKey, release, nil
@@ -303,7 +318,12 @@ func (l *workspaceMACLifecycle) conditionalReleaseBoundary(boundary string, mana
 
 	// No direct consumers remain — check if any other binding or lease still needs this boundary.
 	if l.isBoundaryStillNeeded(boundary) {
-		l.activeBoundaries[boundary] = 1
+		// Defer cleanup: record the boundary for retry when the intersecting
+		// consumer later disappears. Do NOT set a synthetic count — keep
+		// activeBoundaries truthful.
+		if managed {
+			l.deferredBoundaries[boundary] = true
+		}
 		return
 	}
 
@@ -322,6 +342,50 @@ func (l *workspaceMACLifecycle) conditionalReleaseBoundary(boundary string, mana
 
 	// Successful removal: remove ownership metadata.
 	l.forgetBoundaryOwnership(boundary)
+	delete(l.deferredBoundaries, boundary)
+}
+
+// retryDeferredBoundaries attempts to clean up previously deferred boundaries
+// now that a consumer has disappeared.
+// Must be called with l.mu held.
+func (l *workspaceMACLifecycle) retryDeferredBoundaries() {
+	if l.backend == nil {
+		return
+	}
+
+	for boundary := range l.deferredBoundaries {
+		if l.activeBoundaries[boundary] > 0 {
+			// Still has direct consumers, skip.
+			continue
+		}
+		if l.isBoundaryStillNeeded(boundary) {
+			// Still needed by other bindings/leases, keep deferred.
+			continue
+		}
+
+		// Check if we own this boundary.
+		owned, err := l.isBoundaryOwnedByHelper(boundary)
+		if err != nil {
+			slog.Warn("cannot verify deferred boundary ownership for retry",
+				slog.String("boundary", boundary),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if !owned {
+			delete(l.deferredBoundaries, boundary)
+			continue
+		}
+
+		if err := l.backend.removeBoundary(boundary); err != nil {
+			slog.Warn("deferred MAC boundary removal failed, will retry on next startup",
+				slog.String("boundary", boundary),
+				slog.String("error", err.Error()))
+			continue
+		}
+
+		l.forgetBoundaryOwnership(boundary)
+		delete(l.deferredBoundaries, boundary)
+	}
 }
 
 // isBoundaryStillNeeded checks if any active consumer (session binding or lease)
@@ -372,6 +436,7 @@ func (l *workspaceMACLifecycle) cleanupStaleBoundaries() error {
 			continue
 		}
 		l.forgetBoundaryOwnership(boundary)
+		delete(l.deferredBoundaries, boundary)
 	}
 
 	return nil
@@ -420,8 +485,8 @@ func (l *workspaceMACLifecycle) listLiveSessionsWithIDs() ([]liveSessionWithID, 
 // recordBoundaryOwnership stores ownership metadata for a docker-helper-owned boundary.
 func (l *workspaceMACLifecycle) recordBoundaryOwnership(boundary string) error {
 	_, err := l.db.Exec(
-		`INSERT OR IGNORE INTO mac_boundaries (boundary, backend) VALUES (?, ?)`,
-		boundary, l.backendType(),
+		`INSERT OR REPLACE INTO mac_boundaries (backend, boundary) VALUES (?, ?)`,
+		l.backendType(), boundary,
 	)
 	return err
 }
@@ -430,8 +495,8 @@ func (l *workspaceMACLifecycle) recordBoundaryOwnership(boundary string) error {
 func (l *workspaceMACLifecycle) isBoundaryOwnedByHelper(boundary string) (bool, error) {
 	var backend string
 	err := l.db.QueryRow(
-		`SELECT backend FROM mac_boundaries WHERE boundary = ?`,
-		boundary,
+		`SELECT backend FROM mac_boundaries WHERE backend = ? AND boundary = ?`,
+		l.backendType(), boundary,
 	).Scan(&backend)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -592,6 +657,14 @@ func (b *macBackendSELinux) ensureCoverage(workspace string) (macCoverage, bool,
 	if cov, found, err := b.findExistingCoverage(workspace); err != nil {
 		return macCoverage{}, false, err
 	} else if found {
+		// Existing compatible coverage found: run restorecon for the concrete
+		// workspace and verify the actual on-disk type.
+		if err := b.mgr.restoreconRecursive(workspace); err != nil {
+			return macCoverage{}, false, fmt.Errorf("restorecon failed for workspace %s under existing boundary %s: %w", workspace, cov.Boundary, err)
+		}
+		if err := b.mgr.verifyActualType(workspace); err != nil {
+			return macCoverage{}, false, fmt.Errorf("actual SELinux type verification failed for workspace %s: %w", workspace, err)
+		}
 		return cov, false, nil
 	}
 
@@ -608,13 +681,18 @@ func (b *macBackendSELinux) verifyCoverage(workspace string) (macCoverage, error
 		return macCoverage{Boundary: workspace, Managed: false}, nil
 	}
 
-	// Check if an existing boundary covers this workspace.
-	cov, found, err := b.findExistingCoverage(workspace)
+	// Discover the actual persistent covering boundary.
+	boundaries, err := b.mgr.listCoveringBoundaries(workspace)
 	if err != nil {
 		return macCoverage{}, fmt.Errorf("cannot discover SELinux coverage for %s: %w", workspace, err)
 	}
-	if found {
-		return cov, nil
+
+	for _, boundary := range boundaries {
+		// Boundary exists — verify the actual on-disk type for the workspace.
+		if err := b.mgr.verifyActualType(workspace); err != nil {
+			return macCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: %w", boundary, workspace, err)
+		}
+		return macCoverage{Boundary: boundary, Managed: false}, nil
 	}
 
 	// No existing boundary — verify the workspace itself.

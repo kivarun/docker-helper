@@ -713,7 +713,7 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 			continue
 		}
 		msg, _ := rec["msg"].(string)
-		if msg != "staging cleanup failed after tryCreate rejection" {
+		if !strings.HasPrefix(msg, "staging cleanup failed after tryCreate rejection") {
 			continue
 		}
 		foundCleanup = true
@@ -1179,7 +1179,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 			continue
 		}
 		msg, _ := rec["msg"].(string)
-		if msg != "pinned mount cleanup failed" {
+		if !strings.HasPrefix(msg, "pinned mount cleanup failed") {
 			continue
 		}
 		foundCleanup = true
@@ -1293,7 +1293,7 @@ func TestBuildStagingCleanupCorrelation(t *testing.T) {
 			continue
 		}
 		msg, _ := rec["msg"].(string)
-		if msg != "staging cleanup failed" {
+		if !strings.HasPrefix(msg, "staging cleanup failed") {
 			continue
 		}
 		foundCleanup = true
