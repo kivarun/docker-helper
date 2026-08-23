@@ -844,3 +844,63 @@ func TestCompletionAllowedRootAfterPathNoSuggestionsBehavioral(t *testing.T) {
 		t.Errorf("after PATH, must produce empty COMPREPLY, got: %s", output)
 	}
 }
+
+func TestCompletionDoubleDashStopsFlagCompletion(t *testing.T) {
+	// After literal --, no docker-helper flags or subcommands should be suggested.
+	// Container command arguments after -- are not docker-helper options.
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "run", "--image", "alpine", "--", "sh", "-"})
+	if len(results) > 0 {
+		for _, r := range results {
+			if strings.HasPrefix(r, "--") || r == "help" {
+				t.Errorf("after --, must NOT suggest docker-helper flags, got: %s", r)
+				break
+			}
+		}
+	}
+}
+
+func TestCompletionNoFlagsAfterPositional(t *testing.T) {
+	// Go flag.FlagSet stops flag parsing at the first positional argument.
+	// Completion must not suggest helper flags after a positional argument.
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "alice", "--s"})
+	for _, r := range results {
+		if r == "--system" {
+			t.Error("--system must NOT be suggested after positional argument")
+			break
+		}
+	}
+}
+
+func TestCompletionFlagsBeforePositional(t *testing.T) {
+	// Flags before positional arguments must still work.
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "--s"})
+	found := false
+	for _, r := range results {
+		if r == "--system" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("--system must be suggested before positional argument, got: %v", results)
+	}
+}
+
+func TestCompletionFlagEqualsValueDoesNotConsumeNext(t *testing.T) {
+	// --flag=value is self-contained; the following word must not be consumed.
+	// After --endpoint=http://localhost:9999, the next word should be treated
+	// as a new token, not as the flag value.
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "session", "create", "--endpoint=http://localhost:9999", "--"})
+	// After --endpoint=VALUE, -- should be recognized as end-of-options.
+	// If -- was consumed as the flag value, we'd see flag completions.
+	for _, r := range results {
+		if strings.HasPrefix(r, "--") {
+			t.Errorf("--flag=value consumed next word; -- was not recognized: got %s", r)
+			break
+		}
+	}
+}

@@ -286,6 +286,7 @@ func runServe(stdout, stderr io.Writer) error {
 		// correspond to an active session.
 		if err := cleanupStaleSessionRuntimeDirs(db, cfg.RuntimeDir); err != nil {
 			opLog(context.Background()).Warn("stale session runtime cleanup failed",
+				slog.String("operation", "session_runtime_cleanup"),
 				slog.String("error", err.Error()),
 			)
 		}

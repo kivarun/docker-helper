@@ -68,7 +68,11 @@ and stored root.
 .PP
 Manage workspace roots with:
 .br
-\fBdocker-helper config allowed-root list|add|remove PATH\fR
+\fBdocker-helper config allowed-root list\fR \- list global allowed roots
+.br
+\fBdocker-helper config allowed-root add PATH\fR \- add a global allowed root
+.br
+\fBdocker-helper config allowed-root remove PATH\fR \- remove a global allowed root
 .PP
 Legacy scalar \fBallowed_root\fR is accepted by config loading for migration
 purposes only. The current schema uses \fBallowed_roots\fR.
@@ -82,10 +86,12 @@ Must be a positive duration. An absent or empty field is invalid.
 Logging level: \fBdebug\fR, \fBinfo\fR, \fBwarn\fR, or \fBerror\fR.
 .TP
 .B audit_enabled (boolean, optional)
-Enable audit logging for Docker operations. When absent, the effective value
+Enable the audit event stream. When absent, the effective value
 depends on deployment mode: in system mode (effective UID 0) audit is always
 \fBtrue\fR; in user mode it is \fBtrue\fR only when effective \fBlog_level\fR is
 \fBdebug\fR, \fBfalse\fR otherwise. An explicit value always overrides the default.
+The audit stream covers authentication, session, principal, credential,
+admin, and Docker-operation events.
 .TP
 .B shutdown_timeout (string, optional, default="30s")
 Graceful shutdown timeout using Go duration syntax.

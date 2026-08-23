@@ -875,6 +875,140 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 	}
 }
 
+// TestSessionDeleteCleanupCorrelation verifies that when session runtime
+// directory cleanup fails during session deletion, the operational log
+// contains the correct correlation fields: operation=session_delete,
+// session_id, error.
+func TestSessionDeleteCleanupCorrelation(t *testing.T) {
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	defer logging.reset()
+
+	app := newTestAppWithAuth(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessiondeleteuser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1051", "1051", home, nil
+	}
+
+	username := "sessiondeleteuser"
+	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a credential and session for the principal.
+	_, credToken, err := createCredential(app.DB, username, "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sessMux := http.NewServeMux()
+	sessMux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	sessBody := map[string]string{"workspace": filepath.Join(home, "proj")}
+	sessData, _ := json.Marshal(sessBody)
+	sessReq := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(sessData))
+	sessReq.Header.Set("Authorization", "Bearer "+credToken)
+	sessW := httptest.NewRecorder()
+	sessMux.ServeHTTP(sessW, sessReq)
+	if sessW.Code != http.StatusCreated {
+		t.Fatalf("create session: expected %d, got %d: %s", http.StatusCreated, sessW.Code, sessW.Body.String())
+	}
+
+	var sessResp createSessionResponse
+	if err := json.NewDecoder(sessW.Body).Decode(&sessResp); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	sessionID := sessResp.Session.ID
+
+	// Create the session runtime directory so cleanup has something to remove.
+	sessRuntimeDir := sessionRuntimeDir(app.Config.RuntimeDir, sessionID)
+	if err := os.MkdirAll(sessRuntimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace the sessions parent directory with a regular file so that
+	// os.RemoveAll fails with ENOTDIR.
+	sessionsParentDir := filepath.Dir(sessRuntimeDir)
+	if err := os.RemoveAll(sessionsParentDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionsParentDir, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete the session using the principal's credential.
+	delMux := http.NewServeMux()
+	delMux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/sessions/"+sessionID, nil)
+	delReq.Header.Set("Authorization", "Bearer "+credToken)
+	delW := httptest.NewRecorder()
+	delMux.ServeHTTP(delW, delReq)
+
+	if delW.Code != http.StatusNoContent {
+		t.Fatalf("expected %d, got %d: %s", http.StatusNoContent, delW.Code, delW.Body.String())
+	}
+
+	// Parse operational JSON and find the cleanup log.
+	opOutput := opBuf.String()
+	foundCleanup := false
+	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			continue
+		}
+		msg, _ := rec["msg"].(string)
+		if msg != "cannot remove session runtime directory" {
+			continue
+		}
+		foundCleanup = true
+
+		// Assert operation == "session_delete".
+		opField, ok := rec["operation"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing operation field")
+		}
+		if opField != "session_delete" {
+			t.Errorf("cleanup log operation = %q, want \"session_delete\"", opField)
+		}
+
+		// Assert session_id is non-empty and matches.
+		sid, ok := rec["session_id"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing session_id field")
+		}
+		if sid == "" {
+			t.Error("cleanup log session_id is empty")
+		}
+		if sid != sessionID {
+			t.Errorf("session_id = %q, want %q", sid, sessionID)
+		}
+
+		// Assert error is non-empty.
+		errField, ok := rec["error"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing error field")
+		}
+		if errField == "" {
+			t.Error("cleanup log error is empty")
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
+	}
+}
+
 // --- Startup fallback timestamp ---
 
 // TestStartupFallbackTimeFormat verifies that the fallback timestamp

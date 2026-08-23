@@ -371,6 +371,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, id); err != nil {
 		opLog(ctx).Warn("cannot remove session runtime directory",
 			slog.String("operation", "session_delete"),
+			slog.String("session_id", id),
 			slog.String("error", err.Error()),
 		)
 	}

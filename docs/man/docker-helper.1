@@ -117,17 +117,20 @@ Show help for a command.
 Generate Bash completion.
 .SS Session Commands
 .TP
-.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH
-Create a new session for a workspace.
+.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-json]
+Create a new session for a workspace. With \-\-json, output in JSON format.
 .TP
-.B docker-helper session list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
-List active sessions.
+.B docker-helper session list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
+List active sessions. With \-\-json, output in JSON format.
 .TP
-.B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID
-Delete a session by ID.
+.B docker-helper session delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-id SESSION_ID [\-\-json]
+Delete a session by ID. With \-\-json, output in JSON format.
 .TP
 .B docker-helper session cleanup
-Remove expired sessions from the local state database.
+Remove expired sessions from the local state database and clean up stale
+session runtime directories. Session runtime directories may contain
+session-scoped Docker registry credentials. This command does not require
+a running daemon or authentication token.
 .SS Config Commands
 .TP
 .B docker-helper config show [FIELD]
@@ -218,14 +221,16 @@ Validate the AppArmor profile.
 .B docker-helper pull IMAGE
 Pull a Docker image.
 .TP
-.B docker-helper build \-\-context PATH \-\-dockerfile FILE \-\-image NAME
-Build a Docker image.
+.B docker-helper build \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
+Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 .TP
-.B docker-helper run \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] \-\& [command]
-Run a Docker container.
+.B docker-helper run \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-mount SOURCE:TARGET[:ro] ...] \-\& [command]
+Run a Docker container. \-\-env and \-\-mount may be repeated.
 .TP
-.B docker-helper registry login \-\-registry REGISTRY \-\-username USER
+.B docker-helper registry login \-\-registry REGISTRY \-\-username USER [\-\-password-stdin] [\-\-json]
 Log in to a container registry for the current session.
+With \-\-password-stdin, read the password from stdin.
+With \-\-json, output in JSON format.
 .SH OPERATOR ENDPOINT SELECTION
 For reload, session, principal, and credential commands, select the target daemon:
 .IP \(bu 4

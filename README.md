@@ -617,12 +617,14 @@ receive 401 Unauthorized.
 docker-helper session cleanup
 ```
 
-Removes expired session rows from the local state database. Active
-sessions are untouched. Expired sessions are already rejected for
-authentication and excluded from session lists by their `expires_at`
-value; this command is useful for explicitly reclaiming storage during
-long daemon uptimes. The daemon also removes expired sessions
-automatically at startup. No running daemon or admin token is required.
+Removes expired session rows from the local state database and cleans up
+stale session runtime directories. Session runtime directories may contain
+session-scoped Docker registry credentials. Active sessions are untouched.
+Expired sessions are already rejected for authentication and excluded from
+session lists by their `expires_at` value; this command is useful for
+explicitly reclaiming storage during long daemon uptimes. The daemon also
+removes expired sessions automatically at startup. No running daemon or
+admin token is required.
 
 ## Operator CLI
 
@@ -650,7 +652,8 @@ For the full command syntax, use `docker-helper help <command>`.
 
 Bash completion is available and installed automatically when using the
 DEB or RPM packages. Command names and flags are derived from the command tree;
-argument-value completion is maintained alongside the CLI contract.
+selected argument values have specialized completion (e.g., directories for
+`config allowed-root add`).
 
 Install manually:
 
