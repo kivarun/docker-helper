@@ -35,6 +35,13 @@ func initCompletionFixture() {
 		return
 	}
 
+	// Clean up tempdir if any subsequent step fails.
+	defer func() {
+		if completionFixtureErr != nil {
+			os.RemoveAll(res.tmpDir)
+		}
+	}()
+
 	res.binPath = filepath.Join(res.tmpDir, "docker-helper")
 	cmd := exec.Command("go", "build", "-o", res.binPath, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -147,9 +154,17 @@ func TestCompletionScriptNoInitCompletion(t *testing.T) {
 }
 
 func TestCompletionDeterministic(t *testing.T) {
-	script1 := completionScript(t)
-	script2 := completionScript(t)
-	if script1 != script2 {
+	binPath := getCompletionBinary(t)
+
+	out1, err := exec.Command(binPath, "completion", "bash").CombinedOutput()
+	if err != nil {
+		t.Fatalf("first completion bash failed: %v\n%s", err, out1)
+	}
+	out2, err := exec.Command(binPath, "completion", "bash").CombinedOutput()
+	if err != nil {
+		t.Fatalf("second completion bash failed: %v\n%s", err, out2)
+	}
+	if string(out1) != string(out2) {
 		t.Error("completion script is not deterministic")
 	}
 }
