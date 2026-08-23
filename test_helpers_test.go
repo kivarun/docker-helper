@@ -43,25 +43,6 @@ func testAllowedRootDir(t *testing.T) string {
 	return dir
 }
 
-// testNonHomeRootDir creates a unique directory that is valid as a workspace
-// root and is NOT under /home (so isHomeRoot returns false). This is needed
-// for tests that need to exercise the non-home SELinux managed-label path.
-// Candidates are tried in order: the working directory, then "/".
-func testNonHomeRootDir(t *testing.T) string {
-	t.Helper()
-	var candidates []string
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, wd)
-	}
-	candidates = append(candidates, "/")
-	dir, err := allocateTestWorkspaceRoot(candidates)
-	if err != nil {
-		t.Fatalf("cannot allocate non-home workspace root test dir: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
-}
-
 // allocateTestWorkspaceRoot tries each candidate base in order and returns
 // the first unique directory it can create there that passes the production
 // workspace-root policy. A base that does not exist, is not writable, or
