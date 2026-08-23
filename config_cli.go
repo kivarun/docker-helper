@@ -235,68 +235,81 @@ will apply on the next start.`,
 
 // configAllowedRootCommand manages the global allowed_roots array.
 var configAllowedRootCommand = &Command{
-	Name:       "allowed-root",
-	Summary:    "Manage global allowed roots",
-	Usage:      "docker-helper config allowed-root <list|add|remove> [args]",
-	MinPosArgs: 1,
-	MaxPosArgs: 2,
+	Name:    "allowed-root",
+	Summary: "Manage global allowed roots",
 	Help: `Manage the global allowed_roots array.
-
-Subcommands:
-  list                          list all allowed roots
-  add PATH                      add an allowed root
-  remove PATH                   remove an allowed root
 
 The global allowed_roots is the coarse authorization ceiling for new
 sessions. Every new session workspace must be under at least one allowed
 root. Principal allowed roots further narrow the ceiling per principal.
 
-add:
-  - canonicalizes and validates the path;
-  - idempotent (prints "already present" if the root exists);
-  - preserves existing roots.
+In system mode, docker-helper prepares the active MAC backend
+(AppArmor or SELinux) as part of the add operation. This preparation
+runs after config validation and before the config write. If preparation
+fails, the root is not added.
 
-  In system mode, docker-helper prepares the active MAC backend
-  (AppArmor or SELinux) as part of the add operation. This preparation
-  runs after config validation and before the config write. If preparation
-  fails, the root is not added.
+In user mode, only the authorization change is performed.
 
-  In user mode, only the authorization change is performed.
+remove does not invalidate already-issued sessions.`,
+	Subcommands: []*Command{
+		configAllowedRootListCommand,
+		configAllowedRootAddCommand,
+		configAllowedRootRemoveCommand,
+	},
+}
 
-remove:
-  - resolves/matches the stored canonical form;
-  - idempotent (prints "not found" if the root does not exist);
-  - rejects removal of the final global root;
-  - does not invalidate already-issued sessions.
+var configAllowedRootListCommand = &Command{
+	Name:       "list",
+	Summary:    "List all allowed roots",
+	Usage:      "docker-helper config allowed-root list",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	Help:       `List all allowed roots, one canonical root per line.`,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				return configAllowedRootList(stdout, stderr)
+			},
+		}
+	},
+}
 
-list:
-  - one canonical root per line.`,
+var configAllowedRootAddCommand = &Command{
+	Name:       "add",
+	Summary:    "Add an allowed root",
+	Usage:      "docker-helper config allowed-root add PATH",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	Help: `Add an allowed root.
+
+Canonicalizes and validates the path. Idempotent (prints "already present"
+if the root exists). Preserves existing roots.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				switch args[0] {
-				case "list":
-					return configAllowedRootList(stdout, stderr)
-				case "add":
-					if len(args) < 2 {
-						fmt.Fprintln(stderr, "error: path is required")
-						fmt.Fprintln(stderr, "usage: docker-helper config allowed-root add PATH")
-						return 2
-					}
-					return configAllowedRootAdd(args[1], stdout, stderr)
-				case "remove":
-					if len(args) < 2 {
-						fmt.Fprintln(stderr, "error: path is required")
-						fmt.Fprintln(stderr, "usage: docker-helper config allowed-root remove PATH")
-						return 2
-					}
-					return configAllowedRootRemove(args[1], stdout, stderr)
-				default:
-					fmt.Fprintf(stderr, "error: unknown subcommand %q\n", args[0])
-					fmt.Fprintln(stderr, "usage: docker-helper config allowed-root <list|add|remove> [args]")
-					return 2
-				}
+				return configAllowedRootAdd(args[0], stdout, stderr)
+			},
+		}
+	},
+}
+
+var configAllowedRootRemoveCommand = &Command{
+	Name:       "remove",
+	Summary:    "Remove an allowed root",
+	Usage:      "docker-helper config allowed-root remove PATH",
+	MinPosArgs: 1,
+	MaxPosArgs: 1,
+	Help: `Remove an allowed root.
+
+Resolves/matches the stored canonical form. Idempotent (prints "not found"
+if the root does not exist). Rejects removal of the final global root.
+Does not invalidate already-issued sessions.`,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				args := fs.Args()
+				return configAllowedRootRemove(args[0], stdout, stderr)
 			},
 		}
 	},

@@ -2077,3 +2077,147 @@ func TestConfigShowEffectiveInvariant(t *testing.T) {
 		})
 	}
 }
+
+// TestConfigAllowedRootCommandTree verifies that config allowed-root uses
+// the Command.Subcommands framework with proper arity enforcement.
+func TestConfigAllowedRootCommandTree(t *testing.T) {
+	t.Run("no_subcommand_exit_2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("expected exit 2, got %d", code)
+		}
+		if !strings.Contains(stderr.String(), "subcommand") && !strings.Contains(stderr.String(), "Usage:") {
+			t.Errorf("expected subcommand error, got: %s", stderr.String())
+		}
+	})
+
+	t.Run("unknown_subcommand_exit_2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "unknown"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("expected exit 2, got %d", code)
+		}
+		if !strings.Contains(stderr.String(), "unknown") {
+			t.Errorf("expected unknown subcommand error, got: %s", stderr.String())
+		}
+	})
+
+	t.Run("list_extra_arg_exit_2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "list", "extra"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("expected exit 2, got %d", code)
+		}
+	})
+
+	t.Run("add_no_path_exit_2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("expected exit 2, got %d", code)
+		}
+	})
+
+	t.Run("add_extra_arg_exit_2", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", allowedRoot, "extra"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("expected exit 2, got %d", code)
+		}
+	})
+
+	t.Run("remove_no_path_exit_2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "remove"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("expected exit 2, got %d", code)
+		}
+	})
+
+	t.Run("remove_extra_arg_exit_2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "remove", "/some/path", "extra"}, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("expected exit 2, got %d", code)
+		}
+	})
+
+	t.Run("list_reaches_implementation", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		setupConfigTestWithData(t, data)
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "list"}, &stdout, &stderr)
+		if code != 0 {
+			t.Errorf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), allowedRoot) {
+			t.Errorf("expected %s in output, got: %s", allowedRoot, stdout.String())
+		}
+	})
+
+	t.Run("add_reaches_implementation", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupConfigTestWithData(t, data)
+
+		newRoot := testAllowedRootDir(t)
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "add", newRoot}, &stdout, &stderr)
+		if code != 0 {
+			t.Errorf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "added") {
+			t.Errorf("expected 'added' in output, got: %s", stdout.String())
+		}
+		// Verify config was updated.
+		raw := readConfigJSON(t, configPath)
+		var roots []string
+		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+			t.Fatalf("cannot parse allowed_roots: %v", err)
+		}
+		if !contains(roots, newRoot) {
+			t.Errorf("expected %s in allowed_roots, got: %v", newRoot, roots)
+		}
+	})
+
+	t.Run("remove_reaches_implementation", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		extraRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot, extraRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupConfigTestWithData(t, data)
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{"config", "allowed-root", "remove", extraRoot}, &stdout, &stderr)
+		if code != 0 {
+			t.Errorf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "removed") {
+			t.Errorf("expected 'removed' in output, got: %s", stdout.String())
+		}
+		// Verify config was updated.
+		raw := readConfigJSON(t, configPath)
+		var roots []string
+		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+			t.Fatalf("cannot parse allowed_roots: %v", err)
+		}
+		if len(roots) != 1 || roots[0] != allowedRoot {
+			t.Errorf("expected [%s], got: %v", allowedRoot, roots)
+		}
+	})
+}
