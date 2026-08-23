@@ -89,16 +89,6 @@ func requireRoot() error {
 	return nil
 }
 
-func newProductionApparmorManager() *apparmorManager {
-	return newApparmorManager(
-		apparmorMainProfile,
-		apparmorManagedFragment,
-		apparmorLockPath,
-		apparmorParserPath,
-		newProductionParserRunner(),
-	)
-}
-
 func runApparmorRootList(stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

@@ -60,6 +60,16 @@ func newProductionParserRunner() func(executable string, args []string) error {
 	}
 }
 
+func newProductionApparmorManager() *apparmorManager {
+	return newApparmorManager(
+		apparmorMainProfile,
+		apparmorManagedFragment,
+		apparmorLockPath,
+		apparmorParserPath,
+		newProductionParserRunner(),
+	)
+}
+
 type inputError struct {
 	msg string
 }

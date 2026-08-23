@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -409,7 +410,6 @@ func buildCanonicalX509NameDER(rdns []x509NameRDN) ([]byte, error) {
 		// Build canonical DER for each attribute first
 		type attrDER struct {
 			der []byte
-			raw x509NameAttr
 		}
 		var attrs []attrDER
 
@@ -442,18 +442,14 @@ func buildCanonicalX509NameDER(rdns []x509NameRDN) ([]byte, error) {
 			seq = append(seq, encodeDERLength(len(attrInner))...)
 			seq = append(seq, attrInner...)
 
-			attrs = append(attrs, attrDER{der: seq, raw: attr})
+			attrs = append(attrs, attrDER{der: seq})
 		}
 
 		// Sort attributes by their DER encoding for SET OF semantics
 		// This matches OpenSSL's canonical ordering for multi-valued RDNs
-		for i := 0; i < len(attrs); i++ {
-			for j := i + 1; j < len(attrs); j++ {
-				if bytes.Compare(attrs[i].der, attrs[j].der) > 0 {
-					attrs[i], attrs[j] = attrs[j], attrs[i]
-				}
-			}
-		}
+		sort.Slice(attrs, func(i, j int) bool {
+			return bytes.Compare(attrs[i].der, attrs[j].der) < 0
+		})
 
 		// Build the SET from sorted attributes
 		var setInner []byte
