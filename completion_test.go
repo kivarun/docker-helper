@@ -721,6 +721,100 @@ func TestCompletionAllowedRootAddDirectoryOnlyBehavioral(t *testing.T) {
 	}
 }
 
+// TestCompletionAllowedRootAddAbsolutePrefixBehavioral verifies that
+// "config allowed-root add" with an absolute prefix completes directories
+// and excludes regular files, matching the directory-only policy.
+func TestCompletionAllowedRootAddAbsolutePrefixBehavioral(t *testing.T) {
+	script := completionScript(t)
+
+	tmpDir := t.TempDir()
+	dirName := "prefix-dir"
+	fileName := "prefix-file"
+	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	absPrefix := tmpDir + "/prefix"
+
+	var sb strings.Builder
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(")
+	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'add' '" + absPrefix + "'")
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=4\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash completion failed: %v\n%s", err, out)
+	}
+
+	output := string(out)
+
+	// Must contain the directory (with trailing /).
+	if !strings.Contains(output, dirName) {
+		t.Errorf("expected directory %q in completions, got: %s", dirName, output)
+	}
+
+	// Must NOT contain the regular file.
+	if strings.Contains(output, fileName) {
+		t.Errorf("regular file %q must NOT appear in 'add' completions, got: %s", fileName, output)
+	}
+}
+
+// TestCompletionAllowedRootRemoveAbsolutePrefixBehavioral verifies that
+// "config allowed-root remove" with an absolute prefix completes both
+// directories and files.
+func TestCompletionAllowedRootRemoveAbsolutePrefixBehavioral(t *testing.T) {
+	script := completionScript(t)
+
+	tmpDir := t.TempDir()
+	dirName := "prefix-dir"
+	fileName := "prefix-file"
+	if err := os.MkdirAll(filepath.Join(tmpDir, dirName), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, fileName), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	absPrefix := tmpDir + "/prefix"
+
+	var sb strings.Builder
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(")
+	sb.WriteString(" 'docker-helper' 'config' 'allowed-root' 'remove' '" + absPrefix + "'")
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=4\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash completion failed: %v\n%s", err, out)
+	}
+
+	output := string(out)
+
+	// Must contain both directory and file.
+	if !strings.Contains(output, dirName) {
+		t.Errorf("expected directory %q in 'remove' completions, got: %s", dirName, output)
+	}
+	if !strings.Contains(output, fileName) {
+		t.Errorf("expected file %q in 'remove' completions, got: %s", fileName, output)
+	}
+}
+
 // TestCompletionAllowedRootRemoveFilesystemBehavioral verifies that
 // "config allowed-root remove" completes filesystem entries.
 func TestCompletionAllowedRootRemoveFilesystemBehavioral(t *testing.T) {

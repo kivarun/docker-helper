@@ -373,6 +373,72 @@ func TestApparmorCheckInactive(t *testing.T) {
 	}
 }
 
+// TestServeSystemModeAppArmorManagedRootsMissing verifies that when
+// AppArmor is active and the process is confined, but the configured
+// allowed root is not covered by any managed AppArmor root, startup
+// fails with a clear diagnostic before later initialization (admin token,
+// database, listener) can hide the result.
+func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
+	origActive := apparmorLSMActive
+	origConfinement := apparmorProcessConfinement
+	apparmorLSMActive = func() (bool, error) { return true, nil }
+	apparmorProcessConfinement = func() (string, error) {
+		return "docker-helper-system (enforce)", nil
+	}
+	defer func() {
+		apparmorLSMActive = origActive
+		apparmorProcessConfinement = origConfinement
+	}()
+
+	mockSELinuxInactive(t)
+
+	origUID := EffectiveUID
+	origGetConfig := getConfigPathFunc
+	EffectiveUID = func() int { return 0 }
+	defer func() {
+		EffectiveUID = origUID
+		getConfigPathFunc = origGetConfig
+	}()
+
+	// Valid config with an existing allowed root.
+	allowedRoot := testAllowedRootDir(t)
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	configData := fmt.Sprintf(`{"allowed_root":%q,"session_ttl":"12h"}`, allowedRoot)
+	if err := os.WriteFile(configPath, []byte(configData), 0600); err != nil {
+		t.Fatal(err)
+	}
+	getConfigPathFunc = func() string { return configPath }
+
+	// Managed roots return an unrelated root, not covering the configured root.
+	origManaged := apparmorManagedRoots
+	apparmorManagedRoots = func() ([]string, error) {
+		return []string{"/unrelated/managed-root"}, nil
+	}
+	defer func() { apparmorManagedRoots = origManaged }()
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+
+	opLog := stderr.String()
+	if !strings.Contains(opLog, "not covered by managed AppArmor roots") {
+		t.Errorf("expected 'not covered by managed AppArmor roots' in operational log, got: %s", opLog)
+	}
+	if !strings.Contains(opLog, "config allowed-root add") {
+		t.Errorf("expected 'config allowed-root add' in operational log, got: %s", opLog)
+	}
+	// Must not reach later startup steps that could mask the error.
+	if strings.Contains(opLog, "admin token") {
+		t.Error("must fail before admin token initialization")
+	}
+	if strings.Contains(opLog, "database") {
+		t.Error("must fail before database initialization")
+	}
+}
+
 // --- User mode should not trigger AppArmor checks ---
 
 func TestServeUserModeNoAppArmorCheck(t *testing.T) {
