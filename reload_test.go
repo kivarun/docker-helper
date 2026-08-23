@@ -201,8 +201,12 @@ func TestReloadHelp(t *testing.T) {
 	if !strings.Contains(output, "Reload configuration") {
 		t.Fatalf("expected help to contain reload description, got: %s", output)
 	}
-	if !strings.Contains(output, "allowed_root") {
-		t.Fatalf("expected help to mention allowed_root, got: %s", output)
+	if !strings.Contains(output, "allowed_roots") {
+		t.Fatalf("expected help to mention allowed_roots, got: %s", output)
+	}
+	if strings.Contains(output, "allowed_root ") ||
+		(strings.Contains(output, "allowed_root") && !strings.Contains(output, "allowed_roots")) {
+		t.Fatalf("expected help to use allowed_roots, not stale allowed_root, got: %s", output)
 	}
 	if !strings.Contains(output, "session_ttl") {
 		t.Fatalf("expected help to mention session_ttl, got: %s", output)
@@ -2960,9 +2964,314 @@ func TestMACVerificationSELinuxUnchanged(t *testing.T) {
 	}
 }
 
-// TestMACVerificationAppArmorHomeRoot verifies that home roots are not
-// verified under AppArmor (same as SELinux behavior).
-func TestMACVerificationAppArmorHomeRoot(t *testing.T) {
+// TestMACVerificationAppArmorHomeRoots verifies that AppArmor requires
+// managed-root coverage for ALL configured roots, including /home paths.
+func TestMACVerificationAppArmorHomeRoots(t *testing.T) {
+	t.Run("configured_home_managed_empty_fail", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		opBuf := &bytes.Buffer{}
+		initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+		db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := initializeDatabase(db); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+
+		token := "test-admin-token"
+		adminHash := sha256.Sum256([]byte(token))
+
+		app := &App{
+			Config: &Config{
+				AllowedRoots: []string{"/home"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			},
+			DB:             db,
+			AdminTokenHash: adminHash,
+		}
+
+		originalConfig := app.getConfig()
+
+		deps := reloadDeps{
+			loadConfig: func() (*Config, error) {
+				return &Config{
+					AllowedRoots: []string{"/home"},
+					SessionTTL:   12 * time.Hour,
+					LogLevel:     slog.LevelInfo,
+					Mode:         ModeSystem,
+				}, nil
+			},
+			deploymentMode: func() DeploymentMode {
+				return ModeSystem
+			},
+			detectLSM: func() (LSMBackend, error) {
+				return LSMAppArmor, nil
+			},
+			verifySELinuxWorkspace: func(string) error {
+				return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+			},
+			apparmorListRoots: func() ([]string, error) {
+				return []string{}, nil
+			},
+		}
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/reload", nil)
+		req.Header.Set("Authorization", "Bearer test-admin-token")
+
+		app.handleReloadWithDeps(recorder, req, deps)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d, body: %s", recorder.Code, recorder.Body.String())
+		}
+
+		body := recorder.Body.Bytes()
+		var result map[string]any
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatalf("invalid JSON: %s", body)
+		}
+		if code, ok := result["code"].(string); !ok || code != "mac_verification_failed" {
+			t.Fatalf("expected code=mac_verification_failed, got: %s", body)
+		}
+
+		currentConfig := app.getConfig()
+		if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+			t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
+		}
+	})
+
+	t.Run("configured_home_alice_managed_empty_fail", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		opBuf := &bytes.Buffer{}
+		initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+		db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := initializeDatabase(db); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+
+		token := "test-admin-token"
+		adminHash := sha256.Sum256([]byte(token))
+
+		app := &App{
+			Config: &Config{
+				AllowedRoots: []string{"/home"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			},
+			DB:             db,
+			AdminTokenHash: adminHash,
+		}
+
+		originalConfig := app.getConfig()
+
+		deps := reloadDeps{
+			loadConfig: func() (*Config, error) {
+				return &Config{
+					AllowedRoots: []string{"/home/alice"},
+					SessionTTL:   12 * time.Hour,
+					LogLevel:     slog.LevelInfo,
+					Mode:         ModeSystem,
+				}, nil
+			},
+			deploymentMode: func() DeploymentMode {
+				return ModeSystem
+			},
+			detectLSM: func() (LSMBackend, error) {
+				return LSMAppArmor, nil
+			},
+			verifySELinuxWorkspace: func(string) error {
+				return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+			},
+			apparmorListRoots: func() ([]string, error) {
+				return []string{}, nil
+			},
+		}
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/reload", nil)
+		req.Header.Set("Authorization", "Bearer test-admin-token")
+
+		app.handleReloadWithDeps(recorder, req, deps)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d, body: %s", recorder.Code, recorder.Body.String())
+		}
+
+		currentConfig := app.getConfig()
+		if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+			t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
+		}
+	})
+
+	t.Run("configured_home_alice_managed_home_pass", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		opBuf := &bytes.Buffer{}
+		initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+		db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := initializeDatabase(db); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+
+		token := "test-admin-token"
+		adminHash := sha256.Sum256([]byte(token))
+
+		app := &App{
+			Config: &Config{
+				AllowedRoots: []string{"/home"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			},
+			DB:             db,
+			AdminTokenHash: adminHash,
+		}
+
+		deps := reloadDeps{
+			loadConfig: func() (*Config, error) {
+				return &Config{
+					AllowedRoots: []string{"/home/alice"},
+					SessionTTL:   12 * time.Hour,
+					LogLevel:     slog.LevelInfo,
+					Mode:         ModeSystem,
+				}, nil
+			},
+			deploymentMode: func() DeploymentMode {
+				return ModeSystem
+			},
+			detectLSM: func() (LSMBackend, error) {
+				return LSMAppArmor, nil
+			},
+			verifySELinuxWorkspace: func(string) error {
+				return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+			},
+			apparmorListRoots: func() ([]string, error) {
+				return []string{"/home"}, nil
+			},
+		}
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/reload", nil)
+		req.Header.Set("Authorization", "Bearer test-admin-token")
+
+		app.handleReloadWithDeps(recorder, req, deps)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d, body: %s", recorder.Code, recorder.Body.String())
+		}
+
+		currentConfig := app.getConfig()
+		if currentConfig.AllowedRoots[0] != "/home/alice" {
+			t.Errorf("AllowedRoot not updated: got %q", currentConfig.AllowedRoots[0])
+		}
+	})
+
+	t.Run("configured_home_alice_managed_home_alice_pass", func(t *testing.T) {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		opBuf := &bytes.Buffer{}
+		initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+		db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := initializeDatabase(db); err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+
+		token := "test-admin-token"
+		adminHash := sha256.Sum256([]byte(token))
+
+		app := &App{
+			Config: &Config{
+				AllowedRoots: []string{"/home"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			},
+			DB:             db,
+			AdminTokenHash: adminHash,
+		}
+
+		deps := reloadDeps{
+			loadConfig: func() (*Config, error) {
+				return &Config{
+					AllowedRoots: []string{"/home/alice"},
+					SessionTTL:   12 * time.Hour,
+					LogLevel:     slog.LevelInfo,
+					Mode:         ModeSystem,
+				}, nil
+			},
+			deploymentMode: func() DeploymentMode {
+				return ModeSystem
+			},
+			detectLSM: func() (LSMBackend, error) {
+				return LSMAppArmor, nil
+			},
+			verifySELinuxWorkspace: func(string) error {
+				return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+			},
+			apparmorListRoots: func() ([]string, error) {
+				return []string{"/home/alice"}, nil
+			},
+		}
+
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/reload", nil)
+		req.Header.Set("Authorization", "Bearer test-admin-token")
+
+		app.handleReloadWithDeps(recorder, req, deps)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d, body: %s", recorder.Code, recorder.Body.String())
+		}
+
+		currentConfig := app.getConfig()
+		if currentConfig.AllowedRoots[0] != "/home/alice" {
+			t.Errorf("AllowedRoot not updated: got %q", currentConfig.AllowedRoots[0])
+		}
+	})
+}
+
+// TestMACVerificationNoBackend verifies that system-mode reload fails
+// closed when no MAC backend is active (LSMNone).
+func TestMACVerificationNoBackend(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
@@ -2995,10 +3304,12 @@ func TestMACVerificationAppArmorHomeRoot(t *testing.T) {
 		AdminTokenHash: adminHash,
 	}
 
+	originalConfig := app.getConfig()
+
 	deps := reloadDeps{
 		loadConfig: func() (*Config, error) {
 			return &Config{
-				AllowedRoots: []string{"/home"},
+				AllowedRoots: []string{"/data"},
 				SessionTTL:   12 * time.Hour,
 				LogLevel:     slog.LevelInfo,
 				Mode:         ModeSystem,
@@ -3008,15 +3319,13 @@ func TestMACVerificationAppArmorHomeRoot(t *testing.T) {
 			return ModeSystem
 		},
 		detectLSM: func() (LSMBackend, error) {
-			return LSMAppArmor, nil
+			return LSMNone, nil
 		},
 		verifySELinuxWorkspace: func(string) error {
-			return fmt.Errorf("verifySELinuxWorkspace must not be called for AppArmor")
+			return fmt.Errorf("verifySELinuxWorkspace must not be called")
 		},
 		apparmorListRoots: func() ([]string, error) {
-			// No managed roots, but /home should still pass
-			// because it's a home root
-			return []string{}, nil
+			return nil, fmt.Errorf("apparmorListRoots must not be called")
 		},
 	}
 
@@ -3026,7 +3335,98 @@ func TestMACVerificationAppArmorHomeRoot(t *testing.T) {
 
 	app.handleReloadWithDeps(recorder, req, deps)
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d, body: %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", recorder.Code, recorder.Body.String())
+	}
+
+	body := recorder.Body.Bytes()
+	if !strings.Contains(string(body), "no MAC backend active") {
+		t.Errorf("expected 'no MAC backend active' in body, got: %s", body)
+	}
+
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
+	}
+}
+
+// TestMACVerificationUnknownBackend verifies that system-mode reload fails
+// closed when detectLSM returns an unknown backend.
+func TestMACVerificationUnknownBackend(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	opBuf := &bytes.Buffer{}
+	initLoggers(opBuf, io.Discard, slog.LevelError, false)
+
+	db, err := openDatabase(filepath.Join(stateDir, "docker-helper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	token := "test-admin-token"
+	adminHash := sha256.Sum256([]byte(token))
+
+	app := &App{
+		Config: &Config{
+			AllowedRoots: []string{"/home"},
+			SessionTTL:   12 * time.Hour,
+			LogLevel:     slog.LevelInfo,
+			Mode:         ModeSystem,
+		},
+		DB:             db,
+		AdminTokenHash: adminHash,
+	}
+
+	originalConfig := app.getConfig()
+
+	deps := reloadDeps{
+		loadConfig: func() (*Config, error) {
+			return &Config{
+				AllowedRoots: []string{"/data"},
+				SessionTTL:   12 * time.Hour,
+				LogLevel:     slog.LevelInfo,
+				Mode:         ModeSystem,
+			}, nil
+		},
+		deploymentMode: func() DeploymentMode {
+			return ModeSystem
+		},
+		detectLSM: func() (LSMBackend, error) {
+			return LSMBackend("unknown-lsm"), nil
+		},
+		verifySELinuxWorkspace: func(string) error {
+			return fmt.Errorf("verifySELinuxWorkspace must not be called")
+		},
+		apparmorListRoots: func() ([]string, error) {
+			return nil, fmt.Errorf("apparmorListRoots must not be called")
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/reload", nil)
+	req.Header.Set("Authorization", "Bearer test-admin-token")
+
+	app.handleReloadWithDeps(recorder, req, deps)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body: %s", recorder.Code, recorder.Body.String())
+	}
+
+	body := recorder.Body.Bytes()
+	if !strings.Contains(string(body), "unknown MAC backend") {
+		t.Errorf("expected 'unknown MAC backend' in body, got: %s", body)
+	}
+
+	currentConfig := app.getConfig()
+	if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
+		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
 	}
 }

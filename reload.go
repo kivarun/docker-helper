@@ -224,9 +224,6 @@ func verifyAllowedRootsMAC(
 			return fmt.Errorf("cannot read managed AppArmor roots: %w", err)
 		}
 		for _, root := range roots {
-			if isHomeRoot(root) {
-				continue
-			}
 			if !apparmorRootCovered(root, managed) {
 				return fmt.Errorf(
 					"allowed root %s is not covered by managed AppArmor roots; add it via: docker-helper config allowed-root add %s",
@@ -236,8 +233,11 @@ func verifyAllowedRootsMAC(
 		}
 		return nil
 
+	case LSMNone:
+		return fmt.Errorf("no MAC backend active (system mode requires AppArmor or enforcing SELinux)")
+
 	default:
-		return nil
+		return fmt.Errorf("unknown MAC backend: %s", backend)
 	}
 }
 

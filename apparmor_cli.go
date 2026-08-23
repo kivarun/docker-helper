@@ -99,13 +99,6 @@ func newProductionApparmorManager() *apparmorManager {
 	)
 }
 
-// apparmorManagedRoots is the package-level seam for listing managed AppArmor
-// roots. Production default reads from the managed fragment file.
-// Tests may replace this to control the returned roots.
-var apparmorManagedRoots = func() ([]string, error) {
-	return newProductionApparmorManager().listRoots()
-}
-
 func runApparmorRootList(stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

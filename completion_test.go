@@ -780,6 +780,13 @@ func TestCompletionAllowedRootListNoSuggestionsBehavioral(t *testing.T) {
 	script := completionScript(t)
 
 	tmpDir := t.TempDir()
+	// Create sentinel entries to prove no filesystem completion occurs.
+	if err := os.MkdirAll(filepath.Join(tmpDir, "sentinel-dir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "sentinel-file"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	var sb strings.Builder
 	sb.WriteString(script)
@@ -789,11 +796,11 @@ func TestCompletionAllowedRootListNoSuggestionsBehavioral(t *testing.T) {
 	sb.WriteString(")\n")
 	sb.WriteString("COMP_CWORD=4\n")
 	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("cd " + tmpDir + "\n")
 	sb.WriteString("_docker_helper_completion\n")
 	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
 
 	cmd := exec.Command("bash", "-c", sb.String())
-	cmd.Dir = tmpDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash completion failed: %v\n%s", err, out)
@@ -801,11 +808,9 @@ func TestCompletionAllowedRootListNoSuggestionsBehavioral(t *testing.T) {
 
 	output := strings.TrimSpace(string(out))
 
-	// Must not contain action words.
-	for _, sub := range []string{"list", "add", "remove"} {
-		if strings.Contains(output, sub) {
-			t.Errorf("'list' completion must not suggest action %q, got: %s", sub, output)
-		}
+	// COMPREPLY must be actually empty (not just free of action words).
+	if output != "" {
+		t.Errorf("'list' completion must produce empty COMPREPLY, got: %s", output)
 	}
 }
 
@@ -815,6 +820,13 @@ func TestCompletionAllowedRootAfterPathNoSuggestionsBehavioral(t *testing.T) {
 	script := completionScript(t)
 
 	tmpDir := t.TempDir()
+	// Create sentinel entries to prove no filesystem completion occurs.
+	if err := os.MkdirAll(filepath.Join(tmpDir, "sentinel-dir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "sentinel-file"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	var sb strings.Builder
 	sb.WriteString(script)
@@ -824,11 +836,11 @@ func TestCompletionAllowedRootAfterPathNoSuggestionsBehavioral(t *testing.T) {
 	sb.WriteString(")\n")
 	sb.WriteString("COMP_CWORD=5\n")
 	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("cd " + tmpDir + "\n")
 	sb.WriteString("_docker_helper_completion\n")
 	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
 
 	cmd := exec.Command("bash", "-c", sb.String())
-	cmd.Dir = tmpDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash completion failed: %v\n%s", err, out)
@@ -836,10 +848,8 @@ func TestCompletionAllowedRootAfterPathNoSuggestionsBehavioral(t *testing.T) {
 
 	output := strings.TrimSpace(string(out))
 
-	// Must not contain action words.
-	for _, sub := range []string{"list", "add", "remove"} {
-		if strings.Contains(output, sub) {
-			t.Errorf("after PATH, must not suggest action %q, got: %s", sub, output)
-		}
+	// COMPREPLY must be actually empty.
+	if output != "" {
+		t.Errorf("after PATH, must produce empty COMPREPLY, got: %s", output)
 	}
 }
