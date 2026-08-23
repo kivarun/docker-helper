@@ -815,15 +815,16 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Make the sessions parent directory read-only so os.RemoveAll fails.
+	// Replace the sessions parent directory with a regular file so that
+	// os.RemoveAll on .../sessions/<sessionID> fails with ENOTDIR. This is
+	// deterministic regardless of process privileges (unlike chmod).
 	sessionsParentDir := filepath.Dir(sessRuntimeDir)
-	if err := os.Chmod(sessionsParentDir, 0555); err != nil {
+	if err := os.RemoveAll(sessionsParentDir); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		// Restore permissions for cleanup.
-		_ = os.Chmod(sessionsParentDir, 0755)
-	}()
+	if err := os.WriteFile(sessionsParentDir, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Delete the principal — this triggers session runtime cleanup.
 	delMux := http.NewServeMux()
