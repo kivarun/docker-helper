@@ -109,8 +109,14 @@ func initializeDatabase(db *sql.DB) error {
 		return fmt.Errorf("cannot check mac_boundaries schema: %w", err)
 	}
 	if colCount == 0 {
-		// Old schema: boundary is the sole PK. Migrate to (backend, boundary).
-		_, err = db.Exec(`
+		// Old schema: boundary is the sole PK. Migrate to (backend, boundary)
+		// in a single atomic transaction so that partial failures leave the
+		// database in a consistent state.
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("cannot begin mac_boundaries migration: %w", err)
+		}
+		_, err = tx.Exec(`
 			CREATE TABLE mac_boundaries_new (
 				backend TEXT NOT NULL,
 				boundary TEXT NOT NULL,
@@ -118,21 +124,26 @@ func initializeDatabase(db *sql.DB) error {
 			);
 		`)
 		if err != nil {
+			tx.Rollback() //nolint:errcheck
 			return fmt.Errorf("cannot create new mac_boundaries table: %w", err)
 		}
-		_, err = db.Exec(`INSERT OR IGNORE INTO mac_boundaries_new SELECT backend, boundary FROM mac_boundaries`)
+		_, err = tx.Exec(`INSERT OR IGNORE INTO mac_boundaries_new SELECT backend, boundary FROM mac_boundaries`)
 		if err != nil {
-			// Best-effort cleanup.
-			db.Exec(`DROP TABLE IF EXISTS mac_boundaries_new`)
+			tx.Rollback() //nolint:errcheck
 			return fmt.Errorf("cannot migrate mac_boundaries data: %w", err)
 		}
-		_, err = db.Exec(`DROP TABLE mac_boundaries`)
+		_, err = tx.Exec(`DROP TABLE mac_boundaries`)
 		if err != nil {
+			tx.Rollback() //nolint:errcheck
 			return fmt.Errorf("cannot drop old mac_boundaries table: %w", err)
 		}
-		_, err = db.Exec(`ALTER TABLE mac_boundaries_new RENAME TO mac_boundaries`)
+		_, err = tx.Exec(`ALTER TABLE mac_boundaries_new RENAME TO mac_boundaries`)
 		if err != nil {
+			tx.Rollback() //nolint:errcheck
 			return fmt.Errorf("cannot rename mac_boundaries table: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("cannot commit mac_boundaries migration: %w", err)
 		}
 	}
 

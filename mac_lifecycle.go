@@ -427,6 +427,9 @@ func (l *workspaceMACLifecycle) cleanupStaleBoundaries() error {
 			continue
 		}
 		if l.isBoundaryStillNeeded(boundary) {
+			// No direct consumers but an overlapping binding/lease blocks removal.
+			// Register as deferred so it is retried when the intersecting consumer disappears.
+			l.deferredBoundaries[boundary] = true
 			continue
 		}
 		if err := l.backend.removeBoundary(boundary); err != nil {
@@ -643,9 +646,20 @@ func (b *macBackendAppArmor) backendType() string {
 	return "apparmor"
 }
 
+// selinuxWorkspaceOps is the subset of selinuxWorkspaceManager operations
+// used by the MAC lifecycle owner. Defined as an interface so that tests
+// can inject a mock without changing production behavior.
+type selinuxWorkspaceOps interface {
+	listCoveringBoundaries(workspace string) ([]string, error)
+	verifyActualType(workspace string) error
+	restoreconRecursive(workspace string) error
+	ensureWorkspaceLabel(workspace string) (bool, error)
+	rollbackWorkspaceLabel(boundary string) error
+}
+
 // macBackendSELinux wraps the SELinux workspace manager for the lifecycle owner.
 type macBackendSELinux struct {
-	mgr *selinuxWorkspaceManager
+	mgr selinuxWorkspaceOps
 }
 
 func (b *macBackendSELinux) ensureCoverage(workspace string) (macCoverage, bool, error) {
@@ -695,12 +709,10 @@ func (b *macBackendSELinux) verifyCoverage(workspace string) (macCoverage, error
 		return macCoverage{Boundary: boundary, Managed: false}, nil
 	}
 
-	// No existing boundary — verify the workspace itself.
-	if err := b.mgr.verifyActualType(workspace); err == nil {
-		return macCoverage{Boundary: workspace, Managed: false}, nil
-	}
-
-	return macCoverage{}, fmt.Errorf("workspace %s not covered by any SELinux boundary", workspace)
+	// No persistent fcontext boundary found — this is not durable MAC state.
+	// A correct current xattr without a persistent boundary is insufficient
+	// because it will not survive a restorecon or reboot.
+	return macCoverage{}, fmt.Errorf("workspace %s has no persistent SELinux fcontext boundary", workspace)
 }
 
 func (b *macBackendSELinux) findExistingCoverage(workspace string) (macCoverage, bool, error) {

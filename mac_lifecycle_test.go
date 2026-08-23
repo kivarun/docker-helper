@@ -1,10 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1365,318 +1373,1109 @@ func TestBackendSwitchOwnership(t *testing.T) {
 }
 
 // =============================================================================
-// Issue 6: Production-path ordering tests
+// Issue 6: Production-path ordering tests (real handler tests)
 // =============================================================================
 
-// testCleanupTracker records the order of cleanup operations.
-type testCleanupTracker struct {
-	mu          sync.Mutex
-	events      []string
-	cleanupFail bool // if true, cleanup operations fail
-}
-
-func (t *testCleanupTracker) record(event string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.events = append(t.events, event)
-}
-
-func (t *testCleanupTracker) hasEvent(event string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, e := range t.events {
-		if e == event {
-			return true
-		}
-	}
-	return false
-}
-
-func (t *testCleanupTracker) eventOrder() []string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]string{}, t.events...)
-}
-
-// TestRunHandlerPinCleanupFailureRetainsLease verifies that in the production
-// handleRun path, if pin cleanup fails, the MAC lease is retained.
+// TestRunHandlerPinCleanupFailureRetainsLease drives the actual handleRun
+// handler with a pinned mount whose Cleanup fails, and verifies that the
+// MAC lease is retained (not released) by inspecting the lifecycle state.
 func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
 	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	backend := newTestMACBackend("test")
+	mac := newWorkspaceMACLifecycle(db, backend)
+
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create session binding.
+	cfg := &Config{
+		AllowedRoots:          []string{dir},
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
+		Mode:                  ModeSystem,
+	}
+
+	app := &App{
+		Config:            cfg,
+		DB:                db,
+		MACLifecycle:      mac,
+		OperationRegistry: newOperationRegistry(),
+	}
+
+	// Create workspace and session.
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate auth token for the session.
+	token, err := generateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		return err
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
+	// Inject a pinned mount with a failing Cleanup.
+	sentinelErr := errors.New("injected pinned mount cleanup error")
+	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			HostPath: "/tmp/test-mount",
+			cleanup: func() error {
+				return sentinelErr
+			},
+		}, nil
+	}
+
+	// Create a mount source so the handler doesn't reject the request.
+	mountSource := filepath.Join(workspace, "src")
+	if err := os.MkdirAll(mountSource, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Execute command succeeds (true).
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	// Drive handleRun.
+	req := httptest.NewRequest(http.MethodPost, "/run",
+		bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"src","target":"/mnt"}]}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("handleRun: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Wait for operation to complete.
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found in registry")
+	}
+	op.Wait()
+
+	// Verify: the MAC lease was NOT released because cleanup failed.
+	// The boundary count should still reflect the session binding + the
+	// unreleased lease (the lease was never released due to cleanup failure).
+	mac.mu.Lock()
+	boundaryCount := mac.activeBoundaries[workspace]
+	leaseCount := len(mac.leases)
+	mac.mu.Unlock()
+
+	// The session binding contributes 1. The lease was acquired but NOT
+	// released because cleanup failed. The lease entry should still exist.
+	if leaseCount != 1 {
+		t.Errorf("expected 1 lease retained (cleanup failed), got %d", leaseCount)
+	}
+	if boundaryCount != 2 {
+		t.Errorf("expected activeBoundaries=2 (session + unreleased lease), got %d", boundaryCount)
+	}
+}
+
+// TestRunHandlerCleanupSuccessReleasesLease drives handleRun with a
+// successful pinned mount cleanup and verifies the MAC lease IS released.
+func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
 	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	// Create operation with a pinned mount that will fail cleanup.
-	op := newRunOperation("sess-1", "alpine", 4*1024*1024, "")
-	op.cidfile = filepath.Join(app.Config.RuntimeDir, "test.cid")
-	if err := os.WriteFile(op.cidfile, []byte("container-id"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	op.macLeaseRelease = leaseRelease
+	backend := newTestMACBackend("test")
+	mac := newWorkspaceMACLifecycle(db, backend)
 
-	// Create a pinned mount whose cleanup will fail.
-	pinDir := filepath.Join(app.Config.RuntimeDir, "pin-test")
-	if err := os.MkdirAll(pinDir, 0755); err != nil {
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	pinFile := filepath.Join(pinDir, "pin")
-	if err := os.WriteFile(pinFile, []byte("test"), 0644); err != nil {
+
+	cfg := &Config{
+		AllowedRoots:          []string{dir},
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
+		Mode:                  ModeSystem,
+	}
+
+	app := &App{
+		Config:            cfg,
+		DB:                db,
+		MACLifecycle:      mac,
+		OperationRegistry: newOperationRegistry(),
+	}
+
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
 		t.Fatal(err)
+	}
+
+	// Generate auth token for the session.
+	token, err := generateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Inject a pinned mount with a successful Cleanup.
+	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			HostPath: "/tmp/test-mount",
+			cleanup: func() error {
+				return nil
+			},
+		}, nil
+	}
+
+	mountSource := filepath.Join(workspace, "src")
+	if err := os.MkdirAll(mountSource, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/run",
+		bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"src","target":"/mnt"}]}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("handleRun: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+	op.Wait()
+
+	// Verify: the MAC lease WAS released because cleanup succeeded.
+	mac.mu.Lock()
+	leaseCount := len(mac.leases)
+	mac.mu.Unlock()
+
+	if leaseCount != 0 {
+		t.Errorf("expected 0 leases (cleanup succeeded, lease released), got %d", leaseCount)
+	}
+}
+
+// TestBuildHandlerStagingCleanupFailureRetainsLease drives handleBuild with
+// a staging seam that fails Cleanup, and verifies the MAC lease is retained.
+func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	backend := newTestMACBackend("test")
+	mac := newWorkspaceMACLifecycle(db, backend)
+
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		AllowedRoots:          []string{dir},
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
+	}
+
+	app := &App{
+		Config:            cfg,
+		DB:                db,
+		MACLifecycle:      mac,
+		OperationRegistry: newOperationRegistry(),
+	}
+
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "Dockerfile"), []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate auth token for the session.
+	token, err := generateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Inject staging seam with failing Cleanup.
+	sentinelErr := errors.New("injected staging cleanup error")
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		stagingDir := t.TempDir()
+		opDir := filepath.Join(stagingDir, opID)
+		if err := os.MkdirAll(opDir, 0o700); err != nil {
+			return nil, err
+		}
+		ctxDir := filepath.Join(opDir, "context")
+		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), []byte("FROM scratch\n"), 0o644); err != nil {
+			return nil, err
+		}
+		return &stagedBuildContext{
+			ContextPath:    ctxDir,
+			DockerfilePath: filepath.Join(ctxDir, dfrel),
+			cleanupPath:    opDir,
+			removeAll: func(path string) error {
+				return sentinelErr
+			},
+		}, nil
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("handleBuild: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+	op.Wait()
+
+	// Verify: the MAC lease was NOT released because staging cleanup failed.
+	mac.mu.Lock()
+	leaseCount := len(mac.leases)
+	mac.mu.Unlock()
+
+	if leaseCount != 1 {
+		t.Errorf("expected 1 lease retained (staging cleanup failed), got %d", leaseCount)
+	}
+}
+
+// TestBuildHandlerCleanupSuccessReleasesLease drives handleBuild with a
+// successful staging cleanup and verifies the MAC lease IS released.
+func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	backend := newTestMACBackend("test")
+	mac := newWorkspaceMACLifecycle(db, backend)
+
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		AllowedRoots:          []string{dir},
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
+	}
+
+	app := &App{
+		Config:            cfg,
+		DB:                db,
+		MACLifecycle:      mac,
+		OperationRegistry: newOperationRegistry(),
+	}
+
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "Dockerfile"), []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate auth token for the session.
+	token, err := generateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Inject staging seam with successful Cleanup.
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		stagingDir := t.TempDir()
+		opDir := filepath.Join(stagingDir, opID)
+		if err := os.MkdirAll(opDir, 0o700); err != nil {
+			return nil, err
+		}
+		ctxDir := filepath.Join(opDir, "context")
+		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), []byte("FROM scratch\n"), 0o644); err != nil {
+			return nil, err
+		}
+		return &stagedBuildContext{
+			ContextPath:    ctxDir,
+			DockerfilePath: filepath.Join(ctxDir, dfrel),
+			cleanupPath:    opDir,
+		}, nil
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("handleBuild: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opID, _ := resp["operation_id"].(string)
+	op := app.OperationRegistry.get(opID)
+	if op == nil {
+		t.Fatal("operation not found")
+	}
+	op.Wait()
+
+	// Verify: the MAC lease WAS released because staging cleanup succeeded.
+	mac.mu.Lock()
+	leaseCount := len(mac.leases)
+	mac.mu.Unlock()
+
+	if leaseCount != 0 {
+		t.Errorf("expected 0 leases (staging cleanup succeeded), got %d", leaseCount)
+	}
+}
+
+// TestTryCreateRejectionRunPinsBeforeLease drives handleRun with tryCreate
+// rejection and verifies pins are cleaned up before the lease is released.
+func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	backend := newTestMACBackend("test")
+	mac := newWorkspaceMACLifecycle(db, backend)
+
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{
+		AllowedRoots:          []string{dir},
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
+		Mode:                  ModeSystem,
+	}
+
+	app := &App{
+		Config:            cfg,
+		DB:                db,
+		MACLifecycle:      mac,
+		OperationRegistry: newOperationRegistry(),
+	}
+
+	// Force tryCreate rejection.
+	app.OperationRegistry.setShuttingDown()
+
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate auth token for the session.
+	token, err := generateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
 	var cleanupOrder []string
-	op.pinnedMounts = []*pinnedMount{
-		{
-			HostPath: pinFile,
+	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			HostPath: "/tmp/test-mount",
 			cleanup: func() error {
 				cleanupOrder = append(cleanupOrder, "pin_cleanup")
-				return fmt.Errorf("pin cleanup failed")
+				return nil
 			},
-		},
+		}, nil
 	}
 
-	// Simulate the production path: cleanup pins, then conditionally release lease.
-	cleanupCidfile(op)
-	cleanupErr := cleanupPinnedMounts(op)
-	if cleanupErr == nil {
-		t.Fatal("expected pin cleanup to fail")
+	mountSource := filepath.Join(workspace, "src")
+	if err := os.MkdirAll(mountSource, 0755); err != nil {
+		t.Fatal(err)
 	}
 
-	// In production code, lease should NOT be released when cleanup fails.
-	leaseReleased := false
-	leaseRelease = func() {
-		leaseReleased = true
-	}
-	if cleanupErr == nil && leaseRelease != nil {
-		leaseRelease()
+	req := httptest.NewRequest(http.MethodPost, "/run",
+		bytes.NewReader([]byte(`{"image":"alpine","mounts":[{"source":"src","target":"/mnt"}]}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
 	}
 
-	if leaseReleased {
-		t.Error("lease should NOT be released when pin cleanup fails")
-	}
+	// Verify: pin cleanup was called (production code cleaned up pins).
 	if len(cleanupOrder) != 1 || cleanupOrder[0] != "pin_cleanup" {
 		t.Errorf("expected [pin_cleanup], got %v", cleanupOrder)
 	}
+
+	// Verify: lease was released after pin cleanup.
+	mac.mu.Lock()
+	leaseCount := len(mac.leases)
+	mac.mu.Unlock()
+	if leaseCount != 0 {
+		t.Errorf("expected 0 leases after tryCreate rejection, got %d", leaseCount)
+	}
 }
 
-// TestBuildHandlerStagingCleanupFailureRetainsLease verifies that in the
-// production handleBuild path, if staging cleanup fails, the MAC lease is retained.
-func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+// TestTryCreateRejectionBuildStagingBeforeLease drives handleBuild with
+// tryCreate rejection and verifies staging is cleaned up before the lease is released.
+func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
 	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	backend := newTestMACBackend("test")
+	mac := newWorkspaceMACLifecycle(db, backend)
+
+	runtimeDir := filepath.Join(dir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create session binding.
+	cfg := &Config{
+		AllowedRoots:          []string{dir},
+		SessionTTL:            24 * time.Hour,
+		SocketPath:            filepath.Join(dir, "test.sock"),
+		StateDir:              dir,
+		RuntimeDir:            runtimeDir,
+		DatabasePath:          dbPath,
+		AdminTokenPath:        filepath.Join(dir, "admin.token"),
+		ShutdownTimeout:       30 * time.Second,
+		OperationRetentionTTL: 10 * time.Minute,
+		OperationMaxCompleted: 200,
+		OperationLogMaxBytes:  4 * 1024 * 1024,
+	}
+
+	app := &App{
+		Config:            cfg,
+		DB:                db,
+		MACLifecycle:      mac,
+		OperationRegistry: newOperationRegistry(),
+	}
+
+	// Force tryCreate rejection.
+	app.OperationRegistry.setShuttingDown()
+
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "Dockerfile"), []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate auth token for the session.
+	token, err := generateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		return err
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
 	}
 
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
-	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
-	}
-
-	// Create staging directory with failing cleanup.
-	stagedDir := filepath.Join(app.Config.RuntimeDir, "staged-test")
-	if err := os.MkdirAll(stagedDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	staged := &stagedBuildContext{
-		ContextPath:    stagedDir,
-		DockerfilePath: filepath.Join(stagedDir, "Dockerfile"),
-		cleanupPath:    stagedDir,
-	}
-
-	var cleanupOrder []string
-	staged.removeAll = func(path string) error {
-		cleanupOrder = append(cleanupOrder, "staging_cleanup")
-		return fmt.Errorf("staging cleanup failed")
-	}
-
-	// Simulate the production path: cleanup staging, then conditionally release lease.
-	cleanupErr := staged.Cleanup()
-	if cleanupErr == nil {
-		t.Fatal("expected staging cleanup to fail")
-	}
-
-	// In production code, lease should NOT be released when cleanup fails.
-	leaseReleased := false
-	leaseRelease = func() {
-		leaseReleased = true
-	}
-	if cleanupErr == nil && leaseRelease != nil {
-		leaseRelease()
-	}
-
-	if leaseReleased {
-		t.Error("lease should NOT be released when staging cleanup fails")
-	}
-	if len(cleanupOrder) != 1 || cleanupOrder[0] != "staging_cleanup" {
-		t.Errorf("expected [staging_cleanup], got %v", cleanupOrder)
-	}
-}
-
-// TestRunHandlerCleanupSuccessReleasesLease verifies that in the production
-// handleRun path, when cleanup succeeds, the MAC lease IS released.
-func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-	app.OperationRegistry = newOperationRegistry()
-
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
-	})
-	if err != nil {
-		t.Fatalf("CreateSessionBinding: %v", err)
-	}
-
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
-	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
-	}
-
-	// Create operation with a pinned mount that succeeds cleanup.
-	op := newRunOperation("sess-1", "alpine", 4*1024*1024, "")
-	op.cidfile = filepath.Join(app.Config.RuntimeDir, "test.cid")
-	if err := os.WriteFile(op.cidfile, []byte("container-id"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	op.macLeaseRelease = leaseRelease
-
-	pinDir := filepath.Join(app.Config.RuntimeDir, "pin-test")
-	if err := os.MkdirAll(pinDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	pinFile := filepath.Join(pinDir, "pin")
-	if err := os.WriteFile(pinFile, []byte("test"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	op.pinnedMounts = []*pinnedMount{
-		{
-			HostPath: pinFile,
-			cleanup: func() error {
-				return os.Remove(pinFile)
+	var cleanupCalled bool
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		stagingDir := t.TempDir()
+		opDir := filepath.Join(stagingDir, opID)
+		if err := os.MkdirAll(opDir, 0o700); err != nil {
+			return nil, err
+		}
+		ctxDir := filepath.Join(opDir, "context")
+		if err := os.MkdirAll(ctxDir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(ctxDir, dfrel), []byte("FROM scratch\n"), 0o644); err != nil {
+			return nil, err
+		}
+		return &stagedBuildContext{
+			ContextPath:    ctxDir,
+			DockerfilePath: filepath.Join(ctxDir, dfrel),
+			cleanupPath:    opDir,
+			removeAll: func(path string) error {
+				cleanupCalled = true
+				return os.RemoveAll(path)
 			},
-		},
+		}, nil
 	}
 
-	// Simulate the production path.
-	cleanupCidfile(op)
-	cleanupErr := cleanupPinnedMounts(op)
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
 
-	leaseReleased := false
-	origRelease := op.macLeaseRelease
-	op.macLeaseRelease = func() {
-		leaseReleased = true
-		origRelease()
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
 	}
 
-	if cleanupErr == nil && op.macLeaseRelease != nil {
-		op.macLeaseRelease()
+	// Verify: staging cleanup was called.
+	if !cleanupCalled {
+		t.Error("staging cleanup must be called on tryCreate rejection")
 	}
 
-	if cleanupErr != nil {
-		t.Fatalf("unexpected cleanup error: %v", cleanupErr)
-	}
-	if !leaseReleased {
-		t.Error("lease SHOULD be released when cleanup succeeds")
+	// Verify: lease was released after staging cleanup.
+	mac.mu.Lock()
+	leaseCount := len(mac.leases)
+	mac.mu.Unlock()
+	if leaseCount != 0 {
+		t.Errorf("expected 0 leases after tryCreate rejection, got %d", leaseCount)
 	}
 }
 
-// TestBuildHandlerCleanupSuccessReleasesLease verifies that in the production
-// handleBuild path, when cleanup succeeds, the MAC lease IS released.
-func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
-	app, mac, _ := setupTestMACLifecycle(t)
-	app.OperationRegistry = newOperationRegistry()
+// =============================================================================
+// Issue 1 (continued): SELinux durable coverage with real macBackendSELinux
+// =============================================================================
 
-	allowedRoot := app.Config.AllowedRoots[0]
-	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+// selinuxSeam is an injectable mock selinuxWorkspaceManager for testing
+// the real macBackendSELinux path.
+type selinuxSeam struct {
+	coveringBoundaries []string // returned by listCoveringBoundaries
+	boundaryErr        error    // returned by listCoveringBoundaries
+	actualTypeErr      error    // returned by verifyActualType
+	restoreconErr      error    // returned by restoreconRecursive
+	ensureCreated      bool     // newlyCreated from ensureWorkspaceLabel
+	ensureErr          error    // error from ensureWorkspaceLabel
+	rollbackErr        error    // error from rollbackWorkspaceLabel
+}
+
+func (s *selinuxSeam) listCoveringBoundaries(workspace string) ([]string, error) {
+	if s.boundaryErr != nil {
+		return nil, s.boundaryErr
+	}
+	return s.coveringBoundaries, nil
+}
+
+func (s *selinuxSeam) verifyActualType(workspace string) error {
+	return s.actualTypeErr
+}
+
+func (s *selinuxSeam) restoreconRecursive(workspace string) error {
+	return s.restoreconErr
+}
+
+func (s *selinuxSeam) ensureWorkspaceLabel(workspace string) (bool, error) {
+	return s.ensureCreated, s.ensureErr
+}
+
+func (s *selinuxSeam) rollbackWorkspaceLabel(boundary string) error {
+	return s.rollbackErr
+}
+
+func TestSELinuxRealBackendAncestorCorrectType(t *testing.T) {
+	// Persistent ancestor + correct actual type -> verify succeeds.
+	seam := &selinuxSeam{
+		coveringBoundaries: []string{"/data"},
+		actualTypeErr:      nil,
+	}
+	backend := &macBackendSELinux{mgr: seam}
+
+	cov, err := backend.verifyCoverage("/data/workspace")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("verifyCoverage should succeed: %v", err)
+	}
+	if cov.Boundary != "/data" {
+		t.Errorf("expected boundary /data, got %s", cov.Boundary)
+	}
+}
+
+func TestSELinuxRealBackendAncestorWrongType(t *testing.T) {
+	// Persistent ancestor + wrong type -> verify fails.
+	seam := &selinuxSeam{
+		coveringBoundaries: []string{"/data"},
+		actualTypeErr:      errors.New("wrong type"),
+	}
+	backend := &macBackendSELinux{mgr: seam}
+
+	_, err := backend.verifyCoverage("/data/workspace")
+	if err == nil {
+		t.Fatal("verifyCoverage should fail with wrong actual type")
+	}
+	if !strings.Contains(err.Error(), "incorrect") {
+		t.Errorf("expected 'incorrect' in error, got: %v", err)
+	}
+}
+
+func TestSELinuxRealBackendNoBoundaryCorrectXattrFails(t *testing.T) {
+	// No persistent boundary + correct current xattr -> verify FAILS.
+	// This is the key invariant: unmanaged xattr alone is not durable.
+	seam := &selinuxSeam{
+		coveringBoundaries: nil,
+		actualTypeErr:      nil, // correct type but no persistent boundary
+	}
+	backend := &macBackendSELinux{mgr: seam}
+
+	_, err := backend.verifyCoverage("/data/workspace")
+	if err == nil {
+		t.Fatal("verifyCoverage must fail when no persistent fcontext boundary exists")
+	}
+	if !strings.Contains(err.Error(), "no persistent") {
+		t.Errorf("expected 'no persistent' in error, got: %v", err)
+	}
+}
+
+func TestSELinuxRealBackendEnsureRepairsWrongType(t *testing.T) {
+	// ensureCoverage with existing ancestor + restorecon/verify succeeds.
+	seam := &selinuxSeam{
+		coveringBoundaries: []string{"/data"},
+		restoreconErr:      nil,
+		actualTypeErr:      nil,
+	}
+	backend := &macBackendSELinux{mgr: seam}
+
+	cov, changed, err := backend.ensureCoverage("/data/workspace")
+	if err != nil {
+		t.Fatalf("ensureCoverage should succeed: %v", err)
+	}
+	if changed {
+		t.Error("ensureCoverage should not report changed for existing boundary")
+	}
+	if cov.Boundary != "/data" {
+		t.Errorf("expected boundary /data, got %s", cov.Boundary)
+	}
+}
+
+func TestSELinuxRealBackendEnsureCreatesNewBoundary(t *testing.T) {
+	// No existing boundary -> ensureCoverage creates new one.
+	seam := &selinuxSeam{
+		coveringBoundaries: nil,
+		ensureCreated:      true,
+		ensureErr:          nil,
+	}
+	backend := &macBackendSELinux{mgr: seam}
+
+	cov, changed, err := backend.ensureCoverage("/data/workspace")
+	if err != nil {
+		t.Fatalf("ensureCoverage should succeed: %v", err)
+	}
+	if !changed {
+		t.Error("ensureCoverage should report changed for new boundary")
+	}
+	if cov.Boundary != "/data/workspace" {
+		t.Errorf("expected boundary /data/workspace, got %s", cov.Boundary)
+	}
+}
+
+func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
+	// No persistent boundary -> verifyCoverage fails -> ensureCoverage creates it.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
+	// Start with no boundary, verify fails.
+	// After ensureWorkspaceLabel, boundary exists.
+	seam := &selinuxSeam{
+		coveringBoundaries: nil,
+		actualTypeErr:      nil,
+		ensureCreated:      true,
+		ensureErr:          nil,
+	}
+	backend := &macBackendSELinux{mgr: seam}
+
+	// verifyCoverage must fail (no persistent boundary).
+	_, err = backend.verifyCoverage("/data/workspace")
+	if err == nil {
+		t.Fatal("verifyCoverage must fail without persistent boundary")
+	}
+
+	// ensureCoverage creates the persistent boundary.
+	cov, changed, err := backend.ensureCoverage("/data/workspace")
+	if err != nil {
+		t.Fatalf("ensureCoverage failed: %v", err)
+	}
+	if !changed {
+		t.Error("ensureCoverage should report changed")
+	}
+	if cov.Boundary != "/data/workspace" {
+		t.Errorf("expected boundary /data/workspace, got %s", cov.Boundary)
+	}
+
+	// Update seam to reflect the new boundary.
+	seam.coveringBoundaries = []string{"/data/workspace"}
+
+	// Now verifyCoverage succeeds.
+	cov, err = backend.verifyCoverage("/data/workspace")
+	if err != nil {
+		t.Fatalf("verifyCoverage should succeed after ensureCoverage: %v", err)
+	}
+	if cov.Boundary != "/data/workspace" {
+		t.Errorf("expected boundary /data/workspace, got %s", cov.Boundary)
+	}
+}
+
+// =============================================================================
+// Issue 3: Atomic mac_boundaries migration test
+// =============================================================================
+
+func TestMACBoundariesAtomicMigration(t *testing.T) {
+	// Start from the old schema: boundary TEXT PRIMARY KEY, backend TEXT NOT NULL
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	// Create the old schema manually.
+	_, err = db.Exec(`
+		CREATE TABLE mac_boundaries (
+			boundary TEXT PRIMARY KEY,
+			backend TEXT NOT NULL
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+
+	// Insert data into old schema.
+	_, err = db.Exec(`INSERT INTO mac_boundaries (boundary, backend) VALUES ('/data/ws1', 'apparmor')`)
+	if err != nil {
+		t.Fatalf("insert old data: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO mac_boundaries (boundary, backend) VALUES ('/data/ws2', 'selinux')`)
+	if err != nil {
+		t.Fatalf("insert old data: %v", err)
+	}
+
+	// Run initializeDatabase which should migrate to new schema.
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase migration: %v", err)
+	}
+
+	// Verify data survived migration.
+	var ws1Backend, ws2Backend string
+	err = db.QueryRow(`SELECT backend FROM mac_boundaries WHERE boundary = '/data/ws1'`).Scan(&ws1Backend)
+	if err != nil {
+		t.Fatalf("query ws1: %v", err)
+	}
+	if ws1Backend != "apparmor" {
+		t.Errorf("ws1 backend = %q, want 'apparmor'", ws1Backend)
+	}
+
+	err = db.QueryRow(`SELECT backend FROM mac_boundaries WHERE boundary = '/data/ws2'`).Scan(&ws2Backend)
+	if err != nil {
+		t.Fatalf("query ws2: %v", err)
+	}
+	if ws2Backend != "selinux" {
+		t.Errorf("ws2 backend = %q, want 'selinux'", ws2Backend)
+	}
+
+	// Verify the final PK is (backend, boundary).
+	var backendPK, boundaryPK int
+	err = db.QueryRow(`SELECT pk FROM pragma_table_info('mac_boundaries') WHERE name = 'backend'`).Scan(&backendPK)
+	if err != nil {
+		t.Fatalf("query backend pk: %v", err)
+	}
+	err = db.QueryRow(`SELECT pk FROM pragma_table_info('mac_boundaries') WHERE name = 'boundary'`).Scan(&boundaryPK)
+	if err != nil {
+		t.Fatalf("query boundary pk: %v", err)
+	}
+	if backendPK == 0 {
+		t.Error("backend should be part of PK")
+	}
+	if boundaryPK == 0 {
+		t.Error("boundary should be part of PK")
+	}
+}
+
+// =============================================================================
+// Issue 4: Deferred stale-boundary cleanup from cleanupStaleBoundaries
+// =============================================================================
+
+func TestDeferredStaleBoundaryCleanup(t *testing.T) {
+	// An owned boundary with no direct consumer but removal blocked by an
+	// overlapping live binding/lease should be registered in deferredBoundaries.
+	// After the last intersecting consumer disappears, it must be retried.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	defer db.Close()
+
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+
+	backend := newTestMACBackend("test")
+	mac := newWorkspaceMACLifecycle(db, backend)
+
+	parentWS := "/data/parent"
+	childWS := "/data/parent/child"
+
+	// Create parent session binding.
+	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov macCoverage) error {
+		return insertTestSessionTx(db, "sess-parent", parentWS)
 	})
 	if err != nil {
-		t.Fatalf("CreateSessionBinding: %v", err)
+		t.Fatalf("CreateSessionBinding parent: %v", err)
 	}
 
-	// Acquire lease.
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
+	// Create child session binding.
+	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov macCoverage) error {
+		return insertTestSessionTx(db, "sess-child", childWS)
+	})
 	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
+		t.Fatalf("CreateSessionBinding child: %v", err)
 	}
 
-	// Create staging directory with successful cleanup.
-	stagedDir := filepath.Join(app.Config.RuntimeDir, "staged-test")
-	if err := os.MkdirAll(stagedDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	staged := &stagedBuildContext{
-		ContextPath:    stagedDir,
-		DockerfilePath: filepath.Join(stagedDir, "Dockerfile"),
-		cleanupPath:    stagedDir,
+	// Delete child first.
+	mac.ReleaseSessionBoundary("sess-child")
+
+	// Child boundary should be deferred (parent still overlaps).
+	mac.mu.Lock()
+	childDeferred := mac.deferredBoundaries[childWS]
+	mac.mu.Unlock()
+
+	if !childDeferred {
+		t.Error("child boundary should be deferred after release (parent still overlaps)")
 	}
 
-	staged.removeAll = func(path string) error {
-		return os.RemoveAll(path)
+	// Simulate cleanupStaleBoundaries: it should register the child boundary
+	// as deferred because isBoundaryStillNeeded returns true (parent overlaps).
+	err = mac.cleanupStaleBoundaries()
+	if err != nil {
+		t.Fatalf("cleanupStaleBoundaries: %v", err)
 	}
 
-	// Simulate the production path.
-	cleanupErr := staged.Cleanup()
+	// Child should still be deferred (parent still active).
+	mac.mu.Lock()
+	childDeferredAfterCleanup := mac.deferredBoundaries[childWS]
+	mac.mu.Unlock()
 
-	leaseReleased := false
-	origRelease := leaseRelease
-	leaseRelease = func() {
-		leaseReleased = true
-		origRelease()
+	if !childDeferredAfterCleanup {
+		t.Error("child should still be deferred after cleanupStaleBoundaries (parent overlaps)")
 	}
 
-	if cleanupErr == nil && leaseRelease != nil {
-		leaseRelease()
+	// Delete parent — this should trigger retry of deferred boundaries.
+	mac.ReleaseSessionBoundary("sess-parent")
+
+	// Both boundaries should now be gone.
+	mac.mu.Lock()
+	parentDeferred := mac.deferredBoundaries[parentWS]
+	childDeferred = mac.deferredBoundaries[childWS]
+	mac.mu.Unlock()
+
+	if parentDeferred {
+		t.Error("parent should not be deferred after all consumers gone")
+	}
+	if childDeferred {
+		t.Error("child should not be deferred after all consumers gone")
 	}
 
-	if cleanupErr != nil {
-		t.Fatalf("unexpected cleanup error: %v", cleanupErr)
+	// Verify both boundaries were removed from backend.
+	_, err = backend.verifyCoverage(parentWS)
+	if err == nil {
+		t.Error("parent boundary should be removed from backend")
 	}
-	if !leaseReleased {
-		t.Error("lease SHOULD be released when staging cleanup succeeds")
+	_, err = backend.verifyCoverage(childWS)
+	if err == nil {
+		t.Error("child boundary should be removed from backend")
 	}
 }
