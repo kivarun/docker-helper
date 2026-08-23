@@ -655,6 +655,9 @@ func TestAdminTokenRotateInternalErrorDiagnostic(t *testing.T) {
 
 // TestBuildCleanupCorrelationFields verifies that build cleanup logs emit
 // operation="build" and operation_id=<ID> instead of operation=<ID>.
+//
+// This test uses a staging seam that forces Cleanup() to fail so the
+// cleanup error log is guaranteed to be emitted.
 func TestBuildCleanupCorrelationFields(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
@@ -667,6 +670,10 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 
 	// Force tryCreate rejection so the cleanup path runs.
 	app.OperationRegistry.shutting = true
+
+	// Use a staging seam that forces Cleanup() to fail.
+	sentinelErr := errors.New("injected staging cleanup error")
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelErr)
 
 	// Create a real build context so staging succeeds.
 	ctxDir := result.Session.Workspace
@@ -694,8 +701,9 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 		t.Fatalf("expected 503, got %d", w.Code)
 	}
 
-	// Parse operational JSON and verify correlation fields.
+	// Parse operational JSON and find the cleanup log.
 	opOutput := opBuf.String()
+	foundCleanup := false
 	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
 		if line == "" {
 			continue
@@ -705,10 +713,12 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 			continue
 		}
 		msg, _ := rec["msg"].(string)
-		if !strings.Contains(msg, "cleanup") {
+		if msg != "staging cleanup failed after tryCreate rejection" {
 			continue
 		}
-		// This is a cleanup log.
+		foundCleanup = true
+
+		// Assert operation == "build".
 		opField, ok := rec["operation"].(string)
 		if !ok {
 			t.Fatal("cleanup log missing operation field")
@@ -716,6 +726,8 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 		if opField != "build" {
 			t.Errorf("cleanup log operation = %q, want \"build\"", opField)
 		}
+
+		// Assert operation_id is non-empty.
 		opID, ok := rec["operation_id"].(string)
 		if !ok {
 			t.Fatal("cleanup log missing operation_id field")
@@ -723,6 +735,20 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 		if opID == "" {
 			t.Error("cleanup log operation_id is empty")
 		}
+
+		// Assert operation != operation_id.
+		if opField == opID {
+			t.Errorf("operation and operation_id must differ, both are %q", opField)
+		}
+
+		// Assert the error contains our sentinel.
+		errField, _ := rec["error"].(string)
+		if !strings.Contains(errField, sentinelErr.Error()) {
+			t.Errorf("cleanup log error = %q, expected to contain %q", errField, sentinelErr.Error())
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
 	}
 }
 
@@ -730,8 +756,16 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 
 // TestSessionCleanupCorrelationField verifies that session cleanup logs
 // use session_id instead of session.
+//
+// This test creates a real session for a principal, makes the session
+// runtime directory non-removable, then deletes the principal to trigger
+// the cleanup failure path.
 func TestSessionCleanupCorrelationField(t *testing.T) {
-	_, opBuf := setupTestLogging(t)
+	auditBuf := new(bytes.Buffer)
+	opBuf := new(bytes.Buffer)
+	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
+	defer logging.reset()
+
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessioncleanupuser")
@@ -750,24 +784,63 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Delete the principal — this triggers session runtime cleanup for any
-	// active sessions. Even with no sessions, the handler path exercises
-	// the session_id field naming.
-	mux := http.NewServeMux()
-	mux.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
-
-	req := httptest.NewRequest(http.MethodDelete, "/principals/"+username, nil)
-	req.Header.Set("Authorization", "Bearer "+testAdminToken)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	// Create a credential and session for the principal.
+	_, credToken, err := createCredential(app.DB, username, "laptop")
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Parse operational JSON and verify session_id field is used
-	// (not the obsolete "session" field).
+	sessMux := http.NewServeMux()
+	sessMux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	sessBody := map[string]string{"workspace": filepath.Join(home, "proj")}
+	sessData, _ := json.Marshal(sessBody)
+	sessReq := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(sessData))
+	sessReq.Header.Set("Authorization", "Bearer "+credToken)
+	sessW := httptest.NewRecorder()
+	sessMux.ServeHTTP(sessW, sessReq)
+	if sessW.Code != http.StatusCreated {
+		t.Fatalf("create session: expected %d, got %d: %s", http.StatusCreated, sessW.Code, sessW.Body.String())
+	}
+
+	var sessResp createSessionResponse
+	if err := json.NewDecoder(sessW.Body).Decode(&sessResp); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	sessionID := sessResp.Session.ID
+
+	// Create the session runtime directory so cleanup has something to remove.
+	sessRuntimeDir := sessionRuntimeDir(app.Config.RuntimeDir, sessionID)
+	if err := os.MkdirAll(sessRuntimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the sessions parent directory read-only so os.RemoveAll fails.
+	sessionsParentDir := filepath.Dir(sessRuntimeDir)
+	if err := os.Chmod(sessionsParentDir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		// Restore permissions for cleanup.
+		_ = os.Chmod(sessionsParentDir, 0755)
+	}()
+
+	// Delete the principal — this triggers session runtime cleanup.
+	delMux := http.NewServeMux()
+	delMux.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/principals/"+username, nil)
+	delReq.Header.Set("Authorization", "Bearer "+testAdminToken)
+	delW := httptest.NewRecorder()
+	delMux.ServeHTTP(delW, delReq)
+
+	if delW.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", delW.Code, delW.Body.String())
+	}
+
+	// Parse operational JSON and find the cleanup failure log.
 	opOutput := opBuf.String()
+	foundCleanup := false
 	for _, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
 		if line == "" {
 			continue
@@ -776,14 +849,58 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			continue
 		}
-		// Check that no log uses the obsolete "session" field name.
-		if _, hasSession := rec["session"]; hasSession {
-			t.Error("operational log uses obsolete \"session\" field instead of \"session_id\"")
+		msg, _ := rec["msg"].(string)
+		if msg != "failed to clean up session runtime directory" {
+			continue
 		}
+		foundCleanup = true
+
+		// Assert session_id is present and matches.
+		sid, ok := rec["session_id"].(string)
+		if !ok {
+			t.Fatal("cleanup log missing session_id field")
+		}
+		if sid != sessionID {
+			t.Errorf("session_id = %q, want %q", sid, sessionID)
+		}
+
+		// Assert obsolete "session" field is absent.
+		if _, hasSession := rec["session"]; hasSession {
+			t.Error("cleanup log uses obsolete \"session\" field instead of \"session_id\"")
+		}
+	}
+	if !foundCleanup {
+		t.Fatalf("cleanup log not found in operational output:\n%s", opOutput)
 	}
 }
 
 // --- Startup fallback timestamp ---
+
+// TestStartupFallbackTimeFormat verifies that the fallback timestamp
+// format preserves nanosecond precision (RFC3339Nano, not RFC3339).
+func TestStartupFallbackTimeFormat(t *testing.T) {
+	fixed := time.Date(2026, 8, 15, 12, 30, 45, 123456789, time.UTC)
+	got := formatStartupFallbackTime(fixed)
+
+	// RFC3339Nano preserves the nanosecond fraction.
+	// RFC3339 would produce "2026-08-15T12:30:45Z" (no fraction).
+	// RFC3339Nano produces "2026-08-15T12:30:45.123456789Z".
+	if !strings.Contains(got, ".") {
+		t.Fatalf("timestamp has no fractional seconds (RFC3339, not RFC3339Nano): %q", got)
+	}
+	if !strings.Contains(got, "123456789") {
+		t.Fatalf("timestamp does not preserve nanoseconds: %q", got)
+	}
+
+	// Verify it parses as RFC3339Nano.
+	parsed, err := time.Parse(time.RFC3339Nano, got)
+	if err != nil {
+		t.Fatalf("timestamp not valid RFC3339Nano: %v", err)
+	}
+	if parsed.Nanosecond() != 123456789 {
+		t.Errorf("nanosecond = %d, want 123456789", parsed.Nanosecond())
+	}
+}
 
 // TestStartupFallbackTimestampRFC3339Nano verifies that the emergency
 // pre-logger JSON fallback uses RFC3339Nano timestamps.
@@ -813,13 +930,9 @@ func TestStartupFallbackTimestampRFC3339Nano(t *testing.T) {
 		t.Fatal("fallback record missing time field")
 	}
 
-	// Parse the timestamp — RFC3339Nano is a superset of RFC3339.
-	// We verify it has nanosecond precision by checking the format.
+	// Verify it parses as RFC3339Nano.
 	if _, err := time.Parse(time.RFC3339Nano, timeStr); err != nil {
-		// RFC3339Nano may not have sub-second digits; fall back to RFC3339.
-		if _, err := time.Parse(time.RFC3339, timeStr); err != nil {
-			t.Fatalf("time not RFC3339/RFC3339Nano: %q: %v", timeStr, err)
-		}
+		t.Fatalf("time not RFC3339Nano: %q: %v", timeStr, err)
 	}
 
 	// Verify the record contains the expected fields.

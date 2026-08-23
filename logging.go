@@ -245,6 +245,11 @@ var osStderr io.Writer = os.Stderr
 // has not been configured. It silently drops all records.
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
+// formatStartupFallbackTime formats a time for the serveStartupError JSON fallback.
+func formatStartupFallbackTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
 // serveStartupError logs a daemon startup failure as structured JSON to stderr.
 // It is safe to call before initLoggers.
 func serveStartupError(err error, hint string) {
@@ -263,7 +268,7 @@ func serveStartupError(err error, hint string) {
 	// Fallback before logging is initialized: emit structured JSON to stderr.
 	record := map[string]any{
 		"stream":    "operational",
-		"time":      time.Now().UTC().Format(time.RFC3339Nano),
+		"time":      formatStartupFallbackTime(time.Now()),
 		"level":     "ERROR",
 		"msg":       "daemon startup failed",
 		"operation": "serve_startup",
