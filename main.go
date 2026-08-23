@@ -215,9 +215,8 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 
 func runServe(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
-	// Operational logger writes to stdout (systemd journal in system mode).
-	// Audit writer writes to stderr.
-	initLoggers(stdout, stderr, slog.LevelInfo, false)
+	// Audit JSONL -> stdout; operational JSONL -> stderr.
+	initLoggers(stderr, stdout, slog.LevelInfo, false)
 
 	// System mode requires MAC confinement. Check before loadConfig()
 	// to avoid side effects (runtime directory creation) when confinement
@@ -240,7 +239,8 @@ func runServe(stdout, stderr io.Writer) error {
 	}
 
 	// Re-initialize with the configured log level and audit setting.
-	initLoggers(stdout, stderr, cfg.LogLevel, cfg.AuditEnabled)
+	// Audit JSONL -> stdout; operational JSONL -> stderr.
+	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
 
 	// System mode with SELinux: verify non-home allowed_roots workspace labels.
 	if cfg.Mode == ModeSystem {

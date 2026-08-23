@@ -657,10 +657,10 @@ func TestRunCommandWithWritersServeFailure(t *testing.T) {
 		t.Errorf("serve wrote to global stderr: %s", sentinel.String())
 	}
 
-	// Operational output must be valid JSONL.
-	opOutput := stdoutBuf.String()
+	// Operational output must be on stderr, not stdout.
+	opOutput := stderrBuf.String()
 	if opOutput == "" {
-		t.Fatal("stdout (operational) is empty")
+		t.Fatal("stderr (operational) is empty")
 	}
 	for i, line := range strings.Split(strings.TrimSpace(opOutput), "\n") {
 		if line == "" {
@@ -670,6 +670,15 @@ func TestRunCommandWithWritersServeFailure(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			t.Errorf("stderr line %d not valid JSON: %s: %v", i, line, err)
 		}
+		if m["stream"] != "operational" {
+			t.Errorf("stderr line %d: expected stream=operational, got %v", i, m["stream"])
+		}
+	}
+
+	// stdout must not contain operational records.
+	stdoutOutput := stdoutBuf.String()
+	if strings.Contains(stdoutOutput, `"stream":"operational"`) {
+		t.Errorf("stdout must not contain operational records:\n%s", stdoutOutput)
 	}
 }
 
@@ -692,7 +701,9 @@ func TestMissingConfigProducesSingleJSONLRecord(t *testing.T) {
 	// Point config to a nonexistent file.
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/config.json")
 
-	err := runServe(opBuf, auditBuf)
+	// runServe(stdout, stderr): audit->stdout, operational->stderr.
+	// Pass auditBuf as stdout, opBuf as stderr so operational goes to opBuf.
+	err := runServe(auditBuf, opBuf)
 	if err == nil {
 		t.Fatal("expected error from runServe with missing config")
 	}
@@ -766,7 +777,9 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	err = runServe(opBuf, auditBuf)
+	// runServe(stdout, stderr): audit->stdout, operational->stderr.
+	// Pass auditBuf as stdout, opBuf as stderr so operational goes to opBuf.
+	err = runServe(auditBuf, opBuf)
 	if err == nil {
 		lockFile.Close()
 		t.Fatal("expected error from runServe with held lock")
@@ -789,6 +802,91 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 	}
 	if m["stream"] != "operational" {
 		t.Errorf("expected stream=operational, got %v", m["stream"])
+	}
+}
+
+// TestServeAuditRoutingToStdout verifies that the audit logger configured
+// by the serve path writes to stdout and not stderr. This exercises the
+// actual runServe wiring rather than calling initLoggers directly.
+func TestServeAuditRoutingToStdout(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Setenv("XDG_RUNTIME_DIR", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	configDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+
+	allowedRoot := testAllowedRootDir(t)
+	// Enable audit in config so runServe reinitializes with audit enabled.
+	configData := []byte(`{"allowed_roots": ["` + allowedRoot + `"],"session_ttl":"12h","audit_enabled":true}`)
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "admin.token"), []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	t.Setenv("DOCKER_HELPER_CONFIG", filepath.Join(configDir, "config.json"))
+
+	// Pre-acquire the lock so serve fails after config load.
+	runtimeDir := filepath.Join(dir, "docker-helper")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatalf("mkdir runtime: %v", err)
+	}
+	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+
+	stdoutBuf := new(bytes.Buffer)
+	stderrBuf := new(bytes.Buffer)
+
+	sentinel := new(bytes.Buffer)
+	savedStderr := osStderr
+	osStderr = sentinel
+	defer func() {
+		osStderr = savedStderr
+	}()
+
+	code := runCommandWithWriters([]string{"serve"}, stdoutBuf, stderrBuf)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	lockFile.Close()
+
+	if sentinel.Len() > 0 {
+		t.Errorf("serve wrote to global stderr: %s", sentinel.String())
+	}
+
+	// Write an audit record through the logger configured by runServe.
+	writeAudit(auditRecord{Event: "serve.routing.test"})
+
+	// Audit record must appear on stdout, not stderr.
+	stdoutOutput := stdoutBuf.String()
+	if !strings.Contains(stdoutOutput, "serve.routing.test") {
+		t.Fatalf("stdout must contain audit record but got:\n%s", stdoutOutput)
+	}
+
+	stderrOutput := stderrBuf.String()
+	if strings.Contains(stderrOutput, "serve.routing.test") {
+		t.Fatalf("stderr must not contain audit record but got:\n%s", stderrOutput)
+	}
+
+	// Verify the audit record has the correct stream field.
+	for _, line := range strings.Split(strings.TrimSpace(stdoutOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		if m["event"] == "serve.routing.test" && m["stream"] != "audit" {
+			t.Errorf("audit record: expected stream=audit, got %v", m["stream"])
+		}
 	}
 }
 

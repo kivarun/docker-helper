@@ -178,7 +178,7 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	opLog := stdout.String()
+	opLog := stderr.String()
 	if !strings.Contains(opLog, "MAC backend") {
 		t.Errorf("expected 'MAC backend' in operational log, got: %s", opLog)
 	}
@@ -219,7 +219,7 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	opLog := stdout.String()
+	opLog := stderr.String()
 	if !strings.Contains(opLog, "not confined") {
 		t.Errorf("expected 'not confined' in operational log, got: %s", opLog)
 	}

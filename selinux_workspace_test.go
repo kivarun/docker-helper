@@ -1187,8 +1187,8 @@ func TestServeDetectLSMError(t *testing.T) {
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
-	if !strings.Contains(stdout.String(), "cannot determine") {
-		t.Errorf("expected detection error in output, got: %s", stdout.String())
+	if !strings.Contains(stderr.String(), "cannot determine") {
+		t.Errorf("expected detection error in output, got: %s", stderr.String())
 	}
 }
 
