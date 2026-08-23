@@ -302,7 +302,7 @@ docker-helper init
 ```
 
 Creates configuration and state directories, writes `config.json` with
-`allowed_root`, `session_ttl`, `log_level` (default `info`), `shutdown_timeout`
+`allowed_roots`, `session_ttl`, `log_level` (default `info`), `shutdown_timeout`
 (default `30s`), `operation_retention_ttl` (default `10m`),
 `operation_max_completed` (default `200`), and `operation_log_max_bytes`
 (default `4194304` = 4 MiB), and generates an admin token. The
@@ -366,9 +366,15 @@ docker-helper config show admin_token
 To modify a setting:
 
 ```bash
-docker-helper config set allowed_root /path/to/workspaces
 docker-helper config set log_level debug
 docker-helper config set audit_enabled true
+```
+
+Workspace roots are managed through dedicated commands:
+
+```bash
+docker-helper workspace-root add /path/to/workspaces
+docker-helper config allowed-root list
 ```
 
 Each command prints feedback: `updated` when the value changes, `unchanged`
@@ -386,7 +392,7 @@ docker-helper config unset operation_log_max_bytes
 ```
 
 Each prints `unset` when the member was removed, or `unchanged ... is already unset`
-when it was already absent. `allowed_root` and `session_ttl` are required and
+when it was already absent. `allowed_roots` and `session_ttl` are required and
 cannot be unset.
 
 Configuration fields:
@@ -395,7 +401,7 @@ Configuration fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowed_root` | string | Root directory for agent workspaces (required) |
+| `allowed_roots` | array of strings | Canonical root directories for agent workspaces (required) |
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
 | `audit_enabled` | boolean | Override audit behavior (default: `true` in system mode; in user mode, `true` only when `log_level` is `debug`) |
@@ -407,7 +413,7 @@ Configuration fields:
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. |
 | `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |
 
-`allowed_root` and `session_ttl` are required and cannot be unset.
+`allowed_roots` and `session_ttl` are required and cannot be unset.
 Other fields may be unset to restore their defaults, except that
 `trusted_ca_path` cannot be unset while `trusted_ca_injection` is `auto`
 — set it to `disabled` first.
@@ -437,7 +443,7 @@ applying it; if validation fails, the daemon keeps its current configuration
 and the command returns an error.
 
 The following fields are applied at runtime:
-- `allowed_root`
+- `allowed_roots`
 - `session_ttl`
 - `log_level`
 - `audit_enabled`
@@ -581,7 +587,7 @@ docker-helper session create --workspace /path/to/project
 ```
 
 Returns the session ID, token (shown once), workspace, creation time,
-and expiration time. The workspace must be inside `allowed_root`.
+and expiration time. The workspace must be inside an allowed root.
 
 Assign the printed token to an environment variable for use in later
 examples:
@@ -953,16 +959,32 @@ available at
 System mode requires exactly one supported enforcing backend. Backend
 detection is automatic; the operator cannot select a weaker mode with a flag.
 
+### Common workflow
+
+The normal workflow for managing workspace roots is backend-neutral:
+
+```bash
+# Initial setup
+sudo docker-helper init --allowed-root /opt/docker-helper-workspaces
+
+# Add workspace roots later
+sudo docker-helper workspace-root add /path/to/workspace
+```
+
+`workspace-root add` prepares the active MAC backend (AppArmor or SELinux)
+and updates the global authorization ceiling. The user does not need to know
+which backend the host uses.
+
 ### AppArmor
 
 System mode uses mandatory AppArmor confinement with the
 `docker-helper-system` profile. Managed workspace roots are stored in
 `/etc/apparmor.d/docker-helper.d/managed-roots`.
 
-During system-mode `docker-helper init`, the initial `allowed_root` is
-automatically added to managed AppArmor roots. Subsequent changes to
-configuration or principal allowed roots do NOT automatically update
-AppArmor. Manage them explicitly:
+During system-mode `docker-helper init`, the initial workspace root is
+prepared for the AppArmor backend.
+
+Advanced backend-specific management:
 
 ```bash
 docker-helper apparmor root list
@@ -979,32 +1001,41 @@ installed manually.
 
 On an enforcing SELinux system, the systemd service runs in
 `docker_helper_t`; containers started by the service use
-`docker_helper_container_t` with MCS confinement. SELinux does not reproduce
-AppArmor's per-path managed-root rules. The canonical allowed-root check in
-docker-helper remains the path boundary, while SELinux permits only supported
-workspace file types as defense in depth.
+`docker_helper_container_t` with MCS confinement.
 
 #### Workspace SELinux labeling
 
 - `/home` and descendants retain their normal host `user_home_type` labels.
   docker-helper does not relabel `/home` paths.
 
-- Non-home system `allowed_roots` (e.g., `/opt`, `/data`, `/projects/agents`)
-  are managed under the dedicated `docker_helper_workspace_t` SELinux type.
-  When docker-helper initializes or changes a non-home `allowed_root`, it
-  creates a persistent `semanage fcontext` rule and applies `restorecon`
-  recursively. This mapping survives reboot and `restorecon`.
+- Explicitly managed non-home workspace roots (e.g., `/opt/docker-helper-workspaces`)
+  use the dedicated `docker_helper_workspace_t` SELinux type.
+  `workspace-root add` creates a persistent `semanage fcontext` rule and
+  applies `restorecon` recursively. This mapping survives reboot and `restorecon`.
 
-- Selecting a non-home `allowed_root` may recursively restore SELinux labels
-  under that explicitly selected root.
+- `docker-helper config allowed-root add /opt` is an advanced authorization-only
+  operation. It does NOT prepare SELinux managed labels.
+
+- `docker-helper workspace-root add /opt` is rejected because exact `/opt`
+  is too broad as a recursive managed relabel boundary. Use a dedicated
+  child such as `/opt/docker-helper-workspaces` instead.
 
 - Previously managed roots may retain the `docker_helper_workspace_t` label
-  after an `allowed_root` change, because existing sessions can still reference
+  after an authorization change, because existing sessions can still reference
   them. This label is confinement metadata, not authorization.
 
 - No Docker `:z`/`:Z` mount options or `label=disable` is used for workspace
   labeling. The SELinux labeling is managed natively through `semanage fcontext`
   and `restorecon`.
+
+#### Container workspace permissions
+
+Authorized workspace mounts support normal development-tree operations such
+as creating/modifying files, building and executing workspace binaries,
+symlinks, Unix-domain socket pathnames, and FIFOs.
+
+Both `user_home_type` and `docker_helper_workspace_t` have equivalent
+container-side development workspace semantics.
 
 The RPM contains `/usr/share/selinux/docker-helper.pp` and its lifecycle script
 loads the module on an enforcing SELinux host. The DEB does not install the
@@ -1052,8 +1083,7 @@ API requests still require a valid session token or admin credential.
 
 ## Workspace root policy
 
-A new workspace root (config `allowed_root`, principal allowed roots, or
-AppArmor managed roots) must:
+A new workspace root must:
 
 - be a non-empty absolute path;
 - exist and be a directory;
@@ -1084,15 +1114,12 @@ A symlink whose canonical target enters a forbidden namespace is rejected.
 New workspace roots are resolved to their canonical path through symlink
 resolution before policy evaluation; the canonical path is the effective
 and stored root.
-
-Existing stale AppArmor roots remain removable even if they no longer
 satisfy the current policy.
 
 ## System mode with AppArmor: provisioning a principal
 
 System mode requires the operator to configure both docker-helper policy
-and AppArmor confinement separately. Changing principal or config allowed
-roots does NOT automatically update AppArmor.
+and AppArmor confinement. The common workflow handles both:
 
 ```bash
 # 1. Create the principal.
@@ -1101,33 +1128,36 @@ roots does NOT automatically update AppArmor.
 sudo docker-helper principal create --system alice
 
 # 2. Review the principal's allowed roots.
-#    The default home root is shown; this is what AppArmor must cover
-#    if the operator wants it to remain usable.
 sudo docker-helper principal show --system alice
 
 # 3. Add additional allowed roots as needed.
-sudo docker-helper principal allowed-root add \
-    --system alice /srv/workspaces/alice
+#    workspace-root add prepares the MAC backend and updates authorization.
+sudo docker-helper workspace-root add /srv/workspaces/alice
 
-# 4. Add matching AppArmor roots for every allowed root.
-#    The show command above reveals the actual home/default root.
-sudo docker-helper apparmor root add /home/alice
-sudo docker-helper apparmor root add /srv/workspaces/alice
-
-# 5. Create a launcher credential for the principal.
+# 4. Create a launcher credential for the principal.
 sudo docker-helper credential create \
     --system --name laptop alice
+```
+
+Advanced backend-specific management remains available:
+
+```bash
+docker-helper apparmor root list
+docker-helper apparmor root add /path/to/workspace
+docker-helper apparmor root remove /path/to/workspace
 ```
 
 The separation is intentional:
 
 - `principal create` and `principal allowed-root add` define docker-helper
   workspace policy;
-- `apparmor root add` defines daemon filesystem confinement;
+- `workspace-root add` prepares the MAC backend and updates authorization;
+- `apparmor root add` is an advanced backend-specific operation;
 - `credential create` produces a launcher token for session creation.
 
-These layers are not synchronized automatically. The operator must add
-matching AppArmor roots for every workspace that a principal needs.
+The common `workspace-root add` workflow handles both authorization and MAC
+preparation. Advanced operators may use `apparmor root add` directly when
+needed.
 
 If the operator does not want the default home root to remain usable,
 they may remove it before provisioning AppArmor:

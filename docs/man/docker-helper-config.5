@@ -32,8 +32,9 @@ System mode Unix socket (created at runtime)
 JSON object with the following fields. Two fields are required; all others are optional.
 .SH FIELDS
 .TP
-.B allowed_root (string, required)
-Absolute path for agent workspace root. A new workspace root must satisfy
+.B allowed_roots (array of strings, required)
+Canonical absolute paths for agent workspace roots. This is the global
+authorization ceiling only; it does not own MAC state. Each path must satisfy
 the following policy:
 .RS 4
 \(bu
@@ -65,13 +66,14 @@ New workspace roots are resolved to their canonical path through symlink
 resolution before policy evaluation; the canonical path is the effective
 and stored root.
 .PP
-Existing stale managed AppArmor roots remain removable even if they no longer
-satisfy the current policy.
+Manage workspace roots with:
+.br
+\fBdocker-helper workspace-root add PATH\fR (common workflow, prepares MAC backend)
+.br
+\fBdocker-helper config allowed-root list|add|remove PATH\fR (authorization-only)
 .PP
-In AppArmor system mode, the initial value is added to managed roots during
-\fBdocker-helper init\fR. Subsequent changes require manual AppArmor updates via
-\fBdocker-helper apparmor root\fR. SELinux mode keeps normal host labels; the
-selected root's file type must be permitted by the installed policy.
+Legacy scalar \fBallowed_root\fR is accepted by config loading for migration
+purposes only. The current schema uses \fBallowed_roots\fR.
 .TP
 .B session_ttl (string, required)
 Session time-to-live using Go duration syntax (e.g., "30m", "1h", "12h").
@@ -126,8 +128,6 @@ Most configuration changes can be applied via \fBdocker-helper reload\fR without
 restart. Exceptions:
 .IP \(bu 4
 \fBhttp_address\fR: Requires daemon restart
-.IP \(bu 4
-\fBallowed_root\fR: Does NOT automatically update AppArmor managed roots; use \fBdocker-helper apparmor root\fR when AppArmor is active
 .SH DERIVED PATHS
 .SS System Mode
 .TP
@@ -164,33 +164,52 @@ Principal allowed_roots are stored in the state database, not in \fIconfig.json\
 .SH MANDATORY ACCESS CONTROL
 System mode requires exactly one active backend: AppArmor or enforcing
 SELinux. Neither, both, and permissive SELinux fail closed.
+.PP
+\fBallowed_roots\fR is an authorization ceiling only. It does not own MAC state.
+The common workflow for adding workspace roots is:
+.br
+\fBdocker-helper workspace-root add PATH\fR
+.PP
+This prepares the active MAC backend and updates authorization.
 .SS AppArmor
 AppArmor uses profile \fBdocker-helper-system\fR.
-Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR
-and can be modified via \fBdocker-helper apparmor root\fR.
-.PP
-The initial \fBallowed_root\fR from \fBdocker-helper init\fR is added to managed
-AppArmor roots. Subsequent changes to configuration or principal allowed roots
-do NOT automatically update AppArmor—use \fBdocker-helper apparmor root add PATH\fR
-to add new roots.
+Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR.
+\fBworkspace-root add\fR prepares managed AppArmor state automatically.
+Advanced backend-specific management: \fBdocker-helper apparmor root\fR.
 .SS SELinux
 The service runs in \fBdocker_helper_t\fR and system-mode containers run in
-the MCS-constrained \fBdocker_helper_container_t\fR type. SELinux provides
-type-level defense in depth, not per-path managed-root rules. Canonical
-docker-helper allowed-root validation remains the path boundary. The RPM
-contains the policy module; the DEB does not install an SELinux module.
+the MCS-constrained \fBdocker_helper_container_t\fR type.
+.PP
+/home paths retain normal host \fBuser_home_type\fR labels and are not relabelled.
+Explicitly managed non-home workspace roots use \fBdocker_helper_workspace_t\fR
+with persistent \fBsemanage fcontext\fR and \fBrestorecon\fR.
+.PP
+\fBdocker-helper config allowed-root add /opt\fR is authorization-only (no relabel).
+\fBdocker-helper workspace-root add /opt\fR is rejected; use a dedicated child
+such as \fI/opt/docker-helper-workspaces\fR instead.
+.PP
+Authorized workspace mounts support normal development-tree operations
+including file management, executable build/run, symlinks, Unix sockets,
+and FIFOs. Both \fBuser_home_type\fR and \fBdocker_helper_workspace_t\fR have
+equivalent container-side development workspace semantics.
+.PP
+The RPM contains the policy module; the DEB does not install an SELinux module.
 .SH EXAMPLES
 .SS Minimal configuration (both required fields)
 .nf
 {
-  "allowed_root": "/srv/workspaces",
+  "allowed_roots": [
+    "/srv/workspaces"
+  ],
   "session_ttl": "12h"
 }
 .fi
 .SS Full configuration with all fields
 .nf
 {
-  "allowed_root": "/srv/workspaces",
+  "allowed_roots": [
+    "/srv/workspaces"
+  ],
   "session_ttl": "1h",
   "log_level": "debug",
   "audit_enabled": true,

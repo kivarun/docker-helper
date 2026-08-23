@@ -777,11 +777,8 @@ func TestInitHelpContainsAutomationBoundary(t *testing.T) {
 	helpText := stdout.String()
 
 	// Verify help documents automation boundary
-	if !strings.Contains(helpText, "automatically") {
-		t.Error("help should mention automatic AppArmor integration")
-	}
-	if !strings.Contains(helpText, "docker-helper apparmor root add") {
-		t.Error("help should mention manual root management command")
+	if !strings.Contains(helpText, "workspace-root add") {
+		t.Error("help should mention workspace-root add")
 	}
 	if !strings.Contains(helpText, "System mode") {
 		t.Error("help should mention system mode")

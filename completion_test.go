@@ -589,6 +589,42 @@ func TestCompletionAllowedRootSubcommands(t *testing.T) {
 	// Prefix completion: "a" should yield only "add".
 	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "a"})
 	if len(results) != 1 || results[0] != "add" {
-		t.Errorf("config allowed-root a<TAB>: expected [add], got %v", results)
+		t.Errorf("expected [add], got %v", results)
+	}
+
+	// After action, must NOT repeat action words.
+	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "list", ""})
+	for _, sub := range expected {
+		if contains(results, sub) {
+			t.Errorf("after 'config allowed-root list', must not repeat action words, got: %v", results)
+		}
+	}
+}
+
+func TestCompletionWorkspaceRoot(t *testing.T) {
+	script := completionScript(t)
+
+	// Root commands must include workspace-root.
+	results := runCompletion(t, script, []string{"docker-helper", ""})
+	if !contains(results, "workspace-root") {
+		t.Error("root completion must include workspace-root")
+	}
+
+	// workspace-root must complete "add".
+	results = runCompletion(t, script, []string{"docker-helper", "workspace-root", ""})
+	if len(results) != 1 || results[0] != "add" {
+		t.Errorf("expected [add], got %v", results)
+	}
+
+	// Prefix completion: "wo" should yield workspace-root.
+	results = runCompletion(t, script, []string{"docker-helper", "wo"})
+	if len(results) != 1 || results[0] != "workspace-root" {
+		t.Errorf("expected [workspace-root], got %v", results)
+	}
+
+	// completion must complete "bash".
+	results = runCompletion(t, script, []string{"docker-helper", "completion", ""})
+	if len(results) != 1 || results[0] != "bash" {
+		t.Errorf("expected [bash], got %v", results)
 	}
 }

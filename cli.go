@@ -399,16 +399,14 @@ In non-interactive mode (stdin is not a terminal), --allowed-root
 is required.
 
 System mode (effective UID 0):
-  The initial allowed_root is automatically added to the managed
-  AppArmor workspace roots policy. Subsequent changes to the
-  configuration or principal allowed roots do NOT automatically
-  update AppArmor. Use the following command to manage AppArmor
-  roots after init:
+  The initial workspace root is prepared for the active MAC backend
+  (AppArmor or SELinux). Use the following command for later workspace
+  roots:
 
-    docker-helper apparmor root add PATH
+    docker-helper workspace-root add PATH
 
 User mode (non-root):
-  No AppArmor integration.`,
+  No MAC preparation is required.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		allowedRoot := fs.String("allowed-root", "", "Allowed root directory for agent workspaces")
 
@@ -493,7 +491,7 @@ var reloadCommand = &Command{
 	Help: `Ask the running daemon to re-read config.json and apply changes without restarting.
 
 The following configurable fields are applied at runtime:
-  allowed_root              root directory for agent workspaces
+  allowed_roots             root directories for agent workspaces
   session_ttl               session lifetime
   log_level                 operational log verbosity
   audit_enabled             audit output enablement
