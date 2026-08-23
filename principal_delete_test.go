@@ -212,67 +212,6 @@ func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
 	}
 }
 
-func TestPrincipalDeleteRuntimeDirsCleaned(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delruntimeuser")
-	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	orig := OSUserLookup
-	defer func() { OSUserLookup = orig }()
-	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
-		return "1054", "1054", home, nil
-	}
-
-	if _, err := createPrincipal(app.DB, "delruntimeuser", app.Config.AllowedRoots); err != nil {
-		t.Fatalf("createPrincipal: %v", err)
-	}
-
-	_, credToken, err := createCredential(app.DB, "delruntimeuser", "laptop")
-	if err != nil {
-		t.Fatalf("createCredential: %v", err)
-	}
-
-	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
-	body, _ := json.Marshal(reqBody)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /sessions", app.handleCreateSession)
-
-	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+credToken)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("create session: expected %d, got %d", http.StatusCreated, w.Code)
-	}
-
-	var resp createSessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-
-	sessionDir := sessionRuntimeDir(app.Config.RuntimeDir, resp.Session.ID)
-	if err := os.MkdirAll(sessionDir, 0700); err != nil {
-		t.Fatalf("create runtime dir: %v", err)
-	}
-
-	// Clean up runtime directories BEFORE deleting principal (sessions still in DB).
-	if err := cleanupPrincipalRuntimeDirs(app.DB, app.Config.RuntimeDir, "delruntimeuser"); err != nil {
-		t.Fatalf("cleanup runtime dirs: %v", err)
-	}
-
-	if _, err := deletePrincipal(app.DB, "delruntimeuser"); err != nil {
-		t.Fatalf("deletePrincipal: %v", err)
-	}
-
-	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
-		t.Error("runtime directory should be cleaned up")
-	}
-}
-
 func TestPrincipalDisableDeletesSessions(t *testing.T) {
 	app := newTestAppWithAuth(t)
 

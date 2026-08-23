@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -428,48 +427,6 @@ func listPrincipalSummaries(db *sql.DB) ([]principalSummary, error) {
 	}
 
 	return summaries, nil
-}
-
-// cleanupPrincipalRuntimeDirs removes runtime directories for all sessions
-// of a principal. Returns accumulated errors but does not fail on individual
-// directory removal failures.
-func cleanupPrincipalRuntimeDirs(db *sql.DB, runtimeDir, username string) error {
-	principalID, err := findPrincipalIDByUserName(db, username)
-	if err != nil {
-		return err
-	}
-
-	rows, err := db.Query(
-		`SELECT id FROM sessions WHERE principal_id = ?`,
-		principalID,
-	)
-	if err != nil {
-		return fmt.Errorf("cannot query principal sessions: %w", err)
-	}
-	defer rows.Close()
-
-	var errs []error
-	for rows.Next() {
-		var sessionID string
-		if err := rows.Scan(&sessionID); err != nil {
-			return fmt.Errorf("cannot scan session id: %w", err)
-		}
-		if err := cleanupSessionRuntimeDir(runtimeDir, sessionID); err != nil {
-			slog.Warn("failed to clean up session runtime directory",
-				slog.String("session", sessionID),
-				slog.String("error", err.Error()),
-			)
-			errs = append(errs, err)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate sessions: %w", err)
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("failed to clean up %d session runtime directories", len(errs))
-	}
-	return nil
 }
 
 // deletePrincipal removes a principal and all its sessions in a single transaction.
