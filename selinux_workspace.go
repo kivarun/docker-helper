@@ -454,14 +454,14 @@ func (m *selinuxWorkspaceManager) verifyWorkspaceLabel(root string) error {
 	if err != nil {
 		return fmt.Errorf(
 			"cannot read SELinux type for allowed_root %s: %v; "+
-				"ensure the root is prepared via docker-helper init or config set",
+				"ensure the root is prepared via docker-helper init or docker-helper config allowed-root add PATH",
 			root, err,
 		)
 	}
 	if actualType != selinuxWorkspaceType {
 		return fmt.Errorf(
 			"allowed_root %s has SELinux type %s, expected %s; "+
-				"prepare the root via docker-helper init or config set allowed_root",
+				"prepare the root via docker-helper init or docker-helper config allowed-root add PATH",
 			root, actualType, selinuxWorkspaceType,
 		)
 	}

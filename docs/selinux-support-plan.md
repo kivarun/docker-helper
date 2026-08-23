@@ -35,8 +35,9 @@ daemon and container domain the necessary workspace permissions.
 
 ### Non-home system allowed_roots
 
-A non-home system `allowed_root` (e.g., `/opt`, `/data`, `/projects/agents`)
-is managed by docker-helper under a dedicated SELinux type:
+A non-home system `allowed_root` (e.g., `/data`, `/projects/agents`,
+`/opt/docker-helper-workspaces`) is managed by docker-helper under a
+dedicated SELinux type:
 
 ```
 docker_helper_workspace_t
@@ -106,11 +107,15 @@ The SELinux labeling is managed natively through `semanage fcontext` and
 
 #### Previously managed roots
 
-When `allowed_root` is changed, docker-helper does NOT automatically remove or
+When an `allowed_root` is removed, docker-helper does NOT automatically remove or
 relabel the previous root. Existing sessions may still reference the old root,
 and the `docker_helper_workspace_t` label may persist. This is acceptable
 because SELinux labeling is confinement metadata, not authorization. The
 application/session policy still controls access.
+
+Persistent SELinux metadata (fcontext rules, restored labels) may outlive
+authorization changes. This is not a separate authorization or domain layer:
+`config allowed-root` and principal/session checks remain authoritative.
 
 Session-aware SELinux label garbage collection is deferred to post-2.0.
 
@@ -208,14 +213,12 @@ semodule_package -o dist/docker-helper.pp \
 Target hosts need runtime policy tools, not the compiler. The RPM contains
 `/usr/share/selinux/docker-helper.pp`. On an enforcing SELinux system its
 scriptlet installs/replaces the module and restores only docker-helper-owned
-paths. Upgrade preserves the active module; final erase removes it. Arbitrary
-workspaces are never relabelled.
+paths. Upgrade preserves the active module; final erase removes it.
 
 The DEB intentionally contains no SELinux module and provisions AppArmor only.
 
 The current RPM hard-depends on both `apparmor-parser` and `policycoreutils`.
-That is not yet a proven portable dependency contract for Fedora/RHEL-family
-hosts and must be resolved before claiming those targets.
+Fedora/RHEL portability is future work.
 
 The release workflow must install both `checkmodule` and `semodule_package`
 before running `build-packages.sh`; the current isolated release job does not.
@@ -241,20 +244,26 @@ converted into broad permissions.
 
 ### `/opt` and non-home system roots (resolved)
 
-Non-home system `allowed_roots` (e.g., `/opt`, `/data`, `/projects/agents`) are
-now managed under `docker_helper_workspace_t` with persistent `semanage fcontext`
-rules and `restorecon -R` (type-only). The daemon and container domains receive
-workspace permissions for this type. Init, config mutation, and startup/reload
-verify the label and fail closed if it is missing.
+Non-home system `allowed_roots` (e.g., `/data`, `/projects/agents`,
+`/opt/docker-helper-workspaces`) are managed under `docker_helper_workspace_t`
+with persistent `semanage fcontext` rules and `restorecon -R` (type-only).
+The daemon and container domains receive workspace permissions for this type.
+`config allowed-root add` prepares the label and fails closed if it is missing.
+
+Exact `/opt` is rejected by `config allowed-root add` in SELinux mode because
+it would recursively relabel the entire `/opt` namespace. Use a dedicated child
+such as `/opt/docker-helper-workspaces` instead.
 
 Monotonic managed-label lifecycle (R2): once `ensureWorkspaceLabel` returns
 success, the mapping is managed durable state. Outer init/config code does NOT
 roll it back on subsequent failures. A stale mapping is acceptable because it
 is confinement metadata, not authorization.
 
+The Release 2 RPM acceptance target is openSUSE Tumbleweed.
+
 ### Required target matrix
 
-Run the following on openSUSE and the selected Fedora/RHEL-family target:
+Run the following on openSUSE Tumbleweed:
 
 1. clean RPM dependency resolution and install;
 2. module install, upgrade, final erase, and file contexts;

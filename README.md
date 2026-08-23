@@ -1111,12 +1111,11 @@ A symlink whose canonical target enters a forbidden namespace is rejected.
 New workspace roots are resolved to their canonical path through symlink
 resolution before policy evaluation; the canonical path is the effective
 and stored root.
-satisfy the current policy.
 
-## System mode with AppArmor: provisioning a principal
+## System mode: provisioning a principal
 
 System mode requires the operator to configure both docker-helper policy
-and AppArmor confinement. The common workflow handles both:
+and MAC confinement. The common workflow handles both:
 
 ```bash
 # 1. Create the principal.
@@ -1127,14 +1126,36 @@ sudo docker-helper principal create --system alice
 # 2. Review the principal's allowed roots.
 sudo docker-helper principal show --system alice
 
-# 3. Add additional allowed roots as needed.
-#    config allowed-root add prepares the MAC backend and updates authorization.
-sudo docker-helper config allowed-root add /srv/workspaces/alice
+# 3. Add a global allowed root.
+#    config allowed-root add prepares the MAC backend (AppArmor or SELinux)
+#    and raises the system-wide authorization ceiling.
+sudo docker-helper config allowed-root add /srv/workspaces
 
-# 4. Create a launcher credential for the principal.
+# 4. Narrow the principal's authorization to a subdirectory.
+#    principal allowed-root add does NOT prepare MAC; it only defines
+#    which paths this principal may select at session creation time.
+sudo docker-helper principal allowed-root add \
+    --system alice /srv/workspaces/alice
+
+# 5. Create a launcher credential for the principal.
 sudo docker-helper credential create \
     --system --name laptop alice
 ```
+
+The three-level authorization model:
+
+- **Global allowed root** — system-wide ceiling managed by
+  `config allowed-root add`; in system mode, also prepares the active
+  MAC backend (AppArmor or SELinux).
+- **Principal allowed root** — per-principal narrowing managed by
+  `principal allowed-root add`; does not prepare MAC.
+- **Project workspace** — selected only at session creation time via
+  `session create --workspace PATH`; must be under both a global and
+  a principal allowed root.
+
+Individual projects are not registered persistently. The operator adds
+global roots and principal roots, then creates sessions for specific
+workspaces under those roots.
 
 Advanced backend-specific management remains available:
 
@@ -1146,9 +1167,10 @@ docker-helper apparmor root remove /path/to/workspace
 
 The separation is intentional:
 
-- `principal create` and `principal allowed-root add` define docker-helper
+- `principal create` and `principal allowed-root add` define per-principal
   workspace policy;
-- `config allowed-root add` prepares the MAC backend and updates authorization;
+- `config allowed-root add` prepares the MAC backend and updates the
+  system-wide authorization ceiling;
 - `apparmor root add` is an advanced backend-specific operation;
 - `credential create` produces a launcher token for session creation.
 
@@ -1157,7 +1179,7 @@ preparation. Advanced operators may use `apparmor root add` directly when
 needed.
 
 If the operator does not want the default home root to remain usable,
-they may remove it before provisioning AppArmor:
+they may remove it:
 
 ```bash
 sudo docker-helper principal allowed-root remove \

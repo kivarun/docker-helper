@@ -405,7 +405,7 @@ is required.
 
     docker-helper config allowed-root add PATH
 
-User mode (non-root):
+ User mode (non-root):
   No MAC preparation is required.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		allowedRoot := fs.String("allowed-root", "", "Allowed root directory for agent workspaces")

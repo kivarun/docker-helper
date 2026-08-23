@@ -751,18 +751,6 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// configSetSeam is the SELinux workspace preparation seam for configSet.
-// Production: nil (uses real canonicalizer, detectLSM, and manager).
-// Tests: can inject to control canonicalization, detection, and preparation.
-type configSetSeam struct {
-	// canonicalizeRoot replaces canonicalizeWorkspaceRootForAdd.
-	// nil means use the real function.
-	canonicalizeRoot func(string) (string, error)
-	// detectBackend replaces detectLSM.
-	// nil means use the real function.
-	detectBackend func() (LSMBackend, error)
-}
-
 // allowedRootPreflight performs backend-specific MAC preparation for a
 // global allowed root in system mode. This is the internal implementation
 // detail associated with making a new global allowed root usable.
@@ -814,8 +802,11 @@ func allowedRootPreflight(canonical string, stderr io.Writer) error {
 		}
 		return nil
 
+	case LSMNone:
+		return fmt.Errorf("no MAC backend active (system mode requires AppArmor or enforcing SELinux)")
+
 	default:
-		return nil
+		return fmt.Errorf("unknown MAC backend: %s", backend)
 	}
 }
 
@@ -872,9 +863,7 @@ func addAllowedRootToConfig(canonical string, preflight func() error, stdout, st
 	})
 }
 
-// configSetWithSeam is the internal implementation of configSet that
-// respects the injection seam. The public configSet delegates here.
-func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *configSetSeam) int {
+func configSet(field, value string, stdout, stderr io.Writer) int {
 	if msg := deprecatedFieldMessage(field); msg != "" {
 		fmt.Fprint(stderr, msg)
 		return 2
@@ -1006,10 +995,6 @@ func configSetWithSeam(field, value string, stdout, stderr io.Writer, seam *conf
 		stdout,
 		stderr,
 	)
-}
-
-func configSet(field, value string, stdout, stderr io.Writer) int {
-	return configSetWithSeam(field, value, stdout, stderr, nil)
 }
 
 func configUnset(field string, stdout, stderr io.Writer) int {

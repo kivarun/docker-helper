@@ -439,7 +439,7 @@ for full syntax:
 
 Inspect and modify configuration. Requires a subcommand.
 
-Subcommands: `show`, `set`, `unset`.
+Subcommands: `show`, `set`, `unset`, `allowed-root`.
 
 `docker-helper config show [FIELD]` — without FIELD, prints the complete
 effective configuration as JSON (admin_token redacted). With FIELD, prints
@@ -458,9 +458,15 @@ config.json and the daemon are synchronized. If re-reload fails, they may
 diverge until the next manual reload or restart.
 
 `docker-helper config unset FIELD` — removes an optional field to restore
-its default. `allowed_root` and `session_ttl` are required and cannot be
+its default. `allowed_roots` and `session_ttl` are required and cannot be
 unset. Reports `unset` or `unchanged`. The same transactional rollback
 semantics apply.
+
+`docker-helper config allowed-root <list|add|remove> [PATH]` — manages the
+global allowed_roots array. `add` canonicalizes and validates the path; in
+system mode, also prepares the active MAC backend (AppArmor or SELinux).
+`remove` resolves and matches the stored canonical form; rejects removal of
+the final global root. `list` prints one canonical root per line.
 
 `http_address` is configurable in system mode only and requires a daemon
 restart to take effect. It is not included in the reloadable field list.
@@ -469,7 +475,7 @@ restart to take effect. It is not included in the reloadable field list.
 
 Ask the running daemon to re-read `config.json` and apply changes without
 restarting. Reloadable fields:
-`allowed_root`, `session_ttl`, `log_level`, `audit_enabled`,
+`allowed_roots`, `session_ttl`, `log_level`, `audit_enabled`,
 `shutdown_timeout`, `operation_retention_ttl`, `operation_max_completed`,
 `operation_log_max_bytes`, `trusted_ca_path`, `trusted_ca_injection`.
 
@@ -674,9 +680,9 @@ Each session is bound to a single workspace directory.
 
 Initialization follows the selected deployment identity:
 
-- interactive non-root initialization defaults `allowed_root` to the current
+- interactive non-root initialization defaults `allowed_roots` to the current
   user's home directory;
-- interactive root initialization defaults `allowed_root` to `/home`;
+- interactive root initialization defaults `allowed_roots` to `/home`;
 - the shared root validator permits root to select exact `/home` or `/opt`,
   while non-root validation continues to reject those broad namespaces;
 - non-interactive initialization requires an explicit `--allowed-root`.
@@ -688,8 +694,25 @@ same user-scoped credential store directly.
 
 Application acceptance of a root does not by itself prove MAC access. AppArmor
 requires the corresponding managed-root rule. SELinux requires a permitted
-workspace file type; `/opt` remains a Release 2 acceptance decision until it is
-either supported by a narrow tested policy or rejected during SELinux init.
+workspace file type; exact `/opt` is rejected by `config allowed-root add` in
+SELinux mode.
+
+### Three-level authorization model
+
+Authorization flows through three levels:
+
+1. **Global allowed_roots** (config.json) — the system-wide authorization
+   ceiling, managed by `config allowed-root list/add/remove`. In system mode,
+   `config allowed-root add` internally prepares the active MAC backend
+   (AppArmor or SELinux) as part of the add operation.
+2. **Principal allowed roots** (database) — per-principal narrowing, managed
+   by `principal allowed-root add/remove`. Does not prepare MAC.
+3. **Session workspace** (ephemeral) — selected only at session creation time
+   via `session create --workspace PATH`. Must be under both a global and a
+   principal allowed root.
+
+There is no fourth persistent "workspace root" abstraction. Individual
+projects are not registered persistently.
 
 ### Canonical paths
 

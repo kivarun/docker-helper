@@ -592,11 +592,69 @@ func TestCompletionAllowedRootSubcommands(t *testing.T) {
 		t.Errorf("expected [add], got %v", results)
 	}
 
-	// After action, must NOT repeat action words.
+	// Prefix completion: "l" should yield only "list".
+	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "l"})
+	if len(results) != 1 || results[0] != "list" {
+		t.Errorf("expected [list], got %v", results)
+	}
+
+	// After "list", must NOT repeat action words.
 	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "list", ""})
 	for _, sub := range expected {
 		if contains(results, sub) {
 			t.Errorf("after 'config allowed-root list', must not repeat action words, got: %v", results)
+		}
+	}
+}
+
+func TestCompletionAllowedRootListNoPathCompletion(t *testing.T) {
+	script := completionScript(t)
+
+	// "config allowed-root list" must not produce action/path suggestions.
+	results := runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "list", ""})
+	// Should be empty or contain only filesystem entries (not action words).
+	for _, sub := range []string{"list", "add", "remove"} {
+		if contains(results, sub) {
+			t.Errorf("after 'config allowed-root list', must not suggest action %q, got: %v", sub, results)
+		}
+	}
+}
+
+func TestCompletionAllowedRootAddDirectoryOnly(t *testing.T) {
+	script := completionScript(t)
+
+	// "config allowed-root add" should complete directories.
+	// We verify the generated script contains compgen -d for the add case.
+	if !strings.Contains(script, "compgen -d") {
+		t.Error("completion script must use 'compgen -d' for directory completion in 'add' case")
+	}
+}
+
+func TestCompletionAllowedRootRemoveFilesystemCompletion(t *testing.T) {
+	script := completionScript(t)
+
+	// "config allowed-root remove" should complete filesystem entries.
+	// We verify the generated script contains compgen -f for the remove case.
+	if !strings.Contains(script, "compgen -f") {
+		t.Error("completion script must use 'compgen -f' for filesystem completion in 'remove' case")
+	}
+}
+
+func TestCompletionAllowedRootPartialActionNoPathCompletion(t *testing.T) {
+	script := completionScript(t)
+
+	// "config allowed-root li" should complete to "list".
+	results := runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "li"})
+	if len(results) != 1 || results[0] != "list" {
+		t.Errorf("expected [list], got %v", results)
+	}
+
+	// After partial action "li" and a path, should not produce further suggestions.
+	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "li", "/some/path", ""})
+	// No action words should appear.
+	for _, sub := range []string{"list", "add", "remove"} {
+		if contains(results, sub) {
+			t.Errorf("after partial action + path, must not suggest action %q, got: %v", sub, results)
 		}
 	}
 }
