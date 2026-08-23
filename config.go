@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -178,6 +179,61 @@ func lookupConfigField(name string) (configFieldSpec, bool) {
 		}
 	}
 	return configFieldSpec{}, false
+}
+
+// configShowFields returns field names that config show accepts.
+// Includes all user-visible fields except the legacy migration-only allowed_root.
+// Sorted deterministically.
+func configShowFields() []string {
+	var fields []string
+	for _, f := range configFields {
+		if f.name == "allowed_root" {
+			continue // legacy migration-only scalar
+		}
+		fields = append(fields, f.name)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// configSetFields returns writable scalar field names that config set accepts.
+// Excludes allowed_roots (managed via config allowed-root) and allowed_root (legacy).
+// Sorted deterministically.
+func configSetFields() []string {
+	var fields []string
+	for _, f := range configFields {
+		if !f.writable {
+			continue
+		}
+		if f.name == "allowed_roots" || f.name == "allowed_root" {
+			continue
+		}
+		fields = append(fields, f.name)
+	}
+	sort.Strings(fields)
+	return fields
+}
+
+// configUnsetFields returns optional writable scalar field names that config
+// unset accepts. Excludes required fields, allowed_roots, allowed_root, and
+// read-only/computed fields.
+// Sorted deterministically.
+func configUnsetFields() []string {
+	var fields []string
+	for _, f := range configFields {
+		if !f.writable {
+			continue
+		}
+		if f.required {
+			continue
+		}
+		if f.name == "allowed_roots" || f.name == "allowed_root" {
+			continue
+		}
+		fields = append(fields, f.name)
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 func isKnownField(name string) bool {

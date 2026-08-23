@@ -287,7 +287,7 @@ func TestCompletionConfigShowFields(t *testing.T) {
 		t.Error("expected config show field completions")
 		return
 	}
-	expected := []string{"allowed_root", "session_ttl", "log_level", "audit_enabled"}
+	expected := []string{"allowed_roots", "session_ttl", "log_level", "audit_enabled"}
 	resultsMap := make(map[string]bool)
 	for _, r := range results {
 		resultsMap[r] = true
@@ -296,6 +296,10 @@ func TestCompletionConfigShowFields(t *testing.T) {
 		if !resultsMap[exp] {
 			t.Errorf("expected config show field %q not found: %v", exp, results)
 		}
+	}
+	// Must not contain legacy allowed_root.
+	if resultsMap["allowed_root"] {
+		t.Error("config show must not contain legacy allowed_root")
 	}
 }
 
@@ -306,7 +310,7 @@ func TestCompletionConfigSetFields(t *testing.T) {
 		t.Error("expected config set field completions")
 		return
 	}
-	expected := []string{"allowed_root", "session_ttl", "log_level", "audit_enabled"}
+	expected := []string{"session_ttl", "log_level", "audit_enabled"}
 	resultsMap := make(map[string]bool)
 	for _, r := range results {
 		resultsMap[r] = true
@@ -315,6 +319,13 @@ func TestCompletionConfigSetFields(t *testing.T) {
 		if !resultsMap[exp] {
 			t.Errorf("expected config set field %q not found: %v", exp, results)
 		}
+	}
+	// Must not contain allowed_root or allowed_roots.
+	if resultsMap["allowed_root"] {
+		t.Error("config set must not contain legacy allowed_root")
+	}
+	if resultsMap["allowed_roots"] {
+		t.Error("config set must not contain allowed_roots")
 	}
 }
 
@@ -438,5 +449,140 @@ func TestCompletionWorksInPlainBash(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("completion script failed in plain bash: %v\n%s", err, out)
+	}
+}
+
+func TestConfigShowFieldsVocabulary(t *testing.T) {
+	fields := configShowFields()
+
+	// Must contain allowed_roots.
+	if !contains(fields, "allowed_roots") {
+		t.Error("config show must contain allowed_roots")
+	}
+
+	// Must NOT contain legacy allowed_root.
+	if contains(fields, "allowed_root") {
+		t.Error("config show must not contain legacy allowed_root")
+	}
+
+	// Must contain representative computed fields.
+	for _, f := range []string{"mode", "config_path"} {
+		if !contains(fields, f) {
+			t.Errorf("config show must contain %s", f)
+		}
+	}
+
+	// Every returned field must be accepted by configShowField's contract.
+	for _, f := range fields {
+		if _, ok := lookupConfigField(f); !ok {
+			t.Errorf("config show field %q is not in configFields", f)
+		}
+	}
+}
+
+func TestConfigSetFieldsVocabulary(t *testing.T) {
+	fields := configSetFields()
+
+	// Must NOT contain allowed_root or allowed_roots.
+	if contains(fields, "allowed_root") {
+		t.Error("config set must not contain legacy allowed_root")
+	}
+	if contains(fields, "allowed_roots") {
+		t.Error("config set must not contain allowed_roots")
+	}
+
+	// Must contain writable scalar fields.
+	for _, f := range []string{"session_ttl", "log_level", "trusted_ca_path", "http_address"} {
+		if !contains(fields, f) {
+			t.Errorf("config set must contain %s", f)
+		}
+	}
+
+	// Must not contain read-only fields.
+	for _, f := range []string{"mode", "config_path", "audit_enabled_source"} {
+		if contains(fields, f) {
+			t.Errorf("config set must not contain read-only field %s", f)
+		}
+	}
+}
+
+func TestConfigUnsetFieldsVocabulary(t *testing.T) {
+	fields := configUnsetFields()
+
+	// Must NOT contain allowed_root or allowed_roots.
+	if contains(fields, "allowed_root") {
+		t.Error("config unset must not contain legacy allowed_root")
+	}
+	if contains(fields, "allowed_roots") {
+		t.Error("config unset must not contain allowed_roots")
+	}
+
+	// Must NOT contain required fields.
+	if contains(fields, "session_ttl") {
+		t.Error("config unset must not contain required session_ttl")
+	}
+
+	// Must contain optional writable fields.
+	for _, f := range []string{"log_level", "http_address"} {
+		if !contains(fields, f) {
+			t.Errorf("config unset must contain %s", f)
+		}
+	}
+}
+
+func TestCompletionConfigShowNoStaleAllowedRoot(t *testing.T) {
+	script := completionScript(t)
+
+	// config show must contain allowed_roots.
+	results := runCompletion(t, script, []string{"docker-helper", "config", "show", ""})
+	if !contains(results, "allowed_roots") {
+		t.Error("config show completion must contain allowed_roots")
+	}
+
+	// config show must NOT contain stale allowed_root.
+	if contains(results, "allowed_root") {
+		t.Error("config show completion must not contain stale allowed_root")
+	}
+}
+
+func TestCompletionConfigSetNoStaleAllowedRoot(t *testing.T) {
+	script := completionScript(t)
+
+	// config set FIELD must NOT contain stale allowed_root.
+	results := runCompletion(t, script, []string{"docker-helper", "config", "set", ""})
+	if contains(results, "allowed_root") {
+		t.Error("config set completion must not contain stale allowed_root")
+	}
+	if contains(results, "allowed_roots") {
+		t.Error("config set completion must not contain allowed_roots")
+	}
+}
+
+func TestCompletionConfigUnsetNoStaleAllowedRoot(t *testing.T) {
+	script := completionScript(t)
+
+	// config unset must NOT contain stale allowed_root.
+	results := runCompletion(t, script, []string{"docker-helper", "config", "unset", ""})
+	if contains(results, "allowed_root") {
+		t.Error("config unset completion must not contain stale allowed_root")
+	}
+	if contains(results, "allowed_roots") {
+		t.Error("config unset completion must not contain allowed_roots")
+	}
+}
+
+func TestCompletionAllowedRootSubcommands(t *testing.T) {
+	script := completionScript(t)
+
+	// Verify config allowed-root completion does not error and
+	// principal allowed-root still works (regression guard).
+	results := runCompletion(t, script, []string{"docker-helper", "principal", "allowed-root", ""})
+	if len(results) == 0 {
+		t.Error("principal allowed-root completion must return subcommands")
+	}
+	for _, sub := range []string{"add", "remove"} {
+		if !contains(results, sub) {
+			t.Errorf("principal allowed-root completion must contain %s", sub)
+		}
 	}
 }
