@@ -601,25 +601,19 @@ func TestCompletionAllowedRootSubcommands(t *testing.T) {
 	}
 }
 
-func TestCompletionWorkspaceRoot(t *testing.T) {
+func TestCompletionNoWorkspaceRoot(t *testing.T) {
 	script := completionScript(t)
 
-	// Root commands must include workspace-root.
+	// Root commands must NOT include workspace-root.
 	results := runCompletion(t, script, []string{"docker-helper", ""})
-	if !contains(results, "workspace-root") {
-		t.Error("root completion must include workspace-root")
+	if contains(results, "workspace-root") {
+		t.Error("root completion must NOT include workspace-root")
 	}
 
-	// workspace-root must complete "add".
-	results = runCompletion(t, script, []string{"docker-helper", "workspace-root", ""})
-	if len(results) != 1 || results[0] != "add" {
-		t.Errorf("expected [add], got %v", results)
-	}
-
-	// Prefix completion: "wo" should yield workspace-root.
+	// Prefix completion: "wo" should NOT yield workspace-root.
 	results = runCompletion(t, script, []string{"docker-helper", "wo"})
-	if len(results) != 1 || results[0] != "workspace-root" {
-		t.Errorf("expected [workspace-root], got %v", results)
+	if contains(results, "workspace-root") {
+		t.Error("prefix 'wo' must NOT yield workspace-root")
 	}
 
 	// completion must complete "bash".

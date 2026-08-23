@@ -68,9 +68,7 @@ and stored root.
 .PP
 Manage workspace roots with:
 .br
-\fBdocker-helper workspace-root add PATH\fR (common workflow, prepares MAC backend)
-.br
-\fBdocker-helper config allowed-root list|add|remove PATH\fR (authorization-only)
+\fBdocker-helper config allowed-root list|add|remove PATH\fR
 .PP
 Legacy scalar \fBallowed_root\fR is accepted by config loading for migration
 purposes only. The current schema uses \fBallowed_roots\fR.
@@ -165,16 +163,13 @@ Principal allowed_roots are stored in the state database, not in \fIconfig.json\
 System mode requires exactly one active backend: AppArmor or enforcing
 SELinux. Neither, both, and permissive SELinux fail closed.
 .PP
-\fBallowed_roots\fR is an authorization ceiling only. It does not own MAC state.
-The common workflow for adding workspace roots is:
-.br
-\fBdocker-helper workspace-root add PATH\fR
-.PP
-This prepares the active MAC backend and updates authorization.
+\fBallowed_roots\fR is the global authorization ceiling. In system mode,
+\fBdocker-helper config allowed-root add PATH\fR prepares the active MAC
+backend as part of the operation.
 .SS AppArmor
 AppArmor uses profile \fBdocker-helper-system\fR.
 Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR.
-\fBworkspace-root add\fR prepares managed AppArmor state automatically.
+\fBconfig allowed-root add\fR prepares managed AppArmor state automatically.
 Advanced backend-specific management: \fBdocker-helper apparmor root\fR.
 .SS SELinux
 The service runs in \fBdocker_helper_t\fR and system-mode containers run in
@@ -184,9 +179,8 @@ the MCS-constrained \fBdocker_helper_container_t\fR type.
 Explicitly managed non-home workspace roots use \fBdocker_helper_workspace_t\fR
 with persistent \fBsemanage fcontext\fR and \fBrestorecon\fR.
 .PP
-\fBdocker-helper config allowed-root add /opt\fR is authorization-only (no relabel).
-\fBdocker-helper workspace-root add /opt\fR is rejected; use a dedicated child
-such as \fI/opt/docker-helper-workspaces\fR instead.
+\fBdocker-helper config allowed-root add /opt\fR is rejected in SELinux mode;
+use a dedicated child such as \fI/opt/docker-helper-workspaces\fR instead.
 .PP
 Authorized workspace mounts support normal development-tree operations
 including file management, executable build/run, symlinks, Unix sockets,

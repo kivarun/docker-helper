@@ -234,10 +234,6 @@ will apply on the next start.`,
 }
 
 // configAllowedRootCommand manages the global allowed_roots array.
-// This is an authorization-only operation: it does NOT prepare MAC state.
-// For the common workflow that includes MAC preparation, use:
-//
-//	docker-helper workspace-root add PATH
 var configAllowedRootCommand = &Command{
 	Name:       "allowed-root",
 	Summary:    "Manage global allowed roots",
@@ -251,25 +247,27 @@ Subcommands:
   add PATH                      add an allowed root
   remove PATH                   remove an allowed root
 
-The global allowed_roots is the coarse authorization ceiling for new sessions.
-Every new session workspace must be under at least one allowed root.
-
-This command modifies authorization state only. It does NOT prepare MAC
-state (SELinux labels, AppArmor roots). For the common workflow that
-includes MAC preparation, use:
-
-  docker-helper workspace-root add PATH
+The global allowed_roots is the coarse authorization ceiling for new
+sessions. Every new session workspace must be under at least one allowed
+root. Principal allowed roots further narrow the ceiling per principal.
 
 add:
   - canonicalizes and validates the path;
   - idempotent (prints "already present" if the root exists);
-  - preserves existing roots;
-  - authorization-only (no MAC preparation).
+  - preserves existing roots.
+
+  In system mode, docker-helper prepares the active MAC backend
+  (AppArmor or SELinux) as part of the add operation. This preparation
+  runs after config validation and before the config write. If preparation
+  fails, the root is not added.
+
+  In user mode, only the authorization change is performed.
 
 remove:
   - resolves/matches the stored canonical form;
   - idempotent (prints "not found" if the root does not exist);
-  - rejects removal of the final global root.
+  - rejects removal of the final global root;
+  - does not invalidate already-issued sessions.
 
 list:
   - one canonical root per line.`,
@@ -332,9 +330,8 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// configAllowedRootAdd adds a root to allowed_roots (authorization-only).
-// It does NOT prepare MAC state. For the common workflow with MAC
-// preparation, use docker-helper workspace-root add.
+// configAllowedRootAdd adds a root to allowed_roots.
+// In system mode, MAC preparation runs as part of the transaction preflight.
 func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
@@ -351,7 +348,9 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	return addAllowedRootToConfig(canonical, nil, stdout, stderr)
+	return addAllowedRootToConfig(canonical, func() error {
+		return allowedRootPreflight(canonical, stderr)
+	}, stdout, stderr)
 }
 
 // configAllowedRootRemove removes a root from allowed_roots.
@@ -762,26 +761,115 @@ type configSetSeam struct {
 	// detectBackend replaces detectLSM.
 	// nil means use the real function.
 	detectBackend func() (LSMBackend, error)
-	// selinuxEnsure replaces the SELinux ensure call.
-	// nil means use the real manager.
-	selinuxEnsure func(root string) (bool, error)
 }
 
-// selinuxAllowedRootPreflight performs the SELinux workspace preparation
-// for allowed-root ADD. It can be replaced in tests to track invocation.
-var selinuxAllowedRootPreflight = func(root string) error {
+// allowedRootPreflight performs backend-specific MAC preparation for a
+// global allowed root in system mode. This is the internal implementation
+// detail associated with making a new global allowed root usable.
+//
+// In user mode: no-op.
+// In AppArmor system mode: adds root to managed AppArmor policy.
+// In SELinux system mode: prepares managed label for non-home roots;
+// rejects exact /opt (backend-specific confinement limitation).
+func allowedRootPreflight(canonical string, stderr io.Writer) error {
+	if resolveDeploymentMode() != ModeSystem {
+		return nil
+	}
+
 	backend, err := detectLSM()
 	if err != nil {
 		return fmt.Errorf("cannot determine MAC backend: %w", err)
 	}
-	if backend != LSMSelinux {
+
+	switch backend {
+	case LSMAppArmor:
+		mgr := newProductionApparmorManager()
+		result, err := mgr.addRoot(canonical)
+		if err != nil {
+			return err
+		}
+		if result.Changed {
+			fmt.Fprintf(stderr, "AppArmor workspace root added: %s\n", canonical)
+		} else {
+			fmt.Fprintf(stderr, "AppArmor workspace root already present: %s\n", canonical)
+		}
+		return nil
+
+	case LSMSelinux:
+		if !selinuxManagedRootAllowed(canonical) {
+			return fmt.Errorf("exact /opt cannot be a global allowed root in SELinux mode because it would recursively relabel the entire /opt namespace; use a subdirectory such as /opt/docker-helper-workspaces")
+		}
+		// /home and descendants use existing user_home_type labels.
+		if isHomeRoot(canonical) {
+			return nil
+		}
+		changed, err := selinuxEnsureWorkspaceLabel(canonical)
+		if err != nil {
+			return err
+		}
+		if changed {
+			fmt.Fprintf(stderr, "SELinux workspace label prepared: %s\n", canonical)
+		} else {
+			fmt.Fprintf(stderr, "SELinux workspace label already present: %s\n", canonical)
+		}
+		return nil
+
+	default:
 		return nil
 	}
-	selMgr := newSELinuxWorkspaceManager()
-	if _, err := selMgr.ensureWorkspaceLabel(root); err != nil {
-		return err
-	}
-	return nil
+}
+
+// addAllowedRootToConfig adds a root to allowed_roots using the shared
+// config transaction owner.
+//
+// preflight is an optional MAC preparation function. When non-nil, it runs
+// after config validation but before the write.
+func addAllowedRootToConfig(canonical string, preflight func() error, stdout, stderr io.Writer) int {
+	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
+		fc, err := decodeFileConfig(raw)
+		if err != nil {
+			return configMutationResult{}, err
+		}
+
+		// Validate existing roots with full canonicalization (strict resolver).
+		existingRoots, err := resolveAllowedRoots(raw, fc)
+		if err != nil {
+			return configMutationResult{}, err
+		}
+
+		// Check if already present.
+		present := false
+		for _, r := range existingRoots {
+			if r == canonical {
+				present = true
+				break
+			}
+		}
+
+		if present {
+			if !migrated {
+				return configMutationResult{
+					SkipWrite: true,
+					Message:   fmt.Sprintf("already present %s\n", canonical),
+					Preflight: preflight,
+				}, nil
+			}
+			// Legacy migration needed: write migrated config.
+			return configMutationResult{
+				Message:   fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
+				Preflight: preflight,
+			}, nil
+		}
+
+		// Add new root to canonical roots list.
+		rawBytes, _ := json.Marshal(append(existingRoots, canonical))
+		raw["allowed_roots"] = rawBytes
+
+		return configMutationResult{
+			Message:   fmt.Sprintf("added %s\n", canonical),
+			Preflight: preflight,
+		}, nil
+	})
 }
 
 // configSetWithSeam is the internal implementation of configSet that

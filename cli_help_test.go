@@ -375,21 +375,24 @@ func TestReloadSystemEndpointMutuallyExclusive(t *testing.T) {
 
 // --- Release 2 help regression tests ---
 
-func TestHelpWorkspaceRootExposed(t *testing.T) {
-	// Root help must expose workspace-root.
+func TestHelpNoWorkspaceRoot(t *testing.T) {
+	// Root help must NOT expose workspace-root.
 	var stdout, stderr bytes.Buffer
 	rootCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
-	if !strings.Contains(stdout.String(), "workspace-root") {
-		t.Error("root help must expose workspace-root")
+	if strings.Contains(stdout.String(), "workspace-root") {
+		t.Error("root help must NOT expose workspace-root")
 	}
 }
 
-func TestHelpInitPointsToWorkspaceRootAdd(t *testing.T) {
-	// init help must point to workspace-root add, not manual apparmor.
+func TestHelpInitPointsToConfigAllowedRootAdd(t *testing.T) {
+	// init help must point to config allowed-root add, not workspace-root add.
 	var stdout, stderr bytes.Buffer
 	initCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
-	if !strings.Contains(stdout.String(), "workspace-root add") {
-		t.Error("init help must point to workspace-root add")
+	if !strings.Contains(stdout.String(), "config allowed-root add") {
+		t.Error("init help must point to config allowed-root add")
+	}
+	if strings.Contains(stdout.String(), "workspace-root add") {
+		t.Error("init help must not mention workspace-root add")
 	}
 	if strings.Contains(stdout.String(), "apparmor root add") {
 		t.Error("init help must not mention apparmor root add as normal path")
@@ -408,24 +411,19 @@ func TestHelpReloadUsesAllowedRoots(t *testing.T) {
 	}
 }
 
-func TestHelpConfigAllowedRootAuthorizationOnly(t *testing.T) {
-	// config allowed-root help must say authorization-only.
+func TestHelpConfigAllowedRootGlobalCeiling(t *testing.T) {
+	// config allowed-root help must describe global authorization ceiling.
 	var stdout, stderr bytes.Buffer
 	configAllowedRootCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
 	if !strings.Contains(stdout.String(), "authorization") {
 		t.Error("config allowed-root help must mention authorization")
 	}
-	// Help should clearly state it does NOT prepare MAC state.
-	if !strings.Contains(stdout.String(), "does NOT prepare MAC") && !strings.Contains(stdout.String(), "authorization-only") {
-		t.Error("config allowed-root help must clearly state it does not prepare MAC state")
+	// Must NOT mention workspace-root add
+	if strings.Contains(stdout.String(), "workspace-root add") {
+		t.Error("config allowed-root help must not mention workspace-root add")
 	}
-}
-
-func TestHelpWorkspaceRootAddReachable(t *testing.T) {
-	// workspace-root add help must be reachable.
-	var stdout, stderr bytes.Buffer
-	workspaceRootAddCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
-	if !strings.Contains(stdout.String(), "Add a workspace root") {
-		t.Errorf("workspace-root add help not reachable, got: %s", stdout.String())
+	// Must mention system mode MAC preparation
+	if !strings.Contains(stdout.String(), "system mode") {
+		t.Error("config allowed-root help must mention system mode MAC preparation")
 	}
 }

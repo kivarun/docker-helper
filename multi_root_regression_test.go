@@ -870,10 +870,11 @@ func TestAllowedRootRemoveNoOpInvalidConfigFails(t *testing.T) {
 
 var errSELinuxSentinel = fmt.Errorf("selinux preflight sentinel")
 
-// TestSELinuxPreflightOrdering verifies the ownership separation:
-//  1. config allowed-root add is authorization-only (no SELinux);
-//  2. workspace-root add rejects exact /opt in SELinux mode;
-//  3. workspace-root add allows /home without SELinux preparation.
+// TestSELinuxPreflightOrdering verifies the config allowed-root add behavior:
+//  1. config allowed-root add rejects exact /opt in SELinux system mode;
+//  2. config allowed-root add allows /home without SELinux preparation;
+//  3. config allowed-root add in user mode does not perform MAC preparation;
+//  4. MAC preflight failure does not widen allowed_roots.
 func TestSELinuxPreflightOrdering(t *testing.T) {
 	// Mock attemptReload to return "daemon not running" to avoid authentication issues.
 	origAttemptReload := attemptReload
@@ -882,44 +883,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("config_add_is_authorization_only", func(t *testing.T) {
-		cfg := map[string]any{
-			"allowed_roots": []string{"/opt"},
-			"session_ttl":   "12h",
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
-
-		// Mock root so /opt passes the workspace root check.
-		origUID := EffectiveUID
-		EffectiveUID = func() int { return 0 }
-		defer func() { EffectiveUID = origUID }()
-
-		selinuxCalled := false
-		origPreflight := selinuxAllowedRootPreflight
-		selinuxAllowedRootPreflight = func(string) error {
-			selinuxCalled = true
-			return nil
-		}
-		defer func() { selinuxAllowedRootPreflight = origPreflight }()
-
-		// /opt is already in the config, so this should be idempotent.
-		// But config allowed-root add must NOT invoke SELinux.
-		origData, _ := os.ReadFile(configPath)
-
-		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
-		}
-		if selinuxCalled {
-			t.Error("config allowed-root add must NOT invoke SELinux preparation")
-		}
-		// Config unchanged (SkipWrite for already present).
-		verifyConfigUnchanged(t, configPath, origData)
-	})
-
-	t.Run("workspace_root_add_opt_rejected_selinux", func(t *testing.T) {
+	t.Run("config_add_rejects_opt_selinux", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -928,7 +892,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
-		// Mock root so /opt passes workspace root check.
+		// Mock root so /opt passes the workspace root check.
 		origUID := EffectiveUID
 		EffectiveUID = func() int { return 0 }
 		defer func() { EffectiveUID = origUID }()
@@ -942,7 +906,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		defer func() { apparmorLSMActive = origAA }()
 
 		var stdout, stderr bytes.Buffer
-		code := workspaceRootAdd("/opt", &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit, got 0")
 		}
@@ -953,7 +917,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		verifyConfigUnchanged(t, configPath, data)
 	})
 
-	t.Run("workspace_root_add_home_no_selinux", func(t *testing.T) {
+	t.Run("config_add_home_no_selinux_prep", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -979,7 +943,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := workspaceRootAdd("/home", &stdout, &stderr)
+		code := configAllowedRootAdd("/home", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -990,7 +954,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		}
 	})
 
-	t.Run("workspace_root_add_user_mode_no_mac", func(t *testing.T) {
+	t.Run("config_add_user_mode_no_mac", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -1008,7 +972,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
-		code := workspaceRootAdd(testRoot, &stdout, &stderr)
+		code := configAllowedRootAdd(testRoot, &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
@@ -1065,7 +1029,7 @@ func TestWorkspaceRootPreflightOrdering(t *testing.T) {
 		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
 
 		var stdout, stderr bytes.Buffer
-		code := workspaceRootAdd("/opt", &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit, got 0")
 		}
@@ -1189,12 +1153,12 @@ func TestWorkspaceRootPreflightOrdering(t *testing.T) {
 	})
 }
 
-// TestPrepareWorkspaceRootMACDispatch verifies that prepareWorkspaceRootMAC
+// TestAllowedRootPreflightDispatch verifies that allowedRootPreflight
 // correctly dispatches to the SELinux managed-label path for non-home roots,
 // skips it for home roots, and rejects exact /opt.
 // This test is below canonicalizeWorkspaceRootForAdd and does not require
 // real filesystem directories.
-func TestPrepareWorkspaceRootMACDispatch(t *testing.T) {
+func TestAllowedRootPreflightDispatch(t *testing.T) {
 	// Mock root for system mode.
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -1218,7 +1182,7 @@ func TestPrepareWorkspaceRootMACDispatch(t *testing.T) {
 		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
 
 		var stderr bytes.Buffer
-		err := prepareWorkspaceRootMAC("/data/docker-helper-test", &stderr)
+		err := allowedRootPreflight("/data/docker-helper-test", &stderr)
 		if err != nil {
 			t.Fatalf("expected nil error, got: %v", err)
 		}
@@ -1237,7 +1201,7 @@ func TestPrepareWorkspaceRootMACDispatch(t *testing.T) {
 		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
 
 		var stderr bytes.Buffer
-		err := prepareWorkspaceRootMAC("/home/alice/workspaces", &stderr)
+		err := allowedRootPreflight("/home/alice/workspaces", &stderr)
 		if err != nil {
 			t.Fatalf("expected nil error, got: %v", err)
 		}
@@ -1248,7 +1212,7 @@ func TestPrepareWorkspaceRootMACDispatch(t *testing.T) {
 
 	t.Run("exact_opt_rejected", func(t *testing.T) {
 		var stderr bytes.Buffer
-		err := prepareWorkspaceRootMAC("/opt", &stderr)
+		err := allowedRootPreflight("/opt", &stderr)
 		if err == nil {
 			t.Fatal("expected error for /opt, got nil")
 		}
@@ -1283,7 +1247,7 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 		}
 	})
 
-	t.Run("workspace_root_add_rejects_opt", func(t *testing.T) {
+	t.Run("config_allowed_root_add_rejects_opt", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -1306,7 +1270,7 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 		defer func() { apparmorLSMActive = origAA }()
 
 		var stdout, stderr bytes.Buffer
-		code := workspaceRootAdd("/opt", &stdout, &stderr)
+		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit, got 0")
 		}

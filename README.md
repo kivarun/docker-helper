@@ -373,7 +373,7 @@ docker-helper config set audit_enabled true
 Workspace roots are managed through dedicated commands:
 
 ```bash
-docker-helper workspace-root add /path/to/workspaces
+docker-helper config allowed-root add /path/to/workspaces
 docker-helper config allowed-root list
 ```
 
@@ -968,10 +968,10 @@ The normal workflow for managing workspace roots is backend-neutral:
 sudo docker-helper init --allowed-root /opt/docker-helper-workspaces
 
 # Add workspace roots later
-sudo docker-helper workspace-root add /path/to/workspace
+sudo docker-helper config allowed-root add /path/to/workspace
 ```
 
-`workspace-root add` prepares the active MAC backend (AppArmor or SELinux)
+`config allowed-root add` prepares the active MAC backend (AppArmor or SELinux)
 and updates the global authorization ceiling. The user does not need to know
 which backend the host uses.
 
@@ -1010,14 +1010,11 @@ On an enforcing SELinux system, the systemd service runs in
 
 - Explicitly managed non-home workspace roots (e.g., `/opt/docker-helper-workspaces`)
   use the dedicated `docker_helper_workspace_t` SELinux type.
-  `workspace-root add` creates a persistent `semanage fcontext` rule and
+  `config allowed-root add` creates a persistent `semanage fcontext` rule and
   applies `restorecon` recursively. This mapping survives reboot and `restorecon`.
 
-- `docker-helper config allowed-root add /opt` is an advanced authorization-only
-  operation. It does NOT prepare SELinux managed labels.
-
-- `docker-helper workspace-root add /opt` is rejected because exact `/opt`
-  is too broad as a recursive managed relabel boundary. Use a dedicated
+- `docker-helper config allowed-root add /opt` is rejected in SELinux mode because
+  exact `/opt` is too broad as a recursive managed relabel boundary. Use a dedicated
   child such as `/opt/docker-helper-workspaces` instead.
 
 - Previously managed roots may retain the `docker_helper_workspace_t` label
@@ -1131,8 +1128,8 @@ sudo docker-helper principal create --system alice
 sudo docker-helper principal show --system alice
 
 # 3. Add additional allowed roots as needed.
-#    workspace-root add prepares the MAC backend and updates authorization.
-sudo docker-helper workspace-root add /srv/workspaces/alice
+#    config allowed-root add prepares the MAC backend and updates authorization.
+sudo docker-helper config allowed-root add /srv/workspaces/alice
 
 # 4. Create a launcher credential for the principal.
 sudo docker-helper credential create \
@@ -1151,11 +1148,11 @@ The separation is intentional:
 
 - `principal create` and `principal allowed-root add` define docker-helper
   workspace policy;
-- `workspace-root add` prepares the MAC backend and updates authorization;
+- `config allowed-root add` prepares the MAC backend and updates authorization;
 - `apparmor root add` is an advanced backend-specific operation;
 - `credential create` produces a launcher token for session creation.
 
-The common `workspace-root add` workflow handles both authorization and MAC
+The common `config allowed-root add` workflow handles both authorization and MAC
 preparation. Advanced operators may use `apparmor root add` directly when
 needed.
 

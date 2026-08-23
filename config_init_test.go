@@ -777,8 +777,8 @@ func TestInitHelpContainsAutomationBoundary(t *testing.T) {
 	helpText := stdout.String()
 
 	// Verify help documents automation boundary
-	if !strings.Contains(helpText, "workspace-root add") {
-		t.Error("help should mention workspace-root add")
+	if !strings.Contains(helpText, "config allowed-root add") {
+		t.Error("help should mention config allowed-root add")
 	}
 	if !strings.Contains(helpText, "System mode") {
 		t.Error("help should mention system mode")

@@ -137,6 +137,14 @@ func canonicalizeWorkspaceRootForAdd(path string) (string, error) {
 	return canonical, nil
 }
 
+// selinuxManagedRootAllowed returns true if the given canonical path is
+// allowed as a SELinux managed workspace root. Exact /opt is rejected
+// because it would make the entire standard namespace a recursive
+// managed relabel boundary.
+func selinuxManagedRootAllowed(canonical string) bool {
+	return canonical != "/opt"
+}
+
 // validateWorkspaceRootPolicy checks a canonical path against the workspace root
 // security policy without filesystem access. This is the pure policy check that
 // can be tested deterministically.

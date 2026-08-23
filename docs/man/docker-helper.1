@@ -102,7 +102,7 @@ Initialize configuration and admin token. The interactive default is the
 current user's home, or /home for root. Root may explicitly select /home or
 /opt; non-root callers cannot select those broad roots directly. In system mode,
 the initial workspace root is prepared for the active MAC backend.
-Use \fIdocker-helper workspace-root add PATH\fR for later workspace roots.
+Use \fIdocker-helper config allowed-root add PATH\fR for later workspace roots.
 .TP
 .B docker-helper reload [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
 Reload configuration.
@@ -137,8 +137,7 @@ Show configuration values. Without FIELD, prints complete effective config as JS
 Set a configuration value. Writable fields: session_ttl, log_level,
 audit_enabled, shutdown_timeout, operation_retention_ttl, operation_max_completed,
 operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
-Workspace roots are managed through \fBconfig allowed-root\fR and
-\fBworkspace-root add\fR.
+Workspace roots are managed through \fBconfig allowed-root\fR.
 .TP
 .B docker-helper config unset FIELD
 Unset a configuration value. Unsettable fields: log_level, audit_enabled,
@@ -149,15 +148,11 @@ operation_log_max_bytes, trusted_ca_path, trusted_ca_injection, http_address.
 List global allowed roots (authorization ceiling).
 .TP
 .B docker-helper config allowed-root add PATH
-Add a global allowed root (authorization-only, no MAC preparation).
+Add a global allowed root. In system mode, prepares the active MAC
+backend (AppArmor or SELinux) as part of the operation.
 .TP
 .B docker-helper config allowed-root remove PATH
 Remove a global allowed root.
-.SS Workspace Root Commands
-.TP
-.B docker-helper workspace-root add PATH
-Add a workspace root. The common workflow that prepares the active MAC
-backend (AppArmor or SELinux) and updates the global authorization ceiling.
 .SS Principal Commands
 .TP
 .B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
