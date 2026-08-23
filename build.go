@@ -112,15 +112,16 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			// Cleanup staging before releasing lease.
 			if err := staged.Cleanup(); err != nil {
 				opLog(ctx).Error("staging cleanup failed after tryCreate rejection",
 					slog.String("operation", "build"),
 					slog.String("operation_id", op.ID),
 					slog.String("error", err.Error()),
 				)
+			}
+			if leaseRelease != nil {
+				leaseRelease()
 			}
 			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return

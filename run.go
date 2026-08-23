@@ -484,9 +484,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		for i, m := range resolvedMounts {
 			pm, err := a.pinMount(session.Workspace, m.HostPath, cfg.RuntimeDir, op.ID, i)
 			if err != nil {
-				if leaseRelease != nil {
-					leaseRelease()
-				}
+				// Cleanup pins before releasing lease.
 				for j := len(pinnedMounts) - 1; j >= 0; j-- {
 					if ce := pinnedMounts[j].Cleanup(); ce != nil {
 						opLog(ctx).Error("pin cleanup failed",
@@ -494,6 +492,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 							slog.String("error", ce.Error()),
 						)
 					}
+				}
+				if leaseRelease != nil {
+					leaseRelease()
 				}
 				opLog(ctx).Error("cannot pin mount source",
 					slog.String("operation", "run"),
@@ -512,9 +513,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Register the operation. Single tryCreate after all pins are created.
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
-			if leaseRelease != nil {
-				leaseRelease()
-			}
+			// Cleanup pins before releasing lease.
 			for j := len(pinnedMounts) - 1; j >= 0; j-- {
 				if ce := pinnedMounts[j].Cleanup(); ce != nil {
 					opLog(ctx).Error("pin cleanup failed",
@@ -522,6 +521,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 						slog.String("error", ce.Error()),
 					)
 				}
+			}
+			if leaseRelease != nil {
+				leaseRelease()
 			}
 			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
@@ -607,15 +609,16 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	if result.Terminated {
 		cancel()
-		if op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
+		// Cleanup cidfile and pins before releasing lease.
 		cleanupCidfile(op)
 		if ce := cleanupPinnedMounts(op); ce != nil {
 			opLog(ctx).Error("pin cleanup failed",
 				slog.String("operation", "run"),
 				slog.String("error", ce.Error()),
 			)
+		}
+		if op.macLeaseRelease != nil {
+			op.macLeaseRelease()
 		}
 		msg := "run cancelled: daemon is shutting down"
 		if op.reason == terminationCancelled {
@@ -629,15 +632,16 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Err != nil {
 		cancel()
-		if op.macLeaseRelease != nil {
-			op.macLeaseRelease()
-		}
+		// Cleanup cidfile and pins before releasing lease.
 		cleanupCidfile(op)
 		if ce := cleanupPinnedMounts(op); ce != nil {
 			opLog(ctx).Error("pin cleanup failed",
 				slog.String("operation", "run"),
 				slog.String("error", ce.Error()),
 			)
+		}
+		if op.macLeaseRelease != nil {
+			op.macLeaseRelease()
 		}
 		opLog(ctx).Error("cannot start run process",
 			slog.String("operation", "run"),

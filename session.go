@@ -204,6 +204,10 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 			return err
 		})
 		if err != nil {
+			// Classify: MAC preparation errors vs DB insert errors.
+			if errors.Is(err, ErrMACPreparation) {
+				return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrMAC)
+			}
 			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
 		}
 	} else {

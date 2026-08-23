@@ -4,10 +4,14 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 )
+
+// ErrMACPreparation is returned when MAC coverage cannot be ensured or verified.
+var ErrMACPreparation = errors.New("MAC preparation failed")
 
 // macCoverage describes the actual MAC coverage boundary for a workspace.
 type macCoverage struct {
@@ -30,6 +34,11 @@ type macBackend interface {
 	// removeBoundary removes a docker-helper-owned managed boundary.
 	// Only called when the lifecycle has verified ownership.
 	removeBoundary(boundary string) error
+
+	// listManagedBoundaries returns all boundaries that this backend manages.
+	// Used during reconciliation to import pre-existing managed boundaries
+	// into ownership metadata.
+	listManagedBoundaries() ([]string, error)
 
 	// backendType returns the backend identifier ("apparmor" or "selinux").
 	backendType() string
@@ -83,7 +92,7 @@ func (l *workspaceMACLifecycle) CreateSessionBinding(workspace string, sessionID
 
 	coverage, newlyCreated, err := l.backend.ensureCoverage(workspace)
 	if err != nil {
-		return macCoverage{}, fmt.Errorf("MAC preparation failed for %s: %w", workspace, err)
+		return macCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, err)
 	}
 
 	// Resolve ownership for existing boundaries.
@@ -92,7 +101,7 @@ func (l *workspaceMACLifecycle) CreateSessionBinding(workspace string, sessionID
 	} else {
 		owned, oerr := l.isBoundaryOwnedByHelper(coverage.Boundary)
 		if oerr != nil {
-			return macCoverage{}, fmt.Errorf("cannot verify boundary ownership: %w", oerr)
+			return macCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, oerr)
 		}
 		coverage.Managed = owned
 	}
@@ -101,7 +110,7 @@ func (l *workspaceMACLifecycle) CreateSessionBinding(workspace string, sessionID
 	if newlyCreated {
 		if err := l.recordBoundaryOwnership(coverage.Boundary); err != nil {
 			l.backend.removeBoundary(coverage.Boundary) // best-effort cleanup
-			return macCoverage{}, fmt.Errorf("cannot record MAC boundary ownership: %w", err)
+			return macCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, err)
 		}
 	}
 
@@ -109,8 +118,14 @@ func (l *workspaceMACLifecycle) CreateSessionBinding(workspace string, sessionID
 	if err := insertFn(coverage); err != nil {
 		// Rollback: release the exact boundary while still serialized.
 		if newlyCreated {
-			l.backend.removeBoundary(coverage.Boundary) // best-effort
-			l.forgetBoundaryOwnership(coverage.Boundary)
+			if rbErr := l.backend.removeBoundary(coverage.Boundary); rbErr != nil {
+				// Removal failed: KEEP ownership metadata for retry on next startup.
+				slog.Warn("MAC boundary removal failed during rollback, ownership preserved for retry",
+					slog.String("boundary", coverage.Boundary),
+					slog.String("error", rbErr.Error()))
+			} else {
+				l.forgetBoundaryOwnership(coverage.Boundary)
+			}
 		}
 		return macCoverage{}, err
 	}
@@ -176,7 +191,7 @@ func (l *workspaceMACLifecycle) AcquireUse(sessionID, workspace string) (leaseKe
 		defer l.mu.Unlock()
 		delete(l.leases, leaseKey)
 		if l.backend != nil {
-			l.activeBoundaries[coverage.Boundary]--
+			l.conditionalReleaseBoundary(coverage.Boundary, coverage.Managed)
 		}
 	}
 
@@ -194,6 +209,13 @@ func (l *workspaceMACLifecycle) ReconcileLiveSessions() error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// Import pre-existing managed boundaries into ownership metadata.
+	// This ensures that boundaries created before mac_boundaries existed
+	// (e.g., AppArmor managed fragment roots) are tracked as managed.
+	if err := l.importManagedBoundaries(); err != nil {
+		return fmt.Errorf("cannot import managed MAC boundaries: %w", err)
+	}
 
 	sessions, err := l.listLiveSessionsWithIDs()
 	if err != nil {
@@ -240,6 +262,26 @@ func (l *workspaceMACLifecycle) ReconcileLiveSessions() error {
 		slog.Warn("stale MAC boundary cleanup failed", slog.String("error", err.Error()))
 	}
 
+	return nil
+}
+
+// importManagedBoundaries imports pre-existing managed boundaries from the
+// backend into ownership metadata. This ensures that boundaries created
+// before mac_boundaries existed (e.g., AppArmor managed fragment roots)
+// are tracked as managed by docker-helper.
+// Must be called with l.mu held.
+func (l *workspaceMACLifecycle) importManagedBoundaries() error {
+	boundaries, err := l.backend.listManagedBoundaries()
+	if err != nil {
+		return err
+	}
+	for _, boundary := range boundaries {
+		if err := l.recordBoundaryOwnership(boundary); err != nil {
+			slog.Warn("failed to record managed boundary ownership during import",
+				slog.String("boundary", boundary),
+				slog.String("error", err.Error()))
+		}
+	}
 	return nil
 }
 
@@ -528,6 +570,10 @@ func (b *macBackendAppArmor) removeBoundary(boundary string) error {
 	return err
 }
 
+func (b *macBackendAppArmor) listManagedBoundaries() ([]string, error) {
+	return b.listRoots()
+}
+
 func (b *macBackendAppArmor) backendType() string {
 	return "apparmor"
 }
@@ -543,7 +589,9 @@ func (b *macBackendSELinux) ensureCoverage(workspace string) (macCoverage, bool,
 	}
 
 	// Check if an existing boundary covers this workspace.
-	if cov, found := b.findExistingCoverage(workspace); found {
+	if cov, found, err := b.findExistingCoverage(workspace); err != nil {
+		return macCoverage{}, false, err
+	} else if found {
 		return cov, false, nil
 	}
 
@@ -561,7 +609,11 @@ func (b *macBackendSELinux) verifyCoverage(workspace string) (macCoverage, error
 	}
 
 	// Check if an existing boundary covers this workspace.
-	if cov, found := b.findExistingCoverage(workspace); found {
+	cov, found, err := b.findExistingCoverage(workspace)
+	if err != nil {
+		return macCoverage{}, fmt.Errorf("cannot discover SELinux coverage for %s: %w", workspace, err)
+	}
+	if found {
 		return cov, nil
 	}
 
@@ -573,15 +625,15 @@ func (b *macBackendSELinux) verifyCoverage(workspace string) (macCoverage, error
 	return macCoverage{}, fmt.Errorf("workspace %s not covered by any SELinux boundary", workspace)
 }
 
-func (b *macBackendSELinux) findExistingCoverage(workspace string) (macCoverage, bool) {
+func (b *macBackendSELinux) findExistingCoverage(workspace string) (macCoverage, bool, error) {
 	boundaries, err := b.mgr.listCoveringBoundaries(workspace)
 	if err != nil {
-		return macCoverage{}, false
+		return macCoverage{}, false, fmt.Errorf("cannot list covering SELinux boundaries: %w", err)
 	}
 	for _, boundary := range boundaries {
-		return macCoverage{Boundary: boundary, Managed: false}, true
+		return macCoverage{Boundary: boundary, Managed: false}, true, nil
 	}
-	return macCoverage{}, false
+	return macCoverage{}, false, nil
 }
 
 func (b *macBackendSELinux) removeBoundary(boundary string) error {
@@ -589,6 +641,10 @@ func (b *macBackendSELinux) removeBoundary(boundary string) error {
 		return nil
 	}
 	return b.mgr.rollbackWorkspaceLabel(boundary)
+}
+
+func (b *macBackendSELinux) listManagedBoundaries() ([]string, error) {
+	return nil, nil
 }
 
 func (b *macBackendSELinux) backendType() string {
