@@ -380,25 +380,29 @@ func TestApparmorCheckInactive(t *testing.T) {
 // database, listener) can hide the result.
 func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
 	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
 	apparmorLSMActive = func() (bool, error) { return true, nil }
+	t.Cleanup(func() { apparmorLSMActive = origActive })
+
+	origConfinement := apparmorProcessConfinement
 	apparmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (enforce)", nil
 	}
-	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
-	}()
+	t.Cleanup(func() { apparmorProcessConfinement = origConfinement })
 
 	mockSELinuxInactive(t)
 
 	origUID := EffectiveUID
-	origGetConfig := getConfigPathFunc
 	EffectiveUID = func() int { return 0 }
-	defer func() {
-		EffectiveUID = origUID
-		getConfigPathFunc = origGetConfig
-	}()
+	t.Cleanup(func() { EffectiveUID = origUID })
+
+	origGetConfig := getConfigPathFunc
+	t.Cleanup(func() { getConfigPathFunc = origGetConfig })
+
+	origRuntimeDir := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) {
+		return filepath.Join(t.TempDir(), "runtime"), nil
+	}
+	t.Cleanup(func() { getRuntimeDirFunc = origRuntimeDir })
 
 	// Valid config with an existing allowed root.
 	allowedRoot := testAllowedRootDir(t)
@@ -415,7 +419,7 @@ func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
 	apparmorManagedRoots = func() ([]string, error) {
 		return []string{"/unrelated/managed-root"}, nil
 	}
-	defer func() { apparmorManagedRoots = origManaged }()
+	t.Cleanup(func() { apparmorManagedRoots = origManaged })
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)

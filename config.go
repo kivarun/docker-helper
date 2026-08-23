@@ -293,6 +293,9 @@ func getConfigPath() string {
 // getConfigPathFunc is injectable for testing.
 var getConfigPathFunc = getConfigPath
 
+// getRuntimeDirFunc is injectable for testing.
+var getRuntimeDirFunc = getRuntimeDir
+
 func getConfigDir() string {
 	return filepath.Dir(getConfigPathFunc())
 }
@@ -404,7 +407,7 @@ func loadConfig() (*Config, error) {
 		}
 	}
 
-	runtimeDir, err := getRuntimeDir()
+	runtimeDir, err := getRuntimeDirFunc()
 	if err != nil {
 		return nil, err
 	}
