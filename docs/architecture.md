@@ -1197,9 +1197,37 @@ Current error codes (non-exhaustive):
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 
 `GET /sessions` emits `session.list`. `GET /health` intentionally emits no
-audit event because it is an unauthenticated liveness endpoint. Consistent audit
-coverage for authenticated build/run/pull requests rejected during validation
-remains a Release 2 decision recorded by the release audit.
+audit event because it is an unauthenticated liveness endpoint.
+
+### Rejected Docker-operation requests
+
+After successful session authentication, every POST /pull, POST /build, and
+POST /run request produces exactly one of:
+
+- `<kind>.rejected` — the request was rejected before acceptance; or
+- `<kind>.start` — the request was accepted as an operation.
+
+where `<kind>` is `pull`, `build`, or `run`.
+
+Authentication failures remain owned by the existing `auth.failure` path and
+do not additionally emit `<kind>.rejected`.
+
+The rejected event schema contains only:
+
+- `event`: `<kind>.rejected`
+- `result`: the public API error code (e.g., `invalid_image`, `invalid_mount`,
+  `shutting_down`, `internal_error`)
+- `principal_name`: when available
+- `session_id`: from the authenticated session
+- `request_id`: from the request context
+
+The `result` field exactly matches the public API response `code`.
+
+Rejected events intentionally omit request payload metadata (image, mounts,
+env, command, context, dockerfile, etc.). This makes rejected-event metadata
+smaller than accepted `*.start` events and avoids logging partially validated
+input. No `operation_id` is included because a rejected request was never
+accepted as an operation.
 
 ## Audit logging
 
@@ -1352,7 +1380,7 @@ Implemented event families are:
 | Sessions | `session.create`, `session.list`, `session.delete` |
 | Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_remove`, `principal.delete` |
 | Credentials/admin | `principal.credential_create`, `principal.credential_revoke`, `admin_token.rotate` |
-| Docker operations | `pull.start`, `pull.finish`, `build.start`, `build.finish`, `run.start`, `run.finish`, `registry.login.start`, `registry.login.finish` |
+| Docker operations | `pull.start`, `pull.finish`, `pull.rejected`, `build.start`, `build.finish`, `build.rejected`, `run.start`, `run.finish`, `run.rejected`, `registry.login.start`, `registry.login.finish` |
 | Configuration | `config.reload` |
 
 The detailed schemas below document the Docker-operation and principal/session

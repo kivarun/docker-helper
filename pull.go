@@ -18,17 +18,17 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	var req pullRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_json", "invalid JSON request", session.PrincipalName)
 		return
 	}
 
 	if req.Image == "" {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image is required")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_image", "image is required", session.PrincipalName)
 		return
 	}
 
 	if strings.HasPrefix(req.Image, "-") {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image must not start with '-'")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_image", "image must not start with '-'", session.PrincipalName)
 		return
 	}
 
@@ -41,7 +41,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "pull"),
 			slog.String("error", err.Error()),
 		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		writeOperationRejected(ctx, w, http.StatusInternalServerError, "pull", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 

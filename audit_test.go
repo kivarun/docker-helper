@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -716,4 +718,399 @@ func setupTestLoggingDiscard(t *testing.T) {
 	t.Helper()
 	initLoggers(io.Discard, io.Discard, slog.LevelError, true)
 	t.Cleanup(logging.reset)
+}
+
+// --- Docker-operation rejection audit events ---
+
+func TestPullRejectedAudit(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Send a pull request with empty image (invalid_image).
+	reqBody := map[string]any{"image": ""}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	var resp pullResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "invalid_image" {
+		t.Fatalf("expected code invalid_image, got %q", resp.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	found := false
+	for _, rec := range records {
+		if rec.Event == "pull.rejected" {
+			found = true
+			if rec.Result != "invalid_image" {
+				t.Errorf("result = %q, want invalid_image", rec.Result)
+			}
+			if rec.SessionID == "" {
+				t.Error("session_id must be present")
+			}
+			if rec.Image != "" {
+				t.Error("rejected event must not contain image")
+			}
+			if rec.OperationID != "" {
+				t.Error("rejected event must not contain operation_id")
+			}
+		}
+		if rec.Event == "pull.start" {
+			t.Error("pull.start must not be emitted for rejected request")
+		}
+		if rec.Event == "pull.finish" {
+			t.Error("pull.finish must not be emitted for rejected request")
+		}
+	}
+	if !found {
+		t.Fatal("pull.rejected event not found in audit records")
+	}
+}
+
+func TestBuildRejectedAudit(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a valid build context.
+	ctxDir := result.Session.Workspace
+	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Send a build request with invalid build args.
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+		"build_args": map[string]string{"INVALID-KEY": "value"},
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "invalid_build_args" {
+		t.Fatalf("expected code invalid_build_args, got %q", resp.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	found := false
+	for _, rec := range records {
+		if rec.Event == "build.rejected" {
+			found = true
+			if rec.Result != "invalid_build_args" {
+				t.Errorf("result = %q, want invalid_build_args", rec.Result)
+			}
+			if rec.SessionID == "" {
+				t.Error("session_id must be present")
+			}
+		}
+		if rec.Event == "build.start" {
+			t.Error("build.start must not be emitted for rejected request")
+		}
+		if rec.Event == "build.finish" {
+			t.Error("build.finish must not be emitted for rejected request")
+		}
+	}
+	if !found {
+		t.Fatal("build.rejected event not found in audit records")
+	}
+}
+
+func TestRunRejectedAudit(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Send a run request with invalid mount (source outside workspace).
+	reqBody := map[string]any{
+		"image":   "alpine:3.24",
+		"mounts":  []map[string]any{{"source": "/tmp/outside", "target": "/data"}},
+		"command": []string{"echo", "hello"},
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "invalid_mount" {
+		t.Fatalf("expected code invalid_mount, got %q", resp.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	found := false
+	for _, rec := range records {
+		if rec.Event == "run.rejected" {
+			found = true
+			if rec.Result != "invalid_mount" {
+				t.Errorf("result = %q, want invalid_mount", rec.Result)
+			}
+			if rec.SessionID == "" {
+				t.Error("session_id must be present")
+			}
+			// Rejected events must not contain sensitive request data.
+			if len(rec.Mounts) > 0 {
+				t.Error("rejected event must not contain mounts")
+			}
+			if len(rec.EnvKeys) > 0 {
+				t.Error("rejected event must not contain env_keys")
+			}
+			if rec.Image != "" {
+				t.Error("rejected event must not contain image")
+			}
+		}
+		if rec.Event == "run.start" {
+			t.Error("run.start must not be emitted for rejected request")
+		}
+		if rec.Event == "run.finish" {
+			t.Error("run.finish must not be emitted for rejected request")
+		}
+	}
+	if !found {
+		t.Fatal("run.rejected event not found in audit records")
+	}
+}
+
+func TestRejectedInvalidJSON(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Send invalid JSON to pull.
+	req := httptest.NewRequest(http.MethodPost, "/pull", strings.NewReader("not-json"))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	found := false
+	for _, rec := range records {
+		if rec.Event == "pull.rejected" {
+			found = true
+			if rec.Result != "invalid_json" {
+				t.Errorf("result = %q, want invalid_json", rec.Result)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pull.rejected event not found for invalid JSON")
+	}
+}
+
+func TestRejectedShuttingDown(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+	app.OperationRegistry.shutting = true
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a valid build context.
+	ctxDir := result.Session.Workspace
+	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	found := false
+	for _, rec := range records {
+		if rec.Event == "build.rejected" {
+			found = true
+			if rec.Result != "shutting_down" {
+				t.Errorf("result = %q, want shutting_down", rec.Result)
+			}
+		}
+		if rec.Event == "build.start" {
+			t.Error("build.start must not be emitted for shutting_down rejection")
+		}
+	}
+	if !found {
+		t.Fatal("build.rejected event not found for shutting_down")
+	}
+}
+
+func TestRejectedUnauthenticatedNoRejectedEvent(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	// Send pull request without authentication.
+	reqBody := map[string]any{"image": "alpine:3.24"}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	for _, rec := range records {
+		if rec.Event == "pull.rejected" {
+			t.Error("unauthenticated request must not emit pull.rejected")
+		}
+		if rec.Event == "build.rejected" {
+			t.Error("unauthenticated request must not emit build.rejected")
+		}
+		if rec.Event == "run.rejected" {
+			t.Error("unauthenticated request must not emit run.rejected")
+		}
+	}
+}
+
+func TestRejectedNoSensitiveData(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	secretValue := "SECRET_PASSWORD_DO_NOT_LEAK"
+
+	// Send a run request with a secret environment value that will be rejected
+	// due to invalid environment variable name.
+	reqBody := map[string]any{
+		"image":       "alpine:3.24",
+		"environment": map[string]string{"INVALID-KEY": secretValue},
+		"command":     []string{"echo", "hello"},
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleRun(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	// The raw audit output must not contain the secret.
+	rawAudit := auditBuf.String()
+	if strings.Contains(rawAudit, secretValue) {
+		t.Fatalf("audit output contains secret value:\n%s", rawAudit)
+	}
+
+	// Also verify no sensitive metadata in the rejected event.
+	records := parseAuditRecords(auditBuf)
+	for _, rec := range records {
+		if rec.Event == "run.rejected" {
+			if len(rec.EnvKeys) > 0 {
+				t.Error("rejected event must not contain env_keys")
+			}
+			if rec.Image != "" {
+				t.Error("rejected event must not contain image")
+			}
+			if rec.CommandArgCount != nil {
+				t.Error("rejected event must not contain command_arg_count")
+			}
+		}
+	}
+}
+
+func TestAcceptedOperationNoRejectedEvent(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	// Send a valid pull request.
+	reqBody := map[string]any{"image": "alpine:3.24"}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	for _, rec := range records {
+		if rec.Event == "pull.rejected" {
+			t.Error("accepted request must not emit pull.rejected")
+		}
+	}
 }

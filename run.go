@@ -244,37 +244,37 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req runRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_json", "invalid JSON request", session.PrincipalName)
 		return
 	}
 
 	if req.Image == "" {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image is required")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_image", "image is required", session.PrincipalName)
 		return
 	}
 
 	if strings.HasPrefix(req.Image, "-") {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_image", "image must not start with '-'")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_image", "image must not start with '-'", session.PrincipalName)
 		return
 	}
 
 	if req.Workdir != "" {
 		if !filepath.IsAbs(req.Workdir) {
-			writeError(ctx, w, http.StatusBadRequest, "invalid_workdir", "workdir must be an absolute path")
+			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_workdir", "workdir must be an absolute path", session.PrincipalName)
 			return
 		}
 	}
 
 	for name := range req.Environment {
 		if !envNamePattern.MatchString(name) {
-			writeError(ctx, w, http.StatusBadRequest, "invalid_environment", "invalid environment variable name")
+			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_environment", "invalid environment variable name", session.PrincipalName)
 			return
 		}
 	}
 
 	shmSizeBytes, err := validateShmSize(req.ShmSize)
 	if err != nil {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_shm_size", "invalid shm size")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_shm_size", "invalid shm size", session.PrincipalName)
 		return
 	}
 
@@ -293,17 +293,17 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	for _, mount := range req.Mounts {
 		resolved, err := resolveMount(mount, session.Workspace)
 		if err != nil {
-			writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 
 		if cfg.Mode == ModeUser && resolved.HostPath != session.Workspace {
-			writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 
 		if targetSeen[resolved.Target] {
-			writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 		targetSeen[resolved.Target] = true
@@ -315,7 +315,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if cfg.TrustedCAInjection == "auto" {
 		for _, m := range req.Mounts {
 			if isTrustedCAMountOverlap(m.Target) {
-				writeError(ctx, w, http.StatusBadRequest, "invalid_mount", "invalid mount")
+				writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 				return
 			}
 		}
@@ -370,7 +370,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
 		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -382,7 +382,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
 		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -400,7 +400,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "run"),
 				slog.String("error", err.Error()),
 			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 		switch backend {
@@ -414,7 +414,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "run"),
 				slog.String("backend", string(backend)),
 			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 	} else {
@@ -460,7 +460,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 					slog.String("operation", "run"),
 					slog.String("error", err.Error()),
 				)
-				writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+				writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 				return
 			}
 			pinnedMounts = append(pinnedMounts, pm)
@@ -481,7 +481,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 					)
 				}
 			}
-			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
+			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
 		}
 		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)

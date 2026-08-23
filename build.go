@@ -25,27 +25,27 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	var req buildRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_json", "invalid JSON request", session.PrincipalName)
 		return
 	}
 
 	contextPath, dockerfilePath, err := validateBuildRequest(session.Workspace, req)
 	if err != nil {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
 		return
 	}
 
 	// Compute canonical relative Dockerfile path from the resolved absolute path.
 	dockerfileRel, err := filepath.Rel(contextPath, dockerfilePath)
 	if err != nil || !filepath.IsLocal(dockerfileRel) || dockerfileRel == "." {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_build_context", "invalid build context")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
 		return
 	}
 
 	// Validate build-arg names and collect sorted keys.
 	buildArgKeys, err := validateBuildArgs(req.BuildArgs)
 	if err != nil {
-		writeError(ctx, w, http.StatusBadRequest, "invalid_build_args", "invalid build args")
+		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_args", "invalid build args", session.PrincipalName)
 		return
 	}
 
@@ -60,7 +60,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
 		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		writeOperationRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -75,7 +75,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
 		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		writeOperationRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -88,7 +88,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 					slog.String("error", err.Error()),
 				)
 			}
-			writeError(ctx, w, http.StatusServiceUnavailable, "shutting_down", "daemon is shutting down")
+			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
 		}
 		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)

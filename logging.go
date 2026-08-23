@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -210,6 +211,30 @@ func writeAuditWithRequestID(ctx context.Context, record auditRecord) {
 		record.SessionID = sessionIDFromContext(ctx)
 	}
 	writeAudit(record)
+}
+
+// writeOperationRejected emits a <kind>.rejected audit event and writes the
+// corresponding HTTP error response. It is used for Docker-operation requests
+// (pull, build, run) that are rejected after successful session authentication
+// but before the corresponding *.start event.
+//
+// The rejected event contains only: event, result, principal_name, session_id,
+// request_id. No request payload metadata (image, mounts, env, etc.) is included.
+func writeOperationRejected(
+	ctx context.Context,
+	w http.ResponseWriter,
+	status int,
+	kind string, // "pull", "build", or "run"
+	resultCode string,
+	message string,
+	principalName string,
+) {
+	writeAuditWithRequestID(ctx, auditRecord{
+		Event:         kind + ".rejected",
+		Result:        resultCode,
+		PrincipalName: principalName,
+	})
+	writeError(ctx, w, status, resultCode, message)
 }
 
 // opLog returns the operational logger with request-scoped attributes.
