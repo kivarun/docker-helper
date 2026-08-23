@@ -921,9 +921,7 @@ func newSELinuxSystemInitBackend(
 	return &systemInitBackend{
 		resolveRoot: resolveRoot,
 		prepare: func(canonical string) (*systemInitPrepareResult, error) {
-			// Exact /opt is rejected for the common workflow to prevent
-			// recursive relabel of the standard namespace.
-			if canonical == "/opt" {
+			if !selinuxManagedRootAllowed(canonical) {
 				return nil, fmt.Errorf("exact /opt cannot be a managed workspace root in SELinux mode; use a subdirectory such as /opt/docker-helper-workspaces, or use 'docker-helper config allowed-root add /opt' to set it as an authorization ceiling without MAC preparation")
 			}
 			if mgr != nil && !isHomeRoot(canonical) {

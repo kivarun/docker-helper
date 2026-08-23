@@ -47,6 +47,13 @@ type selinuxWorkspaceManager struct {
 	acquireLock func() (func() error, error)
 }
 
+// selinuxEnsureWorkspaceLabel is the injectable seam for testing.
+// It wraps the production ensureWorkspaceLabel call.
+var selinuxEnsureWorkspaceLabel = func(root string) (bool, error) {
+	mgr := newSELinuxWorkspaceManager()
+	return mgr.ensureWorkspaceLabel(root)
+}
+
 func newSELinuxWorkspaceManager() *selinuxWorkspaceManager {
 	rc := func(cmd string, args ...string) ([]byte, error) {
 		c := exec.Command(cmd, args...)

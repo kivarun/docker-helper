@@ -351,7 +351,7 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	return addAllowedRootToConfig(canonical, stdout, stderr)
+	return addAllowedRootToConfig(canonical, nil, stdout, stderr)
 }
 
 // configAllowedRootRemove removes a root from allowed_roots.

@@ -32,11 +32,12 @@ This is the normal post-init command for adding a usable workspace root.
 It performs:
 
   1. Canonicalize and validate PATH
-  2. Prepare required MAC state for the active backend
-  3. Add PATH to global allowed_roots
-  4. Reload the running daemon
+  2. Validate existing configuration
+  3. Prepare required MAC state for the active backend
+  4. Add PATH to global allowed_roots
+  5. Reload the running daemon
 
-In user mode, only the authorization step (3) is performed.
+In user mode, only the authorization steps (1, 4) are performed.
 
 In system mode with AppArmor, the root is added to the managed AppArmor
 policy before the authorization change.
@@ -46,8 +47,8 @@ In system mode with SELinux:
   - Non-home roots get persistent fcontext + restorecon preparation
   - Exact /opt is rejected (use a subdirectory or config allowed-root add)
 
-MAC preparation happens before the config write. If preparation fails,
-authorization is not widened.`,
+MAC preparation happens after config validation and before the config write.
+If preparation fails, authorization is not widened.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -75,18 +76,27 @@ func workspaceRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// Prepare MAC state before authorization change.
-	if err := prepareWorkspaceRootMAC(canonical, stderr); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
 	// Add to authorization using the shared config mutation path.
-	return addAllowedRootToConfig(canonical, stdout, stderr)
+	// MAC preparation runs inside the transaction preflight, after
+	// config validation but before the write.
+	return addAllowedRootToConfig(canonical, func() error {
+		return prepareWorkspaceRootMAC(canonical, stderr)
+	}, stdout, stderr)
+}
+
+// selinuxManagedRootAllowed returns true if the given canonical path is
+// allowed as a SELinux managed workspace root. Exact /opt is rejected
+// because it would make the entire standard namespace a recursive
+// managed relabel boundary.
+//
+// This is the single authoritative owner of the managed-root safety
+// classification, shared by workspace-root add and init.
+func selinuxManagedRootAllowed(canonical string) bool {
+	return canonical != "/opt"
 }
 
 // prepareWorkspaceRootMAC performs backend-specific MAC preparation for a
-// workspace root. This is the shared helper used by workspace-root add and init.
+// workspace root. This is the shared helper used by workspace-root add.
 //
 // In user mode: no-op.
 // In AppArmor system mode: adds root to managed AppArmor policy.
@@ -117,17 +127,14 @@ func prepareWorkspaceRootMAC(canonical string, stderr io.Writer) error {
 		return nil
 
 	case LSMSelinux:
-		// Exact /opt is rejected for the common workflow to prevent
-		// recursive relabel of the standard namespace.
-		if canonical == "/opt" {
+		if !selinuxManagedRootAllowed(canonical) {
 			return fmt.Errorf("exact /opt cannot be a managed workspace root in SELinux mode; use a subdirectory such as /opt/docker-helper-workspaces, or use 'docker-helper config allowed-root add /opt' to set it as an authorization ceiling without MAC preparation")
 		}
 		// /home and descendants use existing user_home_type labels.
 		if isHomeRoot(canonical) {
 			return nil
 		}
-		selMgr := newSELinuxWorkspaceManager()
-		changed, err := selMgr.ensureWorkspaceLabel(canonical)
+		changed, err := selinuxEnsureWorkspaceLabel(canonical)
 		if err != nil {
 			return err
 		}
@@ -144,9 +151,13 @@ func prepareWorkspaceRootMAC(canonical string, stderr io.Writer) error {
 }
 
 // addAllowedRootToConfig adds a root to allowed_roots using the shared
-// config transaction owner. This is the authorization-only mutation path
+// config transaction owner. This is the authorization mutation path
 // shared by config allowed-root add and workspace-root add.
-func addAllowedRootToConfig(canonical string, stdout, stderr io.Writer) int {
+//
+// preflight is an optional MAC preparation function. When non-nil, it runs
+// after config validation but before the write. nil for authorization-only
+// operations (config allowed-root add).
+func addAllowedRootToConfig(canonical string, preflight func() error, stdout, stderr io.Writer) int {
 	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
 		fc, err := decodeFileConfig(raw)
 		if err != nil {
@@ -173,11 +184,13 @@ func addAllowedRootToConfig(canonical string, stdout, stderr io.Writer) int {
 				return configMutationResult{
 					SkipWrite: true,
 					Message:   fmt.Sprintf("already present %s\n", canonical),
+					Preflight: preflight,
 				}, nil
 			}
 			// Legacy migration needed: write migrated config.
 			return configMutationResult{
-				Message: fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
+				Message:   fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
+				Preflight: preflight,
 			}, nil
 		}
 
@@ -186,7 +199,8 @@ func addAllowedRootToConfig(canonical string, stdout, stderr io.Writer) int {
 		raw["allowed_roots"] = rawBytes
 
 		return configMutationResult{
-			Message: fmt.Sprintf("added %s\n", canonical),
+			Message:   fmt.Sprintf("added %s\n", canonical),
+			Preflight: preflight,
 		}, nil
 	})
 }

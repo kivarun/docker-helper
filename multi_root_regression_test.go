@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // =============================================================================
@@ -1016,6 +1018,182 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		newData, _ := os.ReadFile(configPath)
 		if bytes.Equal(origData, newData) {
 			t.Error("config should have been updated")
+		}
+	})
+}
+
+// TestWorkspaceRootPreflightOrdering verifies that MAC preflight runs
+// inside the config transaction, after config validation.
+func TestWorkspaceRootPreflightOrdering(t *testing.T) {
+	// Mock attemptReload to return "daemon not running".
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		return reloadOutcome{reloadDaemonNotRunning, nil}
+	}
+	defer func() { attemptReload = origAttemptReload }()
+
+	t.Run("invalid_config_no_mac_prep", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+			"database_path": "/should/not/be/here",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// Mock root so /opt passes workspace root check.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
+		// Mock SELinux detection.
+		origSEL := selinuxEnabled
+		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+		defer func() { selinuxEnabled = origSEL }()
+		origAA := apparmorLSMActive
+		apparmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { apparmorLSMActive = origAA }()
+
+		// Track SELinux preparation.
+		selinuxCalled := false
+		origEnsure := selinuxEnsureWorkspaceLabel
+		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+			selinuxCalled = true
+			return false, nil
+		}
+		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+
+		var stdout, stderr bytes.Buffer
+		code := workspaceRootAdd("/opt", &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("expected non-zero exit, got 0")
+		}
+		if !strings.Contains(stderr.String(), "database_path") {
+			t.Errorf("expected validation error, got: %s", stderr.String())
+		}
+		if selinuxCalled {
+			t.Error("MAC preparation must NOT be invoked when config validation fails")
+		}
+		// Config unchanged.
+		verifyConfigUnchanged(t, configPath, data)
+	})
+
+	t.Run("selinux_preflight_failure_no_auth_change", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// Mock root for system mode.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
+		// Mock SELinux detection.
+		origSEL := selinuxEnabled
+		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+		defer func() { selinuxEnabled = origSEL }()
+		origAA := apparmorLSMActive
+		apparmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { apparmorLSMActive = origAA }()
+
+		// Mock SELinux to fail.
+		origEnsure := selinuxEnsureWorkspaceLabel
+		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+			return false, errSELinuxSentinel
+		}
+		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+
+		// Use a non-home, non-/opt path that passes selinuxManagedRootAllowed.
+		// Create under /workspace (working dir) to avoid /home/ prefix.
+		testRoot := filepath.Join("/workspace", "test-workspace-"+strconv.Itoa(int(time.Now().UnixNano())))
+		if err := os.MkdirAll(testRoot, 0755); err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(testRoot)
+
+		var stdout, stderr bytes.Buffer
+		code := workspaceRootAdd(testRoot, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("expected non-zero exit, got 0")
+		}
+		if !strings.Contains(stderr.String(), "selinux preflight sentinel") {
+			t.Errorf("expected sentinel error in stderr, got: %s", stderr.String())
+		}
+		// Config unchanged (preflight failure prevents authorization change).
+		verifyConfigUnchanged(t, configPath, data)
+	})
+
+	t.Run("already_present_runs_preflight", func(t *testing.T) {
+		// Use a non-home, non-/opt path that passes selinuxManagedRootAllowed.
+		// Create under /workspace (working dir) to avoid /home/ prefix.
+		testRoot := filepath.Join("/workspace", "test-workspace-"+strconv.Itoa(int(time.Now().UnixNano())))
+		if err := os.MkdirAll(testRoot, 0755); err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(testRoot)
+
+		cfg := map[string]any{
+			"allowed_roots": []string{testRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// Mock root for system mode.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
+		// Mock SELinux detection.
+		origSEL := selinuxEnabled
+		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+		defer func() { selinuxEnabled = origSEL }()
+		origAA := apparmorLSMActive
+		apparmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { apparmorLSMActive = origAA }()
+
+		// Track SELinux preparation.
+		selinuxCalled := false
+		origEnsure := selinuxEnsureWorkspaceLabel
+		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+			selinuxCalled = true
+			return false, nil
+		}
+		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+
+		var stdout, stderr bytes.Buffer
+		code := workspaceRootAdd(testRoot, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+		}
+		if !selinuxCalled {
+			t.Error("MAC preflight must still run when root is already present")
+		}
+		// Config unchanged (SkipWrite for already present).
+		verifyConfigUnchanged(t, configPath, data)
+	})
+}
+
+// TestManagedRootOptPolicyShared verifies that init and workspace-root add
+// use the same exact /opt managed-root policy.
+func TestManagedRootOptPolicyShared(t *testing.T) {
+	t.Run("selinux_managed_root_allowed", func(t *testing.T) {
+		if selinuxManagedRootAllowed("/opt") {
+			t.Error("/opt must not be allowed as managed root")
+		}
+		if !selinuxManagedRootAllowed("/opt/workspaces") {
+			t.Error("/opt/workspaces must be allowed as managed root")
+		}
+		if !selinuxManagedRootAllowed("/data") {
+			t.Error("/data must be allowed as managed root")
+		}
+		if !selinuxManagedRootAllowed("/home") {
+			t.Error("/home must be allowed as managed root")
 		}
 	})
 }
