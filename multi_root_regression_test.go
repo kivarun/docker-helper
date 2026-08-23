@@ -9,10 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // =============================================================================
@@ -1079,6 +1077,64 @@ func TestWorkspaceRootPreflightOrdering(t *testing.T) {
 		verifyConfigUnchanged(t, configPath, data)
 	})
 
+	t.Run("preflight_runs_before_auth_write", func(t *testing.T) {
+		// Use a non-home, non-/opt path that passes selinuxManagedRootAllowed.
+		testRoot := testNonHomeRootDir(t)
+
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// Track preflight invocation and verify auth state at that point.
+		preflightCalled := false
+		authNotYetWidened := false
+
+		preflight := func() error {
+			preflightCalled = true
+			// Read config and verify the new root is NOT yet present.
+			rawData, err := os.ReadFile(configPath)
+			if err != nil {
+				return err
+			}
+			var cfg map[string]any
+			if err := json.Unmarshal(rawData, &cfg); err != nil {
+				return err
+			}
+			if roots, ok := cfg["allowed_roots"].([]any); ok {
+				for _, r := range roots {
+					if r == testRoot {
+						return fmt.Errorf("authorization was widened before preflight ran")
+					}
+				}
+				authNotYetWidened = true
+			}
+			return nil
+		}
+
+		origData, _ := os.ReadFile(configPath)
+
+		var stdout, stderr bytes.Buffer
+		code := addAllowedRootToConfig(testRoot, preflight, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+		}
+		if !preflightCalled {
+			t.Error("preflight must be invoked")
+		}
+		if !authNotYetWidened {
+			t.Error("preflight must observe authorization NOT yet widened")
+		}
+		// Config should now have the root added.
+		newData, _ := os.ReadFile(configPath)
+		if bytes.Equal(origData, newData) {
+			t.Error("config should have been updated with the new root")
+		}
+	})
+
 	t.Run("selinux_preflight_failure_no_auth_change", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
@@ -1109,12 +1165,7 @@ func TestWorkspaceRootPreflightOrdering(t *testing.T) {
 		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
 
 		// Use a non-home, non-/opt path that passes selinuxManagedRootAllowed.
-		// Create under /workspace (working dir) to avoid /home/ prefix.
-		testRoot := filepath.Join("/workspace", "test-workspace-"+strconv.Itoa(int(time.Now().UnixNano())))
-		if err := os.MkdirAll(testRoot, 0755); err != nil {
-			t.Fatal(err)
-		}
-		defer os.RemoveAll(testRoot)
+		testRoot := testNonHomeRootDir(t)
 
 		var stdout, stderr bytes.Buffer
 		code := workspaceRootAdd(testRoot, &stdout, &stderr)
@@ -1130,12 +1181,7 @@ func TestWorkspaceRootPreflightOrdering(t *testing.T) {
 
 	t.Run("already_present_runs_preflight", func(t *testing.T) {
 		// Use a non-home, non-/opt path that passes selinuxManagedRootAllowed.
-		// Create under /workspace (working dir) to avoid /home/ prefix.
-		testRoot := filepath.Join("/workspace", "test-workspace-"+strconv.Itoa(int(time.Now().UnixNano())))
-		if err := os.MkdirAll(testRoot, 0755); err != nil {
-			t.Fatal(err)
-		}
-		defer os.RemoveAll(testRoot)
+		testRoot := testNonHomeRootDir(t)
 
 		cfg := map[string]any{
 			"allowed_roots": []string{testRoot},
@@ -1182,7 +1228,14 @@ func TestWorkspaceRootPreflightOrdering(t *testing.T) {
 // TestManagedRootOptPolicyShared verifies that init and workspace-root add
 // use the same exact /opt managed-root policy.
 func TestManagedRootOptPolicyShared(t *testing.T) {
-	t.Run("selinux_managed_root_allowed", func(t *testing.T) {
+	// Mock attemptReload to return "daemon not running".
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		return reloadOutcome{reloadDaemonNotRunning, nil}
+	}
+	defer func() { attemptReload = origAttemptReload }()
+
+	t.Run("policy_table", func(t *testing.T) {
 		if selinuxManagedRootAllowed("/opt") {
 			t.Error("/opt must not be allowed as managed root")
 		}
@@ -1194,6 +1247,69 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 		}
 		if !selinuxManagedRootAllowed("/home") {
 			t.Error("/home must be allowed as managed root")
+		}
+	})
+
+	t.Run("workspace_root_add_rejects_opt", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// Mock root for system mode.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
+		// Mock SELinux detection.
+		origSEL := selinuxEnabled
+		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+		defer func() { selinuxEnabled = origSEL }()
+		origAA := apparmorLSMActive
+		apparmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { apparmorLSMActive = origAA }()
+
+		var stdout, stderr bytes.Buffer
+		code := workspaceRootAdd("/opt", &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("expected non-zero exit, got 0")
+		}
+		if !strings.Contains(stderr.String(), "exact /opt") {
+			t.Errorf("expected /opt rejection in stderr, got: %s", stderr.String())
+		}
+		// Config unchanged.
+		verifyConfigUnchanged(t, configPath, data)
+	})
+
+	t.Run("selinux_init_rejects_opt", func(t *testing.T) {
+		// Mock root for system mode.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
+		// Mock SELinux detection.
+		origSEL := selinuxEnabled
+		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+		defer func() { selinuxEnabled = origSEL }()
+		origAA := apparmorLSMActive
+		apparmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { apparmorLSMActive = origAA }()
+
+		// Create a nil manager to skip actual SELinux operations.
+		backend := newSELinuxSystemInitBackend(nil, nil)
+		if backend.prepare == nil {
+			t.Fatal("backend.prepare must not be nil")
+		}
+
+		_, err := backend.prepare("/opt")
+		if err == nil {
+			t.Fatal("expected error for /opt, got nil")
+		}
+		if !strings.Contains(err.Error(), "exact /opt") {
+			t.Errorf("expected /opt rejection in error, got: %v", err)
 		}
 	})
 }
