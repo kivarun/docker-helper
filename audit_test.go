@@ -1097,23 +1097,17 @@ func TestBuildRejectedInternalError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Use a staging seam that forces Cleanup() to fail, triggering
-	// the internal_error path after tryCreate rejection.
-	sentinelErr := errors.New("injected staging cleanup error")
-	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelErr)
+	// Make staging itself fail before operation registration.
+	sentinelErr := errors.New("injected staging error")
+	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
+		return nil, sentinelErr
+	}
 
-	// Force tryCreate rejection.
-	app.OperationRegistry.shutting = true
-
-	// Create a valid build context.
+	// Create a valid build context (staging will fail regardless).
 	ctxDir := result.Session.Workspace
 	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
 		t.Fatal(err)
-	}
-
-	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "true")
 	}
 
 	reqBody := map[string]any{
@@ -1127,8 +1121,16 @@ func TestBuildRejectedInternalError(t *testing.T) {
 	w := httptest.NewRecorder()
 	app.handleBuild(w, req)
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", w.Code)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != "internal_error" {
+		t.Fatalf("expected code internal_error, got %q", resp.Code)
 	}
 
 	records := parseAuditRecords(auditBuf)
@@ -1136,8 +1138,8 @@ func TestBuildRejectedInternalError(t *testing.T) {
 	for _, rec := range records {
 		if rec.Event == "build.rejected" {
 			count++
-			if rec.Result != "shutting_down" {
-				t.Errorf("result = %q, want shutting_down", rec.Result)
+			if rec.Result != "internal_error" {
+				t.Errorf("result = %q, want internal_error", rec.Result)
 			}
 		}
 		if rec.Event == "build.start" {
