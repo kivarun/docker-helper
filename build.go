@@ -64,6 +64,22 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Acquire workspace-use lease to reserve MAC state through pre-registration work.
+	var leaseRelease func()
+	if a.MACLifecycle != nil {
+		a.MACLifecycle.mu.Lock()
+		_, leaseRelease, err = a.MACLifecycle.acquireUse("", session.Workspace)
+		a.MACLifecycle.mu.Unlock()
+		if err != nil {
+			opLog(ctx).Error("cannot acquire workspace-use lease",
+				slog.String("operation", "build"),
+				slog.String("error", err.Error()),
+			)
+			writeOperationRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
+			return
+		}
+	}
+
 	// Create the operation first so we have an ID for staging.
 	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName)
 	op.auditBuildArgKeys = buildArgKeys
@@ -71,6 +87,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// Stage the build context into an isolated directory.
 	staged, err := a.stageBuildContext(ctx, session.Workspace, contextPath, dockerfileRel, cfg.RuntimeDir, op.ID)
 	if err != nil {
+		if leaseRelease != nil {
+			leaseRelease()
+		}
 		opLog(ctx).Error("build context staging failed",
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
@@ -81,6 +100,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
 			if err := staged.Cleanup(); err != nil {
 				opLog(ctx).Error("staging cleanup failed after tryCreate rejection",
 					slog.String("operation", "build"),
@@ -93,6 +115,10 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		}
 		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
+
+	// Lease is now associated with the registered operation; it will be
+	// released by waitBuildCompletion after cmd.Wait().
+	_ = leaseRelease // captured for later release
 
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:         "build.start",
@@ -130,6 +156,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	if result.Terminated {
 		cancel()
+		if leaseRelease != nil {
+			leaseRelease()
+		}
 		if err := staged.Cleanup(); err != nil {
 			opLog(ctx).Error("staging cleanup failed after pre-start termination",
 				slog.String("operation", "build"),
@@ -149,6 +178,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Err != nil {
 		cancel()
+		if leaseRelease != nil {
+			leaseRelease()
+		}
 		if err := staged.Cleanup(); err != nil {
 			opLog(ctx).Error("staging cleanup failed after start error",
 				slog.String("operation", "build"),
@@ -166,8 +198,9 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store staged context for cleanup in waitBuildCompletion.
+	// Store staged context and lease release for cleanup in waitBuildCompletion.
 	op.stagedCtx = staged
+	op.macLeaseRelease = leaseRelease
 
 	// Start goroutine for process completion.
 	go func() {
@@ -193,6 +226,11 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 				slog.String("error", cerr.Error()),
 			)
 		}
+	}
+
+	// Release workspace-use lease.
+	if op.macLeaseRelease != nil {
+		op.macLeaseRelease()
 	}
 
 	duration := time.Since(started).Round(time.Millisecond).String()

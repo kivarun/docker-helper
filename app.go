@@ -37,6 +37,9 @@ type App struct {
 	// rotateAdminToken. Production default is os.Rename; tests can fail it
 	// deterministically.
 	RotateRenameFn func(oldpath, newpath string) error
+	// MACLifecycle is the workspace MAC lifecycle owner.
+	// nil in user mode or when no MAC backend is active.
+	MACLifecycle *workspaceMACLifecycle
 }
 
 // pinMount calls PinMountFn if set, otherwise the real PinMount.

@@ -415,31 +415,31 @@ func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
 	getConfigPathFunc = func() string { return configPath }
 
 	// Managed roots return an unrelated root, not covering the configured root.
+	// This is now acceptable — global roots are authorization-only.
+	// MAC state follows session workspaces, not global roots.
 	origManaged := apparmorManagedRoots
 	apparmorManagedRoots = func() ([]string, error) {
 		return []string{"/unrelated/managed-root"}, nil
 	}
 	t.Cleanup(func() { apparmorManagedRoots = origManaged })
 
+	// Startup should succeed — global roots do not require MAC coverage.
+	// (The serve command will fail later due to missing admin token,
+	// but it must NOT fail at the MAC verification step.)
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
 	if code != 1 {
 		t.Errorf("expected exit code 1, got %d", code)
 	}
 
+	// Must NOT contain the old MAC verification error.
 	opLog := stderr.String()
-	if !strings.Contains(opLog, "not covered by managed AppArmor roots") {
-		t.Errorf("expected 'not covered by managed AppArmor roots' in operational log, got: %s", opLog)
+	if strings.Contains(opLog, "not covered by managed AppArmor roots") {
+		t.Error("must NOT verify global roots against managed AppArmor roots at startup")
 	}
-	if !strings.Contains(opLog, "config allowed-root add") {
-		t.Errorf("expected 'config allowed-root add' in operational log, got: %s", opLog)
-	}
-	// Must not reach later startup steps that could mask the error.
-	if strings.Contains(opLog, "admin token") {
-		t.Error("must fail before admin token initialization")
-	}
-	if strings.Contains(opLog, "database") {
-		t.Error("must fail before database initialization")
+	// Must reach admin token step (proves MAC verification was skipped).
+	if !strings.Contains(opLog, "admin token") {
+		t.Error("must reach admin token initialization (proves no MAC verification at startup)")
 	}
 }
 

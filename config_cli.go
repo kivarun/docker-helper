@@ -797,8 +797,12 @@ func allowedRootPreflight(canonical string, stderr io.Writer) error {
 		return nil
 
 	case LSMSelinux:
+		// /opt is a valid authorization ceiling but must not be
+		// relabeled as a managed workspace boundary. Skip MAC
+		// preparation for /opt; session-level MAC preparation
+		// handles concrete workspaces under /opt.
 		if !selinuxManagedRootAllowed(canonical) {
-			return fmt.Errorf("exact /opt cannot be a global allowed root in SELinux mode because it would recursively relabel the entire /opt namespace; use a subdirectory such as /opt/docker-helper-workspaces")
+			return nil
 		}
 		// /home and descendants use existing user_home_type labels.
 		if isHomeRoot(canonical) {

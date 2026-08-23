@@ -87,6 +87,17 @@ func initializeDatabase(db *sql.DB) error {
 		}
 	}
 
+	// Additive migration: mac_boundaries tracks docker-helper-owned MAC boundaries.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS mac_boundaries (
+			boundary TEXT PRIMARY KEY,
+			backend TEXT NOT NULL
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("cannot create mac_boundaries table: %w", err)
+	}
+
 	return nil
 }
 

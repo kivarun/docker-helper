@@ -924,8 +924,12 @@ func newSELinuxSystemInitBackend(
 	return &systemInitBackend{
 		resolveRoot: resolveRoot,
 		prepare: func(canonical string) (*systemInitPrepareResult, error) {
+			// /opt is a valid authorization ceiling but must not be
+			// relabeled as a managed workspace boundary. Skip MAC
+			// preparation for /opt; session-level MAC preparation
+			// handles concrete workspaces under /opt.
 			if !selinuxManagedRootAllowed(canonical) {
-				return nil, fmt.Errorf("exact /opt cannot be a managed workspace root in SELinux mode; use a subdirectory such as /opt/docker-helper-workspaces, or use 'docker-helper config allowed-root add /opt' to set it as an authorization ceiling without MAC preparation")
+				return &systemInitPrepareResult{}, nil
 			}
 			if mgr != nil && !isHomeRoot(canonical) {
 				if _, err := mgr.ensureWorkspaceLabel(canonical); err != nil {

@@ -141,6 +141,11 @@ func canonicalizeWorkspaceRootForAdd(path string) (string, error) {
 // allowed as a SELinux managed workspace root. Exact /opt is rejected
 // because it would make the entire standard namespace a recursive
 // managed relabel boundary.
+//
+// Note: /opt is still a valid authorization ceiling. This function only
+// controls whether MAC preparation (relabeling) occurs for the path.
+// MAC preparation for session workspaces under /opt is handled by the
+// workspace MAC lifecycle, not by global-root preparation.
 func selinuxManagedRootAllowed(canonical string) bool {
 	return canonical != "/opt"
 }

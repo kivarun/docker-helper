@@ -102,31 +102,6 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 		return
 	}
 
-	// System mode: verify configured allowed_roots are usable under the active MAC backend.
-	if err := verifyAllowedRootsMAC(
-		newCfg.AllowedRoots,
-		deps.deploymentMode(),
-		deps.detectLSM,
-		deps.verifySELinuxWorkspace,
-		deps.apparmorListRoots,
-	); err != nil {
-		duration := time.Since(started).Round(time.Millisecond).String()
-		opLog(ctx).Error("reload MAC verification failed",
-			slog.String("operation", "reload"),
-			slog.String("error", err.Error()),
-		)
-		writeAuditWithRequestID(ctx, auditRecord{
-			Event:    "config.reload",
-			Result:   "mac_verification_failed",
-			Duration: duration,
-		})
-		writeError(ctx, w, http.StatusBadRequest,
-			"mac_verification_failed",
-			err.Error(),
-		)
-		return
-	}
-
 	// Preserve startup-only fields that cannot be changed at runtime.
 	oldCfg := a.getConfig()
 	newCfg.HTTPAddress = oldCfg.HTTPAddress

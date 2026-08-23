@@ -242,20 +242,6 @@ func runServe(stdout, stderr io.Writer) error {
 	// Audit JSONL -> stdout; operational JSONL -> stderr.
 	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
 
-	// System mode: verify configured allowed_roots are usable under the active MAC backend.
-	if cfg.Mode == ModeSystem {
-		if err := verifyAllowedRootsMAC(
-			cfg.AllowedRoots,
-			cfg.Mode,
-			detectLSM,
-			newSELinuxWorkspaceManager().verifyWorkspaceLabel,
-			apparmorManagedRoots,
-		); err != nil {
-			serveStartupError(err, "")
-			return err
-		}
-	}
-
 	callbackEntered := false
 	err = runWithLock(cfg.LockPath, func() error {
 		callbackEntered = true
@@ -282,6 +268,20 @@ func runServe(stdout, stderr io.Writer) error {
 			return err
 		}
 
+		// Create MAC lifecycle owner and reconcile live sessions.
+		macBackend, err := newMACBackend(cfg.Mode, detectLSM)
+		if err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+		macLifecycle := newWorkspaceMACLifecycle(db, macBackend)
+
+		// Reconcile: ensure all live sessions have valid MAC state.
+		if err := macLifecycle.reconcileLiveSessions(); err != nil {
+			serveStartupError(err, "MAC state for live sessions cannot be reconciled")
+			return err
+		}
+
 		// Clean up stale session runtime directories that no longer
 		// correspond to an active session.
 		if err := cleanupStaleSessionRuntimeDirs(db, cfg.RuntimeDir); err != nil {
@@ -296,6 +296,7 @@ func runServe(stdout, stderr io.Writer) error {
 			DB:                db,
 			AdminTokenHash:    adminHash,
 			OperationRegistry: newOperationRegistry(),
+			MACLifecycle:      macLifecycle,
 		}
 
 		mux := http.NewServeMux()

@@ -386,6 +386,22 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Acquire workspace-use lease to reserve MAC state through pre-registration work.
+	var leaseRelease func()
+	if a.MACLifecycle != nil {
+		a.MACLifecycle.mu.Lock()
+		_, leaseRelease, err = a.MACLifecycle.acquireUse("", session.Workspace)
+		a.MACLifecycle.mu.Unlock()
+		if err != nil {
+			opLog(ctx).Error("cannot acquire workspace-use lease",
+				slog.String("operation", "run"),
+				slog.String("error", err.Error()),
+			)
+			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			return
+		}
+	}
+
 	// In system mode, determine the MAC backend before pin creation,
 	// operation registration, and run.start audit.
 	// Note: ensureSessionDockerDir() above is a filesystem side effect
@@ -396,6 +412,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	if cfg.Mode == ModeSystem {
 		backend, err := detectLSM()
 		if err != nil {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
 			opLog(ctx).Error("cannot determine MAC backend",
 				slog.String("operation", "run"),
 				slog.String("error", err.Error()),
@@ -410,6 +429,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			securityOpt = "label=disable"
 		default:
 			// LSMNone: no supported MAC backend active — fail closed.
+			if leaseRelease != nil {
+				leaseRelease()
+			}
 			opLog(ctx).Error("no MAC backend active for system mode",
 				slog.String("operation", "run"),
 				slog.String("backend", string(backend)),
@@ -447,7 +469,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		for i, m := range resolvedMounts {
 			pm, err := a.pinMount(session.Workspace, m.HostPath, cfg.RuntimeDir, op.ID, i)
 			if err != nil {
-				// Fail closed: do not use original pathname.
+				if leaseRelease != nil {
+					leaseRelease()
+				}
 				for j := len(pinnedMounts) - 1; j >= 0; j-- {
 					if ce := pinnedMounts[j].Cleanup(); ce != nil {
 						opLog(ctx).Error("pin cleanup failed",
@@ -473,6 +497,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Register the operation. Single tryCreate after all pins are created.
 	if a.OperationRegistry != nil {
 		if !a.OperationRegistry.tryCreate(op) {
+			if leaseRelease != nil {
+				leaseRelease()
+			}
 			for j := len(pinnedMounts) - 1; j >= 0; j-- {
 				if ce := pinnedMounts[j].Cleanup(); ce != nil {
 					opLog(ctx).Error("pin cleanup failed",
@@ -486,6 +513,10 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		}
 		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
+
+	// Lease is now associated with the registered operation; it will be
+	// released by waitRunCompletion after cmd.Wait().
+	op.macLeaseRelease = leaseRelease
 
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:             "run.start",
@@ -561,6 +592,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	if result.Terminated {
 		cancel()
+		if op.macLeaseRelease != nil {
+			op.macLeaseRelease()
+		}
 		cleanupCidfile(op)
 		if ce := cleanupPinnedMounts(op); ce != nil {
 			opLog(ctx).Error("pin cleanup failed",
@@ -580,6 +614,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Err != nil {
 		cancel()
+		if op.macLeaseRelease != nil {
+			op.macLeaseRelease()
+		}
 		cleanupCidfile(op)
 		if ce := cleanupPinnedMounts(op); ce != nil {
 			opLog(ctx).Error("pin cleanup failed",
@@ -635,6 +672,11 @@ func (a *App) waitRunCompletion(op *operation, started time.Time) {
 			slog.String("operation_id", op.ID),
 			slog.String("error", cleanupErr.Error()),
 		)
+	}
+
+	// Release workspace-use lease.
+	if op.macLeaseRelease != nil {
+		op.macLeaseRelease()
 	}
 
 	duration := time.Since(started).Round(time.Millisecond).String()

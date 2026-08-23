@@ -883,7 +883,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("config_add_rejects_opt_selinux", func(t *testing.T) {
+	t.Run("config_add_accepts_opt_selinux_no_mac_prep", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -905,16 +905,30 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		apparmorLSMActive = func() (bool, error) { return false, nil }
 		defer func() { apparmorLSMActive = origAA }()
 
+		// /opt is accepted as authorization ceiling; MAC preparation is skipped.
+		selinuxCalled := false
+		origEnsure := selinuxEnsureWorkspaceLabel
+		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+			selinuxCalled = true
+			return false, nil
+		}
+		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+
+		origData, _ := os.ReadFile(configPath)
+
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd("/opt", &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit, got 0")
+		if code != 0 {
+			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "exact /opt") {
-			t.Errorf("expected /opt rejection in stderr, got: %s", stderr.String())
+		if selinuxCalled {
+			t.Error("SELinux MAC preparation must NOT be called for /opt")
 		}
-		// Config unchanged.
-		verifyConfigUnchanged(t, configPath, data)
+		// Config should have /opt added.
+		newData, _ := os.ReadFile(configPath)
+		if bytes.Equal(origData, newData) {
+			t.Error("config should have been updated with /opt")
+		}
 	})
 
 	t.Run("config_add_home_no_selinux_prep", func(t *testing.T) {
@@ -1028,8 +1042,10 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		}
 		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
 
+		// Use a non-/opt path to test config validation failure.
+		newRoot := testAllowedRootDir(t)
 		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", &stdout, &stderr)
+		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
 		if code == 0 {
 			t.Fatalf("expected non-zero exit, got 0")
 		}
@@ -1210,14 +1226,22 @@ func TestAllowedRootPreflightDispatch(t *testing.T) {
 		}
 	})
 
-	t.Run("exact_opt_rejected", func(t *testing.T) {
+	t.Run("exact_opt_skips_selinux_mac_prep", func(t *testing.T) {
+		selinuxCalled := false
+		origEnsure := selinuxEnsureWorkspaceLabel
+		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+			selinuxCalled = true
+			return false, nil
+		}
+		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+
 		var stderr bytes.Buffer
 		err := allowedRootPreflight("/opt", &stderr)
-		if err == nil {
-			t.Fatal("expected error for /opt, got nil")
+		if err != nil {
+			t.Fatalf("expected nil for /opt as authorization root, got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "exact /opt") {
-			t.Errorf("expected /opt rejection in error, got: %v", err)
+		if selinuxCalled {
+			t.Error("SELinux MAC preparation must NOT be called for /opt")
 		}
 	})
 }
@@ -1359,7 +1383,7 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 		}
 	})
 
-	t.Run("config_allowed_root_add_rejects_opt", func(t *testing.T) {
+	t.Run("config_allowed_root_add_accepts_opt_no_mac", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -1381,19 +1405,32 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 		apparmorLSMActive = func() (bool, error) { return false, nil }
 		defer func() { apparmorLSMActive = origAA }()
 
+		selinuxCalled := false
+		origEnsure := selinuxEnsureWorkspaceLabel
+		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+			selinuxCalled = true
+			return false, nil
+		}
+		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+
+		origData, _ := os.ReadFile(configPath)
+
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd("/opt", &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit, got 0")
+		if code != 0 {
+			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "exact /opt") {
-			t.Errorf("expected /opt rejection in stderr, got: %s", stderr.String())
+		if selinuxCalled {
+			t.Error("SELinux MAC preparation must NOT be called for /opt")
 		}
-		// Config unchanged.
-		verifyConfigUnchanged(t, configPath, data)
+		// Config should have /opt added.
+		newData, _ := os.ReadFile(configPath)
+		if bytes.Equal(origData, newData) {
+			t.Error("config should have been updated with /opt")
+		}
 	})
 
-	t.Run("selinux_init_rejects_opt", func(t *testing.T) {
+	t.Run("selinux_init_skips_opt_mac_prep", func(t *testing.T) {
 		// Mock root for system mode.
 		origUID := EffectiveUID
 		EffectiveUID = func() int { return 0 }
@@ -1413,12 +1450,13 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 			t.Fatal("backend.prepare must not be nil")
 		}
 
-		_, err := backend.prepare("/opt")
-		if err == nil {
-			t.Fatal("expected error for /opt, got nil")
+		// /opt is accepted; MAC preparation is skipped.
+		result, err := backend.prepare("/opt")
+		if err != nil {
+			t.Fatalf("expected nil for /opt as authorization root, got: %v", err)
 		}
-		if !strings.Contains(err.Error(), "exact /opt") {
-			t.Errorf("expected /opt rejection in error, got: %v", err)
+		if result != nil && result.RollbackOnCoreFailure != nil {
+			t.Error("no rollback expected for /opt (no MAC preparation)")
 		}
 	})
 }
