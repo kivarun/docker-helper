@@ -234,6 +234,10 @@ will apply on the next start.`,
 }
 
 // configAllowedRootCommand manages the global allowed_roots array.
+// This is an authorization-only operation: it does NOT prepare MAC state.
+// For the common workflow that includes MAC preparation, use:
+//
+//	docker-helper workspace-root add PATH
 var configAllowedRootCommand = &Command{
 	Name:       "allowed-root",
 	Summary:    "Manage global allowed roots",
@@ -250,11 +254,17 @@ Subcommands:
 The global allowed_roots is the coarse authorization ceiling for new sessions.
 Every new session workspace must be under at least one allowed root.
 
+This command modifies authorization state only. It does NOT prepare MAC
+state (SELinux labels, AppArmor roots). For the common workflow that
+includes MAC preparation, use:
+
+  docker-helper workspace-root add PATH
+
 add:
   - canonicalizes and validates the path;
   - idempotent (prints "already present" if the root exists);
   - preserves existing roots;
-  - in system mode with SELinux, prepares the managed label.
+  - authorization-only (no MAC preparation).
 
 remove:
   - resolves/matches the stored canonical form;
@@ -322,7 +332,9 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// configAllowedRootAdd adds a root to allowed_roots.
+// configAllowedRootAdd adds a root to allowed_roots (authorization-only).
+// It does NOT prepare MAC state. For the common workflow with MAC
+// preparation, use docker-helper workspace-root add.
 func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 	if path == "" {
 		fmt.Fprintln(stderr, "error: path is required")
@@ -339,66 +351,7 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// Determine whether SELinux preparation may be needed.
-	// The actual detectLSM + ensureWorkspaceLabel run inside the
-	// transaction preflight, after config validation.
-	needsSELinux := resolveDeploymentMode() == ModeSystem && !isHomeRoot(canonical)
-
-	return executeConfigTransaction(stdout, stderr, safeWriteConfig, func(raw map[string]json.RawMessage, migrated bool) (configMutationResult, error) {
-		fc, err := decodeFileConfig(raw)
-		if err != nil {
-			return configMutationResult{}, err
-		}
-
-		// Validate existing roots with full canonicalization (strict resolver).
-		// This ensures all existing roots are valid before adding a new one.
-		existingRoots, err := resolveAllowedRoots(raw, fc)
-		if err != nil {
-			return configMutationResult{}, err
-		}
-
-		// Check if already present.
-		present := false
-		for _, r := range existingRoots {
-			if r == canonical {
-				present = true
-				break
-			}
-		}
-
-		// SELinux preflight: runs after validation, before write or SkipWrite.
-		// SELinux preparation runs even when the root is already present.
-		var preflight func() error
-		if needsSELinux {
-			preflight = func() error {
-				return selinuxAllowedRootPreflight(canonical)
-			}
-		}
-
-		if present {
-			if !migrated {
-				return configMutationResult{
-					SkipWrite: true,
-					Message:   fmt.Sprintf("already present %s\n", canonical),
-					Preflight: preflight,
-				}, nil
-			}
-			// Legacy migration needed: write migrated config.
-			return configMutationResult{
-				Message:   fmt.Sprintf("already present %s (legacy schema migrated)\n", canonical),
-				Preflight: preflight,
-			}, nil
-		}
-
-		// Add new root to canonical roots list.
-		rawBytes, _ := json.Marshal(append(existingRoots, canonical))
-		raw["allowed_roots"] = rawBytes
-
-		return configMutationResult{
-			Message:   fmt.Sprintf("added %s\n", canonical),
-			Preflight: preflight,
-		}, nil
-	})
+	return addAllowedRootToConfig(canonical, stdout, stderr)
 }
 
 // configAllowedRootRemove removes a root from allowed_roots.
@@ -1351,7 +1304,8 @@ func applyConfigChangeTransactionally(
 }
 
 // attemptReload calls POST /reload and returns a structured result with error.
-func attemptReload() reloadOutcome {
+// Can be replaced in tests to avoid requiring a running daemon.
+var attemptReload = func() reloadOutcome {
 	client, resolveErr := resolveOperatorClient(operatorClientOptions{})
 	if resolveErr != nil {
 		return reloadOutcome{reloadTransportError, resolveErr}

@@ -569,6 +569,7 @@ func init() {
 		credentialCommand,
 		adminCommand,
 		apparmorCommand,
+		workspaceRootCommand,
 		versionCommand,
 		helpCommand,
 		pullCommand,

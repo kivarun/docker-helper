@@ -870,88 +870,19 @@ func TestAllowedRootRemoveNoOpInvalidConfigFails(t *testing.T) {
 
 var errSELinuxSentinel = fmt.Errorf("selinux preflight sentinel")
 
-// TestSELinuxPreflightOrdering verifies the SELinux preflight ordering:
-//  1. invalid config -> SELinux preparation not invoked;
-//  2. valid ADD of new root -> preparation invoked;
-//  3. valid ADD of already-present root -> preparation invoked even though
-//     the config write is skipped (SkipWrite).
+// TestSELinuxPreflightOrdering verifies the ownership separation:
+//  1. config allowed-root add is authorization-only (no SELinux);
+//  2. workspace-root add rejects exact /opt in SELinux mode;
+//  3. workspace-root add allows /home without SELinux preparation.
 func TestSELinuxPreflightOrdering(t *testing.T) {
-	t.Run("invalid_config_skips_selinux", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
-		cfg := map[string]any{
-			"allowed_roots": []string{allowedRoot},
-			"session_ttl":   "12h",
-			"database_path": "/should/not/be/here",
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+	// Mock attemptReload to return "daemon not running" to avoid authentication issues.
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		return reloadOutcome{reloadDaemonNotRunning, nil}
+	}
+	defer func() { attemptReload = origAttemptReload }()
 
-		// Mock root so /opt passes the workspace root check;
-		// the test is about config validation, not root policy.
-		origUID := EffectiveUID
-		EffectiveUID = func() int { return 0 }
-		defer func() { EffectiveUID = origUID }()
-
-		selinuxCalled := false
-		origPreflight := selinuxAllowedRootPreflight
-		selinuxAllowedRootPreflight = func(string) error {
-			selinuxCalled = true
-			return nil
-		}
-		defer func() { selinuxAllowedRootPreflight = origPreflight }()
-
-		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit, got 0, stdout: %s", stdout.String())
-		}
-		if !strings.Contains(stderr.String(), "database_path") {
-			t.Errorf("expected validation error, got: %s", stderr.String())
-		}
-		if selinuxCalled {
-			t.Error("SELinux preparation must not be invoked when config validation fails")
-		}
-		// Config unchanged
-		verifyConfigUnchanged(t, configPath, data)
-	})
-
-	t.Run("valid_add_new_root_invokes_selinux", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
-		cfg := map[string]any{
-			"allowed_roots": []string{allowedRoot},
-			"session_ttl":   "12h",
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
-
-		origUID := EffectiveUID
-		EffectiveUID = func() int { return 0 }
-		defer func() { EffectiveUID = origUID }()
-
-		selinuxCalled := false
-		origPreflight := selinuxAllowedRootPreflight
-		selinuxAllowedRootPreflight = func(string) error {
-			selinuxCalled = true
-			return errSELinuxSentinel
-		}
-		defer func() { selinuxAllowedRootPreflight = origPreflight }()
-
-		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd("/opt", &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("expected non-zero exit (sentinel error), got 0, stdout: %s", stdout.String())
-		}
-		if !selinuxCalled {
-			t.Error("SELinux preparation must be invoked for valid ADD of new root")
-		}
-		if !strings.Contains(stderr.String(), "selinux preflight sentinel") {
-			t.Errorf("expected sentinel error in stderr, got: %s", stderr.String())
-		}
-		// Config unchanged (preflight error aborts before write).
-		verifyConfigUnchanged(t, configPath, data)
-	})
-
-	t.Run("valid_add_present_root_invokes_selinux", func(t *testing.T) {
+	t.Run("config_add_is_authorization_only", func(t *testing.T) {
 		cfg := map[string]any{
 			"allowed_roots": []string{"/opt"},
 			"session_ttl":   "12h",
@@ -959,6 +890,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		data, _ := json.MarshalIndent(cfg, "", "  ")
 		configPath := setupSELinuxTestEnv(t, data)
 
+		// Mock root so /opt passes the workspace root check.
 		origUID := EffectiveUID
 		EffectiveUID = func() int { return 0 }
 		defer func() { EffectiveUID = origUID }()
@@ -971,19 +903,120 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		}
 		defer func() { selinuxAllowedRootPreflight = origPreflight }()
 
+		// /opt is already in the config, so this should be idempotent.
+		// But config allowed-root add must NOT invoke SELinux.
+		origData, _ := os.ReadFile(configPath)
+
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
 		}
-		if !strings.Contains(stdout.String(), "already present") {
-			t.Errorf("expected 'already present', got: %s", stdout.String())
+		if selinuxCalled {
+			t.Error("config allowed-root add must NOT invoke SELinux preparation")
 		}
-		if !selinuxCalled {
-			t.Error("SELinux preparation must be invoked for valid ADD of already-present root (SkipWrite)")
+		// Config unchanged (SkipWrite for already present).
+		verifyConfigUnchanged(t, configPath, origData)
+	})
+
+	t.Run("workspace_root_add_opt_rejected_selinux", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
 		}
-		// Config unchanged (SkipWrite).
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// Mock root so /opt passes workspace root check.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
+		// Mock SELinux detection.
+		origSEL := selinuxEnabled
+		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+		defer func() { selinuxEnabled = origSEL }()
+		origAA := apparmorLSMActive
+		apparmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { apparmorLSMActive = origAA }()
+
+		var stdout, stderr bytes.Buffer
+		code := workspaceRootAdd("/opt", &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("expected non-zero exit, got 0")
+		}
+		if !strings.Contains(stderr.String(), "exact /opt") {
+			t.Errorf("expected /opt rejection in stderr, got: %s", stderr.String())
+		}
+		// Config unchanged.
 		verifyConfigUnchanged(t, configPath, data)
+	})
+
+	t.Run("workspace_root_add_home_no_selinux", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// Mock root so /home passes workspace root check.
+		origUID := EffectiveUID
+		EffectiveUID = func() int { return 0 }
+		defer func() { EffectiveUID = origUID }()
+
+		// Mock SELinux detection.
+		origSEL := selinuxEnabled
+		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+		defer func() { selinuxEnabled = origSEL }()
+		origAA := apparmorLSMActive
+		apparmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { apparmorLSMActive = origAA }()
+
+		// /home is a home root, so no SELinux preparation.
+		origData, _ := os.ReadFile(configPath)
+
+		var stdout, stderr bytes.Buffer
+		code := workspaceRootAdd("/home", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+		}
+		// Config should have /home added.
+		newData, _ := os.ReadFile(configPath)
+		if bytes.Equal(origData, newData) {
+			t.Error("config should have been updated with /home")
+		}
+	})
+
+	t.Run("workspace_root_add_user_mode_no_mac", func(t *testing.T) {
+		allowedRoot := testAllowedRootDir(t)
+		cfg := map[string]any{
+			"allowed_roots": []string{allowedRoot},
+			"session_ttl":   "12h",
+		}
+		data, _ := json.MarshalIndent(cfg, "", "  ")
+		configPath := setupSELinuxTestEnv(t, data)
+
+		// /home is forbidden for non-root, so use a subdirectory.
+		testRoot := filepath.Join(allowedRoot, "workspace-test")
+		if err := os.MkdirAll(testRoot, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		origData, _ := os.ReadFile(configPath)
+
+		var stdout, stderr bytes.Buffer
+		code := workspaceRootAdd(testRoot, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
+		}
+		// Config should have the root added.
+		newData, _ := os.ReadFile(configPath)
+		if bytes.Equal(origData, newData) {
+			t.Error("config should have been updated")
+		}
 	})
 }
 
