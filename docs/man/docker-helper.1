@@ -168,7 +168,8 @@ List all principals (username, UID, GID, home, enabled).
 Show principal details.
 .TP
 .B docker-helper principal set [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER FIELD VALUE
-Modify principal settings.
+Modify principal settings. FIELD currently supports only \fBenabled\fR;
+VALUE must be \fBtrue\fR or \fBfalse\fR.
 .TP
 .B docker-helper principal delete [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
 Delete a principal and all its sessions, credentials, and allowed roots.
@@ -224,7 +225,7 @@ Pull a Docker image.
 .B docker-helper build \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 .TP
-.B docker-helper run \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-mount SOURCE:TARGET[:ro] ...] \-\& [command]
+.B docker-helper run \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-mount SOURCE:TARGET[:ro] ...] \-\- [command]
 Run a Docker container. \-\-env and \-\-mount may be repeated.
 .TP
 .B docker-helper registry login \-\-registry REGISTRY \-\-username USER [\-\-password-stdin] [\-\-json]
@@ -232,7 +233,7 @@ Log in to a container registry for the current session.
 With \-\-password-stdin, read the password from stdin.
 With \-\-json, output in JSON format.
 .SH OPERATOR ENDPOINT SELECTION
-For reload, session, principal, and credential commands, select the target daemon:
+For reload, session, principal, credential, and admin token rotate commands, select the target daemon:
 .IP \(bu 4
 \fB\-\-system\fR: Connect to system daemon (default for system mode)
 .IP \(bu 4

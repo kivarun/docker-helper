@@ -940,17 +940,13 @@ func TestCompletionAllowedRootAfterPathNoSuggestionsBehavioral(t *testing.T) {
 }
 
 func TestCompletionDoubleDashStopsFlagCompletion(t *testing.T) {
-	// After literal --, no docker-helper flags or subcommands should be suggested.
+	// After literal --, COMPREPLY must be empty.
 	// Container command arguments after -- are not docker-helper options.
+	// No docker-helper completions may leak through: flags, subcommands, -h, --help, etc.
 	script := completionScript(t)
 	results := runCompletion(t, script, []string{"docker-helper", "run", "--image", "alpine", "--", "sh", "-"})
-	if len(results) > 0 {
-		for _, r := range results {
-			if strings.HasPrefix(r, "--") || r == "help" {
-				t.Errorf("after --, must NOT suggest docker-helper flags, got: %s", r)
-				break
-			}
-		}
+	if len(results) != 0 {
+		t.Errorf("after --, COMPREPLY must be empty, got: %v", results)
 	}
 }
 

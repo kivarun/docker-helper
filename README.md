@@ -628,7 +628,7 @@ admin token is required.
 
 ## Operator CLI
 
-API-backed operator commands (principal, credential, session, reload)
+API-backed operator commands (principal, credential, session, reload, admin token rotate)
 support explicit endpoint selection:
 
 ```
