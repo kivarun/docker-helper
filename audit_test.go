@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -752,10 +753,10 @@ func TestPullRejectedAudit(t *testing.T) {
 	}
 
 	records := parseAuditRecords(auditBuf)
-	found := false
+	count := 0
 	for _, rec := range records {
 		if rec.Event == "pull.rejected" {
-			found = true
+			count++
 			if rec.Result != "invalid_image" {
 				t.Errorf("result = %q, want invalid_image", rec.Result)
 			}
@@ -776,8 +777,8 @@ func TestPullRejectedAudit(t *testing.T) {
 			t.Error("pull.finish must not be emitted for rejected request")
 		}
 	}
-	if !found {
-		t.Fatal("pull.rejected event not found in audit records")
+	if count != 1 {
+		t.Errorf("expected exactly 1 pull.rejected event, got %d", count)
 	}
 }
 
@@ -1002,35 +1003,6 @@ func TestRejectedShuttingDown(t *testing.T) {
 	}
 }
 
-func TestRejectedUnauthenticatedNoRejectedEvent(t *testing.T) {
-	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
-
-	// Send pull request without authentication.
-	reqBody := map[string]any{"image": "alpine:3.24"}
-	body, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	app.handlePull(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
-	}
-
-	records := parseAuditRecords(auditBuf)
-	for _, rec := range records {
-		if rec.Event == "pull.rejected" {
-			t.Error("unauthenticated request must not emit pull.rejected")
-		}
-		if rec.Event == "build.rejected" {
-			t.Error("unauthenticated request must not emit build.rejected")
-		}
-		if rec.Event == "run.rejected" {
-			t.Error("unauthenticated request must not emit run.rejected")
-		}
-	}
-}
-
 func TestRejectedNoSensitiveData(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
@@ -1112,5 +1084,159 @@ func TestAcceptedOperationNoRejectedEvent(t *testing.T) {
 		if rec.Event == "pull.rejected" {
 			t.Error("accepted request must not emit pull.rejected")
 		}
+	}
+}
+
+func TestBuildRejectedInternalError(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+	app.OperationRegistry = newOperationRegistry()
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a staging seam that forces Cleanup() to fail, triggering
+	// the internal_error path after tryCreate rejection.
+	sentinelErr := errors.New("injected staging cleanup error")
+	app.StageBuildContextFn = stagingSeamWithCleanupError(t, sentinelErr)
+
+	// Force tryCreate rejection.
+	app.OperationRegistry.shutting = true
+
+	// Create a valid build context.
+	ctxDir := result.Session.Workspace
+	dockerfilePath := filepath.Join(ctxDir, "Dockerfile")
+	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	reqBody := map[string]any{
+		"context":    ".",
+		"dockerfile": "Dockerfile",
+		"image":      "test:latest",
+	}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	app.handleBuild(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+	count := 0
+	for _, rec := range records {
+		if rec.Event == "build.rejected" {
+			count++
+			if rec.Result != "shutting_down" {
+				t.Errorf("result = %q, want shutting_down", rec.Result)
+			}
+		}
+		if rec.Event == "build.start" {
+			t.Error("build.start must not be emitted for rejected request")
+		}
+		if rec.Event == "build.finish" {
+			t.Error("build.finish must not be emitted for rejected request")
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 build.rejected event, got %d", count)
+	}
+}
+
+func TestRejectedWithRequestID(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use the real mux with withRequestID middleware.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /pull", withRequestID(app.handlePull))
+
+	reqBody := map[string]any{"image": ""}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+result.Token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+
+	// Assert X-Request-ID header is non-empty.
+	rid := w.Header().Get("X-Request-ID")
+	if rid == "" {
+		t.Fatal("X-Request-ID header must be non-empty")
+	}
+
+	records := parseAuditRecords(auditBuf)
+	found := false
+	for _, rec := range records {
+		if rec.Event == "pull.rejected" {
+			found = true
+			if rec.RequestID == "" {
+				t.Error("rejected event request_id must be non-empty")
+			}
+			if rec.RequestID != rid {
+				t.Errorf("audit request_id = %q, want %q (X-Request-ID)", rec.RequestID, rid)
+			}
+			if rec.SessionID != result.Session.ID {
+				t.Errorf("session_id = %q, want %q", rec.SessionID, result.Session.ID)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pull.rejected event not found")
+	}
+}
+
+func TestRejectedUnauthenticatedNoRejectedEvent(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuth(t)
+
+	// Send pull request without authentication.
+	reqBody := map[string]any{"image": "alpine:3.24"}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	app.handlePull(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+
+	records := parseAuditRecords(auditBuf)
+
+	// Exactly one auth.failure must be emitted.
+	authFailureCount := 0
+	for _, rec := range records {
+		if rec.Event == "auth.failure" {
+			authFailureCount++
+		}
+		if rec.Event == "pull.rejected" {
+			t.Error("unauthenticated request must not emit pull.rejected")
+		}
+		if rec.Event == "build.rejected" {
+			t.Error("unauthenticated request must not emit build.rejected")
+		}
+		if rec.Event == "run.rejected" {
+			t.Error("unauthenticated request must not emit run.rejected")
+		}
+	}
+	if authFailureCount != 1 {
+		t.Errorf("expected exactly 1 auth.failure event, got %d", authFailureCount)
 	}
 }
