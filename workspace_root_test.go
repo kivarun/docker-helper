@@ -8,9 +8,11 @@ import (
 )
 
 func TestIsForbiddenWorkspaceRoot(t *testing.T) {
-	// The admin bypass for wide namespaces depends on EffectiveUID.
-	// Capture the real uid so we can adjust expectations.
-	isRoot := EffectiveUID() == 0
+	// Use deterministic non-root UID so expected results are the same
+	// regardless of the real host UID running go test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	defer func() { EffectiveUID = origUID }()
 
 	tests := []struct {
 		name    string
@@ -50,9 +52,9 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 		{"under sys", "/sys/kernel", true, "under forbidden system directory"},
 
 		// Forbidden wide namespaces (exact match only) — /home and /opt
-		// are exempted for root via admin bypass.
-		{"wide namespace home", "/home", !isRoot, "too broad"},
-		{"wide namespace opt", "/opt", !isRoot, "too broad"},
+		// are rejected for non-root; root gets admin bypass (tested separately).
+		{"wide namespace home", "/home", true, "too broad"},
+		{"wide namespace opt", "/opt", true, "too broad"},
 		{"wide namespace srv", "/srv", true, "too broad"},
 		{"wide namespace mnt", "/mnt", true, "too broad"},
 		{"wide namespace media", "/media", true, "too broad"},
@@ -94,7 +96,11 @@ func TestIsForbiddenWorkspaceRoot(t *testing.T) {
 }
 
 func TestValidateWorkspaceRootPolicy(t *testing.T) {
-	isRoot := EffectiveUID() == 0
+	// Use deterministic non-root UID so expected results are the same
+	// regardless of the real host UID running go test.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	defer func() { EffectiveUID = origUID }()
 
 	tests := []struct {
 		name    string
@@ -110,8 +116,8 @@ func TestValidateWorkspaceRootPolicy(t *testing.T) {
 		{"forbidden root", "/", true},
 		{"forbidden system", "/etc", true},
 		{"forbidden under system", "/etc/passwd", true},
-		{"forbidden wide ns home", "/home", !isRoot},
-		{"forbidden wide ns opt", "/opt", !isRoot},
+		{"forbidden wide ns home", "/home", true},
+		{"forbidden wide ns opt", "/opt", true},
 		{"forbidden tmp", "/tmp", true},
 		{"forbidden under tmp", "/tmp/work", true},
 	}

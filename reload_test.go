@@ -1618,11 +1618,6 @@ func TestConfigSetReloadHTTP500(t *testing.T) {
 // TestConfigSetHTTPAddressNoReload verifies that http_address set does
 // not trigger a reload and prints "restart required".
 func TestConfigSetHTTPAddressNoReload(t *testing.T) {
-	// http_address requires system mode. Skip if not root.
-	if EffectiveUID() != 0 {
-		t.Skip("http_address requires system mode (UID 0)")
-	}
-
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
@@ -1661,6 +1656,12 @@ func TestConfigSetHTTPAddressNoReload(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 	waitForDialReady(t, "unix", socketPath)
+
+	// http_address requires system mode. Set EffectiveUID explicitly so
+	// the CLI command runs in system mode even in non-root CI.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "http_address", "127.0.0.1:9999"}, &stdout, &stderr)
@@ -1952,11 +1953,6 @@ func TestConfigUnsetRollback(t *testing.T) {
 // TestConfigSetHTTPAddressNoReloadRequest verifies that http_address set
 // makes exactly zero /reload requests.
 func TestConfigSetHTTPAddressNoReloadRequest(t *testing.T) {
-	// http_address requires system mode. Skip if not root.
-	if EffectiveUID() != 0 {
-		t.Skip("http_address requires system mode (UID 0)")
-	}
-
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
@@ -1992,6 +1988,12 @@ func TestConfigSetHTTPAddressNoReloadRequest(t *testing.T) {
 	go server.Serve(listener)
 	defer server.Close()
 	waitForDialReady(t, "unix", socketPath)
+
+	// http_address requires system mode. Set EffectiveUID explicitly so
+	// the CLI command runs in system mode even in non-root CI.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "http_address", "127.0.0.1:9999"}, &stdout, &stderr)
