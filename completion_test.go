@@ -574,15 +574,21 @@ func TestCompletionConfigUnsetNoStaleAllowedRoot(t *testing.T) {
 func TestCompletionAllowedRootSubcommands(t *testing.T) {
 	script := completionScript(t)
 
-	// Verify config allowed-root completion does not error and
-	// principal allowed-root still works (regression guard).
-	results := runCompletion(t, script, []string{"docker-helper", "principal", "allowed-root", ""})
-	if len(results) == 0 {
-		t.Error("principal allowed-root completion must return subcommands")
+	// config allowed-root must complete list, add, remove.
+	results := runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", ""})
+	expected := []string{"list", "add", "remove"}
+	if len(results) != len(expected) {
+		t.Fatalf("expected %d subcommands, got %d: %v", len(expected), len(results), results)
 	}
-	for _, sub := range []string{"add", "remove"} {
+	for _, sub := range expected {
 		if !contains(results, sub) {
-			t.Errorf("principal allowed-root completion must contain %s", sub)
+			t.Errorf("config allowed-root completion must contain %s", sub)
 		}
+	}
+
+	// Prefix completion: "a" should yield only "add".
+	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "a"})
+	if len(results) != 1 || results[0] != "add" {
+		t.Errorf("config allowed-root a<TAB>: expected [add], got %v", results)
 	}
 }
