@@ -95,8 +95,8 @@ func runApparmorRootList(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	mgr := newProductionAppArmorManager()
-	roots, err := mgr.listRoots()
+	mgr := newProductionAppArmorProfileManager()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -119,8 +119,8 @@ func runApparmorRootAdd(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	mgr := newProductionAppArmorManager()
-	result, err := mgr.addRoot(path)
+	mgr := newProductionAppArmorProfileManager()
+	result, err := mgr.addManagedRoot(path)
 	if err != nil {
 		var ie *inputError
 		if errors.As(err, &ie) {
@@ -149,8 +149,8 @@ func runApparmorRootRemove(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	mgr := newProductionAppArmorManager()
-	result, err := mgr.removeRoot(path)
+	mgr := newProductionAppArmorProfileManager()
+	result, err := mgr.removeManagedRoot(path)
 	if err != nil {
 		var ie *inputError
 		if errors.As(err, &ie) {
@@ -179,7 +179,7 @@ func runApparmorCheck(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	mgr := newProductionAppArmorManager()
+	mgr := newProductionAppArmorProfileManager()
 	if err := mgr.check(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

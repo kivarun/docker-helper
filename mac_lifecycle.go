@@ -597,13 +597,13 @@ func macBoundaryOverlap(a, b string) bool {
 
 // appArmorWorkspaceMACDriver wraps the AppArmor manager for the coordinator.
 type appArmorWorkspaceMACDriver struct {
-	addRoot    func(string) (rootResult, error)
-	removeRoot func(string) (rootResult, error)
-	listRoots  func() ([]string, error)
+	addManagedRoot    func(string) (rootResult, error)
+	removeManagedRoot func(string) (rootResult, error)
+	listManagedRoots  func() ([]string, error)
 }
 
 func (d *appArmorWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
-	roots, err := d.listRoots()
+	roots, err := d.listManagedRoots()
 	if err != nil {
 		return workspaceMACCoverage{}, false, fmt.Errorf("cannot list AppArmor managed roots: %w", err)
 	}
@@ -614,7 +614,7 @@ func (d *appArmorWorkspaceMACDriver) ensureCoverage(workspace string) (workspace
 		}
 	}
 
-	result, err := d.addRoot(workspace)
+	result, err := d.addManagedRoot(workspace)
 	if err != nil {
 		return workspaceMACCoverage{}, false, err
 	}
@@ -622,7 +622,7 @@ func (d *appArmorWorkspaceMACDriver) ensureCoverage(workspace string) (workspace
 }
 
 func (d *appArmorWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
-	roots, err := d.listRoots()
+	roots, err := d.listManagedRoots()
 	if err != nil {
 		return workspaceMACCoverage{}, err
 	}
@@ -635,32 +635,32 @@ func (d *appArmorWorkspaceMACDriver) verifyCoverage(workspace string) (workspace
 }
 
 func (d *appArmorWorkspaceMACDriver) removeBoundary(boundary string) error {
-	_, err := d.removeRoot(boundary)
+	_, err := d.removeManagedRoot(boundary)
 	return err
 }
 
 func (d *appArmorWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
-	return d.listRoots()
+	return d.listManagedRoots()
 }
 
 func (d *appArmorWorkspaceMACDriver) backendType() string {
 	return "apparmor"
 }
 
-// selinuxWorkspaceOps is the subset of selinuxWorkspaceManager operations
+// selinuxFcontextOps is the subset of selinuxFcontextManager operations
 // used by the MAC coordinator. Defined as an interface so that tests
 // can inject a mock without changing production behavior.
-type selinuxWorkspaceOps interface {
-	listCoveringBoundaries(workspace string) ([]string, error)
+type selinuxFcontextOps interface {
+	listCoveringFcontexts(workspace string) ([]string, error)
 	verifyActualType(workspace string) error
 	restoreconRecursive(workspace string) error
-	ensureWorkspaceLabel(workspace string) (bool, error)
-	rollbackWorkspaceLabel(boundary string) error
+	ensureWorkspaceFcontext(workspace string) (bool, error)
+	removeWorkspaceFcontext(boundary string) error
 }
 
 // selinuxWorkspaceMACDriver wraps the SELinux workspace manager for the coordinator.
 type selinuxWorkspaceMACDriver struct {
-	mgr selinuxWorkspaceOps
+	mgr selinuxFcontextOps
 }
 
 func (d *selinuxWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
@@ -684,7 +684,7 @@ func (d *selinuxWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceM
 	}
 
 	// Prepare the workspace as a helper-owned boundary.
-	newlyCreated, err := d.mgr.ensureWorkspaceLabel(workspace)
+	newlyCreated, err := d.mgr.ensureWorkspaceFcontext(workspace)
 	if err != nil {
 		return workspaceMACCoverage{}, false, err
 	}
@@ -697,7 +697,7 @@ func (d *selinuxWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceM
 	}
 
 	// Discover the actual persistent covering boundary.
-	boundaries, err := d.mgr.listCoveringBoundaries(workspace)
+	boundaries, err := d.mgr.listCoveringFcontexts(workspace)
 	if err != nil {
 		return workspaceMACCoverage{}, fmt.Errorf("cannot discover SELinux coverage for %s: %w", workspace, err)
 	}
@@ -718,7 +718,7 @@ func (d *selinuxWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceM
 }
 
 func (d *selinuxWorkspaceMACDriver) findExistingCoverage(workspace string) (workspaceMACCoverage, bool, error) {
-	boundaries, err := d.mgr.listCoveringBoundaries(workspace)
+	boundaries, err := d.mgr.listCoveringFcontexts(workspace)
 	if err != nil {
 		return workspaceMACCoverage{}, false, fmt.Errorf("cannot list covering SELinux boundaries: %w", err)
 	}
@@ -733,7 +733,7 @@ func (d *selinuxWorkspaceMACDriver) removeBoundary(boundary string) error {
 	if isHomeRoot(boundary) {
 		return nil
 	}
-	return d.mgr.rollbackWorkspaceLabel(boundary)
+	return d.mgr.removeWorkspaceFcontext(boundary)
 }
 
 // SELinux operator-compatible fcontext rules MUST NOT become helper-owned.
@@ -761,21 +761,21 @@ func newWorkspaceMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, er
 
 	switch backend {
 	case LSMAppArmor:
-		mgr := newProductionAppArmorManager()
+		mgr := newProductionAppArmorProfileManager()
 		return &appArmorWorkspaceMACDriver{
-			addRoot: func(path string) (rootResult, error) {
-				return mgr.addRoot(path)
+			addManagedRoot: func(path string) (rootResult, error) {
+				return mgr.addManagedRoot(path)
 			},
-			removeRoot: func(path string) (rootResult, error) {
-				return mgr.removeRoot(path)
+			removeManagedRoot: func(path string) (rootResult, error) {
+				return mgr.removeManagedRoot(path)
 			},
-			listRoots: func() ([]string, error) {
-				return mgr.listRoots()
+			listManagedRoots: func() ([]string, error) {
+				return mgr.listManagedRoots()
 			},
 		}, nil
 	case LSMSELinux:
 		return &selinuxWorkspaceMACDriver{
-			mgr: newSELinuxWorkspaceManager(),
+			mgr: newSELinuxFcontextManager(),
 		}, nil
 	default:
 		return nil, nil

@@ -248,7 +248,7 @@ Non-home system `allowed_roots` (e.g., `/data`, `/projects/agents`,
 `/opt/docker-helper-workspaces`) are managed under `docker_helper_workspace_t`
 with persistent `semanage fcontext` rules and `restorecon -R` (type-only).
 The daemon and container domains receive workspace permissions for this type.
-`config allowed-root add` prepares the label and fails closed if it is missing.
+`config allowed-root add` updates the authorization ceiling only; it does NOT prepare MAC state.
 
 Exact `/opt` is rejected by `config allowed-root add` in SELinux mode because
 it would recursively relabel the entire `/opt` namespace. Use a dedicated child

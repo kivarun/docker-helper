@@ -20,11 +20,11 @@ import (
 	"time"
 )
 
-// testWorkspaceMACDriver is a mock workspaceMACDriver for testing the lifecycle owner.
+// testWorkspaceMACDriver is a mock workspaceMACDriver for testing the coordinator.
 type testWorkspaceMACDriver struct {
 	mu                    sync.Mutex
 	coverageMap           map[string]string // workspace -> boundary
-	helperOwnedBoundaries map[string]bool   // boundary -> is managed
+	helperOwnedBoundaries map[string]bool   // boundary -> is helper-owned
 	removeErrors          map[string]bool   // boundary -> should removal fail
 	boundaryType          string
 }
@@ -210,7 +210,7 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 		t.Error("session binding should be removed")
 	}
 
-	// Verify boundary was actually removed from backend.
+	// Verify boundary was actually removed from driver.
 	_, err = backend.verifyCoverage(workspace)
 	if err == nil {
 		t.Error("expected error verifying removed boundary")
@@ -294,7 +294,7 @@ func TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval(t *testing.T) {
 }
 
 // TestLegacyAppArmorOwnershipReconciliation verifies that existing AppArmor
-// managed boundaries are imported into ownership metadata during reconciliation.
+// helper-owned boundaries are imported into ownership metadata during reconciliation.
 func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -308,7 +308,7 @@ func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	// Simulate pre-existing managed boundary (in fragment but not in mac_boundaries).
+	// Simulate pre-existing helper-owned boundary (in fragment but not in mac_boundaries).
 	backend := newTestWorkspaceMACDriver("apparmor")
 	backend.coverageMap["/data/workspace"] = "/data"
 	backend.helperOwnedBoundaries["/data"] = true
@@ -349,7 +349,7 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 	}
 
 	// Create a mock SELinux manager that fails on listCoveringBoundaries.
-	mgr := &selinuxWorkspaceManager{
+	mgr := &selinuxFcontextManager{
 		semanagePath:   "/usr/sbin/semanage",
 		restoreconPath: "/usr/sbin/restorecon",
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
@@ -446,7 +446,7 @@ func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
 	}
 }
 
-// failingWorkspaceMACDriver is a mock backend that always fails on ensureCoverage.
+// failingWorkspaceMACDriver is a mock driver that always fails on ensureCoverage.
 type failingWorkspaceMACDriver struct {
 	err error
 }
@@ -692,7 +692,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 		t.Errorf("second release changed leases: first=%d, second=%d", leaseCountAfterFirst, leaseCountAfterSecond)
 	}
 	if boundaryRemoved != boundaryRemovedSecond {
-		t.Errorf("second release changed backend boundary state: first=%v, second=%v", boundaryRemoved, boundaryRemovedSecond)
+		t.Errorf("second release changed driver boundary state: first=%v, second=%v", boundaryRemoved, boundaryRemovedSecond)
 	}
 	// Verify the boundary count was decremented exactly once.
 	if countBefore != countAfterFirst+1 {
@@ -788,14 +788,14 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 		t.Error("child boundary should not be deferred after all consumers gone")
 	}
 
-	// Verify both boundaries were removed from backend.
+	// Verify both boundaries were removed from driver.
 	_, err = backend.verifyCoverage(parentWS)
 	if err == nil {
-		t.Error("parent boundary should be removed from backend")
+		t.Error("parent boundary should be removed from driver")
 	}
 	_, err = backend.verifyCoverage(childWS)
 	if err == nil {
-		t.Error("child boundary should be removed from backend")
+		t.Error("child boundary should be removed from driver")
 	}
 }
 
@@ -952,10 +952,10 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 		t.Error("should not be deferred after last consumer gone")
 	}
 
-	// Verify boundary was removed from backend.
+	// Verify boundary was removed from driver.
 	_, err = backend.verifyCoverage(workspace)
 	if err == nil {
-		t.Error("boundary should be removed from backend")
+		t.Error("boundary should be removed from driver")
 	}
 }
 
@@ -1810,7 +1810,7 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 // Issue 1 (continued): SELinux durable coverage with real selinuxWorkspaceMACDriver
 // =============================================================================
 
-// selinuxSeam is an injectable mock selinuxWorkspaceManager for testing
+// selinuxSeam is an injectable mock selinuxFcontextManager for testing
 // the real selinuxWorkspaceMACDriver path.
 type selinuxSeam struct {
 	coveringBoundaries []string // returned by listCoveringBoundaries
@@ -1822,7 +1822,7 @@ type selinuxSeam struct {
 	rollbackErr        error    // error from rollbackWorkspaceLabel
 }
 
-func (s *selinuxSeam) listCoveringBoundaries(workspace string) ([]string, error) {
+func (s *selinuxSeam) listCoveringFcontexts(workspace string) ([]string, error) {
 	if s.boundaryErr != nil {
 		return nil, s.boundaryErr
 	}
@@ -1837,11 +1837,11 @@ func (s *selinuxSeam) restoreconRecursive(workspace string) error {
 	return s.restoreconErr
 }
 
-func (s *selinuxSeam) ensureWorkspaceLabel(workspace string) (bool, error) {
+func (s *selinuxSeam) ensureWorkspaceFcontext(workspace string) (bool, error) {
 	return s.ensureCreated, s.ensureErr
 }
 
-func (s *selinuxSeam) rollbackWorkspaceLabel(boundary string) error {
+func (s *selinuxSeam) removeWorkspaceFcontext(boundary string) error {
 	return s.rollbackErr
 }
 
@@ -1881,7 +1881,7 @@ func TestSELinuxRealBackendAncestorWrongType(t *testing.T) {
 
 func TestSELinuxRealBackendNoBoundaryCorrectXattrFails(t *testing.T) {
 	// No persistent boundary + correct current xattr -> verify FAILS.
-	// This is the key invariant: unmanaged xattr alone is not durable.
+	// This is the key invariant: operator-compatible xattr alone is not durable.
 	seam := &selinuxSeam{
 		coveringBoundaries: nil,
 		actualTypeErr:      nil, // correct type but no persistent boundary
@@ -2164,13 +2164,13 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 		t.Error("child should not be deferred after all consumers gone")
 	}
 
-	// Verify both boundaries were removed from backend.
+	// Verify both boundaries were removed from driver.
 	_, err = backend.verifyCoverage(parentWS)
 	if err == nil {
-		t.Error("parent boundary should be removed from backend")
+		t.Error("parent boundary should be removed from driver")
 	}
 	_, err = backend.verifyCoverage(childWS)
 	if err == nil {
-		t.Error("child boundary should be removed from backend")
+		t.Error("child boundary should be removed from driver")
 	}
 }

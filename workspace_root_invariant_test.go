@@ -325,18 +325,10 @@ func TestInitSystemModePassesCanonicalToCore(t *testing.T) {
 		t.Fatalf("CLI resolved %q, want %q", resolved, canonicalTarget)
 	}
 
-	var coreRoot, apparmorRoot string
+	var coreRoot string
 	var stdout, stderr bytes.Buffer
 	err = initSystem(resolved, &stdout, &stderr,
-		newAppArmorSystemInitBackend(
-			func(path string) (rootResult, error) {
-				apparmorRoot = path
-				return rootResult{Path: path, Changed: true}, nil
-			},
-			func(path string) (rootResult, error) {
-				return rootResult{Path: path, Changed: true}, nil
-			},
-		),
+		nil,
 		func(ar string, so, se io.Writer) error {
 			coreRoot = ar
 			return nil
@@ -348,9 +340,5 @@ func TestInitSystemModePassesCanonicalToCore(t *testing.T) {
 
 	if coreRoot != canonicalTarget {
 		t.Errorf("core received allowed_root = %q, want canonical %q", coreRoot, canonicalTarget)
-	}
-	// System init no longer prepares MAC; addRoot must NOT be called.
-	if apparmorRoot != "" {
-		t.Errorf("AppArmor addRoot must NOT be called, got %q", apparmorRoot)
 	}
 }

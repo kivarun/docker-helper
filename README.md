@@ -974,9 +974,9 @@ sudo docker-helper init --allowed-root /opt/docker-helper-workspaces
 sudo docker-helper config allowed-root add /path/to/workspace
 ```
 
-`config allowed-root add` prepares the active MAC backend (AppArmor or SELinux)
-and updates the global authorization ceiling. The user does not need to know
-which backend the host uses.
+`config allowed-root add` updates the global authorization ceiling only.
+It does NOT prepare MAC state. MAC preparation occurs at session creation
+time for the concrete workspace.
 
 ### AppArmor
 
@@ -984,8 +984,8 @@ System mode uses mandatory AppArmor confinement with the
 `docker-helper-system` profile. Managed workspace roots are stored in
 `/etc/apparmor.d/docker-helper.d/managed-roots`.
 
-During system-mode `docker-helper init`, the initial workspace root is
-prepared for the AppArmor backend.
+MAC preparation occurs at session creation time for the concrete workspace.
+`docker-helper init` does NOT prepare MAC state for the bootstrap allowed root.
 
 Advanced backend-specific management:
 
@@ -1130,8 +1130,8 @@ sudo docker-helper principal create --system alice
 sudo docker-helper principal show --system alice
 
 # 3. Add a global allowed root.
-#    config allowed-root add prepares the MAC backend (AppArmor or SELinux)
-#    and raises the system-wide authorization ceiling.
+#    config allowed-root add updates the authorization ceiling only;
+#    it does NOT prepare MAC state.
 sudo mkdir -p /srv/workspaces
 sudo docker-helper config allowed-root add /srv/workspaces
 
@@ -1150,8 +1150,7 @@ sudo docker-helper credential create \
 The three-level authorization model:
 
 - **Global allowed root** — system-wide ceiling managed by
-  `config allowed-root add`; in system mode, also prepares the active
-  MAC backend (AppArmor or SELinux).
+  `config allowed-root add`; authorization-only, does NOT prepare MAC.
 - **Principal allowed root** — per-principal narrowing managed by
   `principal allowed-root add`; does not prepare MAC.
 - **Project workspace** — selected only at session creation time via

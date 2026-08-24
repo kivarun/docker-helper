@@ -855,87 +855,34 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	}, nil
 }
 
-// systemInitBackend holds backend-specific hooks for system-mode init.
-type systemInitBackend struct {
-	// resolveRoot canonicalizes an allowed-root path.
-	// nil means use resolveAllowedRoot.
-	resolveRoot func(string) (string, error)
-	// prepare runs backend-specific confinement preparation with the
-	// canonical root. Returns a prepareResult describing any rollback
-	// behavior and post-success output.
-	prepare func(canonical string) (*systemInitPrepareResult, error)
-}
-
-// systemInitPrepareResult describes the outcome of backend preparation.
-type systemInitPrepareResult struct {
-	// RollbackOnCoreFailure is called when core init fails after
-	// successful preparation. nil means no rollback (e.g., SELinux).
-	RollbackOnCoreFailure func() error
-	// rollbackLabel is the backend-specific name used in the rollback
-	// error message (e.g., "AppArmor"). Empty means no rollback.
-	rollbackLabel string
-	// OnSuccess is called after successful core init to print
-	// backend-specific status. nil means no output.
-	OnSuccess func(stdout io.Writer)
-}
-
-// newAppArmorSystemInitBackend constructs the AppArmor backend for
-// system-mode init. System init no longer prepares MAC for the bootstrap
-// allowed root; MAC preparation is handled at session creation time.
-func newAppArmorSystemInitBackend(
-	addRoot func(string) (rootResult, error),
-	removeRoot func(string) (rootResult, error),
-) *systemInitBackend {
-	return &systemInitBackend{
-		prepare: func(canonical string) (*systemInitPrepareResult, error) {
-			return &systemInitPrepareResult{}, nil
-		},
-	}
-}
-
-// newSELinuxSystemInitBackend constructs the SELinux backend for
-// system-mode init. System init no longer prepares MAC for the bootstrap
-// allowed root; MAC preparation is handled at session creation time.
-func newSELinuxSystemInitBackend(
-	mgr *selinuxWorkspaceManager,
-	resolveRoot func(string) (string, error),
-) *systemInitBackend {
-	return &systemInitBackend{
-		resolveRoot: resolveRoot,
-		prepare: func(canonical string) (*systemInitPrepareResult, error) {
-			return &systemInitPrepareResult{}, nil
-		},
-	}
-}
-
 // initSystem is the single authoritative owner of the system-init lifecycle.
 // It performs:
 //
 //  1. determine config/admin-token paths;
-//  2. reject an existing admin token before any confinement side effects;
+//  2. reject an existing admin token before any side effects;
 //  3. inspect and validate existing config if present;
 //  4. canonicalize requested bootstrap root;
 //  5. if config exists, require that requested root is already represented;
-//  6. perform backend-specific confinement preparation;
-//  7. run core init with the original requested allowed-root argument;
-//  8. apply backend-specific failure/success behavior.
+//  6. run core init with the original requested allowed-root argument.
 //
-// b is the backend-specific hooks. nil fields use production defaults.
+// System init does NOT prepare MAC state. MAC preparation is handled at
+// session creation time by the sessionMACCoordinator.
+//
+// resolveRoot is the path canonicalization function (injectable for testing).
 // core is the file-based init function (injectable for testing).
 func initSystem(allowedRoot string, stdout, stderr io.Writer,
-	b *systemInitBackend,
+	resolveRoot func(string) (string, error),
 	core func(string, io.Writer, io.Writer) error,
 ) error {
 	configPath := getConfigPathFunc()
 	configDir := filepath.Dir(configPath)
 	adminTokenPath := filepath.Join(configDir, "admin.token")
 
-	resolveRoot := b.resolveRoot
 	if resolveRoot == nil {
 		resolveRoot = resolveAllowedRoot
 	}
 
-	// Preflight 1: check existing admin.token before any confinement changes.
+	// Preflight 1: check existing admin.token before any side effects.
 	if _, err := os.Stat(adminTokenPath); err == nil {
 		fmt.Fprintln(stderr, "admin.token already exists at:")
 		fmt.Fprintln(stderr, adminTokenPath)
@@ -1003,33 +950,7 @@ func initSystem(allowedRoot string, stdout, stderr io.Writer,
 		}
 	}
 
-	// Backend-specific confinement preparation.
-	if b.prepare != nil {
-		pr, err := b.prepare(effectiveAllowedRoot)
-		if err != nil {
-			return err
-		}
-
-		// Run core init.
-		err = core(allowedRoot, stdout, stderr)
-		if err != nil {
-			// Backend-specific rollback.
-			if pr.RollbackOnCoreFailure != nil {
-				if rbErr := pr.RollbackOnCoreFailure(); rbErr != nil {
-					return fmt.Errorf("init failed: %w; %s rollback also failed: %v", err, pr.rollbackLabel, rbErr)
-				}
-			}
-			return err
-		}
-
-		// Backend-specific success output.
-		if pr.OnSuccess != nil {
-			pr.OnSuccess(stdout)
-		}
-		return nil
-	}
-
-	// No backend preparation needed; run core directly.
+	// Run core init.
 	return core(allowedRoot, stdout, stderr)
 }
 
@@ -1071,7 +992,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	switch backend {
 	case LSMAppArmor:
 		return initSystem(allowedRoot, stdout, stderr,
-			newAppArmorSystemInitBackend(getAppArmorAddRoot(), getAppArmorRemoveRoot()),
+			nil,
 			func(ar string, so, se io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err
@@ -1079,7 +1000,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		)
 	case LSMSELinux:
 		return initSystem(allowedRoot, stdout, stderr,
-			newSELinuxSystemInitBackend(newSELinuxWorkspaceManager(), nil),
+			nil,
 			func(ar string, so, se io.Writer) error {
 				_, err := initCore(ar, so, se)
 				return err
@@ -1177,31 +1098,6 @@ func installCredentialForInit(token string, stdout, stderr io.Writer) error {
 	fmt.Fprintln(stdout, "Credential installed successfully.")
 	fmt.Fprintf(stdout, "Stored at: %s\n", credPath)
 	return nil
-}
-
-// appArmorAddRoot and appArmorRemoveRoot are injectable production seams
-// for testing CLI exit codes without requiring real AppArmor.
-var (
-	appArmorAddRoot = func() func(string) (rootResult, error) {
-		return func(path string) (rootResult, error) {
-			mgr := newProductionAppArmorManager()
-			return mgr.addRoot(path)
-		}
-	}
-	appArmorRemoveRoot = func() func(string) (rootResult, error) {
-		return func(path string) (rootResult, error) {
-			mgr := newProductionAppArmorManager()
-			return mgr.removeRoot(path)
-		}
-	}
-)
-
-func getAppArmorAddRoot() func(string) (rootResult, error) {
-	return appArmorAddRoot()
-}
-
-func getAppArmorRemoveRoot() func(string) (rootResult, error) {
-	return appArmorRemoveRoot()
 }
 
 // resolveAllowedRoot normalizes and validates an allowed-root path.

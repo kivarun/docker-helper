@@ -747,7 +747,7 @@ func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
 	// /var/lib/docker-helper creation (requires root).
 	var coreCalled string
 	err := initSystem(rootDir, &bytes.Buffer{}, &bytes.Buffer{},
-		newSELinuxSystemInitBackend(nil, func(path string) (string, error) { return path, nil }),
+		nil,
 		func(ar string, so, se io.Writer) error {
 			coreCalled = ar
 			return nil

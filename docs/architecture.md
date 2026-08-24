@@ -702,17 +702,20 @@ SELinux mode.
 Authorization flows through three levels:
 
 1. **Global allowed_roots** (config.json) — the system-wide authorization
-   ceiling, managed by `config allowed-root list/add/remove`. In system mode,
-   `config allowed-root add` internally prepares the active MAC backend
-   (AppArmor or SELinux) as part of the add operation.
+   ceiling, managed by `config allowed-root list/add/remove`. Changing
+   allowed roots is a policy-only operation; it does NOT prepare MAC state.
 2. **Principal allowed roots** (database) — per-principal narrowing, managed
    by `principal allowed-root add/remove`. Does not prepare MAC.
 3. **Session workspace** (ephemeral) — selected only at session creation time
    via `session create --workspace PATH`. Must be under both a global and a
    principal allowed root.
 
-There is no fourth persistent "workspace root" abstraction. Individual
-projects are not registered persistently.
+MAC state is derived from the concrete live session/workspace lifecycle,
+not from the authorization ceiling. Only the session workspace participates
+in MAC preparation (AppArmor managed-root rules or SELinux fcontext labels).
+
+Adding `/opt` as a global allowed root must never imply recursive relabeling
+of `/opt/**`.
 
 ### Canonical paths
 
@@ -725,11 +728,17 @@ validation and use. For operations that pass paths to Docker as strings,
 additional measures (such as FD-relative traversal or inode pinning) are
 required to close the gap.
 
-### isInside()
+### Path containment
 
-The function `isInside(parent, child)` checks whether `child` is inside
-`parent` by computing `filepath.Rel(parent, child)` and verifying the
-result does not start with `..`.
+The canonical containment API lives in `path_containment.go`:
+
+- `pathWithin(root, path)` — returns true if `path` is within `root`
+  (equality allowed). Both arguments must be canonical (absolute, cleaned).
+- `pathStrictlyWithin(root, path)` — returns true if `path` is a proper
+  descendant of `root`. Equality returns false.
+
+Argument order is always root first, path second. These functions correctly
+handle the prefix trap: `pathWithin("/data", "/data2")` returns false.
 
 ### Symlink escape prevention
 
@@ -804,7 +813,7 @@ Validation details:
 - context may be relative (joined with workspace) or absolute (must be
   inside workspace);
 - dockerfile must be relative to context;
-- all paths are resolved through `EvalSymlinks` before `isInside` checks;
+- all paths are resolved through `EvalSymlinks` before `pathWithin` checks;
 - build-arg names must match `^[A-Za-z_][A-Za-z0-9_]*$`;
 - build-arg keys are sorted for deterministic Docker argv;
 - build-arg values are never logged or audited (only `build_arg_keys`).
@@ -864,7 +873,7 @@ Validation details:
 - workdir must be an absolute path if provided;
 - mount source must be relative to workspace;
 - mount target must be absolute;
-- source is resolved through `EvalSymlinks` and checked via `isInside`;
+- source is resolved through `EvalSymlinks` and checked via `pathWithin`;
 - environment values are never logged (only names in `env_keys`);
 - environment names are sorted for deterministic output;
 - `shm_size` accepts a plain integer with an optional binary unit (`k`, `m`,
@@ -1060,7 +1069,7 @@ Forbidden:
 ### System-mode run mounts
 
 In system mode, bind-mount sources are first validated with
-`isInside(workspace, sourcePath)`. The helper then opens "/" as a root
+`pathWithin(workspace, sourcePath)`. The helper then opens "/" as a root
 file descriptor. The source path is converted to a root-relative path
 and opened with `openat2` using `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
 and `RESOLVE_NO_MAGICLINKS` relative to the root FD. The resulting inode
@@ -1706,7 +1715,7 @@ Container run:
 ### Path traversal
 
 All paths are resolved through `filepath.Abs` and `filepath.EvalSymlinks`
-before comparison. The `isInside` function uses `filepath.Rel`, which
+before comparison. The `pathWithin` function uses `filepath.Rel`, which
 operates on canonical paths.
 
 For operations that pass paths to Docker, additional measures close the
@@ -1718,7 +1727,7 @@ helper-owned mounts via `open_tree` + `move_mount`.
 
 `EvalSymlinks` resolves all symlinks in a path at validation time.
 If a symlink inside the workspace points outside, the resolved path
-will fail the `isInside` check.
+will fail the `pathWithin` check.
 
 Note: `EvalSymlinks` alone does not prevent TOCTOU attacks where the
 filesystem changes between validation and use. The specific operation

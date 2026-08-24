@@ -15,9 +15,9 @@ const (
 	selinuxWorkspaceType = "docker_helper_workspace_t"
 	semanagePath         = "/usr/sbin/semanage"
 	restoreconPath       = "/usr/sbin/restorecon"
-	// selinuxWorkspaceLockPath is the global lock for serializing
+	// selinuxFcontextLockPath is the global lock for serializing
 	// SELinux workspace fcontext state transitions.
-	selinuxWorkspaceLockPath = "/run/lock/docker-helper-selinux.lock"
+	selinuxFcontextLockPath = "/run/lock/docker-helper-selinux.lock"
 )
 
 // isHomeRoot returns true if the canonical path is /home or under /home.
@@ -29,13 +29,13 @@ func isHomeRoot(canonical string) bool {
 	return strings.HasPrefix(canonical, "/home/")
 }
 
-// selinuxWorkspaceManager manages persistent SELinux workspace labeling for
+// selinuxFcontextManager manages persistent SELinux workspace labeling for
 // non-home system allowed_roots. It uses semanage fcontext + restorecon to
 // create persistent mappings that survive reboot and restorecon.
 //
 // Test seams: runCommand, readPathCon, selinuxActive, and acquireLock are
 // injectable.
-type selinuxWorkspaceManager struct {
+type selinuxFcontextManager struct {
 	semanagePath   string
 	restoreconPath string
 	runCommand     func(string, ...string) ([]byte, error)
@@ -50,33 +50,33 @@ type selinuxWorkspaceManager struct {
 // selinuxEnsureWorkspaceLabel is the injectable seam for testing.
 // It wraps the production ensureWorkspaceLabel call.
 var selinuxEnsureWorkspaceLabel = func(root string) (bool, error) {
-	mgr := newSELinuxWorkspaceManager()
-	return mgr.ensureWorkspaceLabel(root)
+	mgr := newSELinuxFcontextManager()
+	return mgr.ensureWorkspaceFcontext(root)
 }
 
-func newSELinuxWorkspaceManager() *selinuxWorkspaceManager {
+func newSELinuxFcontextManager() *selinuxFcontextManager {
 	rc := func(cmd string, args ...string) ([]byte, error) {
 		c := exec.Command(cmd, args...)
 		out, err := c.CombinedOutput()
 		return out, err
 	}
-	return &selinuxWorkspaceManager{
+	return &selinuxFcontextManager{
 		semanagePath:   semanagePath,
 		restoreconPath: restoreconPath,
 		runCommand:     rc,
 		readPathCon:    readPathSELinuxType,
 		selinuxActive:  selinuxEnabled,
-		acquireLock:    acquireSELinuxWorkspaceLock,
+		acquireLock:    acquireSELinuxFcontextLock,
 	}
 }
 
-// acquireSELinuxWorkspaceLock acquires the global SELinux workspace management
+// acquireSELinuxFcontextLock acquires the global SELinux workspace management
 // lock. Returns a release function and an error.
-func acquireSELinuxWorkspaceLock() (func() error, error) {
+func acquireSELinuxFcontextLock() (func() error, error) {
 	if err := os.MkdirAll("/run/lock", 0755); err != nil {
 		return nil, fmt.Errorf("cannot create lock directory: %w", err)
 	}
-	f, err := os.OpenFile(selinuxWorkspaceLockPath, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := os.OpenFile(selinuxFcontextLockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open SELinux workspace lock: %w", err)
 	}
@@ -219,7 +219,7 @@ func unescapeFcontextPath(s string) (string, bool) {
 // The caller MUST NOT roll it back on subsequent failures.
 // Internal rollback only occurs when the manager itself cannot complete
 // before returning success.
-func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreated bool, err error) {
+func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
 		return false, fmt.Errorf("cannot determine SELinux status: %w", err)
@@ -292,7 +292,7 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 	// Apply restorecon recursively.
 	if err := m.restoreconRecursive(root); err != nil {
 		// Internal rollback: manager cannot complete its transition.
-		if rbErr := m.rollbackWorkspaceLabel(root); rbErr != nil {
+		if rbErr := m.removeWorkspaceFcontext(root); rbErr != nil {
 			return false, fmt.Errorf("restorecon failed: %v; rollback also failed: %v", err, rbErr)
 		}
 		return false, fmt.Errorf("restorecon failed for %s: %w", root, err)
@@ -301,7 +301,7 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 	// Verify the actual on-disk type.
 	if err := m.verifyActualType(root); err != nil {
 		// Internal rollback.
-		if rbErr := m.rollbackWorkspaceLabel(root); rbErr != nil {
+		if rbErr := m.removeWorkspaceFcontext(root); rbErr != nil {
 			return false, fmt.Errorf("verification failed: %v; rollback also failed: %v", err, rbErr)
 		}
 		return false, err
@@ -321,7 +321,7 @@ func (m *selinuxWorkspaceManager) ensureWorkspaceLabel(root string) (newlyCreate
 //   - if an arbitrary regex/equivalence cannot be proven disjoint safely: fail closed;
 //   - rules mapping to docker_helper_workspace_t are compatible (docker-helper-owned or
 //     operator-compatible) and are allowed to overlap.
-func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, existing []fcontextRule) error {
+func (m *selinuxFcontextManager) checkOverlap(root string, ourPattern string, existing []fcontextRule) error {
 	ourStem := root // the literal unescaped root
 
 	for _, rule := range existing {
@@ -385,7 +385,7 @@ func (m *selinuxWorkspaceManager) checkOverlap(root string, ourPattern string, e
 // (DEST = SOURCE) overlaps with the selected ROOT.
 // Returns nil if the equivalence is completely disjoint from ROOT.
 // Returns an error if DEST or SOURCE equals, contains, or is contained by ROOT.
-func (m *selinuxWorkspaceManager) checkEquivalenceOverlap(root string, rule fcontextRule) error {
+func (m *selinuxFcontextManager) checkEquivalenceOverlap(root string, rule fcontextRule) error {
 	dest := rule.equivalenceDest
 	source := rule.equivalenceSource
 
@@ -414,7 +414,7 @@ func (m *selinuxWorkspaceManager) checkEquivalenceOverlap(root string, rule fcon
 
 // verifyActualType reads the actual on-disk SELinux type for the root and
 // verifies it matches docker_helper_workspace_t.
-func (m *selinuxWorkspaceManager) verifyActualType(root string) error {
+func (m *selinuxFcontextManager) verifyActualType(root string) error {
 	actualType, err := m.readPathCon(root)
 	if err != nil {
 		return fmt.Errorf("cannot verify SELinux type for %s: %w", root, err)
@@ -432,7 +432,7 @@ func (m *selinuxWorkspaceManager) verifyActualType(root string) error {
 // SELinux type. It does NOT mutate any state. Used during daemon startup
 // and reload to fail closed if a manually edited config bypasses the
 // managed-label invariant.
-func (m *selinuxWorkspaceManager) verifyWorkspaceLabel(root string) error {
+func (m *selinuxFcontextManager) verifyWorkspaceLabel(root string) error {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
 		return fmt.Errorf("cannot determine SELinux status: %w", err)
@@ -470,7 +470,7 @@ func (m *selinuxWorkspaceManager) verifyWorkspaceLabel(root string) error {
 // Outer callers (init, config allowed-root add) MUST NOT call this on a
 // mapping that was previously returned as successful. Once
 // ensureWorkspaceLabel returns success, the mapping is managed durable state.
-func (m *selinuxWorkspaceManager) rollbackWorkspaceLabel(root string) error {
+func (m *selinuxFcontextManager) removeWorkspaceFcontext(root string) error {
 	pattern := fcontextPattern(root)
 
 	// First remove the fcontext rule.
@@ -500,7 +500,7 @@ type fcontextRule struct {
 // Uses -C -n to inspect only local customizations, not base policy.
 //
 // Fails closed on any non-empty line that cannot be classified safely.
-func (m *selinuxWorkspaceManager) listLocalFcontextRules() ([]fcontextRule, error) {
+func (m *selinuxFcontextManager) listLocalFcontextRules() ([]fcontextRule, error) {
 	out, err := m.runCommand(m.semanagePath, "fcontext", "-l", "-C", "-n")
 	if err != nil {
 		return nil, fmt.Errorf("semanage fcontext -l -C -n: %w: %s", err, strings.TrimSpace(string(out)))
@@ -630,7 +630,7 @@ func isLiteralAbsPath(s string) bool {
 	return true
 }
 
-func (m *selinuxWorkspaceManager) addFcontextRule(pattern, fileType string) error {
+func (m *selinuxFcontextManager) addFcontextRule(pattern, fileType string) error {
 	// semanage fcontext -a -t TYPE PATTERN
 	out, err := m.runCommand(m.semanagePath, "fcontext", "-a", "-t", fileType, pattern)
 	if err != nil {
@@ -639,7 +639,7 @@ func (m *selinuxWorkspaceManager) addFcontextRule(pattern, fileType string) erro
 	return nil
 }
 
-func (m *selinuxWorkspaceManager) removeFcontextRule(pattern string) error {
+func (m *selinuxFcontextManager) removeFcontextRule(pattern string) error {
 	// semanage fcontext -d PATTERN
 	out, err := m.runCommand(m.semanagePath, "fcontext", "-d", pattern)
 	if err != nil {
@@ -648,7 +648,7 @@ func (m *selinuxWorkspaceManager) removeFcontextRule(pattern string) error {
 	return nil
 }
 
-func (m *selinuxWorkspaceManager) restoreconRecursive(root string) error {
+func (m *selinuxFcontextManager) restoreconRecursive(root string) error {
 	// Type-only restorecon: do not forcibly reset user, role, or MLS/MCS range.
 	out, err := m.runCommand(m.restoreconPath, "-R", root)
 	if err != nil {
@@ -660,7 +660,7 @@ func (m *selinuxWorkspaceManager) restoreconRecursive(root string) error {
 // listCoveringBoundaries returns all existing fcontext boundaries that cover
 // the given workspace path. Returns only boundaries that map to
 // docker_helper_workspace_t. The caller determines ownership via mac_boundaries.
-func (m *selinuxWorkspaceManager) listCoveringBoundaries(workspace string) ([]string, error) {
+func (m *selinuxFcontextManager) listCoveringFcontexts(workspace string) ([]string, error) {
 	rules, err := m.listLocalFcontextRules()
 	if err != nil {
 		return nil, err

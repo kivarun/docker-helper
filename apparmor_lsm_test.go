@@ -310,7 +310,7 @@ func TestInitSystemModePreflightInactive(t *testing.T) {
 
 // --- Integration: AppArmor CLI preflight ---
 
-func TestApparmorRootListInactive(t *testing.T) {
+func TestAppArmorRootListInactive(t *testing.T) {
 	mockApparmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -323,7 +323,7 @@ func TestApparmorRootListInactive(t *testing.T) {
 	}
 }
 
-func TestApparmorRootAddInactive(t *testing.T) {
+func TestAppArmorRootAddInactive(t *testing.T) {
 	mockApparmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -341,7 +341,7 @@ func TestApparmorRootAddInactive(t *testing.T) {
 	}
 }
 
-func TestApparmorRootRemoveInactive(t *testing.T) {
+func TestAppArmorRootRemoveInactive(t *testing.T) {
 	mockApparmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -357,7 +357,7 @@ func TestApparmorRootRemoveInactive(t *testing.T) {
 	}
 }
 
-func TestApparmorCheckInactive(t *testing.T) {
+func TestAppArmorCheckInactive(t *testing.T) {
 	mockApparmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }

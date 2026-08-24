@@ -19,9 +19,9 @@ type capturedParserCall struct {
 	args []string
 }
 
-// setupApparmorTestWithRunner builds a manager over a fresh temp dir with a
+// setupAppArmorTestWithRunner builds a manager over a fresh temp dir with a
 // fake executable parser and the given runner.
-func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []string) error) (dir string, mgr *appArmorManager) {
+func setupAppArmorTestWithRunner(t *testing.T, runner func(exe string, args []string) error) (dir string, mgr *appArmorProfileManager) {
 	t.Helper()
 	dir = t.TempDir()
 
@@ -37,7 +37,7 @@ func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []st
 		t.Fatal(err)
 	}
 
-	mgr = newAppArmorManager(
+	mgr = newAppArmorProfileManager(
 		mainProfile,
 		managedFragment,
 		lockPath,
@@ -48,12 +48,12 @@ func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []st
 	return dir, mgr
 }
 
-// setupApparmorTest is like setupApparmorTestWithRunner but captures each
+// setupAppArmorTest is like setupAppArmorTestWithRunner but captures each
 // parser invocation for assertions.
-func setupApparmorTest(t *testing.T) (dir string, mgr *appArmorManager, captured *capturedParserCall) {
+func setupAppArmorTest(t *testing.T) (dir string, mgr *appArmorProfileManager, captured *capturedParserCall) {
 	t.Helper()
 	captured = &capturedParserCall{}
-	dir, mgr = setupApparmorTestWithRunner(t, func(exe string, args []string) error {
+	dir, mgr = setupAppArmorTestWithRunner(t, func(exe string, args []string) error {
 		captured.exe = exe
 		captured.args = args
 		return nil
@@ -81,10 +81,10 @@ func mockSELinuxInactive(t *testing.T) {
 
 // --- Command registration and help ---
 
-// TestApparmorHelpOutput verifies help dispatch for every apparmor command
+// TestAppArmorHelpOutput verifies help dispatch for every apparmor command
 // level, including the "help <command>" form. Running "apparmor --help"
 // through the real dispatcher also proves the command is registered.
-func TestApparmorHelpOutput(t *testing.T) {
+func TestAppArmorHelpOutput(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
@@ -118,7 +118,7 @@ func TestApparmorHelpOutput(t *testing.T) {
 
 // --- Rejection when effective UID is not 0 ---
 
-func TestApparmorRequiresRoot(t *testing.T) {
+func TestAppArmorRequiresRoot(t *testing.T) {
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 1000 }
 	defer func() { EffectiveUID = saved }()
@@ -149,7 +149,7 @@ func TestApparmorRequiresRoot(t *testing.T) {
 
 // --- Absolute/existing-directory validation ---
 
-func TestApparmorRootAddRelativePath(t *testing.T) {
+func TestAppArmorRootAddRelativePath(t *testing.T) {
 	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -165,7 +165,7 @@ func TestApparmorRootAddRelativePath(t *testing.T) {
 	}
 }
 
-func TestApparmorRootAddNonExistentPath(t *testing.T) {
+func TestAppArmorRootAddNonExistentPath(t *testing.T) {
 	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -181,7 +181,7 @@ func TestApparmorRootAddNonExistentPath(t *testing.T) {
 	}
 }
 
-func TestApparmorRootAddFileNotDirectory(t *testing.T) {
+func TestAppArmorRootAddFileNotDirectory(t *testing.T) {
 	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -204,7 +204,7 @@ func TestApparmorRootAddFileNotDirectory(t *testing.T) {
 
 // --- Canonicalization of a symlinked input path ---
 
-func TestApparmorRootAddSymlinkedPath(t *testing.T) {
+func TestAppArmorRootAddSymlinkedPath(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	realDir := filepath.Join(rootDir, "real")
 	linkDir := filepath.Join(rootDir, "link")
@@ -215,9 +215,9 @@ func TestApparmorRootAddSymlinkedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
+	_, mgr, _ := setupAppArmorTest(t)
 
-	result, err := mgr.addRoot(linkDir)
+	result, err := mgr.addManagedRoot(linkDir)
 	if err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestApparmorRootAddSymlinkedPath(t *testing.T) {
 		t.Error("expected Changed=true")
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -239,10 +239,10 @@ func TestApparmorRootAddSymlinkedPath(t *testing.T) {
 
 // --- Rejection of / and AppArmor-pattern input ---
 
-func TestApparmorRootAddRootDirectory(t *testing.T) {
-	_, mgr, _ := setupApparmorTest(t)
+func TestAppArmorRootAddRootDirectory(t *testing.T) {
+	_, mgr, _ := setupAppArmorTest(t)
 
-	_, err := mgr.addRoot("/")
+	_, err := mgr.addManagedRoot("/")
 	if err == nil {
 		t.Fatal("expected error for /")
 	}
@@ -251,7 +251,7 @@ func TestApparmorRootAddRootDirectory(t *testing.T) {
 	}
 }
 
-func TestApparmorRootAddGlobRejected(t *testing.T) {
+func TestAppArmorRootAddGlobRejected(t *testing.T) {
 	// The base must be policy-legal (t.TempDir() is under the forbidden /tmp
 	// tree and would be rejected by the workspace root policy before lexical
 	// validation runs), so the rejection comes from the lexical check.
@@ -264,8 +264,8 @@ func TestApparmorRootAddGlobRejected(t *testing.T) {
 				t.Skipf("cannot create path with %q: %v", ch, err)
 			}
 
-			_, mgr, _ := setupApparmorTest(t)
-			_, err := mgr.addRoot(path)
+			_, mgr, _ := setupAppArmorTest(t)
+			_, err := mgr.addManagedRoot(path)
 			if err == nil {
 				t.Fatalf("expected error for path with %q", ch)
 			}
@@ -276,13 +276,13 @@ func TestApparmorRootAddGlobRejected(t *testing.T) {
 	}
 }
 
-func TestApparmorRootAddCLIRejectsGlob(t *testing.T) {
+func TestAppArmorRootAddCLIRejectsGlob(t *testing.T) {
 	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
 
-	// Policy-legal base, as in TestApparmorRootAddGlobRejected.
+	// Policy-legal base, as in TestAppArmorRootAddGlobRejected.
 	rootDir := testAllowedRootDir(t)
 	path := filepath.Join(rootDir, "test*")
 	if err := os.MkdirAll(path, 0755); err != nil {
@@ -364,9 +364,9 @@ func TestRootWithSpecialCharacters(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, mgr, _ := setupApparmorTest(t)
+			_, mgr, _ := setupAppArmorTest(t)
 
-			result, err := mgr.addRoot(path)
+			result, err := mgr.addManagedRoot(path)
 			if err != nil {
 				t.Fatalf("addRoot failed: %v", err)
 			}
@@ -374,7 +374,7 @@ func TestRootWithSpecialCharacters(t *testing.T) {
 				t.Errorf("expected %s, got %s", path, result.Path)
 			}
 
-			roots, err := mgr.listRoots()
+			roots, err := mgr.listManagedRoots()
 			if err != nil {
 				t.Fatalf("listRoots failed: %v", err)
 			}
@@ -394,8 +394,8 @@ func TestRootWithControlCharacter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
-	_, err := mgr.addRoot(path)
+	_, mgr, _ := setupAppArmorTest(t)
+	_, err := mgr.addManagedRoot(path)
 	if err == nil {
 		t.Fatal("expected error for control character")
 	}
@@ -445,16 +445,16 @@ func TestRenderFragmentRuleEscaping(t *testing.T) {
 
 // --- Duplicate add ---
 
-func TestApparmorDuplicateAdd(t *testing.T) {
+func TestAppArmorDuplicateAdd(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	testDir := filepath.Join(rootDir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
+	_, mgr, _ := setupAppArmorTest(t)
 
-	result1, err := mgr.addRoot(testDir)
+	result1, err := mgr.addManagedRoot(testDir)
 	if err != nil {
 		t.Fatalf("first addRoot failed: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestApparmorDuplicateAdd(t *testing.T) {
 		t.Errorf("first add expected path %s, got %s", testDir, result1.Path)
 	}
 
-	result2, err := mgr.addRoot(testDir)
+	result2, err := mgr.addManagedRoot(testDir)
 	if err != nil {
 		t.Fatalf("second addRoot failed: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestApparmorDuplicateAdd(t *testing.T) {
 		t.Errorf("second add expected path %s, got %s", testDir, result2.Path)
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -487,16 +487,16 @@ func TestApparmorDuplicateAdd(t *testing.T) {
 
 // --- Absent remove ---
 
-func TestApparmorAbsentRemove(t *testing.T) {
+func TestAppArmorAbsentRemove(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
+	_, mgr, _ := setupAppArmorTest(t)
 
-	result, err := mgr.removeRoot(testDir)
+	result, err := mgr.removeManagedRoot(testDir)
 	if err != nil {
 		t.Fatalf("removeRoot failed: %v", err)
 	}
@@ -510,16 +510,16 @@ func TestApparmorAbsentRemove(t *testing.T) {
 
 // --- Remove after directory deletion ---
 
-func TestApparmorRemoveAfterDeletion(t *testing.T) {
+func TestAppArmorRemoveAfterDeletion(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	testDir := filepath.Join(rootDir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
+	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addRoot(testDir); err != nil {
+	if _, err := mgr.addManagedRoot(testDir); err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
 
@@ -527,7 +527,7 @@ func TestApparmorRemoveAfterDeletion(t *testing.T) {
 		t.Fatalf("RemoveAll failed: %v", err)
 	}
 
-	result, err := mgr.removeRoot(testDir)
+	result, err := mgr.removeManagedRoot(testDir)
 	if err != nil {
 		t.Fatalf("removeRoot failed after deletion: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestApparmorRemoveAfterDeletion(t *testing.T) {
 		t.Errorf("expected %s, got %s", testDir, result.Path)
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -549,10 +549,10 @@ func TestApparmorRemoveAfterDeletion(t *testing.T) {
 
 // --- List of an absent fragment ---
 
-func TestApparmorListAbsentFragment(t *testing.T) {
-	_, mgr, _ := setupApparmorTest(t)
+func TestAppArmorListAbsentFragment(t *testing.T) {
+	_, mgr, _ := setupAppArmorTest(t)
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -563,8 +563,8 @@ func TestApparmorListAbsentFragment(t *testing.T) {
 
 // --- Malformed managed fragment ---
 
-func TestApparmorListMalformedFragment(t *testing.T) {
-	_, mgr, _ := setupApparmorTest(t)
+func TestAppArmorListMalformedFragment(t *testing.T) {
+	_, mgr, _ := setupAppArmorTest(t)
 
 	fragmentDir := filepath.Dir(mgr.managedFragmentPath)
 	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
@@ -587,7 +587,7 @@ func TestApparmorListMalformedFragment(t *testing.T) {
 			if err := os.WriteFile(mgr.managedFragmentPath, tc.data, 0644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := mgr.listRoots(); err == nil {
+			if _, err := mgr.listManagedRoots(); err == nil {
 				t.Fatal("expected error for malformed fragment")
 			}
 		})
@@ -596,23 +596,23 @@ func TestApparmorListMalformedFragment(t *testing.T) {
 
 // --- Exact parser executable and arguments ---
 
-func TestApparmorParserInvocation(t *testing.T) {
+func TestAppArmorParserInvocation(t *testing.T) {
 	tests := []struct {
 		name     string
-		op       func(mgr *appArmorManager, testDir string) error
+		op       func(mgr *appArmorProfileManager, testDir string) error
 		wantArgs []string // plus the main profile path as the final argument
 	}{
 		{
 			name: "reload on add",
-			op: func(mgr *appArmorManager, testDir string) error {
-				_, err := mgr.addRoot(testDir)
+			op: func(mgr *appArmorProfileManager, testDir string) error {
+				_, err := mgr.addManagedRoot(testDir)
 				return err
 			},
 			wantArgs: []string{"--replace", "--skip-read-cache"},
 		},
 		{
 			name: "validate on check",
-			op: func(mgr *appArmorManager, testDir string) error {
+			op: func(mgr *appArmorProfileManager, testDir string) error {
 				return mgr.check()
 			},
 			wantArgs: []string{"--skip-kernel-load", "--skip-read-cache"},
@@ -643,7 +643,7 @@ func TestApparmorParserInvocation(t *testing.T) {
 			}
 
 			captured := &capturedParserCall{}
-			mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+			mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 				func(exe string, args []string) error {
 					captured.exe = exe
 					captured.args = args
@@ -671,7 +671,7 @@ func TestApparmorParserInvocation(t *testing.T) {
 	}
 }
 
-func TestApparmorNoShellInvocation(t *testing.T) {
+func TestAppArmorNoShellInvocation(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "fragment")
@@ -699,14 +699,14 @@ func TestApparmorNoShellInvocation(t *testing.T) {
 		return nil
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := mgr.addRoot(testDir)
+	_, err := mgr.addManagedRoot(testDir)
 	if err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
@@ -718,7 +718,7 @@ func TestApparmorNoShellInvocation(t *testing.T) {
 
 // --- check does not reload or modify files ---
 
-func TestApparmorCheckDoesNotReload(t *testing.T) {
+func TestAppArmorCheckDoesNotReload(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
@@ -750,7 +750,7 @@ func TestApparmorCheckDoesNotReload(t *testing.T) {
 		return nil
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	if err := mgr.check(); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -764,7 +764,7 @@ func TestApparmorCheckDoesNotReload(t *testing.T) {
 	}
 }
 
-func TestApparmorCheckDoesNotModifyFiles(t *testing.T) {
+func TestAppArmorCheckDoesNotModifyFiles(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
@@ -786,7 +786,7 @@ func TestApparmorCheckDoesNotModifyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, func(exe string, args []string) error { return nil })
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, func(exe string, args []string) error { return nil })
 
 	if err := mgr.check(); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -811,15 +811,15 @@ func TestApparmorCheckDoesNotModifyFiles(t *testing.T) {
 
 // --- Successful atomic add/remove ---
 
-func TestApparmorSuccessfulAdd(t *testing.T) {
+func TestAppArmorSuccessfulAdd(t *testing.T) {
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, mgr, captured := setupApparmorTest(t)
+	_, mgr, captured := setupAppArmorTest(t)
 
-	result, err := mgr.addRoot(testDir)
+	result, err := mgr.addManagedRoot(testDir)
 	if err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
@@ -830,7 +830,7 @@ func TestApparmorSuccessfulAdd(t *testing.T) {
 		t.Errorf("expected %s, got %s", testDir, result.Path)
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -843,20 +843,20 @@ func TestApparmorSuccessfulAdd(t *testing.T) {
 	}
 }
 
-func TestApparmorSuccessfulRemove(t *testing.T) {
+func TestAppArmorSuccessfulRemove(t *testing.T) {
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, mgr, captured := setupApparmorTest(t)
+	_, mgr, captured := setupAppArmorTest(t)
 
-	if _, err := mgr.addRoot(testDir); err != nil {
+	if _, err := mgr.addManagedRoot(testDir); err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
 	captured.args = nil
 
-	result, err := mgr.removeRoot(testDir)
+	result, err := mgr.removeManagedRoot(testDir)
 	if err != nil {
 		t.Fatalf("removeRoot failed: %v", err)
 	}
@@ -867,7 +867,7 @@ func TestApparmorSuccessfulRemove(t *testing.T) {
 		t.Errorf("expected %s, got %s", testDir, result.Path)
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -880,7 +880,7 @@ func TestApparmorSuccessfulRemove(t *testing.T) {
 	}
 }
 
-func TestApparmorAddMultipleRoots(t *testing.T) {
+func TestAppArmorAddMultipleRoots(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	dirA := filepath.Join(rootDir, "a")
 	dirB := filepath.Join(rootDir, "b")
@@ -891,19 +891,19 @@ func TestApparmorAddMultipleRoots(t *testing.T) {
 		}
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
+	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addRoot(dirC); err != nil {
+	if _, err := mgr.addManagedRoot(dirC); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addRoot(dirA); err != nil {
+	if _, err := mgr.addManagedRoot(dirA); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addRoot(dirB); err != nil {
+	if _, err := mgr.addManagedRoot(dirB); err != nil {
 		t.Fatal(err)
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -927,15 +927,15 @@ func reflectSliceEqual(a, b []string) bool {
 
 // --- Fragment permissions ---
 
-func TestApparmorFragmentPermissions(t *testing.T) {
+func TestAppArmorFragmentPermissions(t *testing.T) {
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
+	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addRoot(testDir); err != nil {
+	if _, err := mgr.addManagedRoot(testDir); err != nil {
 		t.Fatalf("addRoot failed: %v", err)
 	}
 
@@ -961,7 +961,7 @@ func TestApparmorFragmentPermissions(t *testing.T) {
 
 // --- Parser failure restores the exact previous bytes ---
 
-func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
+func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	testDirA := filepath.Join(rootDir, "a")
 	testDirB := filepath.Join(rootDir, "b")
@@ -980,9 +980,9 @@ func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
 		return errors.New("parser failed")
 	}
 
-	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
+	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addRoot(testDirA); err != nil {
+	if _, err := mgr.addManagedRoot(testDirA); err != nil {
 		t.Fatalf("first addRoot failed: %v", err)
 	}
 
@@ -991,7 +991,7 @@ func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
 		t.Fatalf("cannot read fragment: %v", err)
 	}
 
-	_, err = mgr.addRoot(testDirB)
+	_, err = mgr.addManagedRoot(testDirB)
 	if err == nil {
 		t.Fatal("expected error for second addRoot")
 	}
@@ -1005,7 +1005,7 @@ func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
 		t.Error("fragment was not restored to previous bytes after parser failure")
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed after rollback: %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestApparmorParserFailureRestoresPrevious(t *testing.T) {
 	}
 }
 
-func TestApparmorParserFailureRemoveRestores(t *testing.T) {
+func TestAppArmorParserFailureRemoveRestores(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	testDirA := filepath.Join(rootDir, "a")
 	testDirB := filepath.Join(rootDir, "b")
@@ -1028,12 +1028,12 @@ func TestApparmorParserFailureRemoveRestores(t *testing.T) {
 		return nil
 	}
 
-	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
+	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addRoot(testDirA); err != nil {
+	if _, err := mgr.addManagedRoot(testDirA); err != nil {
 		t.Fatalf("first addRoot failed: %v", err)
 	}
-	if _, err := mgr.addRoot(testDirB); err != nil {
+	if _, err := mgr.addManagedRoot(testDirB); err != nil {
 		t.Fatalf("second addRoot failed: %v", err)
 	}
 
@@ -1046,7 +1046,7 @@ func TestApparmorParserFailureRemoveRestores(t *testing.T) {
 		t.Fatalf("cannot read fragment: %v", err)
 	}
 
-	_, err = mgr.removeRoot(testDirA)
+	_, err = mgr.removeManagedRoot(testDirA)
 	if err == nil {
 		t.Fatal("expected error for removeRoot")
 	}
@@ -1063,7 +1063,7 @@ func TestApparmorParserFailureRemoveRestores(t *testing.T) {
 
 // --- Rollback reload failure is reported ---
 
-func TestApparmorRollbackReloadFailure(t *testing.T) {
+func TestAppArmorRollbackReloadFailure(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	testDirA := filepath.Join(rootDir, "a")
 	testDirB := filepath.Join(rootDir, "b")
@@ -1077,9 +1077,9 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 		return nil
 	}
 
-	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
+	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addRoot(testDirA); err != nil {
+	if _, err := mgr.addManagedRoot(testDirA); err != nil {
 		t.Fatalf("first addRoot failed: %v", err)
 	}
 
@@ -1089,7 +1089,7 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 		return fmt.Errorf("parser error %d", callCount)
 	}
 
-	_, err := mgr.addRoot(testDirB)
+	_, err := mgr.addManagedRoot(testDirB)
 	if err == nil {
 		t.Fatal("expected error for second addRoot")
 	}
@@ -1105,7 +1105,7 @@ func TestApparmorRollbackReloadFailure(t *testing.T) {
 
 // --- Lock serialization ---
 
-func TestApparmorLockSerialization(t *testing.T) {
+func TestAppArmorLockSerialization(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, "lock")
 
@@ -1126,7 +1126,7 @@ func TestApparmorLockSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1144,7 +1144,7 @@ func TestApparmorLockSerialization(t *testing.T) {
 
 // --- Real concurrency test ---
 
-func TestApparmorConcurrentLockBusy(t *testing.T) {
+func TestAppArmorConcurrentLockBusy(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	testDirA := filepath.Join(rootDir, "a")
 	testDirB := filepath.Join(rootDir, "b")
@@ -1164,7 +1164,7 @@ func TestApparmorConcurrentLockBusy(t *testing.T) {
 		return nil
 	}
 
-	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
+	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
 	var wg sync.WaitGroup
 	var errA, errB error
@@ -1175,7 +1175,7 @@ func TestApparmorConcurrentLockBusy(t *testing.T) {
 	// First goroutine: enters runner, holds lock
 	go func() {
 		defer wg.Done()
-		resultA, errA = mgr.addRoot(testDirA)
+		resultA, errA = mgr.addManagedRoot(testDirA)
 	}()
 
 	// Wait for first goroutine to be in the runner (lock held)
@@ -1184,7 +1184,7 @@ func TestApparmorConcurrentLockBusy(t *testing.T) {
 	// Second goroutine: tries to acquire lock while first holds it
 	go func() {
 		defer wg.Done()
-		_, errB = mgr.addRoot(testDirB)
+		_, errB = mgr.addManagedRoot(testDirB)
 		close(secondDone)
 	}()
 
@@ -1214,7 +1214,7 @@ func TestApparmorConcurrentLockBusy(t *testing.T) {
 
 // --- Parser not executable preflight ---
 
-func TestApparmorParserNotExecutable(t *testing.T) {
+func TestAppArmorParserNotExecutable(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -1260,9 +1260,9 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 		return nil
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	_, err = mgr.addRoot(testDir)
+	_, err = mgr.addManagedRoot(testDir)
 	if err == nil {
 		t.Fatal("expected error for non-executable parser")
 	}
@@ -1293,17 +1293,17 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 
 // --- Symlink fragment rejected in add and remove ---
 
-func TestApparmorSymlinkFragmentRejected(t *testing.T) {
+func TestAppArmorSymlinkFragmentRejected(t *testing.T) {
 	tests := []struct {
 		name string
-		op   func(mgr *appArmorManager, testDir string) error
+		op   func(mgr *appArmorProfileManager, testDir string) error
 	}{
-		{"add", func(mgr *appArmorManager, testDir string) error {
-			_, err := mgr.addRoot(testDir)
+		{"add", func(mgr *appArmorProfileManager, testDir string) error {
+			_, err := mgr.addManagedRoot(testDir)
 			return err
 		}},
-		{"remove", func(mgr *appArmorManager, testDir string) error {
-			_, err := mgr.removeRoot(testDir)
+		{"remove", func(mgr *appArmorProfileManager, testDir string) error {
+			_, err := mgr.removeManagedRoot(testDir)
 			return err
 		}},
 	}
@@ -1340,7 +1340,7 @@ func TestApparmorSymlinkFragmentRejected(t *testing.T) {
 			}
 
 			runnerCalled := false
-			mgr := newAppArmorManager(mainProfile, linkFragment, lockPath, parserPath,
+			mgr := newAppArmorProfileManager(mainProfile, linkFragment, lockPath, parserPath,
 				func(exe string, args []string) error {
 					runnerCalled = true
 					return nil
@@ -1381,7 +1381,7 @@ func TestApparmorSymlinkFragmentRejected(t *testing.T) {
 
 // --- Non-regular fragment rejected (directory) ---
 
-func TestApparmorNonRegularFragmentDirectory(t *testing.T) {
+func TestAppArmorNonRegularFragmentDirectory(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -1407,11 +1407,11 @@ func TestApparmorNonRegularFragmentDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addRoot(testDir)
+	_, err := mgr.addManagedRoot(testDir)
 	if err == nil {
 		t.Fatal("expected error for directory fragment")
 	}
@@ -1422,7 +1422,7 @@ func TestApparmorNonRegularFragmentDirectory(t *testing.T) {
 
 // --- Parser unavailable preflight ---
 
-func TestApparmorParserUnavailableNoChanges(t *testing.T) {
+func TestAppArmorParserUnavailableNoChanges(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -1438,11 +1438,11 @@ func TestApparmorParserUnavailableNoChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addRoot(testDir)
+	_, err := mgr.addManagedRoot(testDir)
 	if err == nil {
 		t.Fatal("expected error for missing parser")
 	}
@@ -1457,7 +1457,7 @@ func TestApparmorParserUnavailableNoChanges(t *testing.T) {
 
 // --- Main profile missing preflight ---
 
-func TestApparmorMainProfileMissingNoChanges(t *testing.T) {
+func TestAppArmorMainProfileMissingNoChanges(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -1473,11 +1473,11 @@ func TestApparmorMainProfileMissingNoChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addRoot(testDir)
+	_, err := mgr.addManagedRoot(testDir)
 	if err == nil {
 		t.Fatal("expected error for missing main profile")
 	}
@@ -1492,14 +1492,14 @@ func TestApparmorMainProfileMissingNoChanges(t *testing.T) {
 
 // --- Check command behavior ---
 
-func TestApparmorCheckParserNotAvailable(t *testing.T) {
+func TestAppArmorCheckParserNotAvailable(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "fragment")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "nonexistent")
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1512,7 +1512,7 @@ func TestApparmorCheckParserNotAvailable(t *testing.T) {
 	}
 }
 
-func TestApparmorCheckMainProfileNotFound(t *testing.T) {
+func TestAppArmorCheckMainProfileNotFound(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "nonexistent")
 	fragment := filepath.Join(dir, "fragment")
@@ -1523,7 +1523,7 @@ func TestApparmorCheckMainProfileNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1536,7 +1536,7 @@ func TestApparmorCheckMainProfileNotFound(t *testing.T) {
 	}
 }
 
-func TestApparmorCheckValidationFailure(t *testing.T) {
+func TestAppArmorCheckValidationFailure(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
@@ -1556,7 +1556,7 @@ func TestApparmorCheckValidationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return errors.New("validation failed") },
 	)
 
@@ -1569,7 +1569,7 @@ func TestApparmorCheckValidationFailure(t *testing.T) {
 	}
 }
 
-func TestApparmorCheckSuccess(t *testing.T) {
+func TestAppArmorCheckSuccess(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
 	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
@@ -1589,7 +1589,7 @@ func TestApparmorCheckSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1600,7 +1600,7 @@ func TestApparmorCheckSuccess(t *testing.T) {
 
 // --- Remove does not infer parent/child ---
 
-func TestApparmorRemoveNoInference(t *testing.T) {
+func TestAppArmorRemoveNoInference(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	parentDir := filepath.Join(rootDir, "parent")
 	childDir := filepath.Join(parentDir, "child")
@@ -1610,20 +1610,20 @@ func TestApparmorRemoveNoInference(t *testing.T) {
 		}
 	}
 
-	_, mgr, _ := setupApparmorTest(t)
+	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addRoot(parentDir); err != nil {
+	if _, err := mgr.addManagedRoot(parentDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addRoot(childDir); err != nil {
+	if _, err := mgr.addManagedRoot(childDir); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := mgr.removeRoot(childDir); err != nil {
+	if _, err := mgr.removeManagedRoot(childDir); err != nil {
 		t.Fatalf("removeRoot failed: %v", err)
 	}
 
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots failed: %v", err)
 	}
@@ -1675,7 +1675,7 @@ func TestFragmentRoundTripSpecialChars(t *testing.T) {
 
 // --- CLI exit codes ---
 
-func TestApparmorCLIExitCodes(t *testing.T) {
+func TestAppArmorCLIExitCodes(t *testing.T) {
 	mockApparmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -1772,7 +1772,7 @@ func TestValidateRootPathForRemoveRoot(t *testing.T) {
 
 // --- Rollback restores exact mode ---
 
-func TestApparmorRollbackRestoresMode(t *testing.T) {
+func TestAppArmorRollbackRestoresMode(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	testDirA := filepath.Join(rootDir, "a")
 	testDirB := filepath.Join(rootDir, "b")
@@ -1791,9 +1791,9 @@ func TestApparmorRollbackRestoresMode(t *testing.T) {
 		return errors.New("parser failed")
 	}
 
-	_, mgr := setupApparmorTestWithRunner(t, fakeRunner)
+	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addRoot(testDirA); err != nil {
+	if _, err := mgr.addManagedRoot(testDirA); err != nil {
 		t.Fatalf("first addRoot failed: %v", err)
 	}
 
@@ -1803,7 +1803,7 @@ func TestApparmorRollbackRestoresMode(t *testing.T) {
 	}
 	prevMode := prevInfo.Mode().Perm()
 
-	_, err = mgr.addRoot(testDirB)
+	_, err = mgr.addManagedRoot(testDirB)
 	if err == nil {
 		t.Fatal("expected error for second addRoot")
 	}
@@ -1821,7 +1821,7 @@ func TestApparmorRollbackRestoresMode(t *testing.T) {
 
 // --- Rollback when fragment previously absent ---
 
-func TestApparmorRollbackRestoresNoFragment(t *testing.T) {
+func TestAppArmorRollbackRestoresNoFragment(t *testing.T) {
 	dir := t.TempDir()
 	testDir := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -1846,9 +1846,9 @@ func TestApparmorRollbackRestoresNoFragment(t *testing.T) {
 		return errors.New("parser always fails")
 	}
 
-	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	_, err := mgr.addRoot(testDir)
+	_, err := mgr.addManagedRoot(testDir)
 	if err == nil {
 		t.Fatal("expected error for addRoot")
 	}
@@ -1981,12 +1981,12 @@ func TestValidateRootPathForRemoveNonDirectory(t *testing.T) {
 
 // --- Stale unsafe roots: parser tolerance and REMOVE semantics ---
 
-// TestApparmorStaleUnsafeRootPreservedSemantics verifies that a managed
+// TestAppArmorStaleUnsafeRootPreservedSemantics verifies that a managed
 // fragment containing a root that violates the current workspace root
 // policy (e.g., a pre-policy /var/... root) is still parsed, can still be
 // removed (stale REMOVE semantics), and is diagnosed by check.
-func TestApparmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
-	_, mgr, _ := setupApparmorTest(t)
+func TestAppArmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
+	_, mgr, _ := setupAppArmorTest(t)
 
 	staleUnsafe := "/var/lib/legacy-workspaces"
 	fragmentPath := mgr.managedFragmentPath
@@ -1998,7 +1998,7 @@ func TestApparmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
 	}
 
 	// 1) Parser must tolerate the stale unsafe root.
-	roots, err := mgr.listRoots()
+	roots, err := mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots() error: %v", err)
 	}
@@ -2007,14 +2007,14 @@ func TestApparmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
 	}
 
 	// 2) Stale REMOVE semantics: the unsafe root must still be removable.
-	res, err := mgr.removeRoot(staleUnsafe)
+	res, err := mgr.removeManagedRoot(staleUnsafe)
 	if err != nil {
 		t.Fatalf("removeRoot() error: %v", err)
 	}
 	if !res.Changed {
 		t.Error("removeRoot should report Changed=true")
 	}
-	roots, err = mgr.listRoots()
+	roots, err = mgr.listManagedRoots()
 	if err != nil {
 		t.Fatalf("listRoots() after remove: %v", err)
 	}
@@ -2154,7 +2154,7 @@ func TestUserProfileContainsDockerBuildx(t *testing.T) {
 	}
 }
 
-func TestApparmorUserProfileParserValidation(t *testing.T) {
+func TestAppArmorUserProfileParserValidation(t *testing.T) {
 	if _, err := exec.LookPath("apparmor_parser"); err != nil {
 		t.Skip("apparmor_parser not available")
 	}

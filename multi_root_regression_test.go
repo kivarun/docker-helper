@@ -1213,36 +1213,6 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 			t.Error("config should have been updated with /opt")
 		}
 	})
-
-	t.Run("selinux_init_skips_opt_mac_prep", func(t *testing.T) {
-		// Mock root for system mode.
-		origUID := EffectiveUID
-		EffectiveUID = func() int { return 0 }
-		defer func() { EffectiveUID = origUID }()
-
-		// Mock SELinux detection.
-		origSEL := selinuxEnabled
-		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { apparmorLSMActive = origAA }()
-
-		// Create a nil manager to skip actual SELinux operations.
-		backend := newSELinuxSystemInitBackend(nil, nil)
-		if backend.prepare == nil {
-			t.Fatal("backend.prepare must not be nil")
-		}
-
-		// /opt is accepted; MAC preparation is skipped.
-		result, err := backend.prepare("/opt")
-		if err != nil {
-			t.Fatalf("expected nil for /opt as authorization root, got: %v", err)
-		}
-		if result != nil && result.RollbackOnCoreFailure != nil {
-			t.Error("no rollback expected for /opt (no MAC preparation)")
-		}
-	})
 }
 
 // setupSELinuxTestEnv creates a test environment for SELinux preflight tests.
