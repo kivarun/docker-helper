@@ -368,27 +368,6 @@ func TestInitCLIInputErrorExitCode(t *testing.T) {
 	}
 }
 
-func TestInitHelpContainsAutomationBoundary(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"init", "--help"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0 for help, got %d", code)
-	}
-
-	helpText := stdout.String()
-
-	// Verify help documents automation boundary
-	if !strings.Contains(helpText, "config allowed-root add") {
-		t.Error("help should mention config allowed-root add")
-	}
-	if !strings.Contains(helpText, "System mode") {
-		t.Error("help should mention system mode")
-	}
-	if !strings.Contains(helpText, "User mode") {
-		t.Error("help should mention user mode")
-	}
-}
-
 // --- Config path validation tests ---
 
 // TestInitSystemConfigPathIsDirectory verifies that initSystem fails when

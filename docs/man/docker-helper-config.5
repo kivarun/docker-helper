@@ -169,13 +169,13 @@ Principal allowed_roots are stored in the state database, not in \fIconfig.json\
 System mode requires exactly one active backend: AppArmor or enforcing
 SELinux. Neither, both, and permissive SELinux fail closed.
 .PP
-\fBallowed_roots\fR is the global authorization ceiling. In system mode,
-\fBdocker-helper config allowed-root add PATH\fR prepares the active MAC
-backend as part of the operation.
+\fBallowed_roots\fR is the global authorization ceiling. MAC coverage
+for a concrete workspace is prepared at session creation time.
 .SS AppArmor
 AppArmor uses profile \fBdocker-helper-system\fR.
 Managed workspace roots are stored in \fI/etc/apparmor.d/docker-helper.d/managed-roots\fR.
-\fBconfig allowed-root add\fR prepares managed AppArmor state automatically.
+\fBconfig allowed-root add\fR changes the authorization ceiling only;
+MAC coverage is prepared at session creation time.
 Advanced backend-specific management: \fBdocker-helper apparmor root\fR.
 .SS SELinux
 The service runs in \fBdocker_helper_t\fR and system-mode containers run in
@@ -185,8 +185,11 @@ the MCS-constrained \fBdocker_helper_container_t\fR type.
 Explicitly managed non-home workspace roots use \fBdocker_helper_workspace_t\fR
 with persistent \fBsemanage fcontext\fR and \fBrestorecon\fR.
 .PP
-\fBdocker-helper config allowed-root add /opt\fR is rejected in SELinux mode;
-use a dedicated child such as \fI/opt/docker-helper-workspaces\fR instead.
+\fBdocker-helper config allowed-root add /opt\fR is accepted as an
+authorization ceiling for effective UID 0.  docker-helper will not
+create a recursive helper-owned MAC boundary at exact /opt.
+If an operator-compatible boundary already exists at /opt, it is used
+as coverage but never claimed or deleted.
 .PP
 Authorized workspace mounts support normal development-tree operations
 including file management, executable build/run, symlinks, Unix sockets,

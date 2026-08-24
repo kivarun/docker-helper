@@ -399,11 +399,10 @@ In non-interactive mode (stdin is not a terminal), --allowed-root
 is required.
 
 System mode (effective UID 0):
-  The initial workspace root is prepared for the active MAC backend
-  (AppArmor or SELinux). Use the following command for later workspace
-  roots:
-
-    docker-helper config allowed-root add PATH
+  The allowed root is the system-wide authorization ceiling.
+  init does not prepare MAC state.
+  MAC coverage for a concrete workspace is prepared by the session
+  lifecycle at session creation.
 
 User mode (non-root):
   No MAC preparation is required.`,

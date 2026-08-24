@@ -384,18 +384,44 @@ func TestHelpNoWorkspaceRoot(t *testing.T) {
 	}
 }
 
-func TestHelpInitPointsToConfigAllowedRootAdd(t *testing.T) {
-	// init help must point to config allowed-root add, not workspace-root add.
+func TestHelpInitMACLifecycleContract(t *testing.T) {
+	// init help must describe the correct MAC lifecycle contract:
+	// system mode has authorization ceiling + session-creation MAC preparation;
+	// user mode requires no MAC preparation; init never prepares MAC state.
 	var stdout, stderr bytes.Buffer
 	initCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
-	if !strings.Contains(stdout.String(), "config allowed-root add") {
-		t.Error("init help must point to config allowed-root add")
+	helpText := stdout.String()
+
+	// Must describe system mode and user mode.
+	if !strings.Contains(helpText, "System mode") {
+		t.Error("init help must describe system mode")
 	}
-	if strings.Contains(stdout.String(), "workspace-root add") {
-		t.Error("init help must not mention workspace-root add")
+	if !strings.Contains(helpText, "User mode") {
+		t.Error("init help must describe user mode")
 	}
-	if strings.Contains(stdout.String(), "apparmor root add") {
-		t.Error("init help must not mention apparmor root add as normal path")
+
+	// Must describe the allowed root as the authorization ceiling.
+	if !strings.Contains(helpText, "authorization ceiling") {
+		t.Error("init help must describe the allowed root as the authorization ceiling")
+	}
+
+	// Must state that system-mode MAC preparation happens at session creation.
+	if !strings.Contains(helpText, "session") {
+		t.Error("init help must mention session lifecycle for MAC preparation")
+	}
+
+	// Must state that user mode requires no MAC preparation.
+	if !strings.Contains(helpText, "No MAC preparation") {
+		t.Error("init help must state that user mode requires no MAC preparation")
+	}
+
+	// Must NOT claim that init prepares MAC state.
+	if strings.Contains(helpText, "prepared for the active MAC backend") {
+		t.Error("init help must not claim that init prepares the active MAC backend")
+	}
+	// Must NOT direct users to config allowed-root add for MAC preparation.
+	if strings.Contains(helpText, "config allowed-root add PATH") {
+		t.Error("init help must not direct users to config allowed-root add for MAC preparation")
 	}
 }
 
@@ -412,18 +438,38 @@ func TestHelpReloadUsesAllowedRoots(t *testing.T) {
 }
 
 func TestHelpConfigAllowedRootGlobalCeiling(t *testing.T) {
-	// config allowed-root help must describe global authorization ceiling.
+	// config allowed-root help must describe the authorization ceiling
+	// and must not claim that changing allowed_roots prepares MAC state.
 	var stdout, stderr bytes.Buffer
 	configAllowedRootCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
-	if !strings.Contains(stdout.String(), "authorization") {
+	helpText := stdout.String()
+
+	// Must describe the authorization ceiling.
+	if !strings.Contains(helpText, "authorization") {
 		t.Error("config allowed-root help must mention authorization")
 	}
-	// Must NOT mention workspace-root add
-	if strings.Contains(stdout.String(), "workspace-root add") {
+
+	// Must state that changing allowed_roots never prepares MAC state.
+	if !strings.Contains(helpText, "never prepares MAC state") {
+		t.Error("config allowed-root help must state that changing allowed_roots never prepares MAC state")
+	}
+
+	// Must describe system mode MAC at session creation.
+	if !strings.Contains(helpText, "session creation") {
+		t.Error("config allowed-root help must mention session creation for system-mode MAC")
+	}
+
+	// Must describe user mode.
+	if !strings.Contains(helpText, "user mode") {
+		t.Error("config allowed-root help must describe user mode")
+	}
+
+	// Must NOT mention workspace-root add.
+	if strings.Contains(helpText, "workspace-root add") {
 		t.Error("config allowed-root help must not mention workspace-root add")
 	}
-	// Must NOT mention MAC preparation (handled at session creation time)
-	if strings.Contains(stdout.String(), "prepares the active MAC backend") {
-		t.Error("config allowed-root help must not mention MAC preparation")
+	// Must NOT claim that allowed-root add prepares MAC state.
+	if strings.Contains(helpText, "prepares the active MAC backend") {
+		t.Error("config allowed-root help must not claim that allowed-root add prepares MAC state")
 	}
 }

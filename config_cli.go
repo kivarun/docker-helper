@@ -239,8 +239,10 @@ The global allowed_roots is the coarse authorization ceiling for new
 sessions. Every new session workspace must be under at least one allowed
 root. Principal allowed roots further narrow the ceiling per principal.
 
-MAC preparation (AppArmor or SELinux) is handled at session creation time,
-not when adding an allowed root.
+Changing allowed_roots never prepares MAC state.
+In system mode, MAC coverage for a concrete workspace is handled by the
+session lifecycle at session creation. In user mode, no MAC preparation
+is required.
 
 remove does not invalidate already-issued sessions.`,
 	Subcommands: []*Command{
@@ -918,8 +920,6 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 	case "http_address":
 		newValue, _ = json.Marshal(value)
 	}
-
-	// SELinux preparation is handled by config allowed-root add.
 
 	return applyConfigChangeTransactionally(
 		configOpSet,
