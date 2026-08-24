@@ -117,8 +117,8 @@ func validateRootPathForAdd(path string) (string, error) {
 		return "", &inputError{msg: "path must be absolute"}
 	}
 
-	// Use the unified workspace root policy for canonicalization and security checks.
-	canonical, err := canonicalizeWorkspaceRootForAdd(path)
+	// Use the shared path-safety policy for canonicalization and security checks.
+	canonical, err := canonicalizePathForAdd(path)
 	if err != nil {
 		return "", &inputError{msg: err.Error()}
 	}
@@ -589,9 +589,9 @@ func (m *appArmorProfileManager) check() error {
 		return fmt.Errorf("managed fragment is malformed: %w", err)
 	}
 
-	// Diagnose managed roots that violate the workspace root security policy.
+	// Diagnose managed roots that violate the shared path-safety policy.
 	for _, root := range roots {
-		if err := validateWorkspaceRootPolicy(root); err != nil {
+		if err := validatePathPolicy(root); err != nil {
 			return fmt.Errorf("managed root %q violates workspace root policy: %s", root, err)
 		}
 	}

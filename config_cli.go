@@ -349,7 +349,7 @@ func configAllowedRootAdd(path string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	canonical, err := canonicalizeWorkspaceRootForAdd(path)
+	canonical, err := canonicalizePathForAdd(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 2
@@ -1103,7 +1103,7 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 			fmt.Fprintf(stderr, "error: cannot parse allowed_root: %v\n", err)
 			return 1
 		}
-		canon, canonErr := canonicalizeWorkspaceRootForAdd(legacyVal)
+		canon, canonErr := canonicalizePathForAdd(legacyVal)
 		if canonErr != nil {
 			fmt.Fprintf(stderr, "error: cannot canonicalize allowed_root %q: %v\n", legacyVal, canonErr)
 			return 1
