@@ -233,7 +233,7 @@ func TestAppArmorBoundaryAddSymlinkedPath(t *testing.T) {
 		t.Fatalf("listBoundaries failed: %v", err)
 	}
 	if len(boundaries) != 1 || boundaries[0] != realDir {
-		t.Errorf("expected canonical root %s, got %v", realDir, boundaries)
+		t.Errorf("expected canonical boundary %s, got %v", realDir, boundaries)
 	}
 }
 
@@ -253,7 +253,7 @@ func TestAppArmorBoundaryAddRootDirectory(t *testing.T) {
 
 func TestAppArmorBoundaryAddGlobRejected(t *testing.T) {
 	// The base must be policy-legal (t.TempDir() is under the forbidden /tmp
-	// tree and would be rejected by the workspace root policy before lexical
+	// tree and would be rejected by the workspace-path policy before lexical
 	// validation runs), so the rejection comes from the lexical check.
 	rootDir := testAllowedRootDir(t)
 
@@ -329,7 +329,7 @@ func TestRenderFragmentEmpty(t *testing.T) {
 		t.Error("empty fragment should start with header")
 	}
 	if strings.Contains(content, "# root-json:") {
-		t.Error("empty fragment should not contain root entries")
+		t.Error("empty fragment should not contain boundary entries")
 	}
 }
 
@@ -355,7 +355,7 @@ func TestEscapeAppArmorPath(t *testing.T) {
 
 // --- Special characters in paths ---
 
-func TestRootWithSpecialCharacters(t *testing.T) {
+func TestBoundaryWithSpecialCharacters(t *testing.T) {
 	for _, name := range []string{"with space", `with"quote`, "with#hash", "with,comma", "with\\backslash"} {
 		t.Run(name, func(t *testing.T) {
 			rootDir := testAllowedRootDir(t)
@@ -379,15 +379,15 @@ func TestRootWithSpecialCharacters(t *testing.T) {
 				t.Fatalf("listBoundaries failed: %v", err)
 			}
 			if len(boundaries) != 1 || boundaries[0] != path {
-				t.Errorf("expected root %s, got %v", path, boundaries)
+				t.Errorf("expected boundary %s, got %v", path, boundaries)
 			}
 		})
 	}
 }
 
-func TestRootWithControlCharacter(t *testing.T) {
+func TestBoundaryWithControlCharacter(t *testing.T) {
 	// Policy-legal base so the rejection comes from lexical validation, not
-	// the workspace root policy (t.TempDir() is under the forbidden /tmp).
+	// the workspace-path policy (t.TempDir() is under the forbidden /tmp).
 	rootDir := testAllowedRootDir(t)
 	path := filepath.Join(rootDir, "with\x01control")
 	if err := os.MkdirAll(path, 0755); err != nil {
@@ -481,7 +481,7 @@ func TestAppArmorDuplicateAdd(t *testing.T) {
 		t.Fatalf("listBoundaries failed: %v", err)
 	}
 	if len(boundaries) != 1 {
-		t.Errorf("expected 1 root, got %d", len(boundaries))
+		t.Errorf("expected 1 boundary, got %d", len(boundaries))
 	}
 }
 
@@ -835,7 +835,7 @@ func TestAppArmorSuccessfulAdd(t *testing.T) {
 		t.Fatalf("listBoundaries failed: %v", err)
 	}
 	if len(boundaries) != 1 || boundaries[0] != testDir {
-		t.Errorf("expected root %s, got %v", testDir, boundaries)
+		t.Errorf("expected boundary %s, got %v", testDir, boundaries)
 	}
 
 	if len(captured.args) != 3 || captured.args[0] != "--replace" {
@@ -1722,7 +1722,7 @@ func TestRenderFragmentFormat(t *testing.T) {
 		t.Errorf("expected blank line after header, got: %s", lines[2])
 	}
 	if lines[3] != `# root-json: "/workspace"` {
-		t.Errorf("expected root metadata, got: %s", lines[3])
+		t.Errorf("expected boundary metadata, got: %s", lines[3])
 	}
 	if lines[4] != `"/workspace/" r,` {
 		t.Errorf("expected dir rule, got: %s", lines[4])
@@ -1732,16 +1732,16 @@ func TestRenderFragmentFormat(t *testing.T) {
 	}
 }
 
-func TestRenderFragmentMultipleRoots(t *testing.T) {
+func TestRenderFragmentMultipleBoundaries(t *testing.T) {
 	boundaries := []string{"/a", "/b"}
 	data := renderFragment(boundaries)
 	content := string(data)
 
 	if !strings.Contains(content, `# root-json: "/a"`) {
-		t.Error("missing root /a")
+		t.Error("missing boundary /a")
 	}
 	if !strings.Contains(content, `# root-json: "/b"`) {
-		t.Error("missing root /b")
+		t.Error("missing boundary /b")
 	}
 	if !strings.Contains(content, `"/a/" r,`) {
 		t.Error("missing rule for /a")
@@ -1753,7 +1753,7 @@ func TestRenderFragmentMultipleRoots(t *testing.T) {
 
 // --- validateBoundaryPathForRemove ---
 
-func TestValidateRootPathForRemoveNonExistent(t *testing.T) {
+func TestValidateBoundaryPathForRemoveNonExistent(t *testing.T) {
 	canonical, err := validateBoundaryPathForRemove("/nonexistent/path")
 	if err != nil {
 		t.Fatalf("expected success for non-existent path in remove, got: %v", err)
@@ -1763,7 +1763,7 @@ func TestValidateRootPathForRemoveNonExistent(t *testing.T) {
 	}
 }
 
-func TestValidateRootPathForRemoveRoot(t *testing.T) {
+func TestValidateBoundaryPathForRemoveFilesystemRoot(t *testing.T) {
 	_, err := validateBoundaryPathForRemove("/")
 	if err == nil {
 		t.Fatal("expected error for /")
@@ -1860,7 +1860,7 @@ func TestAppArmorRollbackRestoresNoFragment(t *testing.T) {
 
 // --- Lexical validation table-driven tests ---
 
-func TestValidateRootLexical(t *testing.T) {
+func TestValidateBoundaryLexical(t *testing.T) {
 	tests := []struct {
 		name    string
 		path    string
@@ -1908,10 +1908,10 @@ func TestValidateRootLexical(t *testing.T) {
 
 // --- Fragment with invalid boundaries rejected by parseFragment ---
 
-func TestParseFragmentRejectsInvalidRoots(t *testing.T) {
+func TestParseFragmentRejectsInvalidBoundaries(t *testing.T) {
 	tests := []struct {
-		name string
-		root string
+		name     string
+		boundary string
 	}{
 		{"relative", "relative"},
 		{"root dir", "/"},
@@ -1925,10 +1925,10 @@ func TestParseFragmentRejectsInvalidRoots(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Use renderFragment to create a properly formatted fragment
-			data := renderFragment([]string{tc.root})
+			data := renderFragment([]string{tc.boundary})
 			_, err := parseFragment(data)
 			if err == nil {
-				t.Fatalf("expected error for invalid root %q, got nil", tc.root)
+				t.Fatalf("expected error for invalid boundary %q, got nil", tc.boundary)
 			}
 		})
 	}
@@ -1936,7 +1936,7 @@ func TestParseFragmentRejectsInvalidRoots(t *testing.T) {
 
 // --- Stat error in remove ---
 
-func TestValidateRootPathForRemoveStatError(t *testing.T) {
+func TestValidateBoundaryPathForRemoveStatError(t *testing.T) {
 	// Test with a symlink loop to get ELOOP error
 	dir := t.TempDir()
 	linkPath := filepath.Join(dir, "loop")
@@ -1961,9 +1961,9 @@ func TestValidateRootPathForRemoveStatError(t *testing.T) {
 	}
 }
 
-// --- Existing non-directory path as lexical stale root ---
+// --- Existing non-directory path as lexical stale boundary ---
 
-func TestValidateRootPathForRemoveNonDirectory(t *testing.T) {
+func TestValidateBoundaryPathForRemoveNonDirectory(t *testing.T) {
 	dir := t.TempDir()
 	tmpfile := filepath.Join(dir, "notadir")
 	if err := os.WriteFile(tmpfile, []byte("data"), 0644); err != nil {
@@ -1982,8 +1982,8 @@ func TestValidateRootPathForRemoveNonDirectory(t *testing.T) {
 // --- Stale unsafe boundaries: parser tolerance and REMOVE semantics ---
 
 // TestAppArmorStaleUnsafeBoundaryPreservedSemantics verifies that a managed
-// fragment containing a root that violates the current workspace root
-// policy (e.g., a pre-policy /var/... root) is still parsed, can still be
+// fragment containing a managed boundary that violates the current workspace-path
+// policy (e.g., a pre-policy /var/... boundary) is still parsed, can still be
 // removed (stale REMOVE semantics), and is diagnosed by check.
 func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	_, mgr, _ := setupAppArmorTest(t)
@@ -1997,7 +1997,7 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1) Parser must tolerate the stale unsafe root.
+	// 1) Parser must tolerate the stale unsafe boundary.
 	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
 		t.Fatalf("listBoundaries() error: %v", err)
@@ -2006,13 +2006,13 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 		t.Fatalf("listBoundaries() = %v, want [%s]", boundaries, staleUnsafe)
 	}
 
-	// 2) Stale REMOVE semantics: the unsafe root must still be removable.
+	// 2) Stale REMOVE semantics: the unsafe boundary must still be removable.
 	res, err := mgr.removeManagedBoundary(staleUnsafe)
 	if err != nil {
 		t.Fatalf("removeBoundary() error: %v", err)
 	}
 	if !res.Changed {
-		t.Error("removeRoot should report Changed=true")
+		t.Error("removeBoundary should report Changed=true")
 	}
 	boundaries, err = mgr.listManagedBoundaries()
 	if err != nil {
@@ -2028,9 +2028,9 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	}
 	err = mgr.check()
 	if err == nil {
-		t.Error("check() should diagnose policy-violating managed root")
+		t.Error("check() should diagnose policy-violating managed boundary")
 	} else if !strings.Contains(err.Error(), "workspace root policy") {
-		t.Errorf("check() error = %q, want workspace root policy diagnostic", err.Error())
+		t.Errorf("check() error = %q, want workspace-path policy diagnostic", err.Error())
 	}
 }
 

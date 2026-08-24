@@ -229,7 +229,7 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 
 	// Import pre-existing helper-owned boundaries into ownership metadata.
 	// This ensures that boundaries created before mac_boundaries existed
-	// (e.g., AppArmor managed fragment roots) are tracked as helper-owned.
+	// (e.g., AppArmor managed fragment boundaries) are tracked as helper-owned.
 	if err := c.importHelperOwnedBoundaries(); err != nil {
 		return fmt.Errorf("cannot import helper-owned MAC boundaries: %w", err)
 	}
@@ -284,7 +284,7 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 
 // importHelperOwnedBoundaries imports pre-existing helper-owned boundaries from
 // the driver into ownership metadata. This ensures that boundaries created
-// before mac_boundaries existed (e.g., AppArmor managed fragment roots)
+// before mac_boundaries existed (e.g., AppArmor managed fragment boundaries)
 // are tracked as helper-owned by docker-helper.
 // Must be called with c.mu held.
 func (c *sessionMACCoordinator) importHelperOwnedBoundaries() error {
