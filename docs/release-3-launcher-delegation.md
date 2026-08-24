@@ -37,9 +37,9 @@ The proposed hierarchy is:
 ```text
 Global policy
 └── Principal
-    ├── Principal credentials
+    ├── Principal credentials (zero or more)
     └── Launcher
-        ├── Launcher credentials
+        ├── Launcher credential (zero or one)
         └── Sessions
             └── Operations and Docker containers
 ```
@@ -50,8 +50,8 @@ The roles are deliberately concrete:
   filesystem policy for that identity.
 - **Launcher** is a stable delegated subject, filesystem-policy layer, session
   owner, and runtime ownership boundary.
-- **Credential** is a rotatable bearer key that authenticates either a
-  Principal or a Launcher. It is not a resource owner.
+- **Credential** is a rotatable bearer key owned by exactly one Principal or
+  exactly one Launcher. It is not a resource owner.
 - **Session** is an execution capability owned by exactly one Launcher.
 - **Operation and container** belong to their Session and therefore to its
   Launcher.
@@ -66,8 +66,8 @@ Control-plane authority flows downward:
 
 - the admin token has full control over Principals, Launchers, credentials,
   and sessions;
-- a Principal credential controls Launchers attached to that Principal,
-  credentials for those Launchers, and their sessions;
+- a Principal credential controls Launchers attached to that Principal, the
+  optional credential of each Launcher, and their sessions;
 - a Launcher credential controls only sessions owned by that Launcher;
 - a Session token authorizes only pull, build, run, registry, and operation
   requests within that Session.
@@ -144,11 +144,12 @@ relabeling of that ceiling.
 The `default` Launcher uses `inherit`, so its filesystem authority matches its
 Principal's effective authority.
 
-All credentials for one Launcher represent the same trust domain. Therefore a
-caller holding a credential for the `default` Launcher may list and delete
-Sessions created for that Launcher by the Principal or administrator. It does
-not receive those Sessions' bearer tokens or session-scoped registry secrets
-and cannot call their data-plane endpoints without the Session token.
+The optional credential of a Launcher represents that Launcher's trust domain.
+Therefore a caller holding the credential for the `default` Launcher may list
+and delete Sessions created for that Launcher by the Principal or
+administrator. It does not receive those Sessions' bearer tokens or
+session-scoped registry secrets and cannot call their data-plane endpoints
+without the Session token.
 
 The incremental risk is primarily metadata visibility and availability. It is
 not a new workspace confidentiality boundary: the same credential can already
@@ -165,19 +166,30 @@ The admin token remains the root capability and does not identify a Principal.
 Release 2 principal credentials remain Principal credentials in the new model;
 they must not be silently reclassified as Launcher credentials.
 
-Credentials at either level are technical keys with:
+Every Credential is a technical key with:
 
 - an opaque credential ID;
-- one owner, Principal or Launcher;
+- exactly one owner, Principal or Launcher;
 - a token hash;
 - creation and revocation timestamps.
 
-Credentials do not need business names. The stable human-readable name belongs
-to the Launcher.
+Principal and Launcher credential cardinality deliberately differ:
 
-Revoking one credential blocks that key but does not change Launcher ownership
-or revoke already issued Session tokens. Multiple credentials for the same
-owner exist for safe overlapping rotation and exact audit attribution.
+- a Principal may own zero or more Principal credentials; their existing names
+  remain useful for distinguishing independently issued keys;
+- a Launcher may own zero or one Launcher credential;
+- a Launcher credential has no business name because the stable
+  human-readable identity belongs to the Launcher.
+
+Revoking a credential blocks that key but does not change Principal or Launcher
+ownership and does not revoke already issued Session tokens. Principal
+credentials retain the existing multi-credential lifecycle, including
+overlapping replacement when required.
+
+Rotating a Launcher credential atomically replaces the bearer secret of that
+same logical credential. The old secret becomes invalid, the credential ID and
+Launcher ownership remain unchanged, and no second concurrently owned Launcher
+credential is created.
 
 Neither a Principal nor a Launcher requires a credential merely to exist or to
 own resources. The administrator can create and manage a credential-less
@@ -223,9 +235,14 @@ are advanced workflows rather than quick-start steps:
 
 ```text
 docker-helper principal credential create USER
-docker-helper launcher credential create LAUNCHER_ID
+docker-helper launcher credential issue LAUNCHER_ID
+docker-helper launcher credential rotate LAUNCHER_ID
 docker-helper credential install
 ```
+
+`launcher credential issue` is valid only when the Launcher has no credential.
+`launcher credential rotate` replaces the secret of the existing credential
+and returns the new secret exactly once.
 
 A Principal credential may create a Session for its `default` Launcher without
 installing the Launcher credential. The Launcher credential returned during
@@ -247,12 +264,20 @@ PATCH  /launchers/{id}
 PUT    /launchers/{id}/allowed-roots
 DELETE /launchers/{id}
 
-POST   /launchers/{id}/credentials
-GET    /launchers/{id}/credentials
+PUT    /launchers/{id}/credential
+GET    /launchers/{id}/credential
+POST   /launchers/{id}/credential/rotate
+DELETE /launchers/{id}/credential
 ```
 
 Principal and Launcher creation accept `issue_credential`. A successful
 issuance response returns the secret exactly once.
+
+The singular Launcher credential resource enforces zero-or-one cardinality.
+Rotation updates that resource's bearer secret atomically, preserves its
+credential ID and Launcher ownership, invalidates the old secret, and returns
+the replacement secret exactly once. Principal credential endpoints remain
+plural and continue to support multiple independently revocable credentials.
 
 The Session endpoints remain structurally stable:
 
@@ -309,18 +334,27 @@ CREATE TABLE credentials (
     id            TEXT PRIMARY KEY,
     principal_id  INTEGER,
     launcher_id   TEXT,
+    name          TEXT,
     token_hash    TEXT NOT NULL UNIQUE,
     created_at    INTEGER NOT NULL,
     revoked_at    INTEGER,
     FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
     FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+    UNIQUE (principal_id, name),
+    UNIQUE (launcher_id),
     CHECK (
-        (principal_id IS NOT NULL AND launcher_id IS NULL)
+        (principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
         OR
-        (principal_id IS NULL AND launcher_id IS NOT NULL)
+        (principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
     )
 );
 ```
+
+The owner check gives every Credential exactly one concrete owner. The unique
+non-null `launcher_id` enforces at most one Credential per Launcher, while
+`name` remains available only for the Principal multi-credential model.
+Launcher rotation updates the existing row's token hash and lifecycle metadata
+rather than inserting a second Launcher-owned row.
 
 Sessions logically store a non-null `launcher_id`. Principal identity is
 derived through the Launcher rather than duplicated as an independent owner.
@@ -346,9 +380,10 @@ Lifecycle semantics are:
 - credential revoke blocks that key; existing Sessions survive;
 - root narrowing affects new Sessions; existing Sessions survive until normal
   deletion or expiry;
-- Launcher disable blocks all of its credentials and invalidates its Sessions;
+- Launcher disable blocks its credential, if present, and invalidates its
+  Sessions;
 - Launcher deletion is permitted only after checked Session and runtime
-  cleanup, then removes its roots and credentials;
+  cleanup, then removes its roots and optional credential;
 - Principal disable or deletion applies the same lifecycle to every attached
   Launcher;
 - Session deletion uses the existing authoritative operation, runtime, and MAC
@@ -357,8 +392,8 @@ Lifecycle semantics are:
 ## Migration direction
 
 Release 2 credentials already authenticate Principals. Migration preserves
-their IDs and token hashes as Principal credentials and removes their names
-from the logical model.
+their IDs, names, and token hashes as Principal credentials. They remain a
+multi-credential Principal lifecycle and are not reassigned to Launchers.
 
 Existing Principal-owned Sessions may be assigned to an automatically created
 `default` Launcher for that Principal. Existing admin-created Sessions without
@@ -384,11 +419,14 @@ Required coverage includes:
 - rejection of stale or directly injected out-of-ceiling Launcher roots;
 - isolation between two Launchers of one Principal, including equal-root
   Launchers with separate Session namespaces;
-- shared Session management across two credentials of one Launcher;
+- Session-management continuity across Launcher credential rotation, with the
+  old secret rejected, the replacement secret authorized, and no second
+  Launcher credential created;
 - Principal access only to Launchers attached to that Principal;
 - default Launcher selection and explicit Launcher selection;
 - admin creation only for an explicit ownership chain;
-- credential rotation without ownership change or Session revocation;
+- Principal overlapping credential replacement and singular Launcher
+  credential rotation without ownership change or Session revocation;
 - Launcher and Principal disable/delete cleanup boundaries;
 - container ownership labels and checked cleanup;
 - migration of Release 2 credentials as Principal credentials;

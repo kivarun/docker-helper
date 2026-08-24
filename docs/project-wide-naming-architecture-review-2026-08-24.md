@@ -66,13 +66,13 @@ Verification on the review baseline:
 - **requireSession** authenticates a Session token for Docker actions:
   [response.go:153-183](../response.go#L153-L183).
 - **sessionAuthContext** and **authenticateSessionRequest** authenticate an
-  admin token or Launcher credential for Session management:
+  admin token or Principal credential for Session management:
   [sessions.go:49-118](../sessions.go#L49-L118).
 - **writeUnauthorizedSession** says “Authentication required for session
   management” and is also called by the Docker-action path:
   [response.go:107-113](../response.go#L107-L113).
 - **TestAuthAuditAdminWrongToken_CreateSession** actually tests fallback to an
-  unknown Launcher credential and expects credential.not_found:
+  unknown Principal credential and expects credential.not_found:
   [auth_audit_test.go:214-242](../auth_audit_test.go#L214-L242).
 
 **Actual semantic responsibility**
@@ -81,7 +81,7 @@ There are two separate authority domains:
 
 - Session capability authentication for pull/build/run/registry/operation
   requests;
-- Session-control authority, supplied by an admin token or Launcher
+- Session-control authority, supplied by an admin token or Principal
   credential, for create/list/delete Session requests.
 
 **Why the vocabulary is dangerous**
@@ -284,15 +284,15 @@ Session-control audit then emits credential.disabled:
 
 **Actual responsibility**
 
-A Launcher credential may be unknown or revoked. The independently owned
-Principal may be disabled.
+A Principal credential may be unknown or revoked. Its owning Principal may be
+disabled independently of the credential lifecycle.
 
 **Preferred vocabulary**
 
 - ErrPrincipalDisabled;
 - principal.disabled in audit;
 - CredentialWithPrincipal.PrincipalName;
-- LauncherCredentialAuth for the internal authenticated-authority result.
+- PrincipalCredentialAuth for the internal authenticated-authority result.
 
 **Compatibility and batch**
 
@@ -564,8 +564,8 @@ Test-only mechanical rename.
 
 **Current vocabulary and evidence**
 
-README defines Admin token, Launcher credential, and Session token as three
-separate classes:
+README incorrectly labels the current Release 2 Principal credential as a
+Launcher credential while defining the three authentication classes:
 [README.md:51-61](../README.md#L51-L61).
 
 Later documentation uses “admin credential” or “administrative credential”:
@@ -574,12 +574,15 @@ Later documentation uses “admin credential” or “administrative credential�
 
 **Actual responsibility**
 
-Credential is a concrete Launcher-bound entity in the Release 2 model. The
-root administrative capability is the admin token.
+Credential is a concrete Principal-owned entity in the Release 2 model; the
+canonical term is Principal credential. Launcher credential is reserved for
+the proposed Release 3 delegation model. The root administrative capability
+is the admin token.
 
 **Preferred vocabulary and batch**
 
-Use admin token consistently in README, release plan, man pages, and packaging
+Use Principal credential for the Release 2 entity and admin token for the root
+capability consistently in README, release plan, man pages, and packaging
 comments. This is terminology-only and has no compatibility cost.
 
 ## 4. P3 findings
@@ -796,7 +799,7 @@ The normal auth-failure owner includes those fields:
 
 Route the database failure through the common auth audit owner.
 
-### N4. Launcher-credential token format has two owners
+### N4. Principal-credential token format has two owners
 
 generateCredentialToken contains a literal dhc_ prefix and a 32-byte length:
 [credential.go:32-39](../credential.go#L32-L39).
