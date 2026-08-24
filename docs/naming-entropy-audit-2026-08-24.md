@@ -6,17 +6,17 @@ Reference model: `AGENTS.md` § MAC naming grammar.
 
 **Scope:** This audit covers the MAC lifecycle, AppArmor/SELinux native
 mechanics, MAC boundaries, canonical path containment, init/reload lifecycle,
-and shared workspace-path policy. It is the reference area currently
-undergoing final control review.
+and shared workspace-path policy. It is the completed reference area accepted
+as the naming/architecture model for the upcoming project-wide audit.
 
 **This is not a project-wide naming audit.** It makes no claim that naming
 across the whole repository is clean. The next phase is a fresh project-wide
 audit using this area as the quality/reference model.
 
 The identified refactor batches in this reference scope have been applied.
-Independent control review found one remaining actionable naming issue.
-Final acceptance of the reference area is pending correction and re-review
-of the remaining finding.
+Control review found two actionable naming findings; both were corrected.
+Final independent re-review found no remaining actionable naming issue
+within this reference scope. The reference area is accepted.
 
 Rule: one domain concept -> one canonical term. Different concepts must not
 share one word. Different implementations must not invent synonyms for the
@@ -280,7 +280,7 @@ User-facing error strings that say "workspace root" are correctly preserved
 as compatibility vocabulary. Only the internal documentation comments are
 affected.
 
-**Status:** corrected; pending final re-review.
+**Status:** corrected; verified in final re-review.
 
 **SELinux fcontext internal "root" vocabulary conflates different path roles**
 
@@ -321,7 +321,14 @@ The required semantic split for the eventual implementation is:
 The implementation batch should be designed from actual call semantics,
 not a mechanical rename.
 
-**Status:** corrected; pending final re-review.
+**Status:** corrected; verified in final re-review.
+
+### Control review result
+
+**Result: PASSED**
+
+Final re-review found no remaining actionable naming issue within the
+defined reference scope.
 
 ### Verified invariants (no issues found)
 
@@ -341,8 +348,8 @@ not a mechanical rename.
 - Truly generic primitives (`pathWithin`, `pathStrictlyWithin`) remain
   separate and correctly named.
 
-Final acceptance of the reference area is pending correction and re-review
-of the remaining finding.
+The reference area is accepted as the reference model for the upcoming
+project-wide naming/architecture audit.
 
 This is NOT a project-wide cleanliness claim. The next phase is a fresh
 project-wide naming/architecture audit using this area as reference.
