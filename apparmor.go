@@ -27,7 +27,7 @@ const (
 	fragmentHeader2 = "# Managed AppArmor workspace roots for docker-helper-system profile."
 )
 
-type apparmorManager struct {
+type appArmorManager struct {
 	mainProfilePath     string
 	managedFragmentPath string
 	lockPath            string
@@ -35,11 +35,11 @@ type apparmorManager struct {
 	runParser           func(executable string, args []string) error
 }
 
-func newApparmorManager(
+func newAppArmorManager(
 	mainProfile, managedFragment, lockPath, parserPath string,
 	runParser func(executable string, args []string) error,
-) *apparmorManager {
-	return &apparmorManager{
+) *appArmorManager {
+	return &appArmorManager{
 		mainProfilePath:     mainProfile,
 		managedFragmentPath: managedFragment,
 		lockPath:            lockPath,
@@ -60,8 +60,8 @@ func newProductionParserRunner() func(executable string, args []string) error {
 	}
 }
 
-func newProductionApparmorManager() *apparmorManager {
-	return newApparmorManager(
+func newProductionAppArmorManager() *appArmorManager {
+	return newAppArmorManager(
 		apparmorMainProfile,
 		apparmorManagedFragment,
 		apparmorLockPath,
@@ -270,7 +270,7 @@ func deduplicateStrings(s []string) []string {
 	return result
 }
 
-func (m *apparmorManager) acquireApparmorLock() (*os.File, error) {
+func (m *appArmorManager) acquireAppArmorLock() (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(m.lockPath), 0755); err != nil {
 		return nil, fmt.Errorf("cannot create lock directory: %w", err)
 	}
@@ -291,7 +291,7 @@ func (m *apparmorManager) acquireApparmorLock() (*os.File, error) {
 	return f, nil
 }
 
-func (m *apparmorManager) readFragment() ([]string, error) {
+func (m *appArmorManager) readFragment() ([]string, error) {
 	info, err := os.Lstat(m.managedFragmentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -314,7 +314,7 @@ func (m *apparmorManager) readFragment() ([]string, error) {
 	return parseFragment(data)
 }
 
-func (m *apparmorManager) writeFragment(roots []string) error {
+func (m *appArmorManager) writeFragment(roots []string) error {
 	dir := filepath.Dir(m.managedFragmentPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create fragment directory: %w", err)
@@ -350,11 +350,11 @@ func (m *apparmorManager) writeFragment(roots []string) error {
 	return nil
 }
 
-func (m *apparmorManager) reloadProfile() error {
+func (m *appArmorManager) reloadProfile() error {
 	return m.runParser(m.parserPath, []string{"--replace", "--skip-read-cache", m.mainProfilePath})
 }
 
-func (m *apparmorManager) validateProfile() error {
+func (m *appArmorManager) validateProfile() error {
 	return m.runParser(m.parserPath, []string{"--skip-kernel-load", "--skip-read-cache", m.mainProfilePath})
 }
 
@@ -365,7 +365,7 @@ type fragmentSnapshot struct {
 	roots  []string
 }
 
-func (m *apparmorManager) snapshotFragment() (*fragmentSnapshot, error) {
+func (m *appArmorManager) snapshotFragment() (*fragmentSnapshot, error) {
 	info, err := os.Lstat(m.managedFragmentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -398,7 +398,7 @@ func (m *apparmorManager) snapshotFragment() (*fragmentSnapshot, error) {
 	}, nil
 }
 
-func (m *apparmorManager) preflight() error {
+func (m *appArmorManager) preflight() error {
 	info, err := os.Stat(m.parserPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -427,7 +427,7 @@ func (m *apparmorManager) preflight() error {
 	return nil
 }
 
-func (m *apparmorManager) restoreFragmentFile(snap *fragmentSnapshot) error {
+func (m *appArmorManager) restoreFragmentFile(snap *fragmentSnapshot) error {
 	if !snap.exists {
 		err := os.Remove(m.managedFragmentPath)
 		if err != nil {
@@ -468,7 +468,7 @@ func (m *apparmorManager) restoreFragmentFile(snap *fragmentSnapshot) error {
 	return nil
 }
 
-func (m *apparmorManager) rollbackFragment(snap *fragmentSnapshot) error {
+func (m *appArmorManager) rollbackFragment(snap *fragmentSnapshot) error {
 	if err := m.restoreFragmentFile(snap); err != nil {
 		return err
 	}
@@ -478,17 +478,17 @@ func (m *apparmorManager) rollbackFragment(snap *fragmentSnapshot) error {
 	return nil
 }
 
-func (m *apparmorManager) listRoots() ([]string, error) {
+func (m *appArmorManager) listRoots() ([]string, error) {
 	return m.readFragment()
 }
 
-func (m *apparmorManager) addRoot(path string) (rootResult, error) {
+func (m *appArmorManager) addRoot(path string) (rootResult, error) {
 	canonical, err := validateRootPathForAdd(path)
 	if err != nil {
 		return rootResult{}, err
 	}
 
-	lockFile, err := m.acquireApparmorLock()
+	lockFile, err := m.acquireAppArmorLock()
 	if err != nil {
 		return rootResult{}, err
 	}
@@ -529,13 +529,13 @@ func (m *apparmorManager) addRoot(path string) (rootResult, error) {
 	return rootResult{Path: canonical, Changed: true}, nil
 }
 
-func (m *apparmorManager) removeRoot(path string) (rootResult, error) {
+func (m *appArmorManager) removeRoot(path string) (rootResult, error) {
 	canonical, err := validateRootPathForRemove(path)
 	if err != nil {
 		return rootResult{}, err
 	}
 
-	lockFile, err := m.acquireApparmorLock()
+	lockFile, err := m.acquireAppArmorLock()
 	if err != nil {
 		return rootResult{}, err
 	}
@@ -579,7 +579,7 @@ func (m *apparmorManager) removeRoot(path string) (rootResult, error) {
 	return rootResult{Path: canonical, Changed: true}, nil
 }
 
-func (m *apparmorManager) check() error {
+func (m *appArmorManager) check() error {
 	if err := m.preflight(); err != nil {
 		return err
 	}
@@ -603,9 +603,9 @@ func (m *apparmorManager) check() error {
 	return nil
 }
 
-// apparmorManagedRoots is the package-level seam for listing managed AppArmor
+// appArmorManagedRoots is the package-level seam for listing managed AppArmor
 // roots. Production default reads from the managed fragment file.
 // Tests may replace this to control the returned roots.
-var apparmorManagedRoots = func() ([]string, error) {
-	return newProductionApparmorManager().listRoots()
+var appArmorManagedRoots = func() ([]string, error) {
+	return newProductionAppArmorManager().listRoots()
 }

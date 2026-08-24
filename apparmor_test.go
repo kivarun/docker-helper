@@ -21,7 +21,7 @@ type capturedParserCall struct {
 
 // setupApparmorTestWithRunner builds a manager over a fresh temp dir with a
 // fake executable parser and the given runner.
-func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []string) error) (dir string, mgr *apparmorManager) {
+func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []string) error) (dir string, mgr *appArmorManager) {
 	t.Helper()
 	dir = t.TempDir()
 
@@ -37,7 +37,7 @@ func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []st
 		t.Fatal(err)
 	}
 
-	mgr = newApparmorManager(
+	mgr = newAppArmorManager(
 		mainProfile,
 		managedFragment,
 		lockPath,
@@ -50,7 +50,7 @@ func setupApparmorTestWithRunner(t *testing.T, runner func(exe string, args []st
 
 // setupApparmorTest is like setupApparmorTestWithRunner but captures each
 // parser invocation for assertions.
-func setupApparmorTest(t *testing.T) (dir string, mgr *apparmorManager, captured *capturedParserCall) {
+func setupApparmorTest(t *testing.T) (dir string, mgr *appArmorManager, captured *capturedParserCall) {
 	t.Helper()
 	captured = &capturedParserCall{}
 	dir, mgr = setupApparmorTestWithRunner(t, func(exe string, args []string) error {
@@ -599,12 +599,12 @@ func TestApparmorListMalformedFragment(t *testing.T) {
 func TestApparmorParserInvocation(t *testing.T) {
 	tests := []struct {
 		name     string
-		op       func(mgr *apparmorManager, testDir string) error
+		op       func(mgr *appArmorManager, testDir string) error
 		wantArgs []string // plus the main profile path as the final argument
 	}{
 		{
 			name: "reload on add",
-			op: func(mgr *apparmorManager, testDir string) error {
+			op: func(mgr *appArmorManager, testDir string) error {
 				_, err := mgr.addRoot(testDir)
 				return err
 			},
@@ -612,7 +612,7 @@ func TestApparmorParserInvocation(t *testing.T) {
 		},
 		{
 			name: "validate on check",
-			op: func(mgr *apparmorManager, testDir string) error {
+			op: func(mgr *appArmorManager, testDir string) error {
 				return mgr.check()
 			},
 			wantArgs: []string{"--skip-kernel-load", "--skip-read-cache"},
@@ -643,7 +643,7 @@ func TestApparmorParserInvocation(t *testing.T) {
 			}
 
 			captured := &capturedParserCall{}
-			mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+			mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 				func(exe string, args []string) error {
 					captured.exe = exe
 					captured.args = args
@@ -699,7 +699,7 @@ func TestApparmorNoShellInvocation(t *testing.T) {
 		return nil
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	testDir := filepath.Join(testAllowedRootDir(t), "workspace")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
@@ -750,7 +750,7 @@ func TestApparmorCheckDoesNotReload(t *testing.T) {
 		return nil
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	if err := mgr.check(); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -786,7 +786,7 @@ func TestApparmorCheckDoesNotModifyFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, func(exe string, args []string) error { return nil })
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, func(exe string, args []string) error { return nil })
 
 	if err := mgr.check(); err != nil {
 		t.Fatalf("check failed: %v", err)
@@ -1126,11 +1126,11 @@ func TestApparmorLockSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
-	_, err = mgr.acquireApparmorLock()
+	_, err = mgr.acquireAppArmorLock()
 	if err == nil {
 		f.Close()
 		t.Fatal("expected lock error when another process holds the lock")
@@ -1260,7 +1260,7 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 		return nil
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	_, err = mgr.addRoot(testDir)
 	if err == nil {
@@ -1296,13 +1296,13 @@ func TestApparmorParserNotExecutable(t *testing.T) {
 func TestApparmorSymlinkFragmentRejected(t *testing.T) {
 	tests := []struct {
 		name string
-		op   func(mgr *apparmorManager, testDir string) error
+		op   func(mgr *appArmorManager, testDir string) error
 	}{
-		{"add", func(mgr *apparmorManager, testDir string) error {
+		{"add", func(mgr *appArmorManager, testDir string) error {
 			_, err := mgr.addRoot(testDir)
 			return err
 		}},
-		{"remove", func(mgr *apparmorManager, testDir string) error {
+		{"remove", func(mgr *appArmorManager, testDir string) error {
 			_, err := mgr.removeRoot(testDir)
 			return err
 		}},
@@ -1340,7 +1340,7 @@ func TestApparmorSymlinkFragmentRejected(t *testing.T) {
 			}
 
 			runnerCalled := false
-			mgr := newApparmorManager(mainProfile, linkFragment, lockPath, parserPath,
+			mgr := newAppArmorManager(mainProfile, linkFragment, lockPath, parserPath,
 				func(exe string, args []string) error {
 					runnerCalled = true
 					return nil
@@ -1407,7 +1407,7 @@ func TestApparmorNonRegularFragmentDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1438,7 +1438,7 @@ func TestApparmorParserUnavailableNoChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1473,7 +1473,7 @@ func TestApparmorMainProfileMissingNoChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1499,7 +1499,7 @@ func TestApparmorCheckParserNotAvailable(t *testing.T) {
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "nonexistent")
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1523,7 +1523,7 @@ func TestApparmorCheckMainProfileNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1556,7 +1556,7 @@ func TestApparmorCheckValidationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return errors.New("validation failed") },
 	)
 
@@ -1589,7 +1589,7 @@ func TestApparmorCheckSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath,
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath,
 		func(exe string, args []string) error { return nil },
 	)
 
@@ -1846,7 +1846,7 @@ func TestApparmorRollbackRestoresNoFragment(t *testing.T) {
 		return errors.New("parser always fails")
 	}
 
-	mgr := newApparmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
+	mgr := newAppArmorManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
 	_, err := mgr.addRoot(testDir)
 	if err == nil {

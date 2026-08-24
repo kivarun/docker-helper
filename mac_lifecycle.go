@@ -7,18 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
-	"strings"
 	"sync"
 )
 
 // ErrMACPreparation is returned when MAC coverage cannot be ensured or verified.
 var ErrMACPreparation = errors.New("MAC preparation failed")
 
-// macCoverage describes the actual MAC coverage boundary for a workspace.
-type macCoverage struct {
-	Boundary string // the actual boundary path providing coverage
-	Managed  bool   // true if docker-helper owns this boundary
+// workspaceMACCoverage describes the actual MAC coverage boundary for a workspace.
+type workspaceMACCoverage struct {
+	Boundary    string // the actual boundary path providing coverage
+	HelperOwned bool   // true if docker-helper owns this boundary (operator-compatible boundaries are not helper-owned)
 }
 
 // workspaceMACDriver is the backend-specific adapter for workspace MAC operations.
@@ -27,20 +25,21 @@ type workspaceMACDriver interface {
 	// ensureCoverage ensures MAC coverage for a concrete canonical workspace.
 	// Returns the actual coverage boundary (may be the workspace or an ancestor).
 	// created is true if a new boundary was created.
-	ensureCoverage(workspace string) (coverage macCoverage, created bool, err error)
+	ensureCoverage(workspace string) (coverage workspaceMACCoverage, created bool, err error)
 
 	// verifyCoverage checks that a workspace has valid MAC coverage without
 	// mutating state. Returns the actual coverage boundary.
-	verifyCoverage(workspace string) (coverage macCoverage, err error)
+	verifyCoverage(workspace string) (coverage workspaceMACCoverage, err error)
 
-	// removeBoundary removes a docker-helper-owned managed boundary.
+	// removeBoundary removes a docker-helper-owned boundary.
 	// Only called when the coordinator has verified ownership.
 	removeBoundary(boundary string) error
 
-	// listManagedBoundaries returns all boundaries that this driver manages.
-	// Used during reconciliation to import pre-existing managed boundaries
-	// into ownership metadata.
-	listManagedBoundaries() ([]string, error)
+	// discoverHelperOwnedBoundaries returns boundaries intrinsically attributable
+	// to docker-helper. Used during startup to import pre-existing helper-owned
+	// boundaries into durable ownership metadata.
+	// Operator-compatible boundaries MUST NOT be returned.
+	discoverHelperOwnedBoundaries() ([]string, error)
 
 	// backendType returns the backend identifier ("apparmor" or "selinux").
 	backendType() string
@@ -55,28 +54,28 @@ type sessionMACCoordinator struct {
 	driver workspaceMACDriver
 
 	// sessionBindings maps session ID to the exact MAC coverage boundary.
-	sessionBindings map[string]macCoverage
+	sessionBindings map[string]workspaceMACCoverage
 
-	// activeBoundaries maps boundary path to direct consumer count.
-	activeBoundaries map[string]int
+	// boundaryConsumerCounts maps boundary path to direct consumer count.
+	boundaryConsumerCounts map[string]int
 
-	// deferredBoundaries tracks driver-owned boundaries that cannot yet be
+	// deferredBoundaries tracks helper-owned boundaries that cannot yet be
 	// removed because an intersecting session/boundary is live. These are
 	// retried for cleanup when any consumer disappears.
 	deferredBoundaries map[string]bool
 
-	// leases maps unique lease key to workspace.
-	leases map[string]string
+	// workspaceUseLeases maps unique lease key to workspace.
+	workspaceUseLeases map[string]string
 }
 
 func newSessionMACCoordinator(db *sql.DB, driver workspaceMACDriver) *sessionMACCoordinator {
 	return &sessionMACCoordinator{
-		db:                 db,
-		driver:             driver,
-		sessionBindings:    make(map[string]macCoverage),
-		activeBoundaries:   make(map[string]int),
-		deferredBoundaries: make(map[string]bool),
-		leases:             make(map[string]string),
+		db:                     db,
+		driver:                 driver,
+		sessionBindings:        make(map[string]workspaceMACCoverage),
+		boundaryConsumerCounts: make(map[string]int),
+		deferredBoundaries:     make(map[string]bool),
+		workspaceUseLeases:     make(map[string]string),
 	}
 }
 
@@ -85,14 +84,14 @@ func newSessionMACCoordinator(db *sql.DB, driver workspaceMACDriver) *sessionMAC
 // boundary is released while still serialized.
 //
 // This method acquires and releases the coordinator lock.
-func (c *sessionMACCoordinator) CreateSessionBinding(workspace string, sessionID string, insertFn func(macCoverage) error) (macCoverage, error) {
+func (c *sessionMACCoordinator) CreateSessionBinding(workspace string, sessionID string, insertFn func(workspaceMACCoverage) error) (workspaceMACCoverage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.driver == nil {
-		cov := macCoverage{Boundary: workspace}
+		cov := workspaceMACCoverage{Boundary: workspace}
 		if err := insertFn(cov); err != nil {
-			return macCoverage{}, err
+			return workspaceMACCoverage{}, err
 		}
 		c.sessionBindings[sessionID] = cov
 		return cov, nil
@@ -100,25 +99,25 @@ func (c *sessionMACCoordinator) CreateSessionBinding(workspace string, sessionID
 
 	coverage, newlyCreated, err := c.driver.ensureCoverage(workspace)
 	if err != nil {
-		return macCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, err)
+		return workspaceMACCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, err)
 	}
 
 	// Resolve ownership for existing boundaries.
 	if newlyCreated {
-		coverage.Managed = true
+		coverage.HelperOwned = true
 	} else {
 		owned, oerr := c.isBoundaryOwnedByHelper(coverage.Boundary)
 		if oerr != nil {
-			return macCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, oerr)
+			return workspaceMACCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, oerr)
 		}
-		coverage.Managed = owned
+		coverage.HelperOwned = owned
 	}
 
 	// Record ownership for newly-created boundaries before DB insert.
 	if newlyCreated {
 		if err := c.recordBoundaryOwnership(coverage.Boundary); err != nil {
 			c.driver.removeBoundary(coverage.Boundary) // best-effort cleanup
-			return macCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, err)
+			return workspaceMACCoverage{}, fmt.Errorf("%w: %w", ErrMACPreparation, err)
 		}
 	}
 
@@ -135,19 +134,20 @@ func (c *sessionMACCoordinator) CreateSessionBinding(workspace string, sessionID
 				c.forgetBoundaryOwnership(coverage.Boundary)
 			}
 		}
-		return macCoverage{}, err
+		return workspaceMACCoverage{}, err
 	}
 
 	c.sessionBindings[sessionID] = coverage
-	c.activeBoundaries[coverage.Boundary]++
+	c.boundaryConsumerCounts[coverage.Boundary]++
 	return coverage, nil
 }
 
-// ReleaseSessionBoundary releases the MAC boundary for a deleted session.
-// Uses the exact binding for the session ID.
+// ReleaseSessionBinding releases the session->MAC binding for a deleted session.
+// Uses the exact binding for the session ID. The underlying boundary may remain
+// because of other consumers.
 //
 // This method acquires and releases the coordinator lock.
-func (c *sessionMACCoordinator) ReleaseSessionBoundary(sessionID string) {
+func (c *sessionMACCoordinator) ReleaseSessionBinding(sessionID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -161,16 +161,16 @@ func (c *sessionMACCoordinator) ReleaseSessionBoundary(sessionID string) {
 		return
 	}
 
-	c.conditionalReleaseBoundary(coverage.Boundary, coverage.Managed)
+	c.conditionalReleaseBoundary(coverage.Boundary, coverage.HelperOwned)
 	// Retry cleanup of previously deferred boundaries now that a consumer disappeared.
 	c.retryDeferredBoundaries()
 }
 
-// AcquireUse acquires a workspace-use lease for an operation.
+// AcquireWorkspaceUse acquires a workspace-use lease for an operation.
 // Checks exact session ID and workspace. Returns a release function.
 //
 // This method acquires and releases the coordinator lock.
-func (c *sessionMACCoordinator) AcquireUse(sessionID, workspace string) (leaseKey string, release func(), err error) {
+func (c *sessionMACCoordinator) AcquireWorkspaceUse(sessionID, workspace string) (leaseKey string, release func(), err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -190,11 +190,11 @@ func (c *sessionMACCoordinator) AcquireUse(sessionID, workspace string) (leaseKe
 	}
 
 	// Increment boundary count.
-	c.activeBoundaries[coverage.Boundary]++
+	c.boundaryConsumerCounts[coverage.Boundary]++
 
 	// Create unique lease key.
 	leaseKey = generateLeaseKey()
-	c.leases[leaseKey] = workspace
+	c.workspaceUseLeases[leaseKey] = workspace
 
 	// Idempotent release: use sync.Once so the release function affects
 	// coordinator state exactly once.
@@ -203,9 +203,9 @@ func (c *sessionMACCoordinator) AcquireUse(sessionID, workspace string) (leaseKe
 		releaseOnce.Do(func() {
 			c.mu.Lock()
 			defer c.mu.Unlock()
-			delete(c.leases, leaseKey)
+			delete(c.workspaceUseLeases, leaseKey)
 			if c.driver != nil {
-				c.conditionalReleaseBoundary(coverage.Boundary, coverage.Managed)
+				c.conditionalReleaseBoundary(coverage.Boundary, coverage.HelperOwned)
 			}
 			// Retry cleanup of previously deferred boundaries.
 			c.retryDeferredBoundaries()
@@ -227,11 +227,11 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Import pre-existing managed boundaries into ownership metadata.
+	// Import pre-existing helper-owned boundaries into ownership metadata.
 	// This ensures that boundaries created before mac_boundaries existed
-	// (e.g., AppArmor managed fragment roots) are tracked as managed.
-	if err := c.importManagedBoundaries(); err != nil {
-		return fmt.Errorf("cannot import managed MAC boundaries: %w", err)
+	// (e.g., AppArmor managed fragment roots) are tracked as helper-owned.
+	if err := c.importHelperOwnedBoundaries(); err != nil {
+		return fmt.Errorf("cannot import helper-owned MAC boundaries: %w", err)
 	}
 
 	sessions, err := c.listLiveSessionsWithIDs()
@@ -253,23 +253,23 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 					c.driver.removeBoundary(coverage.Boundary) // best-effort
 					return fmt.Errorf("cannot record ownership for repaired boundary %s: %w", coverage.Boundary, rbErr)
 				}
-				coverage.Managed = true
+				coverage.HelperOwned = true
 			} else {
 				owned, oerr := c.isBoundaryOwnedByHelper(coverage.Boundary)
 				if oerr != nil {
 					return fmt.Errorf("cannot verify repaired boundary ownership: %w", oerr)
 				}
-				coverage.Managed = owned
+				coverage.HelperOwned = owned
 			}
-			c.activeBoundaries[coverage.Boundary]++
+			c.boundaryConsumerCounts[coverage.Boundary]++
 			c.sessionBindings[s.ID] = coverage
 		} else {
 			owned, oerr := c.isBoundaryOwnedByHelper(coverage.Boundary)
 			if oerr != nil {
 				return fmt.Errorf("cannot verify boundary ownership for session %s: %w", s.ID, oerr)
 			}
-			coverage.Managed = owned
-			c.activeBoundaries[coverage.Boundary]++
+			coverage.HelperOwned = owned
+			c.boundaryConsumerCounts[coverage.Boundary]++
 			c.sessionBindings[s.ID] = coverage
 		}
 	}
@@ -282,19 +282,19 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 	return nil
 }
 
-// importManagedBoundaries imports pre-existing managed boundaries from the
-// driver into ownership metadata. This ensures that boundaries created
+// importHelperOwnedBoundaries imports pre-existing helper-owned boundaries from
+// the driver into ownership metadata. This ensures that boundaries created
 // before mac_boundaries existed (e.g., AppArmor managed fragment roots)
-// are tracked as managed by docker-helper.
+// are tracked as helper-owned by docker-helper.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) importManagedBoundaries() error {
-	boundaries, err := c.driver.listManagedBoundaries()
+func (c *sessionMACCoordinator) importHelperOwnedBoundaries() error {
+	boundaries, err := c.driver.discoverHelperOwnedBoundaries()
 	if err != nil {
 		return err
 	}
 	for _, boundary := range boundaries {
 		if err := c.recordBoundaryOwnership(boundary); err != nil {
-			slog.Warn("failed to record managed boundary ownership during import",
+			slog.Warn("failed to record helper-owned boundary during import",
 				slog.String("boundary", boundary),
 				slog.String("error", err.Error()))
 		}
@@ -305,16 +305,16 @@ func (c *sessionMACCoordinator) importManagedBoundaries() error {
 // conditionalReleaseBoundary decreases the consumer count and possibly removes
 // the boundary. Accounts for live bindings and leases.
 // Must be called with c.mu held.
-func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, managed bool) {
+func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, helperOwned bool) {
 	if c.driver == nil {
 		return
 	}
 
-	count := c.activeBoundaries[boundary]
+	count := c.boundaryConsumerCounts[boundary]
 	if count <= 1 {
-		delete(c.activeBoundaries, boundary)
+		delete(c.boundaryConsumerCounts, boundary)
 	} else {
-		c.activeBoundaries[boundary] = count - 1
+		c.boundaryConsumerCounts[boundary] = count - 1
 		return
 	}
 
@@ -322,15 +322,15 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, mana
 	if c.isBoundaryStillNeeded(boundary) {
 		// Defer cleanup: record the boundary for retry when the intersecting
 		// consumer later disappears. Do NOT set a synthetic count — keep
-		// activeBoundaries truthful.
-		if managed {
+		// boundaryConsumerCounts truthful.
+		if helperOwned {
 			c.deferredBoundaries[boundary] = true
 		}
 		return
 	}
 
-	// Safe to remove if managed.
-	if !managed {
+	// Safe to remove if helper-owned.
+	if !helperOwned {
 		return
 	}
 
@@ -356,7 +356,7 @@ func (c *sessionMACCoordinator) retryDeferredBoundaries() {
 	}
 
 	for boundary := range c.deferredBoundaries {
-		if c.activeBoundaries[boundary] > 0 {
+		if c.boundaryConsumerCounts[boundary] > 0 {
 			// Still has direct consumers, skip.
 			continue
 		}
@@ -401,8 +401,8 @@ func (c *sessionMACCoordinator) isBoundaryStillNeeded(boundary string) bool {
 		}
 	}
 
-	// Check leases.
-	for _, ws := range c.leases {
+	// Check workspace-use leases.
+	for _, ws := range c.workspaceUseLeases {
 		if boundaryCoversWorkspace(boundary, ws) {
 			return true
 		}
@@ -425,7 +425,7 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 	}
 
 	for _, boundary := range boundaries {
-		if c.activeBoundaries[boundary] > 0 {
+		if c.boundaryConsumerCounts[boundary] > 0 {
 			continue
 		}
 		if c.isBoundaryStillNeeded(boundary) {
@@ -559,32 +559,6 @@ func generateLeaseKey() string {
 	return "lease_" + hex.EncodeToString(b)
 }
 
-// pathWithin returns true if path is within root (equality allowed).
-// Both root and path must be canonical (absolute, cleaned).
-func pathWithin(root, path string) bool {
-	if root == path {
-		return true
-	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// pathStrictlyWithin returns true if path is a proper descendant of root.
-// Both root and path must be canonical (absolute, cleaned).
-func pathStrictlyWithin(root, path string) bool {
-	if root == path {
-		return false
-	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
 // pathOverlapRelation describes the canonical relationship between two paths.
 type pathOverlapRelation int
 
@@ -628,36 +602,36 @@ type appArmorWorkspaceMACDriver struct {
 	listRoots  func() ([]string, error)
 }
 
-func (d *appArmorWorkspaceMACDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
+func (d *appArmorWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
 	roots, err := d.listRoots()
 	if err != nil {
-		return macCoverage{}, false, fmt.Errorf("cannot list AppArmor managed roots: %w", err)
+		return workspaceMACCoverage{}, false, fmt.Errorf("cannot list AppArmor managed roots: %w", err)
 	}
 
 	for _, root := range roots {
 		if boundaryCoversWorkspace(root, workspace) {
-			return macCoverage{Boundary: root, Managed: true}, false, nil
+			return workspaceMACCoverage{Boundary: root, HelperOwned: true}, false, nil
 		}
 	}
 
 	result, err := d.addRoot(workspace)
 	if err != nil {
-		return macCoverage{}, false, err
+		return workspaceMACCoverage{}, false, err
 	}
-	return macCoverage{Boundary: workspace, Managed: true}, result.Changed, nil
+	return workspaceMACCoverage{Boundary: workspace, HelperOwned: true}, result.Changed, nil
 }
 
-func (d *appArmorWorkspaceMACDriver) verifyCoverage(workspace string) (macCoverage, error) {
+func (d *appArmorWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
 	roots, err := d.listRoots()
 	if err != nil {
-		return macCoverage{}, err
+		return workspaceMACCoverage{}, err
 	}
 	for _, root := range roots {
 		if boundaryCoversWorkspace(root, workspace) {
-			return macCoverage{Boundary: root, Managed: true}, nil
+			return workspaceMACCoverage{Boundary: root, HelperOwned: true}, nil
 		}
 	}
-	return macCoverage{}, fmt.Errorf("workspace %s not covered by any managed AppArmor root", workspace)
+	return workspaceMACCoverage{}, fmt.Errorf("workspace %s not covered by any managed AppArmor root", workspace)
 }
 
 func (d *appArmorWorkspaceMACDriver) removeBoundary(boundary string) error {
@@ -665,7 +639,7 @@ func (d *appArmorWorkspaceMACDriver) removeBoundary(boundary string) error {
 	return err
 }
 
-func (d *appArmorWorkspaceMACDriver) listManagedBoundaries() ([]string, error) {
+func (d *appArmorWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	return d.listRoots()
 }
 
@@ -689,68 +663,70 @@ type selinuxWorkspaceMACDriver struct {
 	mgr selinuxWorkspaceOps
 }
 
-func (d *selinuxWorkspaceMACDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
+func (d *selinuxWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
 	if isHomeRoot(workspace) {
-		return macCoverage{Boundary: workspace, Managed: false}, false, nil
+		return workspaceMACCoverage{Boundary: workspace, HelperOwned: false}, false, nil
 	}
 
 	// Check if an existing boundary covers this workspace.
 	if cov, found, err := d.findExistingCoverage(workspace); err != nil {
-		return macCoverage{}, false, err
+		return workspaceMACCoverage{}, false, err
 	} else if found {
 		// Existing compatible coverage found: run restorecon for the concrete
 		// workspace and verify the actual on-disk type.
 		if err := d.mgr.restoreconRecursive(workspace); err != nil {
-			return macCoverage{}, false, fmt.Errorf("restorecon failed for workspace %s under existing boundary %s: %w", workspace, cov.Boundary, err)
+			return workspaceMACCoverage{}, false, fmt.Errorf("restorecon failed for workspace %s under existing boundary %s: %w", workspace, cov.Boundary, err)
 		}
 		if err := d.mgr.verifyActualType(workspace); err != nil {
-			return macCoverage{}, false, fmt.Errorf("actual SELinux type verification failed for workspace %s: %w", workspace, err)
+			return workspaceMACCoverage{}, false, fmt.Errorf("actual SELinux type verification failed for workspace %s: %w", workspace, err)
 		}
 		return cov, false, nil
 	}
 
-	// Prepare the workspace as a managed boundary.
+	// Prepare the workspace as a helper-owned boundary.
 	newlyCreated, err := d.mgr.ensureWorkspaceLabel(workspace)
 	if err != nil {
-		return macCoverage{}, false, err
+		return workspaceMACCoverage{}, false, err
 	}
-	return macCoverage{Boundary: workspace, Managed: true}, newlyCreated, nil
+	return workspaceMACCoverage{Boundary: workspace, HelperOwned: true}, newlyCreated, nil
 }
 
-func (d *selinuxWorkspaceMACDriver) verifyCoverage(workspace string) (macCoverage, error) {
+func (d *selinuxWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
 	if isHomeRoot(workspace) {
-		return macCoverage{Boundary: workspace, Managed: false}, nil
+		return workspaceMACCoverage{Boundary: workspace, HelperOwned: false}, nil
 	}
 
 	// Discover the actual persistent covering boundary.
 	boundaries, err := d.mgr.listCoveringBoundaries(workspace)
 	if err != nil {
-		return macCoverage{}, fmt.Errorf("cannot discover SELinux coverage for %s: %w", workspace, err)
+		return workspaceMACCoverage{}, fmt.Errorf("cannot discover SELinux coverage for %s: %w", workspace, err)
 	}
 
 	for _, boundary := range boundaries {
 		// Boundary exists — verify the actual on-disk type for the workspace.
 		if err := d.mgr.verifyActualType(workspace); err != nil {
-			return macCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: %w", boundary, workspace, err)
+			return workspaceMACCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: %w", boundary, workspace, err)
 		}
-		return macCoverage{Boundary: boundary, Managed: false}, nil
+		// SELinux operator-compatible fcontext rules are NOT helper-owned.
+		return workspaceMACCoverage{Boundary: boundary, HelperOwned: false}, nil
 	}
 
 	// No persistent fcontext boundary found — this is not durable MAC state.
 	// A correct current xattr without a persistent boundary is insufficient
 	// because it will not survive a restorecon or reboot.
-	return macCoverage{}, fmt.Errorf("workspace %s has no persistent SELinux fcontext boundary", workspace)
+	return workspaceMACCoverage{}, fmt.Errorf("workspace %s has no persistent SELinux fcontext boundary", workspace)
 }
 
-func (d *selinuxWorkspaceMACDriver) findExistingCoverage(workspace string) (macCoverage, bool, error) {
+func (d *selinuxWorkspaceMACDriver) findExistingCoverage(workspace string) (workspaceMACCoverage, bool, error) {
 	boundaries, err := d.mgr.listCoveringBoundaries(workspace)
 	if err != nil {
-		return macCoverage{}, false, fmt.Errorf("cannot list covering SELinux boundaries: %w", err)
+		return workspaceMACCoverage{}, false, fmt.Errorf("cannot list covering SELinux boundaries: %w", err)
 	}
 	for _, boundary := range boundaries {
-		return macCoverage{Boundary: boundary, Managed: false}, true, nil
+		// SELinux operator-compatible fcontext rules are NOT helper-owned.
+		return workspaceMACCoverage{Boundary: boundary, HelperOwned: false}, true, nil
 	}
-	return macCoverage{}, false, nil
+	return workspaceMACCoverage{}, false, nil
 }
 
 func (d *selinuxWorkspaceMACDriver) removeBoundary(boundary string) error {
@@ -760,7 +736,10 @@ func (d *selinuxWorkspaceMACDriver) removeBoundary(boundary string) error {
 	return d.mgr.rollbackWorkspaceLabel(boundary)
 }
 
-func (d *selinuxWorkspaceMACDriver) listManagedBoundaries() ([]string, error) {
+// SELinux operator-compatible fcontext rules MUST NOT become helper-owned.
+// discoverHelperOwnedBoundaries returns nil because SELinux boundaries are
+// never intrinsically attributable to docker-helper.
+func (d *selinuxWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	return nil, nil
 }
 
@@ -782,7 +761,7 @@ func newWorkspaceMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, er
 
 	switch backend {
 	case LSMAppArmor:
-		mgr := newProductionApparmorManager()
+		mgr := newProductionAppArmorManager()
 		return &appArmorWorkspaceMACDriver{
 			addRoot: func(path string) (rootResult, error) {
 				return mgr.addRoot(path)

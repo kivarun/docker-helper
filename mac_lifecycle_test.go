@@ -22,43 +22,43 @@ import (
 
 // testWorkspaceMACDriver is a mock workspaceMACDriver for testing the lifecycle owner.
 type testWorkspaceMACDriver struct {
-	mu                sync.Mutex
-	coverageMap       map[string]string // workspace -> boundary
-	managedBoundaries map[string]bool   // boundary -> is managed
-	removeErrors      map[string]bool   // boundary -> should removal fail
-	boundaryType      string
+	mu                    sync.Mutex
+	coverageMap           map[string]string // workspace -> boundary
+	helperOwnedBoundaries map[string]bool   // boundary -> is managed
+	removeErrors          map[string]bool   // boundary -> should removal fail
+	boundaryType          string
 }
 
 func newTestWorkspaceMACDriver(backendType string) *testWorkspaceMACDriver {
 	return &testWorkspaceMACDriver{
-		coverageMap:       make(map[string]string),
-		managedBoundaries: make(map[string]bool),
-		removeErrors:      make(map[string]bool),
-		boundaryType:      backendType,
+		coverageMap:           make(map[string]string),
+		helperOwnedBoundaries: make(map[string]bool),
+		removeErrors:          make(map[string]bool),
+		boundaryType:          backendType,
 	}
 }
 
-func (b *testWorkspaceMACDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
+func (b *testWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if boundary, ok := b.coverageMap[workspace]; ok {
-		return macCoverage{Boundary: boundary, Managed: b.managedBoundaries[boundary]}, false, nil
+		return workspaceMACCoverage{Boundary: boundary, HelperOwned: b.helperOwnedBoundaries[boundary]}, false, nil
 	}
 
 	b.coverageMap[workspace] = workspace
-	b.managedBoundaries[workspace] = true
-	return macCoverage{Boundary: workspace, Managed: true}, true, nil
+	b.helperOwnedBoundaries[workspace] = true
+	return workspaceMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
 }
 
-func (b *testWorkspaceMACDriver) verifyCoverage(workspace string) (macCoverage, error) {
+func (b *testWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if boundary, ok := b.coverageMap[workspace]; ok {
-		return macCoverage{Boundary: boundary, Managed: b.managedBoundaries[boundary]}, nil
+		return workspaceMACCoverage{Boundary: boundary, HelperOwned: b.helperOwnedBoundaries[boundary]}, nil
 	}
-	return macCoverage{}, fmt.Errorf("no coverage for %s", workspace)
+	return workspaceMACCoverage{}, fmt.Errorf("no coverage for %s", workspace)
 }
 
 func (b *testWorkspaceMACDriver) removeBoundary(boundary string) error {
@@ -69,16 +69,16 @@ func (b *testWorkspaceMACDriver) removeBoundary(boundary string) error {
 		return fmt.Errorf("removeBoundary failed for %s", boundary)
 	}
 	delete(b.coverageMap, boundary)
-	delete(b.managedBoundaries, boundary)
+	delete(b.helperOwnedBoundaries, boundary)
 	return nil
 }
 
-func (b *testWorkspaceMACDriver) listManagedBoundaries() ([]string, error) {
+func (b *testWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	var result []string
-	for boundary := range b.managedBoundaries {
+	for boundary := range b.helperOwnedBoundaries {
 		result = append(result, boundary)
 	}
 	return result, nil
@@ -162,7 +162,7 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 	}
 
 	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(app.DB, "sess-1", workspace)
 	})
 	if err != nil {
@@ -170,28 +170,28 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 	}
 
 	// Acquire use lease (simulates operation starting).
-	_, leaseRelease, err := mac.AcquireUse("sess-1", workspace)
+	_, leaseRelease, err := mac.AcquireWorkspaceUse("sess-1", workspace)
 	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
+		t.Fatalf("AcquireWorkspaceUse: %v", err)
 	}
 
 	// Verify boundary count is 2 (session + operation).
 	mac.mu.Lock()
-	count := mac.activeBoundaries[workspace]
+	count := mac.boundaryConsumerCounts[workspace]
 	mac.mu.Unlock()
 	if count != 2 {
-		t.Errorf("expected activeBoundaries count 2, got %d", count)
+		t.Errorf("expected boundaryConsumerCounts count 2, got %d", count)
 	}
 
 	// Delete session (simulates session deletion while operation running).
-	mac.ReleaseSessionBoundary("sess-1")
+	mac.ReleaseSessionBinding("sess-1")
 
 	// Boundary count should be 1 (only operation lease remains).
 	mac.mu.Lock()
-	count = mac.activeBoundaries[workspace]
+	count = mac.boundaryConsumerCounts[workspace]
 	mac.mu.Unlock()
 	if count != 1 {
-		t.Errorf("expected activeBoundaries count 1 after session release, got %d", count)
+		t.Errorf("expected boundaryConsumerCounts count 1 after session release, got %d", count)
 	}
 
 	// Operation completes: release lease.
@@ -199,12 +199,12 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 
 	// Boundary should now be removed (count reaches 0, no other consumers).
 	mac.mu.Lock()
-	count = mac.activeBoundaries[workspace]
+	count = mac.boundaryConsumerCounts[workspace]
 	_, hasBinding := mac.sessionBindings["sess-1"]
 	mac.mu.Unlock()
 
 	if count != 0 {
-		t.Errorf("expected activeBoundaries count 0 after lease release, got %d", count)
+		t.Errorf("expected boundaryConsumerCounts count 0 after lease release, got %d", count)
 	}
 	if hasBinding {
 		t.Error("session binding should be removed")
@@ -243,7 +243,7 @@ func TestDBInsertFailurePreservesOwnership(t *testing.T) {
 	backend.removeErrors[workspace] = true
 
 	// Create session binding with a failing DB insert.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		return fmt.Errorf("simulated DB insert failure")
 	})
 	if err == nil {
@@ -274,7 +274,7 @@ func TestDBInsertFailureRemovesOwnershipOnSuccessfulRemoval(t *testing.T) {
 	}
 
 	// Boundary removal succeeds (default).
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		return fmt.Errorf("simulated DB insert failure")
 	})
 	if err == nil {
@@ -311,14 +311,14 @@ func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
 	// Simulate pre-existing managed boundary (in fragment but not in mac_boundaries).
 	backend := newTestWorkspaceMACDriver("apparmor")
 	backend.coverageMap["/data/workspace"] = "/data"
-	backend.managedBoundaries["/data"] = true
+	backend.helperOwnedBoundaries["/data"] = true
 
 	mac := newSessionMACCoordinator(db, backend)
 
-	// Directly call importManagedBoundaries to test the import logic.
+	// Directly call importHelperOwnedBoundaries to test the import logic.
 	mac.mu.Lock()
-	if err := mac.importManagedBoundaries(); err != nil {
-		t.Fatalf("importManagedBoundaries: %v", err)
+	if err := mac.importHelperOwnedBoundaries(); err != nil {
+		t.Fatalf("importHelperOwnedBoundaries: %v", err)
 	}
 	mac.mu.Unlock()
 
@@ -401,7 +401,7 @@ func TestMACPreparationErrorClassification(t *testing.T) {
 	mac := newSessionMACCoordinator(db, backend)
 
 	// CreateSessionBinding should return an error wrapped with ErrMACPreparation.
-	_, err = mac.CreateSessionBinding("/data/workspace", "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding("/data/workspace", "sess-1", func(cov workspaceMACCoverage) error {
 		return nil
 	})
 	if err == nil {
@@ -433,7 +433,7 @@ func TestDBInsertErrorRemainsDatabaseError(t *testing.T) {
 	}
 
 	// Create session binding with a failing DB insert.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		return fmt.Errorf("database locked")
 	})
 	if err == nil {
@@ -451,19 +451,19 @@ type failingWorkspaceMACDriver struct {
 	err error
 }
 
-func (b *failingWorkspaceMACDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
-	return macCoverage{}, false, b.err
+func (b *failingWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
+	return workspaceMACCoverage{}, false, b.err
 }
 
-func (b *failingWorkspaceMACDriver) verifyCoverage(workspace string) (macCoverage, error) {
-	return macCoverage{}, b.err
+func (b *failingWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
+	return workspaceMACCoverage{}, b.err
 }
 
 func (b *failingWorkspaceMACDriver) removeBoundary(boundary string) error {
 	return nil
 }
 
-func (b *failingWorkspaceMACDriver) listManagedBoundaries() ([]string, error) {
+func (b *failingWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	return nil, nil
 }
 
@@ -485,43 +485,43 @@ type selinuxTestDriver struct {
 	verifyActualTypeFail bool
 }
 
-func (b *selinuxTestDriver) ensureCoverage(workspace string) (macCoverage, bool, error) {
+func (b *selinuxTestDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if boundaries, ok := b.coveringBoundaries[workspace]; ok && len(boundaries) > 0 {
 		// Existing compatible coverage: run restorecon and verify actual type.
 		if b.restoreconFail {
-			return macCoverage{}, false, fmt.Errorf("restorecon failed for %s", workspace)
+			return workspaceMACCoverage{}, false, fmt.Errorf("restorecon failed for %s", workspace)
 		}
 		b.restoreconCalls++
 		if b.verifyActualTypeFail {
-			return macCoverage{}, false, fmt.Errorf("actual type verification failed for %s", workspace)
+			return workspaceMACCoverage{}, false, fmt.Errorf("actual type verification failed for %s", workspace)
 		}
-		return macCoverage{Boundary: boundaries[0], Managed: false}, false, nil
+		return workspaceMACCoverage{Boundary: boundaries[0], HelperOwned: false}, false, nil
 	}
 
 	// No existing coverage: create new boundary.
-	return macCoverage{Boundary: workspace, Managed: true}, true, nil
+	return workspaceMACCoverage{Boundary: workspace, HelperOwned: true}, true, nil
 }
 
-func (b *selinuxTestDriver) verifyCoverage(workspace string) (macCoverage, error) {
+func (b *selinuxTestDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if boundaries, ok := b.coveringBoundaries[workspace]; ok && len(boundaries) > 0 {
 		// Boundary exists — verify actual on-disk type.
 		if b.verifyActualTypeFail {
-			return macCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: wrong_type", boundaries[0], workspace)
+			return workspaceMACCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: wrong_type", boundaries[0], workspace)
 		}
-		return macCoverage{Boundary: boundaries[0], Managed: false}, nil
+		return workspaceMACCoverage{Boundary: boundaries[0], HelperOwned: false}, nil
 	}
 
 	// No boundary — check workspace itself.
 	if b.verifyActualTypeFail {
-		return macCoverage{}, fmt.Errorf("workspace %s not covered by any SELinux boundary", workspace)
+		return workspaceMACCoverage{}, fmt.Errorf("workspace %s not covered by any SELinux boundary", workspace)
 	}
-	return macCoverage{Boundary: workspace, Managed: false}, nil
+	return workspaceMACCoverage{Boundary: workspace, HelperOwned: false}, nil
 }
 
 func (b *selinuxTestDriver) removeBoundary(boundary string) error {
@@ -530,7 +530,7 @@ func (b *selinuxTestDriver) removeBoundary(boundary string) error {
 	return nil
 }
 
-func (b *selinuxTestDriver) listManagedBoundaries() ([]string, error) {
+func (b *selinuxTestDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	return nil, nil
 }
 
@@ -616,7 +616,7 @@ func TestSELinuxRestoreconFailureFailsClosed(t *testing.T) {
 
 	mac := newSessionMACCoordinator(db, backend)
 
-	_, err = mac.CreateSessionBinding("/data/workspace", "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding("/data/workspace", "sess-1", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-1", "/data/workspace")
 	})
 	if err == nil {
@@ -641,7 +641,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	}
 
 	// Create session binding.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(app.DB, "sess-1", workspace)
 	})
 	if err != nil {
@@ -649,23 +649,23 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	}
 
 	// Acquire lease.
-	_, release, err := mac.AcquireUse("sess-1", workspace)
+	_, release, err := mac.AcquireWorkspaceUse("sess-1", workspace)
 	if err != nil {
-		t.Fatalf("AcquireUse: %v", err)
+		t.Fatalf("AcquireWorkspaceUse: %v", err)
 	}
 
 	// Record state before first release.
 	mac.mu.Lock()
-	countBefore := mac.activeBoundaries[workspace]
-	leaseCountBefore := len(mac.leases)
+	countBefore := mac.boundaryConsumerCounts[workspace]
+	leaseCountBefore := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 
 	// First release.
 	release()
 
 	mac.mu.Lock()
-	countAfterFirst := mac.activeBoundaries[workspace]
-	leaseCountAfterFirst := len(mac.leases)
+	countAfterFirst := mac.boundaryConsumerCounts[workspace]
+	leaseCountAfterFirst := len(mac.workspaceUseLeases)
 	boundaryRemoved := func() bool {
 		_, err := mac.driver.verifyCoverage(workspace)
 		return err != nil
@@ -676,8 +676,8 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 	release()
 
 	mac.mu.Lock()
-	countAfterSecond := mac.activeBoundaries[workspace]
-	leaseCountAfterSecond := len(mac.leases)
+	countAfterSecond := mac.boundaryConsumerCounts[workspace]
+	leaseCountAfterSecond := len(mac.workspaceUseLeases)
 	boundaryRemovedSecond := func() bool {
 		_, err := mac.driver.verifyCoverage(workspace)
 		return err != nil
@@ -686,7 +686,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 
 	// Verify second release changed nothing.
 	if countAfterFirst != countAfterSecond {
-		t.Errorf("second release changed activeBoundaries: first=%d, second=%d", countAfterFirst, countAfterSecond)
+		t.Errorf("second release changed boundaryConsumerCounts: first=%d, second=%d", countAfterFirst, countAfterSecond)
 	}
 	if leaseCountAfterFirst != leaseCountAfterSecond {
 		t.Errorf("second release changed leases: first=%d, second=%d", leaseCountAfterFirst, leaseCountAfterSecond)
@@ -729,7 +729,7 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 	childWS := "/data/parent/child"
 
 	// Create parent session binding.
-	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-parent", parentWS)
 	})
 	if err != nil {
@@ -737,7 +737,7 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 	}
 
 	// Create child session binding.
-	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-child", childWS)
 	})
 	if err != nil {
@@ -745,13 +745,13 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 	}
 
 	// Delete child first.
-	mac.ReleaseSessionBoundary("sess-child")
+	mac.ReleaseSessionBinding("sess-child")
 
 	// Child boundary should be deferred (parent still needs it via overlap).
 	mac.mu.Lock()
-	childActive := mac.activeBoundaries[childWS]
+	childActive := mac.boundaryConsumerCounts[childWS]
 	childDeferred := mac.deferredBoundaries[childWS]
-	parentActive := mac.activeBoundaries[parentWS]
+	parentActive := mac.boundaryConsumerCounts[parentWS]
 	mac.mu.Unlock()
 
 	if childActive != 0 {
@@ -765,13 +765,13 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 	}
 
 	// Delete parent.
-	mac.ReleaseSessionBoundary("sess-parent")
+	mac.ReleaseSessionBinding("sess-parent")
 
 	// Both boundaries should now be gone.
 	mac.mu.Lock()
-	parentActive = mac.activeBoundaries[parentWS]
+	parentActive = mac.boundaryConsumerCounts[parentWS]
 	parentDeferred := mac.deferredBoundaries[parentWS]
-	childActive = mac.activeBoundaries[childWS]
+	childActive = mac.boundaryConsumerCounts[childWS]
 	childDeferred = mac.deferredBoundaries[childWS]
 	mac.mu.Unlock()
 
@@ -820,7 +820,7 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 	childWS := "/data/parent/child"
 
 	// Create parent session binding.
-	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-parent", parentWS)
 	})
 	if err != nil {
@@ -828,7 +828,7 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 	}
 
 	// Create child session binding.
-	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-child", childWS)
 	})
 	if err != nil {
@@ -836,13 +836,13 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 	}
 
 	// Delete parent first.
-	mac.ReleaseSessionBoundary("sess-parent")
+	mac.ReleaseSessionBinding("sess-parent")
 
 	// Parent boundary should be deferred (child still overlaps).
 	mac.mu.Lock()
-	parentActive := mac.activeBoundaries[parentWS]
+	parentActive := mac.boundaryConsumerCounts[parentWS]
 	parentDeferred := mac.deferredBoundaries[parentWS]
-	childActive := mac.activeBoundaries[childWS]
+	childActive := mac.boundaryConsumerCounts[childWS]
 	mac.mu.Unlock()
 
 	if parentActive != 0 {
@@ -856,13 +856,13 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 	}
 
 	// Delete child.
-	mac.ReleaseSessionBoundary("sess-child")
+	mac.ReleaseSessionBinding("sess-child")
 
 	// Both boundaries should now be gone.
 	mac.mu.Lock()
-	parentActive = mac.activeBoundaries[parentWS]
+	parentActive = mac.boundaryConsumerCounts[parentWS]
 	parentDeferred = mac.deferredBoundaries[parentWS]
-	childActive = mac.activeBoundaries[childWS]
+	childActive = mac.boundaryConsumerCounts[childWS]
 	childDeferred := mac.deferredBoundaries[childWS]
 	mac.mu.Unlock()
 
@@ -900,14 +900,14 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 	workspace := "/data/workspace"
 
 	// Create two session bindings on the same workspace.
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding sess-1: %v", err)
 	}
 
-	_, err = mac.CreateSessionBinding(workspace, "sess-2", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-2", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-2", workspace)
 	})
 	if err != nil {
@@ -915,17 +915,17 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 	}
 
 	mac.mu.Lock()
-	countBefore := mac.activeBoundaries[workspace]
+	countBefore := mac.boundaryConsumerCounts[workspace]
 	mac.mu.Unlock()
 	if countBefore != 2 {
 		t.Errorf("expected count 2, got %d", countBefore)
 	}
 
 	// Delete first session.
-	mac.ReleaseSessionBoundary("sess-1")
+	mac.ReleaseSessionBinding("sess-1")
 
 	mac.mu.Lock()
-	countAfterFirst := mac.activeBoundaries[workspace]
+	countAfterFirst := mac.boundaryConsumerCounts[workspace]
 	deferred := mac.deferredBoundaries[workspace]
 	mac.mu.Unlock()
 
@@ -938,10 +938,10 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 	}
 
 	// Delete second session.
-	mac.ReleaseSessionBoundary("sess-2")
+	mac.ReleaseSessionBinding("sess-2")
 
 	mac.mu.Lock()
-	countAfterSecond := mac.activeBoundaries[workspace]
+	countAfterSecond := mac.boundaryConsumerCounts[workspace]
 	deferred = mac.deferredBoundaries[workspace]
 	mac.mu.Unlock()
 
@@ -986,7 +986,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	workspace := "/data/workspace"
 
 	// Create boundary with apparmor backend.
-	_, err = mac1.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac1.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-1", workspace)
 	})
 	if err != nil {
@@ -1005,7 +1005,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	}
 
 	// Release the session.
-	mac1.ReleaseSessionBoundary("sess-1")
+	mac1.ReleaseSessionBinding("sess-1")
 
 	// Now create lifecycle with "selinux" backend.
 	selinuxBackend := newTestWorkspaceMACDriver("selinux")
@@ -1023,7 +1023,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	}
 
 	// selinux can create its own boundary at the same path.
-	_, err = mac2.CreateSessionBinding(workspace, "sess-2", func(cov macCoverage) error {
+	_, err = mac2.CreateSessionBinding(workspace, "sess-2", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-2", workspace)
 	})
 	if err != nil {
@@ -1122,7 +1122,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
 		return err
@@ -1180,8 +1180,8 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	// The boundary count should still reflect the session binding + the
 	// unreleased lease (the lease was never released due to cleanup failure).
 	mac.mu.Lock()
-	boundaryCount := mac.activeBoundaries[workspace]
-	leaseCount := len(mac.leases)
+	boundaryCount := mac.boundaryConsumerCounts[workspace]
+	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 
 	// The session binding contributes 1. The lease was acquired but NOT
@@ -1190,7 +1190,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		t.Errorf("expected 1 lease retained (cleanup failed), got %d", leaseCount)
 	}
 	if boundaryCount != 2 {
-		t.Errorf("expected activeBoundaries=2 (session + unreleased lease), got %d", boundaryCount)
+		t.Errorf("expected boundaryConsumerCounts=2 (session + unreleased lease), got %d", boundaryCount)
 	}
 }
 
@@ -1251,7 +1251,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
 		return err
@@ -1302,7 +1302,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 
 	// Verify: the MAC lease WAS released because cleanup succeeded.
 	mac.mu.Lock()
-	leaseCount := len(mac.leases)
+	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 
 	if leaseCount != 0 {
@@ -1369,7 +1369,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
 		return err
@@ -1435,7 +1435,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 
 	// Verify: the MAC lease was NOT released because staging cleanup failed.
 	mac.mu.Lock()
-	leaseCount := len(mac.leases)
+	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 
 	if leaseCount != 1 {
@@ -1502,7 +1502,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
 		return err
@@ -1564,7 +1564,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 
 	// Verify: the MAC lease WAS released because staging cleanup succeeded.
 	mac.mu.Lock()
-	leaseCount := len(mac.leases)
+	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 
 	if leaseCount != 0 {
@@ -1632,7 +1632,7 @@ func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
 		return err
@@ -1674,7 +1674,7 @@ func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
 
 	// Verify: lease was released after pin cleanup.
 	mac.mu.Lock()
-	leaseCount := len(mac.leases)
+	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 	if leaseCount != 0 {
 		t.Errorf("expected 0 leases after tryCreate rejection, got %d", leaseCount)
@@ -1743,7 +1743,7 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
-	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
 			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
 		return err
@@ -1799,7 +1799,7 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 
 	// Verify: lease was released after staging cleanup.
 	mac.mu.Lock()
-	leaseCount := len(mac.leases)
+	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 	if leaseCount != 0 {
 		t.Errorf("expected 0 leases after tryCreate rejection, got %d", leaseCount)
@@ -1981,7 +1981,7 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 	// Verify: the session binding was created with the new boundary.
 	mac.mu.Lock()
 	binding, hasBinding := mac.sessionBindings["sess-reconcile"]
-	active := mac.activeBoundaries[workspace]
+	active := mac.boundaryConsumerCounts[workspace]
 	mac.mu.Unlock()
 
 	if !hasBinding {
@@ -1991,7 +1991,7 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 		t.Errorf("boundary = %q, want %q", binding.Boundary, workspace)
 	}
 	if active != 1 {
-		t.Errorf("activeBoundaries = %d, want 1", active)
+		t.Errorf("boundaryConsumerCounts = %d, want 1", active)
 	}
 
 	// Update seam to reflect the new boundary now exists.
@@ -2109,7 +2109,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 	childWS := "/data/parent/child"
 
 	// Create parent session binding (the only live consumer).
-	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov macCoverage) error {
+	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov workspaceMACCoverage) error {
 		return insertTestSessionTx(db, "sess-parent", parentWS)
 	})
 	if err != nil {
@@ -2149,7 +2149,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 
 	// Delete parent — this triggers retryDeferredBoundaries which should
 	// clean up the deferred child boundary.
-	mac.ReleaseSessionBoundary("sess-parent")
+	mac.ReleaseSessionBinding("sess-parent")
 
 	// Both boundaries should now be gone.
 	mac.mu.Lock()
@@ -2172,61 +2172,5 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 	_, err = backend.verifyCoverage(childWS)
 	if err == nil {
 		t.Error("child boundary should be removed from backend")
-	}
-}
-
-// =============================================================================
-// Canonical path containment API tests
-// =============================================================================
-
-func TestPathWithin(t *testing.T) {
-	tests := []struct {
-		name, root, path string
-		want             bool
-	}{
-		{"equal", "/data", "/data", true},
-		{"child", "/data", "/data/foo", true},
-		{"deep child", "/data", "/data/foo/bar", true},
-		{"sibling", "/data", "/data2", false},
-		{"sibling child", "/data", "/other/foo", false},
-		{"prefix trap", "/data", "/data2", false},
-		{"prefix trap child", "/data", "/data2/foo", false},
-		{"root slash", "/", "/data", true},
-		{"root slash equal", "/", "/", true},
-		{"nested", "/a/b/c", "/a/b/c/d", true},
-		{"nested sibling", "/a/b/c", "/a/b/d", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := pathWithin(tc.root, tc.path); got != tc.want {
-				t.Errorf("pathWithin(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestPathStrictlyWithin(t *testing.T) {
-	tests := []struct {
-		name, root, path string
-		want             bool
-	}{
-		{"equal", "/data", "/data", false},
-		{"child", "/data", "/data/foo", true},
-		{"deep child", "/data", "/data/foo/bar", true},
-		{"sibling", "/data", "/data2", false},
-		{"sibling child", "/data", "/other/foo", false},
-		{"prefix trap", "/data", "/data2", false},
-		{"prefix trap child", "/data", "/data2/foo", false},
-		{"root slash", "/", "/data", true},
-		{"root slash equal", "/", "/", false},
-		{"nested", "/a/b/c", "/a/b/c/d", true},
-		{"nested sibling", "/a/b/c", "/a/b/d", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := pathStrictlyWithin(tc.root, tc.path); got != tc.want {
-				t.Errorf("pathStrictlyWithin(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
-			}
-		})
 	}
 }

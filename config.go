@@ -1184,13 +1184,13 @@ func installCredentialForInit(token string, stdout, stderr io.Writer) error {
 var (
 	appArmorAddRoot = func() func(string) (rootResult, error) {
 		return func(path string) (rootResult, error) {
-			mgr := newProductionApparmorManager()
+			mgr := newProductionAppArmorManager()
 			return mgr.addRoot(path)
 		}
 	}
 	appArmorRemoveRoot = func() func(string) (rootResult, error) {
 		return func(path string) (rootResult, error) {
-			mgr := newProductionApparmorManager()
+			mgr := newProductionAppArmorManager()
 			return mgr.removeRoot(path)
 		}
 	}

@@ -264,11 +264,11 @@ func TestServeSystemModePreflightEnforce(t *testing.T) {
 	getConfigPathFunc = func() string { return configPath }
 
 	// Mock managed AppArmor roots to cover the configured root.
-	origManagedRoots := apparmorManagedRoots
-	apparmorManagedRoots = func() ([]string, error) {
+	origManagedRoots := appArmorManagedRoots
+	appArmorManagedRoots = func() ([]string, error) {
 		return []string{allowedRoot}, nil
 	}
-	defer func() { apparmorManagedRoots = origManagedRoots }()
+	defer func() { appArmorManagedRoots = origManagedRoots }()
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
@@ -417,11 +417,11 @@ func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
 	// Managed roots return an unrelated root, not covering the configured root.
 	// This is now acceptable — global roots are authorization-only.
 	// MAC state follows session workspaces, not global roots.
-	origManaged := apparmorManagedRoots
-	apparmorManagedRoots = func() ([]string, error) {
+	origManaged := appArmorManagedRoots
+	appArmorManagedRoots = func() ([]string, error) {
 		return []string{"/unrelated/managed-root"}, nil
 	}
-	t.Cleanup(func() { apparmorManagedRoots = origManaged })
+	t.Cleanup(func() { appArmorManagedRoots = origManaged })
 
 	// Startup should succeed — global roots do not require MAC coverage.
 	// (The serve command will fail later due to missing admin token,

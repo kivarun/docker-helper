@@ -190,7 +190,7 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 	// Acquire coordinator serialization and prepare MAC.
 	// CreateSessionBinding holds the lock through DB insert and rollback.
 	if a.MACCoordinator != nil {
-		_, err := a.MACCoordinator.CreateSessionBinding(absWorkspace, sessionID, func(coverage macCoverage) error {
+		_, err := a.MACCoordinator.CreateSessionBinding(absWorkspace, sessionID, func(coverage workspaceMACCoverage) error {
 			_, err := a.DB.Exec(
 				`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
 				 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -357,7 +357,7 @@ func (a *App) deleteSession(id string) (*Session, error) {
 
 	// Release MAC boundary for the deleted session.
 	if a.MACCoordinator != nil {
-		a.MACCoordinator.ReleaseSessionBoundary(id)
+		a.MACCoordinator.ReleaseSessionBinding(id)
 	}
 
 	return &s, nil
@@ -409,7 +409,7 @@ func (a *App) deleteSessionForPrincipal(id string, principalID int64) (*Session,
 
 	// Release MAC boundary for the deleted session.
 	if a.MACCoordinator != nil {
-		a.MACCoordinator.ReleaseSessionBoundary(id)
+		a.MACCoordinator.ReleaseSessionBinding(id)
 	}
 
 	return &s, nil
