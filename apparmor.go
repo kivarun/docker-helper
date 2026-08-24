@@ -76,15 +76,15 @@ type inputError struct {
 
 func (e *inputError) Error() string { return e.msg }
 
-// rootResult is the structured return value for addManagedRoot and removeManagedRoot.
-type rootResult struct {
+// boundaryResult is the structured return value for addManagedBoundary and removeManagedBoundary.
+type boundaryResult struct {
 	Path    string
 	Changed bool
 }
 
-// validateRootLexical checks a path string without filesystem access.
-// It is the authoritative lexical validator for stored roots.
-func validateRootLexical(path string) error {
+// validateBoundaryLexical checks a path string without filesystem access.
+// It is the authoritative lexical validator for stored managed boundaries.
+func validateBoundaryLexical(path string) error {
 	if !utf8.ValidString(path) {
 		return &inputError{msg: "path is not valid UTF-8"}
 	}
@@ -112,7 +112,7 @@ func validateRootLexical(path string) error {
 	return nil
 }
 
-func validateRootPathForAdd(path string) (string, error) {
+func validateBoundaryPathForAdd(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", &inputError{msg: "path must be absolute"}
 	}
@@ -124,14 +124,14 @@ func validateRootPathForAdd(path string) (string, error) {
 	}
 
 	// AppArmor-specific lexical validation (format constraints for managed fragment).
-	if err := validateRootLexical(canonical); err != nil {
+	if err := validateBoundaryLexical(canonical); err != nil {
 		return "", err
 	}
 
 	return canonical, nil
 }
 
-func validateRootPathForRemove(path string) (string, error) {
+func validateBoundaryPathForRemove(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", &inputError{msg: "path must be absolute"}
 	}
@@ -143,14 +143,14 @@ func validateRootPathForRemove(path string) (string, error) {
 			if err != nil {
 				return "", &inputError{msg: fmt.Sprintf("cannot resolve path: %v", err)}
 			}
-			if err := validateRootLexical(canonical); err != nil {
+			if err := validateBoundaryLexical(canonical); err != nil {
 				return "", err
 			}
 			return canonical, nil
 		}
-		// Existing non-directory: treat as lexical stale root candidate.
+		// Existing non-directory: treat as lexical stale boundary candidate.
 		cleaned := filepath.Clean(path)
-		if err := validateRootLexical(cleaned); err != nil {
+		if err := validateBoundaryLexical(cleaned); err != nil {
 			return "", err
 		}
 		return cleaned, nil
@@ -161,7 +161,7 @@ func validateRootPathForRemove(path string) (string, error) {
 	}
 
 	cleaned := filepath.Clean(path)
-	if err := validateRootLexical(cleaned); err != nil {
+	if err := validateBoundaryLexical(cleaned); err != nil {
 		return "", err
 	}
 	return cleaned, nil
@@ -186,9 +186,9 @@ func escapeAppArmorPath(path string) string {
 	return path
 }
 
-func renderFragment(roots []string) []byte {
-	sorted := make([]string, len(roots))
-	copy(sorted, roots)
+func renderFragment(boundaries []string) []byte {
+	sorted := make([]string, len(boundaries))
+	copy(sorted, boundaries)
 	sort.Strings(sorted)
 	sorted = deduplicateStrings(sorted)
 
@@ -197,10 +197,10 @@ func renderFragment(roots []string) []byte {
 	buf.WriteString(fragmentHeader1 + "\n")
 	buf.WriteString(fragmentHeader2 + "\n")
 
-	for _, root := range sorted {
-		escaped := escapeAppArmorPath(root)
+	for _, boundary := range sorted {
+		escaped := escapeAppArmorPath(boundary)
 		buf.WriteString("\n")
-		buf.WriteString("# root-json: " + jsonQuote(root) + "\n")
+		buf.WriteString("# root-json: " + jsonQuote(boundary) + "\n")
 		buf.WriteString("\"" + escaped + "/\" r,\n")
 		buf.WriteString("\"" + escaped + "/**\" r,\n")
 	}
@@ -226,7 +226,7 @@ func parseFragment(data []byte) ([]string, error) {
 		return nil, errors.New("fragment header mismatch")
 	}
 
-	var roots []string
+	var boundaries []string
 	for i := 2; i < len(lines); i++ {
 		line := lines[i]
 		if line == "" {
@@ -234,19 +234,19 @@ func parseFragment(data []byte) ([]string, error) {
 		}
 		if strings.HasPrefix(line, "# root-json: ") {
 			quoted := strings.TrimPrefix(line, "# root-json: ")
-			root, err := jsonUnquote(quoted)
+			boundary, err := jsonUnquote(quoted)
 			if err != nil {
 				return nil, fmt.Errorf("malformed root-json metadata at line %d: %w", i+1, err)
 			}
-			if err := validateRootLexical(root); err != nil {
+			if err := validateBoundaryLexical(boundary); err != nil {
 				return nil, fmt.Errorf("invalid root at line %d: %w", i+1, err)
 			}
-			roots = append(roots, root)
+			boundaries = append(boundaries, boundary)
 		}
 	}
 
-	sort.Strings(roots)
-	deduped := deduplicateStrings(roots)
+	sort.Strings(boundaries)
+	deduped := deduplicateStrings(boundaries)
 
 	expected := renderFragment(deduped)
 	if !bytes.Equal(data, expected) {
@@ -314,13 +314,13 @@ func (m *appArmorProfileManager) readFragment() ([]string, error) {
 	return parseFragment(data)
 }
 
-func (m *appArmorProfileManager) writeFragment(roots []string) error {
+func (m *appArmorProfileManager) writeFragment(boundaries []string) error {
 	dir := filepath.Dir(m.managedFragmentPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create fragment directory: %w", err)
 	}
 
-	data := renderFragment(roots)
+	data := renderFragment(boundaries)
 
 	tmp, err := os.CreateTemp(dir, "managed-roots-*.tmp")
 	if err != nil {
@@ -359,10 +359,10 @@ func (m *appArmorProfileManager) validateProfile() error {
 }
 
 type fragmentSnapshot struct {
-	exists bool
-	data   []byte
-	mode   os.FileMode
-	roots  []string
+	exists     bool
+	data       []byte
+	mode       os.FileMode
+	boundaries []string
 }
 
 func (m *appArmorProfileManager) snapshotFragment() (*fragmentSnapshot, error) {
@@ -385,16 +385,16 @@ func (m *appArmorProfileManager) snapshotFragment() (*fragmentSnapshot, error) {
 		return nil, fmt.Errorf("cannot read managed fragment: %w", err)
 	}
 
-	roots, err := parseFragment(data)
+	boundaries, err := parseFragment(data)
 	if err != nil {
 		return nil, fmt.Errorf("fragment parse error: %w", err)
 	}
 
 	return &fragmentSnapshot{
-		exists: true,
-		data:   data,
-		mode:   info.Mode().Perm(),
-		roots:  roots,
+		exists:     true,
+		data:       data,
+		mode:       info.Mode().Perm(),
+		boundaries: boundaries,
 	}, nil
 }
 
@@ -478,105 +478,105 @@ func (m *appArmorProfileManager) rollbackFragment(snap *fragmentSnapshot) error 
 	return nil
 }
 
-func (m *appArmorProfileManager) listManagedRoots() ([]string, error) {
+func (m *appArmorProfileManager) listManagedBoundaries() ([]string, error) {
 	return m.readFragment()
 }
 
-func (m *appArmorProfileManager) addManagedRoot(path string) (rootResult, error) {
-	canonical, err := validateRootPathForAdd(path)
+func (m *appArmorProfileManager) addManagedBoundary(path string) (boundaryResult, error) {
+	canonical, err := validateBoundaryPathForAdd(path)
 	if err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 
 	lockFile, err := m.acquireAppArmorLock()
 	if err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 	defer lockFile.Close()
 
 	if err := m.checkPrerequisites(); err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 
 	snap, err := m.snapshotFragment()
 	if err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 
-	for _, r := range snap.roots {
+	for _, r := range snap.boundaries {
 		if r == canonical {
-			return rootResult{Path: canonical, Changed: false}, nil
+			return boundaryResult{Path: canonical, Changed: false}, nil
 		}
 	}
 
-	newRoots := make([]string, 0, len(snap.roots)+1)
-	newRoots = append(newRoots, snap.roots...)
-	newRoots = append(newRoots, canonical)
-	sort.Strings(newRoots)
+	newBoundaries := make([]string, 0, len(snap.boundaries)+1)
+	newBoundaries = append(newBoundaries, snap.boundaries...)
+	newBoundaries = append(newBoundaries, canonical)
+	sort.Strings(newBoundaries)
 
-	if err := m.writeFragment(newRoots); err != nil {
-		return rootResult{}, err
+	if err := m.writeFragment(newBoundaries); err != nil {
+		return boundaryResult{}, err
 	}
 
 	if err := m.reloadProfile(); err != nil {
 		rollbackErr := m.rollbackFragment(snap)
 		if rollbackErr != nil {
-			return rootResult{}, fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
+			return boundaryResult{}, fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
 		}
-		return rootResult{}, fmt.Errorf("reload failed: %w", err)
+		return boundaryResult{}, fmt.Errorf("reload failed: %w", err)
 	}
 
-	return rootResult{Path: canonical, Changed: true}, nil
+	return boundaryResult{Path: canonical, Changed: true}, nil
 }
 
-func (m *appArmorProfileManager) removeManagedRoot(path string) (rootResult, error) {
-	canonical, err := validateRootPathForRemove(path)
+func (m *appArmorProfileManager) removeManagedBoundary(path string) (boundaryResult, error) {
+	canonical, err := validateBoundaryPathForRemove(path)
 	if err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 
 	lockFile, err := m.acquireAppArmorLock()
 	if err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 	defer lockFile.Close()
 
 	if err := m.checkPrerequisites(); err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 
 	snap, err := m.snapshotFragment()
 	if err != nil {
-		return rootResult{}, err
+		return boundaryResult{}, err
 	}
 
-	newRoots := make([]string, 0, len(snap.roots))
+	newBoundaries := make([]string, 0, len(snap.boundaries))
 	found := false
-	for _, r := range snap.roots {
+	for _, r := range snap.boundaries {
 		if r == canonical {
 			found = true
 		} else {
-			newRoots = append(newRoots, r)
+			newBoundaries = append(newBoundaries, r)
 		}
 	}
 
 	if !found {
-		return rootResult{Path: canonical, Changed: false}, nil
+		return boundaryResult{Path: canonical, Changed: false}, nil
 	}
 
-	if err := m.writeFragment(newRoots); err != nil {
-		return rootResult{}, err
+	if err := m.writeFragment(newBoundaries); err != nil {
+		return boundaryResult{}, err
 	}
 
 	if err := m.reloadProfile(); err != nil {
 		rollbackErr := m.rollbackFragment(snap)
 		if rollbackErr != nil {
-			return rootResult{}, fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
+			return boundaryResult{}, fmt.Errorf("reload failed: %v; rollback also failed: %v", err, rollbackErr)
 		}
-		return rootResult{}, fmt.Errorf("reload failed: %w", err)
+		return boundaryResult{}, fmt.Errorf("reload failed: %w", err)
 	}
 
-	return rootResult{Path: canonical, Changed: true}, nil
+	return boundaryResult{Path: canonical, Changed: true}, nil
 }
 
 func (m *appArmorProfileManager) check() error {
@@ -584,15 +584,15 @@ func (m *appArmorProfileManager) check() error {
 		return err
 	}
 
-	roots, err := m.readFragment()
+	boundaries, err := m.readFragment()
 	if err != nil {
 		return fmt.Errorf("managed fragment is malformed: %w", err)
 	}
 
-	// Diagnose managed roots that violate the shared path-safety policy.
-	for _, root := range roots {
-		if err := validatePathPolicy(root); err != nil {
-			return fmt.Errorf("managed root %q violates workspace root policy: %s", root, err)
+	// Diagnose managed boundaries that violate the shared path-safety policy.
+	for _, boundary := range boundaries {
+		if err := validatePathPolicy(boundary); err != nil {
+			return fmt.Errorf("managed root %q violates workspace root policy: %s", boundary, err)
 		}
 	}
 
@@ -604,8 +604,8 @@ func (m *appArmorProfileManager) check() error {
 }
 
 // appArmorManagedRoots is the package-level seam for listing managed AppArmor
-// roots. Production default reads from the managed fragment file.
-// Tests may replace this to control the returned roots.
+// boundaries. Production default reads from the managed fragment file.
+// Tests may replace this to control the returned boundaries.
 var appArmorManagedRoots = func() ([]string, error) {
-	return newProductionAppArmorProfileManager().listManagedRoots()
+	return newProductionAppArmorProfileManager().listManagedBoundaries()
 }

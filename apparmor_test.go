@@ -26,7 +26,7 @@ func setupAppArmorTestWithRunner(t *testing.T, runner func(exe string, args []st
 	dir = t.TempDir()
 
 	mainProfile := filepath.Join(dir, "docker-helper-system")
-	managedFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	managedFragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "apparmor.lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -149,7 +149,7 @@ func TestAppArmorRequiresRoot(t *testing.T) {
 
 // --- Absolute/existing-directory validation ---
 
-func TestAppArmorRootAddRelativePath(t *testing.T) {
+func TestAppArmorBoundaryAddRelativePath(t *testing.T) {
 	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -165,7 +165,7 @@ func TestAppArmorRootAddRelativePath(t *testing.T) {
 	}
 }
 
-func TestAppArmorRootAddNonExistentPath(t *testing.T) {
+func TestAppArmorBoundaryAddNonExistentPath(t *testing.T) {
 	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -181,7 +181,7 @@ func TestAppArmorRootAddNonExistentPath(t *testing.T) {
 	}
 }
 
-func TestAppArmorRootAddFileNotDirectory(t *testing.T) {
+func TestAppArmorBoundaryAddFileNotDirectory(t *testing.T) {
 	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
@@ -204,7 +204,7 @@ func TestAppArmorRootAddFileNotDirectory(t *testing.T) {
 
 // --- Canonicalization of a symlinked input path ---
 
-func TestAppArmorRootAddSymlinkedPath(t *testing.T) {
+func TestAppArmorBoundaryAddSymlinkedPath(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	realDir := filepath.Join(rootDir, "real")
 	linkDir := filepath.Join(rootDir, "link")
@@ -217,9 +217,9 @@ func TestAppArmorRootAddSymlinkedPath(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	result, err := mgr.addManagedRoot(linkDir)
+	result, err := mgr.addManagedBoundary(linkDir)
 	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
+		t.Fatalf("addBoundary failed: %v", err)
 	}
 	if result.Path != realDir {
 		t.Errorf("expected canonical result %s, got %s", realDir, result.Path)
@@ -228,21 +228,21 @@ func TestAppArmorRootAddSymlinkedPath(t *testing.T) {
 		t.Error("expected Changed=true")
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(roots) != 1 || roots[0] != realDir {
-		t.Errorf("expected canonical root %s, got %v", realDir, roots)
+	if len(boundaries) != 1 || boundaries[0] != realDir {
+		t.Errorf("expected canonical root %s, got %v", realDir, boundaries)
 	}
 }
 
 // --- Rejection of / and AppArmor-pattern input ---
 
-func TestAppArmorRootAddRootDirectory(t *testing.T) {
+func TestAppArmorBoundaryAddRootDirectory(t *testing.T) {
 	_, mgr, _ := setupAppArmorTest(t)
 
-	_, err := mgr.addManagedRoot("/")
+	_, err := mgr.addManagedBoundary("/")
 	if err == nil {
 		t.Fatal("expected error for /")
 	}
@@ -251,7 +251,7 @@ func TestAppArmorRootAddRootDirectory(t *testing.T) {
 	}
 }
 
-func TestAppArmorRootAddGlobRejected(t *testing.T) {
+func TestAppArmorBoundaryAddGlobRejected(t *testing.T) {
 	// The base must be policy-legal (t.TempDir() is under the forbidden /tmp
 	// tree and would be rejected by the workspace root policy before lexical
 	// validation runs), so the rejection comes from the lexical check.
@@ -265,7 +265,7 @@ func TestAppArmorRootAddGlobRejected(t *testing.T) {
 			}
 
 			_, mgr, _ := setupAppArmorTest(t)
-			_, err := mgr.addManagedRoot(path)
+			_, err := mgr.addManagedBoundary(path)
 			if err == nil {
 				t.Fatalf("expected error for path with %q", ch)
 			}
@@ -282,7 +282,7 @@ func TestAppArmorRootAddCLIRejectsGlob(t *testing.T) {
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
 
-	// Policy-legal base, as in TestAppArmorRootAddGlobRejected.
+	// Policy-legal base, as in TestAppArmorBoundaryAddGlobRejected.
 	rootDir := testAllowedRootDir(t)
 	path := filepath.Join(rootDir, "test*")
 	if err := os.MkdirAll(path, 0755); err != nil {
@@ -299,8 +299,8 @@ func TestAppArmorRootAddCLIRejectsGlob(t *testing.T) {
 // --- Deterministic sorted rendering ---
 
 func TestRenderFragmentSorted(t *testing.T) {
-	roots := []string{"/z/workspace", "/a/workspace", "/m/workspace"}
-	data := renderFragment(roots)
+	boundaries := []string{"/z/workspace", "/a/workspace", "/m/workspace"}
+	data := renderFragment(boundaries)
 
 	content := string(data)
 	aIdx := strings.Index(content, `# root-json: "/a/workspace"`)
@@ -308,17 +308,17 @@ func TestRenderFragmentSorted(t *testing.T) {
 	zIdx := strings.Index(content, `# root-json: "/z/workspace"`)
 
 	if aIdx >= mIdx || mIdx >= zIdx {
-		t.Errorf("roots not sorted: a=%d m=%d z=%d", aIdx, mIdx, zIdx)
+		t.Errorf("boundaries not sorted: a=%d m=%d z=%d", aIdx, mIdx, zIdx)
 	}
 }
 
 func TestRenderFragmentDeterministic(t *testing.T) {
-	roots := []string{"/b", "/a", "/c"}
-	data1 := renderFragment(roots)
+	boundaries := []string{"/b", "/a", "/c"}
+	data1 := renderFragment(boundaries)
 	data2 := renderFragment([]string{"/c", "/a", "/b"})
 
 	if !bytes.Equal(data1, data2) {
-		t.Error("renderFragment not deterministic for same roots in different order")
+		t.Error("renderFragment not deterministic for same boundaries in different order")
 	}
 }
 
@@ -366,20 +366,20 @@ func TestRootWithSpecialCharacters(t *testing.T) {
 
 			_, mgr, _ := setupAppArmorTest(t)
 
-			result, err := mgr.addManagedRoot(path)
+			result, err := mgr.addManagedBoundary(path)
 			if err != nil {
-				t.Fatalf("addRoot failed: %v", err)
+				t.Fatalf("addBoundary failed: %v", err)
 			}
 			if result.Path != path {
 				t.Errorf("expected %s, got %s", path, result.Path)
 			}
 
-			roots, err := mgr.listManagedRoots()
+			boundaries, err := mgr.listManagedBoundaries()
 			if err != nil {
-				t.Fatalf("listRoots failed: %v", err)
+				t.Fatalf("listBoundaries failed: %v", err)
 			}
-			if len(roots) != 1 || roots[0] != path {
-				t.Errorf("expected root %s, got %v", path, roots)
+			if len(boundaries) != 1 || boundaries[0] != path {
+				t.Errorf("expected root %s, got %v", path, boundaries)
 			}
 		})
 	}
@@ -395,7 +395,7 @@ func TestRootWithControlCharacter(t *testing.T) {
 	}
 
 	_, mgr, _ := setupAppArmorTest(t)
-	_, err := mgr.addManagedRoot(path)
+	_, err := mgr.addManagedBoundary(path)
 	if err == nil {
 		t.Fatal("expected error for control character")
 	}
@@ -434,8 +434,8 @@ func TestMetadataRoundTrip(t *testing.T) {
 // --- Exact AppArmor rule text ---
 
 func TestRenderFragmentRuleEscaping(t *testing.T) {
-	roots := []string{`/path\with"special`}
-	data := renderFragment(roots)
+	boundaries := []string{`/path\with"special`}
+	data := renderFragment(boundaries)
 	content := string(data)
 
 	if !strings.Contains(content, `"/path\\with\"special/" r,`) {
@@ -454,9 +454,9 @@ func TestAppArmorDuplicateAdd(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	result1, err := mgr.addManagedRoot(testDir)
+	result1, err := mgr.addManagedBoundary(testDir)
 	if err != nil {
-		t.Fatalf("first addRoot failed: %v", err)
+		t.Fatalf("first addBoundary failed: %v", err)
 	}
 	if !result1.Changed {
 		t.Error("first add expected Changed=true")
@@ -465,9 +465,9 @@ func TestAppArmorDuplicateAdd(t *testing.T) {
 		t.Errorf("first add expected path %s, got %s", testDir, result1.Path)
 	}
 
-	result2, err := mgr.addManagedRoot(testDir)
+	result2, err := mgr.addManagedBoundary(testDir)
 	if err != nil {
-		t.Fatalf("second addRoot failed: %v", err)
+		t.Fatalf("second addBoundary failed: %v", err)
 	}
 	if result2.Changed {
 		t.Error("second add expected Changed=false")
@@ -476,12 +476,12 @@ func TestAppArmorDuplicateAdd(t *testing.T) {
 		t.Errorf("second add expected path %s, got %s", testDir, result2.Path)
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(roots) != 1 {
-		t.Errorf("expected 1 root, got %d", len(roots))
+	if len(boundaries) != 1 {
+		t.Errorf("expected 1 root, got %d", len(boundaries))
 	}
 }
 
@@ -496,9 +496,9 @@ func TestAppArmorAbsentRemove(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	result, err := mgr.removeManagedRoot(testDir)
+	result, err := mgr.removeManagedBoundary(testDir)
 	if err != nil {
-		t.Fatalf("removeRoot failed: %v", err)
+		t.Fatalf("removeBoundary failed: %v", err)
 	}
 	if result.Changed {
 		t.Error("expected Changed=false for absent root")
@@ -519,17 +519,17 @@ func TestAppArmorRemoveAfterDeletion(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedRoot(testDir); err != nil {
-		t.Fatalf("addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDir); err != nil {
+		t.Fatalf("addBoundary failed: %v", err)
 	}
 
 	if err := os.RemoveAll(testDir); err != nil {
 		t.Fatalf("RemoveAll failed: %v", err)
 	}
 
-	result, err := mgr.removeManagedRoot(testDir)
+	result, err := mgr.removeManagedBoundary(testDir)
 	if err != nil {
-		t.Fatalf("removeRoot failed after deletion: %v", err)
+		t.Fatalf("removeBoundary failed after deletion: %v", err)
 	}
 	if !result.Changed {
 		t.Error("expected Changed=true")
@@ -538,12 +538,12 @@ func TestAppArmorRemoveAfterDeletion(t *testing.T) {
 		t.Errorf("expected %s, got %s", testDir, result.Path)
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(roots) != 0 {
-		t.Errorf("expected empty list after remove, got %v", roots)
+	if len(boundaries) != 0 {
+		t.Errorf("expected empty list after remove, got %v", boundaries)
 	}
 }
 
@@ -552,12 +552,12 @@ func TestAppArmorRemoveAfterDeletion(t *testing.T) {
 func TestAppArmorListAbsentFragment(t *testing.T) {
 	_, mgr, _ := setupAppArmorTest(t)
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(roots) != 0 {
-		t.Errorf("expected empty list, got %v", roots)
+	if len(boundaries) != 0 {
+		t.Errorf("expected empty list, got %v", boundaries)
 	}
 }
 
@@ -587,7 +587,7 @@ func TestAppArmorListMalformedFragment(t *testing.T) {
 			if err := os.WriteFile(mgr.managedFragmentPath, tc.data, 0644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := mgr.listManagedRoots(); err == nil {
+			if _, err := mgr.listManagedBoundaries(); err == nil {
 				t.Fatal("expected error for malformed fragment")
 			}
 		})
@@ -605,7 +605,7 @@ func TestAppArmorParserInvocation(t *testing.T) {
 		{
 			name: "reload on add",
 			op: func(mgr *appArmorProfileManager, testDir string) error {
-				_, err := mgr.addManagedRoot(testDir)
+				_, err := mgr.addManagedBoundary(testDir)
 				return err
 			},
 			wantArgs: []string{"--replace", "--skip-read-cache"},
@@ -706,9 +706,9 @@ func TestAppArmorNoShellInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := mgr.addManagedRoot(testDir)
+	_, err := mgr.addManagedBoundary(testDir)
 	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
+		t.Fatalf("addBoundary failed: %v", err)
 	}
 
 	if shellUsed {
@@ -721,7 +721,7 @@ func TestAppArmorNoShellInvocation(t *testing.T) {
 func TestAppArmorCheckDoesNotReload(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -767,7 +767,7 @@ func TestAppArmorCheckDoesNotReload(t *testing.T) {
 func TestAppArmorCheckDoesNotModifyFiles(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -819,9 +819,9 @@ func TestAppArmorSuccessfulAdd(t *testing.T) {
 
 	_, mgr, captured := setupAppArmorTest(t)
 
-	result, err := mgr.addManagedRoot(testDir)
+	result, err := mgr.addManagedBoundary(testDir)
 	if err != nil {
-		t.Fatalf("addRoot failed: %v", err)
+		t.Fatalf("addBoundary failed: %v", err)
 	}
 	if !result.Changed {
 		t.Error("expected Changed=true")
@@ -830,12 +830,12 @@ func TestAppArmorSuccessfulAdd(t *testing.T) {
 		t.Errorf("expected %s, got %s", testDir, result.Path)
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(roots) != 1 || roots[0] != testDir {
-		t.Errorf("expected root %s, got %v", testDir, roots)
+	if len(boundaries) != 1 || boundaries[0] != testDir {
+		t.Errorf("expected root %s, got %v", testDir, boundaries)
 	}
 
 	if len(captured.args) != 3 || captured.args[0] != "--replace" {
@@ -851,14 +851,14 @@ func TestAppArmorSuccessfulRemove(t *testing.T) {
 
 	_, mgr, captured := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedRoot(testDir); err != nil {
-		t.Fatalf("addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDir); err != nil {
+		t.Fatalf("addBoundary failed: %v", err)
 	}
 	captured.args = nil
 
-	result, err := mgr.removeManagedRoot(testDir)
+	result, err := mgr.removeManagedBoundary(testDir)
 	if err != nil {
-		t.Fatalf("removeRoot failed: %v", err)
+		t.Fatalf("removeBoundary failed: %v", err)
 	}
 	if !result.Changed {
 		t.Error("expected Changed=true")
@@ -867,12 +867,12 @@ func TestAppArmorSuccessfulRemove(t *testing.T) {
 		t.Errorf("expected %s, got %s", testDir, result.Path)
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(roots) != 0 {
-		t.Errorf("expected empty list after remove, got %v", roots)
+	if len(boundaries) != 0 {
+		t.Errorf("expected empty list after remove, got %v", boundaries)
 	}
 
 	if len(captured.args) != 3 || captured.args[0] != "--replace" {
@@ -880,7 +880,7 @@ func TestAppArmorSuccessfulRemove(t *testing.T) {
 	}
 }
 
-func TestAppArmorAddMultipleRoots(t *testing.T) {
+func TestAppArmorAddMultipleBoundaries(t *testing.T) {
 	rootDir := testAllowedRootDir(t)
 	dirA := filepath.Join(rootDir, "a")
 	dirB := filepath.Join(rootDir, "b")
@@ -893,23 +893,23 @@ func TestAppArmorAddMultipleRoots(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedRoot(dirC); err != nil {
+	if _, err := mgr.addManagedBoundary(dirC); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addManagedRoot(dirA); err != nil {
+	if _, err := mgr.addManagedBoundary(dirA); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addManagedRoot(dirB); err != nil {
+	if _, err := mgr.addManagedBoundary(dirB); err != nil {
 		t.Fatal(err)
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
 	expected := []string{dirA, dirB, dirC}
-	if !reflectSliceEqual(roots, expected) {
-		t.Errorf("expected %v, got %v", expected, roots)
+	if !reflectSliceEqual(boundaries, expected) {
+		t.Errorf("expected %v, got %v", expected, boundaries)
 	}
 }
 
@@ -935,8 +935,8 @@ func TestAppArmorFragmentPermissions(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedRoot(testDir); err != nil {
-		t.Fatalf("addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDir); err != nil {
+		t.Fatalf("addBoundary failed: %v", err)
 	}
 
 	info, err := os.Stat(mgr.managedFragmentPath)
@@ -982,8 +982,8 @@ func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedRoot(testDirA); err != nil {
-		t.Fatalf("first addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+		t.Fatalf("first addBoundary failed: %v", err)
 	}
 
 	prevData, err := os.ReadFile(mgr.managedFragmentPath)
@@ -991,9 +991,9 @@ func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 		t.Fatalf("cannot read fragment: %v", err)
 	}
 
-	_, err = mgr.addManagedRoot(testDirB)
+	_, err = mgr.addManagedBoundary(testDirB)
 	if err == nil {
-		t.Fatal("expected error for second addRoot")
+		t.Fatal("expected error for second addBoundary")
 	}
 
 	afterData, err := os.ReadFile(mgr.managedFragmentPath)
@@ -1005,12 +1005,12 @@ func TestAppArmorParserFailureRestoresPrevious(t *testing.T) {
 		t.Error("fragment was not restored to previous bytes after parser failure")
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed after rollback: %v", err)
+		t.Fatalf("listBoundaries failed after rollback: %v", err)
 	}
-	if len(roots) != 1 || roots[0] != testDirA {
-		t.Errorf("expected only %s after rollback, got %v", testDirA, roots)
+	if len(boundaries) != 1 || boundaries[0] != testDirA {
+		t.Errorf("expected only %s after rollback, got %v", testDirA, boundaries)
 	}
 }
 
@@ -1030,11 +1030,11 @@ func TestAppArmorParserFailureRemoveRestores(t *testing.T) {
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedRoot(testDirA); err != nil {
-		t.Fatalf("first addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+		t.Fatalf("first addBoundary failed: %v", err)
 	}
-	if _, err := mgr.addManagedRoot(testDirB); err != nil {
-		t.Fatalf("second addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDirB); err != nil {
+		t.Fatalf("second addBoundary failed: %v", err)
 	}
 
 	mgr.runParser = func(exe string, args []string) error {
@@ -1046,9 +1046,9 @@ func TestAppArmorParserFailureRemoveRestores(t *testing.T) {
 		t.Fatalf("cannot read fragment: %v", err)
 	}
 
-	_, err = mgr.removeManagedRoot(testDirA)
+	_, err = mgr.removeManagedBoundary(testDirA)
 	if err == nil {
-		t.Fatal("expected error for removeRoot")
+		t.Fatal("expected error for removeBoundary")
 	}
 
 	afterData, err := os.ReadFile(mgr.managedFragmentPath)
@@ -1079,8 +1079,8 @@ func TestAppArmorRollbackReloadFailure(t *testing.T) {
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedRoot(testDirA); err != nil {
-		t.Fatalf("first addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+		t.Fatalf("first addBoundary failed: %v", err)
 	}
 
 	callCount := 0
@@ -1089,9 +1089,9 @@ func TestAppArmorRollbackReloadFailure(t *testing.T) {
 		return fmt.Errorf("parser error %d", callCount)
 	}
 
-	_, err := mgr.addManagedRoot(testDirB)
+	_, err := mgr.addManagedBoundary(testDirB)
 	if err == nil {
-		t.Fatal("expected error for second addRoot")
+		t.Fatal("expected error for second addBoundary")
 	}
 
 	errMsg := err.Error()
@@ -1168,14 +1168,14 @@ func TestAppArmorConcurrentLockBusy(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var errA, errB error
-	var resultA rootResult
+	var resultA boundaryResult
 
 	wg.Add(2)
 
 	// First goroutine: enters runner, holds lock
 	go func() {
 		defer wg.Done()
-		resultA, errA = mgr.addManagedRoot(testDirA)
+		resultA, errA = mgr.addManagedBoundary(testDirA)
 	}()
 
 	// Wait for first goroutine to be in the runner (lock held)
@@ -1184,7 +1184,7 @@ func TestAppArmorConcurrentLockBusy(t *testing.T) {
 	// Second goroutine: tries to acquire lock while first holds it
 	go func() {
 		defer wg.Done()
-		_, errB = mgr.addManagedRoot(testDirB)
+		_, errB = mgr.addManagedBoundary(testDirB)
 		close(secondDone)
 	}()
 
@@ -1222,7 +1222,7 @@ func TestAppArmorParserNotExecutable(t *testing.T) {
 	}
 
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -1262,7 +1262,7 @@ func TestAppArmorParserNotExecutable(t *testing.T) {
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	_, err = mgr.addManagedRoot(testDir)
+	_, err = mgr.addManagedBoundary(testDir)
 	if err == nil {
 		t.Fatal("expected error for non-executable parser")
 	}
@@ -1299,11 +1299,11 @@ func TestAppArmorSymlinkFragmentRejected(t *testing.T) {
 		op   func(mgr *appArmorProfileManager, testDir string) error
 	}{
 		{"add", func(mgr *appArmorProfileManager, testDir string) error {
-			_, err := mgr.addManagedRoot(testDir)
+			_, err := mgr.addManagedBoundary(testDir)
 			return err
 		}},
 		{"remove", func(mgr *appArmorProfileManager, testDir string) error {
-			_, err := mgr.removeManagedRoot(testDir)
+			_, err := mgr.removeManagedBoundary(testDir)
 			return err
 		}},
 	}
@@ -1318,7 +1318,7 @@ func TestAppArmorSymlinkFragmentRejected(t *testing.T) {
 
 			mainProfile := filepath.Join(dir, "main")
 			realFragment := filepath.Join(dir, "real-fragment")
-			linkFragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+			linkFragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 			lockPath := filepath.Join(dir, "lock")
 			parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -1389,7 +1389,7 @@ func TestAppArmorNonRegularFragmentDirectory(t *testing.T) {
 	}
 
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -1411,7 +1411,7 @@ func TestAppArmorNonRegularFragmentDirectory(t *testing.T) {
 		func(exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addManagedRoot(testDir)
+	_, err := mgr.addManagedBoundary(testDir)
 	if err == nil {
 		t.Fatal("expected error for directory fragment")
 	}
@@ -1430,7 +1430,7 @@ func TestAppArmorParserUnavailableNoChanges(t *testing.T) {
 	}
 
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "nonexistent_parser")
 
@@ -1442,7 +1442,7 @@ func TestAppArmorParserUnavailableNoChanges(t *testing.T) {
 		func(exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addManagedRoot(testDir)
+	_, err := mgr.addManagedBoundary(testDir)
 	if err == nil {
 		t.Fatal("expected error for missing parser")
 	}
@@ -1465,7 +1465,7 @@ func TestAppArmorMainProfileMissingNoChanges(t *testing.T) {
 	}
 
 	mainProfile := filepath.Join(dir, "nonexistent_profile")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -1477,7 +1477,7 @@ func TestAppArmorMainProfileMissingNoChanges(t *testing.T) {
 		func(exe string, args []string) error { return nil },
 	)
 
-	_, err := mgr.addManagedRoot(testDir)
+	_, err := mgr.addManagedBoundary(testDir)
 	if err == nil {
 		t.Fatal("expected error for missing main profile")
 	}
@@ -1539,7 +1539,7 @@ func TestAppArmorCheckMainProfileNotFound(t *testing.T) {
 func TestAppArmorCheckValidationFailure(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -1572,7 +1572,7 @@ func TestAppArmorCheckValidationFailure(t *testing.T) {
 func TestAppArmorCheckSuccess(t *testing.T) {
 	dir := t.TempDir()
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -1612,38 +1612,38 @@ func TestAppArmorRemoveNoInference(t *testing.T) {
 
 	_, mgr, _ := setupAppArmorTest(t)
 
-	if _, err := mgr.addManagedRoot(parentDir); err != nil {
+	if _, err := mgr.addManagedBoundary(parentDir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mgr.addManagedRoot(childDir); err != nil {
+	if _, err := mgr.addManagedBoundary(childDir); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := mgr.removeManagedRoot(childDir); err != nil {
-		t.Fatalf("removeRoot failed: %v", err)
+	if _, err := mgr.removeManagedBoundary(childDir); err != nil {
+		t.Fatalf("removeBoundary failed: %v", err)
 	}
 
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots failed: %v", err)
+		t.Fatalf("listBoundaries failed: %v", err)
 	}
-	if len(roots) != 1 || roots[0] != parentDir {
-		t.Errorf("expected only parent %s, got %v", parentDir, roots)
+	if len(boundaries) != 1 || boundaries[0] != parentDir {
+		t.Errorf("expected only parent %s, got %v", parentDir, boundaries)
 	}
 }
 
 // --- Fragment parse round-trip ---
 
 func TestFragmentRoundTrip(t *testing.T) {
-	roots := []string{"/a", "/b", "/c"}
-	data := renderFragment(roots)
+	boundaries := []string{"/a", "/b", "/c"}
+	data := renderFragment(boundaries)
 
 	parsed, err := parseFragment(data)
 	if err != nil {
 		t.Fatalf("parseFragment failed: %v", err)
 	}
-	if !reflectSliceEqual(parsed, roots) {
-		t.Errorf("expected %v, got %v", roots, parsed)
+	if !reflectSliceEqual(parsed, boundaries) {
+		t.Errorf("expected %v, got %v", boundaries, parsed)
 	}
 }
 
@@ -1659,8 +1659,8 @@ func TestFragmentEmptyRoundTrip(t *testing.T) {
 }
 
 func TestFragmentRoundTripSpecialChars(t *testing.T) {
-	roots := []string{"/with space", `/with"quote`, "/with\\backslash", "/with#hash", "/with,comma"}
-	data := renderFragment(roots)
+	boundaries := []string{"/with space", `/with"quote`, "/with\\backslash", "/with#hash", "/with,comma"}
+	data := renderFragment(boundaries)
 
 	parsed, err := parseFragment(data)
 	if err != nil {
@@ -1707,8 +1707,8 @@ func TestAppArmorCLIExitCodes(t *testing.T) {
 // --- renderFragment format ---
 
 func TestRenderFragmentFormat(t *testing.T) {
-	roots := []string{"/workspace"}
-	data := renderFragment(roots)
+	boundaries := []string{"/workspace"}
+	data := renderFragment(boundaries)
 	content := string(data)
 
 	lines := strings.Split(content, "\n")
@@ -1733,8 +1733,8 @@ func TestRenderFragmentFormat(t *testing.T) {
 }
 
 func TestRenderFragmentMultipleRoots(t *testing.T) {
-	roots := []string{"/a", "/b"}
-	data := renderFragment(roots)
+	boundaries := []string{"/a", "/b"}
+	data := renderFragment(boundaries)
 	content := string(data)
 
 	if !strings.Contains(content, `# root-json: "/a"`) {
@@ -1751,10 +1751,10 @@ func TestRenderFragmentMultipleRoots(t *testing.T) {
 	}
 }
 
-// --- validateRootPathForRemove ---
+// --- validateBoundaryPathForRemove ---
 
 func TestValidateRootPathForRemoveNonExistent(t *testing.T) {
-	canonical, err := validateRootPathForRemove("/nonexistent/path")
+	canonical, err := validateBoundaryPathForRemove("/nonexistent/path")
 	if err != nil {
 		t.Fatalf("expected success for non-existent path in remove, got: %v", err)
 	}
@@ -1764,7 +1764,7 @@ func TestValidateRootPathForRemoveNonExistent(t *testing.T) {
 }
 
 func TestValidateRootPathForRemoveRoot(t *testing.T) {
-	_, err := validateRootPathForRemove("/")
+	_, err := validateBoundaryPathForRemove("/")
 	if err == nil {
 		t.Fatal("expected error for /")
 	}
@@ -1793,8 +1793,8 @@ func TestAppArmorRollbackRestoresMode(t *testing.T) {
 
 	_, mgr := setupAppArmorTestWithRunner(t, fakeRunner)
 
-	if _, err := mgr.addManagedRoot(testDirA); err != nil {
-		t.Fatalf("first addRoot failed: %v", err)
+	if _, err := mgr.addManagedBoundary(testDirA); err != nil {
+		t.Fatalf("first addBoundary failed: %v", err)
 	}
 
 	prevInfo, err := os.Stat(mgr.managedFragmentPath)
@@ -1803,9 +1803,9 @@ func TestAppArmorRollbackRestoresMode(t *testing.T) {
 	}
 	prevMode := prevInfo.Mode().Perm()
 
-	_, err = mgr.addManagedRoot(testDirB)
+	_, err = mgr.addManagedBoundary(testDirB)
 	if err == nil {
-		t.Fatal("expected error for second addRoot")
+		t.Fatal("expected error for second addBoundary")
 	}
 
 	afterInfo, err := os.Stat(mgr.managedFragmentPath)
@@ -1829,7 +1829,7 @@ func TestAppArmorRollbackRestoresNoFragment(t *testing.T) {
 	}
 
 	mainProfile := filepath.Join(dir, "main")
-	fragment := filepath.Join(dir, "docker-helper.d", "managed-roots")
+	fragment := filepath.Join(dir, "docker-helper.d", "managed-boundaries")
 	lockPath := filepath.Join(dir, "lock")
 	parserPath := filepath.Join(dir, "apparmor_parser")
 
@@ -1848,9 +1848,9 @@ func TestAppArmorRollbackRestoresNoFragment(t *testing.T) {
 
 	mgr := newAppArmorProfileManager(mainProfile, fragment, lockPath, parserPath, fakeRunner)
 
-	_, err := mgr.addManagedRoot(testDir)
+	_, err := mgr.addManagedBoundary(testDir)
 	if err == nil {
-		t.Fatal("expected error for addRoot")
+		t.Fatal("expected error for addBoundary")
 	}
 
 	if _, err := os.Stat(fragment); !os.IsNotExist(err) {
@@ -1892,7 +1892,7 @@ func TestValidateRootLexical(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateRootLexical(tc.path)
+			err := validateBoundaryLexical(tc.path)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for %q, got nil", tc.path)
@@ -1906,7 +1906,7 @@ func TestValidateRootLexical(t *testing.T) {
 	}
 }
 
-// --- Fragment with invalid roots rejected by parseFragment ---
+// --- Fragment with invalid boundaries rejected by parseFragment ---
 
 func TestParseFragmentRejectsInvalidRoots(t *testing.T) {
 	tests := []struct {
@@ -1944,7 +1944,7 @@ func TestValidateRootPathForRemoveStatError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := validateRootPathForRemove(linkPath)
+	_, err := validateBoundaryPathForRemove(linkPath)
 	if err == nil {
 		t.Fatal("expected error for symlink loop")
 	}
@@ -1970,7 +1970,7 @@ func TestValidateRootPathForRemoveNonDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	canonical, err := validateRootPathForRemove(tmpfile)
+	canonical, err := validateBoundaryPathForRemove(tmpfile)
 	if err != nil {
 		t.Fatalf("expected success for existing non-directory, got: %v", err)
 	}
@@ -1979,13 +1979,13 @@ func TestValidateRootPathForRemoveNonDirectory(t *testing.T) {
 	}
 }
 
-// --- Stale unsafe roots: parser tolerance and REMOVE semantics ---
+// --- Stale unsafe boundaries: parser tolerance and REMOVE semantics ---
 
-// TestAppArmorStaleUnsafeRootPreservedSemantics verifies that a managed
+// TestAppArmorStaleUnsafeBoundaryPreservedSemantics verifies that a managed
 // fragment containing a root that violates the current workspace root
 // policy (e.g., a pre-policy /var/... root) is still parsed, can still be
 // removed (stale REMOVE semantics), and is diagnosed by check.
-func TestAppArmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
+func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 	_, mgr, _ := setupAppArmorTest(t)
 
 	staleUnsafe := "/var/lib/legacy-workspaces"
@@ -1998,28 +1998,28 @@ func TestAppArmorStaleUnsafeRootPreservedSemantics(t *testing.T) {
 	}
 
 	// 1) Parser must tolerate the stale unsafe root.
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots() error: %v", err)
+		t.Fatalf("listBoundaries() error: %v", err)
 	}
-	if len(roots) != 1 || roots[0] != staleUnsafe {
-		t.Fatalf("listRoots() = %v, want [%s]", roots, staleUnsafe)
+	if len(boundaries) != 1 || boundaries[0] != staleUnsafe {
+		t.Fatalf("listBoundaries() = %v, want [%s]", boundaries, staleUnsafe)
 	}
 
 	// 2) Stale REMOVE semantics: the unsafe root must still be removable.
-	res, err := mgr.removeManagedRoot(staleUnsafe)
+	res, err := mgr.removeManagedBoundary(staleUnsafe)
 	if err != nil {
-		t.Fatalf("removeRoot() error: %v", err)
+		t.Fatalf("removeBoundary() error: %v", err)
 	}
 	if !res.Changed {
 		t.Error("removeRoot should report Changed=true")
 	}
-	roots, err = mgr.listManagedRoots()
+	boundaries, err = mgr.listManagedBoundaries()
 	if err != nil {
-		t.Fatalf("listRoots() after remove: %v", err)
+		t.Fatalf("listBoundaries() after remove: %v", err)
 	}
-	if len(roots) != 0 {
-		t.Errorf("listRoots() after remove = %v, want empty", roots)
+	if len(boundaries) != 0 {
+		t.Errorf("listBoundaries() after remove = %v, want empty", boundaries)
 	}
 
 	// 3) check() must diagnose the policy violation (not crash or reject parse).

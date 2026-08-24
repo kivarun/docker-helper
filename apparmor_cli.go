@@ -96,14 +96,14 @@ func runAppArmorRootList(stdout, stderr io.Writer) int {
 	}
 
 	mgr := newProductionAppArmorProfileManager()
-	roots, err := mgr.listManagedRoots()
+	boundaries, err := mgr.listManagedBoundaries()
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
-	for _, root := range roots {
-		fmt.Fprintln(stdout, root)
+	for _, boundary := range boundaries {
+		fmt.Fprintln(stdout, boundary)
 	}
 
 	return 0
@@ -120,7 +120,7 @@ func runAppArmorRootAdd(path string, stdout, stderr io.Writer) int {
 	}
 
 	mgr := newProductionAppArmorProfileManager()
-	result, err := mgr.addManagedRoot(path)
+	result, err := mgr.addManagedBoundary(path)
 	if err != nil {
 		var ie *inputError
 		if errors.As(err, &ie) {
@@ -150,7 +150,7 @@ func runAppArmorRootRemove(path string, stdout, stderr io.Writer) int {
 	}
 
 	mgr := newProductionAppArmorProfileManager()
-	result, err := mgr.removeManagedRoot(path)
+	result, err := mgr.removeManagedBoundary(path)
 	if err != nil {
 		var ie *inputError
 		if errors.As(err, &ie) {

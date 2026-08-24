@@ -599,24 +599,24 @@ func macBoundaryOverlap(a, b string) bool {
 
 // appArmorWorkspaceMACDriver wraps the AppArmor manager for the coordinator.
 type appArmorWorkspaceMACDriver struct {
-	addManagedRoot    func(string) (rootResult, error)
-	removeManagedRoot func(string) (rootResult, error)
-	listManagedRoots  func() ([]string, error)
+	addManagedBoundary    func(string) (boundaryResult, error)
+	removeManagedBoundary func(string) (boundaryResult, error)
+	listManagedBoundaries func() ([]string, error)
 }
 
 func (d *appArmorWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
-	roots, err := d.listManagedRoots()
+	boundaries, err := d.listManagedBoundaries()
 	if err != nil {
-		return workspaceMACCoverage{}, false, fmt.Errorf("cannot list AppArmor managed roots: %w", err)
+		return workspaceMACCoverage{}, false, fmt.Errorf("cannot list AppArmor managed boundaries: %w", err)
 	}
 
-	for _, root := range roots {
-		if boundaryCoversWorkspace(root, workspace) {
-			return workspaceMACCoverage{Boundary: root, HelperOwned: true}, false, nil
+	for _, boundary := range boundaries {
+		if boundaryCoversWorkspace(boundary, workspace) {
+			return workspaceMACCoverage{Boundary: boundary, HelperOwned: true}, false, nil
 		}
 	}
 
-	result, err := d.addManagedRoot(workspace)
+	result, err := d.addManagedBoundary(workspace)
 	if err != nil {
 		return workspaceMACCoverage{}, false, err
 	}
@@ -624,25 +624,25 @@ func (d *appArmorWorkspaceMACDriver) ensureCoverage(workspace string) (workspace
 }
 
 func (d *appArmorWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
-	roots, err := d.listManagedRoots()
+	boundaries, err := d.listManagedBoundaries()
 	if err != nil {
 		return workspaceMACCoverage{}, err
 	}
-	for _, root := range roots {
-		if boundaryCoversWorkspace(root, workspace) {
-			return workspaceMACCoverage{Boundary: root, HelperOwned: true}, nil
+	for _, boundary := range boundaries {
+		if boundaryCoversWorkspace(boundary, workspace) {
+			return workspaceMACCoverage{Boundary: boundary, HelperOwned: true}, nil
 		}
 	}
-	return workspaceMACCoverage{}, fmt.Errorf("workspace %s not covered by any managed AppArmor root", workspace)
+	return workspaceMACCoverage{}, fmt.Errorf("workspace %s not covered by any managed AppArmor boundary", workspace)
 }
 
 func (d *appArmorWorkspaceMACDriver) removeBoundary(boundary string) error {
-	_, err := d.removeManagedRoot(boundary)
+	_, err := d.removeManagedBoundary(boundary)
 	return err
 }
 
 func (d *appArmorWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
-	return d.listManagedRoots()
+	return d.listManagedBoundaries()
 }
 
 func (d *appArmorWorkspaceMACDriver) backendType() string {
@@ -778,14 +778,14 @@ func newWorkspaceMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, er
 	case LSMAppArmor:
 		mgr := newProductionAppArmorProfileManager()
 		return &appArmorWorkspaceMACDriver{
-			addManagedRoot: func(path string) (rootResult, error) {
-				return mgr.addManagedRoot(path)
+			addManagedBoundary: func(path string) (boundaryResult, error) {
+				return mgr.addManagedBoundary(path)
 			},
-			removeManagedRoot: func(path string) (rootResult, error) {
-				return mgr.removeManagedRoot(path)
+			removeManagedBoundary: func(path string) (boundaryResult, error) {
+				return mgr.removeManagedBoundary(path)
 			},
-			listManagedRoots: func() ([]string, error) {
-				return mgr.listManagedRoots()
+			listManagedBoundaries: func() ([]string, error) {
+				return mgr.listManagedBoundaries()
 			},
 		}, nil
 	case LSMSELinux:
