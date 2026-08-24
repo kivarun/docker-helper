@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestRunSessionAuthValidToken(t *testing.T) {
+func TestRunSessionCapabilityAuthValidToken(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.OperationRegistry = newOperationRegistry()
 
@@ -39,7 +39,7 @@ func TestRunSessionAuthValidToken(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthMissingAuthorization(t *testing.T) {
+func TestRunSessionCapabilityAuthMissingAuthorization(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -55,7 +55,7 @@ func TestRunSessionAuthMissingAuthorization(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthWrongScheme(t *testing.T) {
+func TestRunSessionCapabilityAuthWrongScheme(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -72,7 +72,7 @@ func TestRunSessionAuthWrongScheme(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthEmptyBearer(t *testing.T) {
+func TestRunSessionCapabilityAuthEmptyBearer(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -89,7 +89,7 @@ func TestRunSessionAuthEmptyBearer(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthInvalidToken(t *testing.T) {
+func TestRunSessionCapabilityAuthInvalidToken(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -106,7 +106,7 @@ func TestRunSessionAuthInvalidToken(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthExpiredSession(t *testing.T) {
+func TestRunSessionCapabilityAuthExpiredSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -133,7 +133,7 @@ func TestRunSessionAuthExpiredSession(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthDeletedSession(t *testing.T) {
+func TestRunSessionCapabilityAuthDeletedSession(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -163,7 +163,7 @@ func TestRunSessionAuthDeletedSession(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthResponseContainsCode(t *testing.T) {
+func TestRunSessionCapabilityAuthResponseContract(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -173,6 +173,10 @@ func TestRunSessionAuthResponseContainsCode(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	app.handleRun(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
+	}
 
 	var resp response
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
@@ -182,25 +186,15 @@ func TestRunSessionAuthResponseContainsCode(t *testing.T) {
 	if resp.Code != "unauthorized" {
 		t.Errorf("expected code 'unauthorized', got %q", resp.Code)
 	}
-}
-
-func TestRunSessionAuthResponseContainsWWWAuthenticate(t *testing.T) {
-	app := newTestAppWithAuth(t)
-
-	reqBody := map[string]string{"image": "alpine:latest"}
-	body, _ := json.Marshal(reqBody)
-
-	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-
-	app.handleRun(w, req)
-
+	if resp.Message != "Session authentication required." {
+		t.Errorf("expected message 'Session authentication required.', got %q", resp.Message)
+	}
 	if w.Header().Get("WWW-Authenticate") != "Bearer" {
 		t.Errorf("expected WWW-Authenticate: Bearer, got %q", w.Header().Get("WWW-Authenticate"))
 	}
 }
 
-func TestRunSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
+func TestRunSessionCapabilityAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	called := false
@@ -227,7 +221,7 @@ func TestRunSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthAdminTokenRejected(t *testing.T) {
+func TestRunSessionCapabilityAuthAdminTokenRejected(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
@@ -244,7 +238,7 @@ func TestRunSessionAuthAdminTokenRejected(t *testing.T) {
 	}
 }
 
-func TestRunSessionAuthHashIsComputed(t *testing.T) {
+func TestRunSessionCapabilityAuthHashIsComputed(t *testing.T) {
 	token := "dht_test_session_token"
 	hash := sha256.Sum256([]byte(token))
 

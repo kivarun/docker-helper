@@ -14,7 +14,7 @@ import (
 )
 
 func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSession(w, r)
+	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
 		return
 	}
@@ -288,7 +288,7 @@ func (a *App) operationForSession(sessionID, operationID string) *operation {
 }
 
 func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSession(w, r)
+	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
 		return
 	}
@@ -325,7 +325,7 @@ func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleOperationLogs(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSession(w, r)
+	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
 		return
 	}
@@ -374,7 +374,7 @@ func parseOffset(s string) (int64, error) {
 }
 
 func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSession(w, r)
+	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
 		return
 	}

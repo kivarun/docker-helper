@@ -16,7 +16,7 @@ func withRequestID(next http.HandlerFunc) http.HandlerFunc {
 		ctx := context.WithValue(r.Context(), requestIDKey, rid)
 
 		// Set session_id in context after authentication establishes it.
-		// Handlers that call requireSession or requireAdmin will set this.
+		// Handlers that call requireSessionCapability or requireAdmin will set this.
 
 		w.Header().Set("X-Request-ID", rid)
 		next(w, r.WithContext(ctx))
@@ -25,7 +25,7 @@ func withRequestID(next http.HandlerFunc) http.HandlerFunc {
 
 // withSessionID wraps an HTTP handler to add the session ID to the context
 // after the handler has established the session through authentication.
-// This is used internally by handlers after requireSession returns.
+// This is used internally by handlers after requireSessionCapability returns.
 func withSessionID(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sessionIDKey, sessionID)
 }

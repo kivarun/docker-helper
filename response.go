@@ -104,7 +104,16 @@ func writeUnauthorizedAdmin(ctx context.Context, w http.ResponseWriter) {
 	})
 }
 
-func writeUnauthorizedSession(ctx context.Context, w http.ResponseWriter) {
+func writeUnauthorizedSessionCapability(ctx context.Context, w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeJSON(ctx, w, http.StatusUnauthorized, response{
+		OK:      false,
+		Code:    "unauthorized",
+		Message: "Session authentication required.",
+	})
+}
+
+func writeUnauthorizedSessionControl(ctx context.Context, w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	writeJSON(ctx, w, http.StatusUnauthorized, response{
 		OK:      false,
@@ -150,12 +159,14 @@ func (a *App) requireAdminWithHash(w http.ResponseWriter, r *http.Request) ([sha
 	return tokenHash, true
 }
 
-func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, bool) {
+// requireSessionCapability authenticates a Session bearer token for data-plane
+// actions such as run, build, pull, registry login, and operation access.
+func (a *App) requireSessionCapability(w http.ResponseWriter, r *http.Request) (*Session, bool) {
 	ctx := r.Context()
 	token, ok := parseBearerToken(r)
 	if !ok {
 		writeAuthFailure(ctx, r, "session.parse_failed")
-		writeUnauthorizedSession(ctx, w)
+		writeUnauthorizedSessionCapability(ctx, w)
 		return nil, false
 	}
 
@@ -174,7 +185,7 @@ func (a *App) requireSession(w http.ResponseWriter, r *http.Request) (*Session, 
 			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		} else {
-			writeUnauthorizedSession(ctx, w)
+			writeUnauthorizedSessionCapability(ctx, w)
 		}
 		return nil, false
 	}

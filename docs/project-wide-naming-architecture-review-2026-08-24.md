@@ -61,50 +61,56 @@ Verification on the review baseline:
 
 ### P1-1. Session capability and session-control authority share one vocabulary
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-- **requireSession** authenticates a Session token for Docker actions:
-  [response.go:153-183](../response.go#L153-L183).
-- **sessionAuthContext** and **authenticateSessionRequest** authenticate an
-  admin token or Principal credential for Session management:
-  [sessions.go:49-118](../sessions.go#L49-L118).
-- **writeUnauthorizedSession** says “Authentication required for session
-  management” and is also called by the Docker-action path:
-  [response.go:107-113](../response.go#L107-L113).
-- **TestAuthAuditAdminWrongToken_CreateSession** actually tests fallback to an
-  unknown Principal credential and expects credential.not_found:
-  [auth_audit_test.go:214-242](../auth_audit_test.go#L214-L242).
+Internal symbols have been renamed to distinguish the two authority domains:
 
-**Actual semantic responsibility**
+- **requireSessionCapability** authenticates a Session bearer token for data-plane
+  actions (run, build, pull, registry login, operation access).
+- **sessionControlAuthority** and **authenticateSessionControlRequest** authenticate
+  an admin token or Principal credential for session control (create, list, delete).
+- **writeUnauthorizedSessionCapability** returns a capability-specific message
+  ("Session authentication required.") for data-plane 401 responses.
+- **writeUnauthorizedSessionControl** retains the session-management message
+  ("Authentication required for session management.") for control-plane 401 responses.
+- **TestAuthAuditCredentialNotFound_CreateSession** correctly describes the test
+  behavior: non-admin token falls through to Principal credential lookup, which
+  fails with credential.not_found.
 
-There are two separate authority domains:
+Test vocabulary was also corrected:
 
-- Session capability authentication for pull/build/run/registry/operation
-  requests;
-- Session-control authority, supplied by an admin token or Principal
-  credential, for create/list/delete Session requests.
+- All `TestRunSessionAuth*` tests renamed to `TestRunSessionCapabilityAuth*`.
+- `TestAuthAuditAdminParseFailed*` renamed to `TestAuthAuditSessionControlParseFailed*`.
+- `TestAuthAuditSessionParseFailed*` renamed to `TestAuthAuditSessionCapabilityParseFailed*`.
+- `TestAuthAuditSessionNotFound*` renamed to `TestAuthAuditSessionCapabilityNotFound*`.
+- `TestAuthAuditSessionDatabaseError*` renamed to `TestAuthAuditSessionCapabilityDatabaseError*`.
+- `TestAuthAuditNoFailureOnValidSessionAuth*` renamed to
+  `TestAuthAuditNoFailureOnValidSessionCapabilityAuth*`.
 
-**Why the vocabulary is dangerous**
+Explicit response-contract tests were added:
 
-The collision has already produced incorrect HTTP wording and ambiguous audit
-results. A future authorization change can easily be applied to the wrong
-path.
+- `TestRunSessionCapabilityAuthResponseContract` asserts HTTP 401, code
+  "unauthorized", message "Session authentication required.", and
+  WWW-Authenticate: Bearer for missing session capability.
+- `TestAuthAuditSessionControlUnauthorizedResponseContract` asserts HTTP 401,
+  code "unauthorized", message "Authentication required for session management.",
+  and WWW-Authenticate: Bearer for missing session-control authority.
 
-**Preferred canonical vocabulary**
+**Previous names (resolved)**
 
-- requireSessionCapability;
-- sessionControlAuthority;
-- authenticateSessionControlRequest;
-- writeUnauthorizedSessionCapability;
-- writeUnauthorizedSessionControl;
-- reserve session_capability and session_control as separate audit concepts.
+- ~~requireSession~~ → requireSessionCapability
+- ~~sessionAuthContext~~ → sessionControlAuthority
+- ~~authenticateSessionRequest~~ → authenticateSessionControlRequest
+- ~~writeUnauthorizedSession~~ → writeUnauthorizedSessionCapability / writeUnauthorizedSessionControl
+- ~~TestAuthAuditAdminWrongToken_CreateSession~~ → TestAuthAuditCredentialNotFound_CreateSession
+- ~~authResult~~ (field) → principalCredential
 
 **Compatibility and narrow batch**
 
-Internal symbols are compatibility-free. HTTP message text and audit
-event/result values are observable surfaces and should be migrated separately.
-The first batch should rename internal symbols, split the response helpers, and
-correct the misleading tests without redesigning authentication.
+Audit event/result strings were not changed in this batch. HTTP message text for
+session-capability 401 responses was corrected from the incorrect session-management
+message to a capability-specific message. This is an observable change that fixes
+semantically wrong wording.
 
 ### P1-2. Allowed-root names lose the policy-scope level
 

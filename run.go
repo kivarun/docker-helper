@@ -234,7 +234,7 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 }
 
 func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
-	session, ok := a.requireSession(w, r)
+	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
 		return
 	}

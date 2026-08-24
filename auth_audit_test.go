@@ -141,10 +141,10 @@ func assertNoAuthFailure(t *testing.T, buf *bytes.Buffer) {
 }
 
 // ========================
-// admin.parse_failed
+// session-control parse_failed
 // ========================
 
-func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
+func TestAuthAuditSessionControlParseFailed_MissingHeader(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -167,7 +167,7 @@ func TestAuthAuditAdminParseFailed_MissingHeader(t *testing.T) {
 	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", "", headerMarker, bodyMarker)
 }
 
-func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
+func TestAuthAuditSessionControlParseFailed_WrongScheme(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -189,7 +189,7 @@ func TestAuthAuditAdminParseFailed_WrongScheme(t *testing.T) {
 	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", authHeader, "", "")
 }
 
-func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
+func TestAuthAuditSessionControlParseFailed_EmptyBearer(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -212,10 +212,40 @@ func TestAuthAuditAdminParseFailed_EmptyBearer(t *testing.T) {
 }
 
 // ========================
+// session-control unauthorized response contract
+// ========================
+
+func TestAuthAuditSessionControlUnauthorizedResponseContract(t *testing.T) {
+	app := newTestAppWithAuthAndStaging(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if resp.Code != "unauthorized" {
+		t.Errorf("expected code 'unauthorized', got %q", resp.Code)
+	}
+	if resp.Message != "Authentication required for session management." {
+		t.Errorf("expected session-management message, got %q", resp.Message)
+	}
+	if w.Header().Get("WWW-Authenticate") != "Bearer" {
+		t.Errorf("expected WWW-Authenticate: Bearer, got %q", w.Header().Get("WWW-Authenticate"))
+	}
+}
+
+// ========================
 // credential.not_found (token not admin, not valid credential)
 // ========================
 
-func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
+func TestAuthAuditCredentialNotFound_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -242,10 +272,10 @@ func TestAuthAuditAdminWrongToken_CreateSession(t *testing.T) {
 }
 
 // ========================
-// session.parse_failed
+// session.parse_failed (session capability)
 // ========================
 
-func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
+func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -268,7 +298,7 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Run(t *testing.T) {
 	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", "", headerMarker, bodyMarker)
 }
 
-func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
+func TestAuthAuditSessionCapabilityParseFailed_WrongScheme_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -290,7 +320,7 @@ func TestAuthAuditSessionParseFailed_WrongScheme_Run(t *testing.T) {
 	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", authHeader, "", "")
 }
 
-func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
+func TestAuthAuditSessionCapabilityParseFailed_EmptyBearer_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -312,7 +342,7 @@ func TestAuthAuditSessionParseFailed_EmptyBearer_Run(t *testing.T) {
 	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", authHeader, "", "")
 }
 
-func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
+func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Build(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -332,10 +362,10 @@ func TestAuthAuditSessionParseFailed_MissingHeader_Build(t *testing.T) {
 }
 
 // ========================
-// session.not_found
+// session.not_found (session capability)
 // ========================
 
-func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
+func TestAuthAuditSessionCapabilityNotFound_UnknownToken(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -362,10 +392,10 @@ func TestAuthAuditSessionNotFound_UnknownToken(t *testing.T) {
 }
 
 // ========================
-// session.database_error
+// session.database_error (session capability)
 // ========================
 
-func TestAuthAuditSessionDatabaseError_Run(t *testing.T) {
+func TestAuthAuditSessionCapabilityDatabaseError_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 
@@ -424,7 +454,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 
 	assertNoAuthFailure(t, auditBuf)
 }
-func TestAuthAuditNoFailureOnValidSessionAuth_Run(t *testing.T) {
+func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
 	app.OperationRegistry = newOperationRegistry()

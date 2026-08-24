@@ -367,7 +367,7 @@ func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 	}
 }
 
-// ---------- requireSession DB error ----------
+// ---------- requireSessionCapability DB error ----------
 
 func TestErrorContractRequireSessionDBError(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)

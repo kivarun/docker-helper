@@ -46,34 +46,36 @@ func sessionToJSON(s Session) sessionJSON {
 	}
 }
 
-// sessionAuthContext represents the authenticated context for session operations.
-type sessionAuthContext struct {
-	isAdmin    bool
-	authResult *CredentialAuthResult
+// sessionControlAuthority represents the authenticated authority for session
+// control operations: create, list, and delete sessions.
+type sessionControlAuthority struct {
+	isAdmin             bool
+	principalCredential *CredentialAuthResult
 }
 
-// authenticateSessionRequest tries admin token first, then credential token.
-func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request) (*sessionAuthContext, error) {
+// authenticateSessionControlRequest tries admin token first, then Principal
+// credential. It returns the authority context on success.
+func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.Request) (*sessionControlAuthority, error) {
 	ctx := r.Context()
 
 	// Parse the Authorization header.
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		writeAuthFailure(ctx, r, "parse_failed")
-		writeUnauthorizedSession(ctx, w)
+		writeUnauthorizedSessionControl(ctx, w)
 		return nil, nil
 	}
 
 	token, ok := parseBearerToken(r)
 	if !ok {
 		writeAuthFailure(ctx, r, "parse_failed")
-		writeUnauthorizedSession(ctx, w)
+		writeUnauthorizedSessionControl(ctx, w)
 		return nil, nil
 	}
 
 	if token == "" {
 		writeAuthFailure(ctx, r, "parse_failed")
-		writeUnauthorizedSession(ctx, w)
+		writeUnauthorizedSessionControl(ctx, w)
 		return nil, nil
 	}
 
@@ -81,13 +83,13 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 	tokenHash := sha256.Sum256([]byte(token))
 	currentHash := a.getAdminTokenHash()
 	if subtle.ConstantTimeCompare(tokenHash[:], currentHash[:]) == 1 {
-		return &sessionAuthContext{isAdmin: true}, nil
+		return &sessionControlAuthority{isAdmin: true}, nil
 	}
 
-	// Try credential.
+	// Try Principal credential.
 	authResult, err := authenticateCredential(a.DB, token)
 	if err == nil {
-		return &sessionAuthContext{authResult: authResult}, nil
+		return &sessionControlAuthority{principalCredential: authResult}, nil
 	}
 
 	// Credential auth failed. Check if it's a database error.
@@ -98,7 +100,7 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 			Event:  "auth.session",
 			Result: "database_error",
 		})
-		opLog(ctx).Error("session auth database error",
+		opLog(ctx).Error("session control auth database error",
 			slog.String("operation", "session_auth"),
 			slog.String("error", err.Error()),
 		)
@@ -114,14 +116,14 @@ func (a *App) authenticateSessionRequest(w http.ResponseWriter, r *http.Request)
 		resultCode = "credential.disabled"
 	}
 	writeAuthFailure(ctx, r, resultCode)
-	writeUnauthorizedSession(ctx, w)
+	writeUnauthorizedSessionControl(ctx, w)
 	return nil, err
 }
 
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
-	authCtx, err := a.authenticateSessionRequest(w, r)
+	authCtx, err := a.authenticateSessionControlRequest(w, r)
 	if err != nil || authCtx == nil {
 		return
 	}
@@ -146,7 +148,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if authCtx.isAdmin {
 		result, err = a.createSession(req.Workspace)
 	} else {
-		auth := authCtx.authResult
+		auth := authCtx.principalCredential
 		globalRoots := a.getConfig().AllowedRoots
 		result, err = a.createSessionWithPolicy(&sessionCreatePolicy{
 			Workspace:    req.Workspace,
@@ -165,9 +167,9 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			Result:    resultCode,
 			Duration:  duration,
 		}
-		if !authCtx.isAdmin && authCtx.authResult != nil {
-			auditRec.PrincipalName = authCtx.authResult.PrincipalName
-			auditRec.CredentialID = authCtx.authResult.CredentialID
+		if !authCtx.isAdmin && authCtx.principalCredential != nil {
+			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
+			auditRec.CredentialID = authCtx.principalCredential.CredentialID
 		}
 		writeAuditWithRequestID(ctx, auditRec)
 
@@ -196,11 +198,11 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Result:    "success",
 		Duration:  duration,
 	}
-	if !authCtx.isAdmin && authCtx.authResult != nil {
-		auditRec.PrincipalName = authCtx.authResult.PrincipalName
-		auditRec.CredentialID = authCtx.authResult.CredentialID
+	if !authCtx.isAdmin && authCtx.principalCredential != nil {
+		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
+		auditRec.CredentialID = authCtx.principalCredential.CredentialID
 		// Populate principal name in the session for the response.
-		result.Session.PrincipalName = authCtx.authResult.PrincipalName
+		result.Session.PrincipalName = authCtx.principalCredential.PrincipalName
 	}
 	writeAuditWithRequestID(ctx, auditRec)
 
@@ -214,7 +216,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
-	authCtx, err := a.authenticateSessionRequest(w, r)
+	authCtx, err := a.authenticateSessionControlRequest(w, r)
 	if err != nil || authCtx == nil {
 		return
 	}
@@ -226,7 +228,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	if authCtx.isAdmin {
 		sessions, err = a.listSessions()
 	} else {
-		auth := authCtx.authResult
+		auth := authCtx.principalCredential
 		sessions, err = a.listSessionsForPrincipal(auth.PrincipalID)
 	}
 
@@ -238,9 +240,9 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			Result:   "database_error",
 			Duration: duration,
 		}
-		if !authCtx.isAdmin && authCtx.authResult != nil {
-			auditRec.PrincipalName = authCtx.authResult.PrincipalName
-			auditRec.CredentialID = authCtx.authResult.CredentialID
+		if !authCtx.isAdmin && authCtx.principalCredential != nil {
+			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
+			auditRec.CredentialID = authCtx.principalCredential.CredentialID
 		}
 		writeAuditWithRequestID(ctx, auditRec)
 		opLog(ctx).Error("list sessions error",
@@ -265,9 +267,9 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		Result:   "success",
 		Duration: duration,
 	}
-	if !authCtx.isAdmin && authCtx.authResult != nil {
-		auditRec.PrincipalName = authCtx.authResult.PrincipalName
-		auditRec.CredentialID = authCtx.authResult.CredentialID
+	if !authCtx.isAdmin && authCtx.principalCredential != nil {
+		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
+		auditRec.CredentialID = authCtx.principalCredential.CredentialID
 	}
 	writeAuditWithRequestID(ctx, auditRec)
 
@@ -277,7 +279,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
-	authCtx, err := a.authenticateSessionRequest(w, r)
+	authCtx, err := a.authenticateSessionControlRequest(w, r)
 	if err != nil || authCtx == nil {
 		return
 	}
@@ -301,7 +303,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if authCtx.isAdmin {
 		session, err = a.deleteSession(id)
 	} else {
-		auth := authCtx.authResult
+		auth := authCtx.principalCredential
 		session, err = a.deleteSessionForPrincipal(id, auth.PrincipalID)
 	}
 
@@ -332,9 +334,9 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		if workspace != "" {
 			auditRec.Workspace = workspace
 		}
-		if !authCtx.isAdmin && authCtx.authResult != nil {
-			auditRec.PrincipalName = authCtx.authResult.PrincipalName
-			auditRec.CredentialID = authCtx.authResult.CredentialID
+		if !authCtx.isAdmin && authCtx.principalCredential != nil {
+			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
+			auditRec.CredentialID = authCtx.principalCredential.CredentialID
 		}
 		writeAuditWithRequestID(ctx, auditRec)
 
@@ -359,9 +361,9 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if session != nil {
 		auditRec.Workspace = session.Workspace
 	}
-	if !authCtx.isAdmin && authCtx.authResult != nil {
-		auditRec.PrincipalName = authCtx.authResult.PrincipalName
-		auditRec.CredentialID = authCtx.authResult.CredentialID
+	if !authCtx.isAdmin && authCtx.principalCredential != nil {
+		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
+		auditRec.CredentialID = authCtx.principalCredential.CredentialID
 	}
 	writeAuditWithRequestID(ctx, auditRec)
 
