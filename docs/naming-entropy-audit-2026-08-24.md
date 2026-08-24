@@ -15,7 +15,7 @@ audit using this area as the quality/reference model.
 
 The identified refactor batches in this reference scope have been applied.
 Independent control review found one remaining actionable naming issue.
-Final acceptance of the reference area is pending correction and re-review.
+Final acceptance of the reference area is pending final re-review.
 
 Rule: one domain concept -> one canonical term. Different concepts must not
 share one word. Different implementations must not invent synonyms for the
@@ -268,7 +268,7 @@ Their internal documentation comments currently say:
 
 - `forbiddenSystemTrees`: "must never be workspace roots or ancestors of
   workspace roots"
-- `forbiddenWideNamespace`: "too broad to be workspace roots themselves"
+- `forbiddenWideNamespaces`: "too broad to be workspace roots themselves"
 - `adminWideNamespaceOverrides`: "root (uid 0) may use as workspace roots"
 
 These should use "workspace path" / "workspace-path policy" vocabulary,
@@ -279,7 +279,7 @@ User-facing error strings that say "workspace root" are correctly preserved
 as compatibility vocabulary. Only the internal documentation comments are
 affected.
 
-**Status:** pending correction and re-review.
+**Status:** corrected; pending final re-review.
 
 ### Verified invariants (no issues found)
 
@@ -299,7 +299,7 @@ affected.
 - Truly generic primitives (`pathWithin`, `pathStrictlyWithin`) remain
   separate and correctly named.
 
-Final acceptance of the reference area is pending correction and re-review
+Final acceptance of the reference area is pending final re-review
 of the finding above.
 
 This is NOT a project-wide cleanliness claim. The next phase is a fresh

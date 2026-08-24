@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// forbiddenSystemTrees are absolute paths that must never be workspace roots
-// or ancestors of workspace roots. These are system directories that contain
+// forbiddenSystemTrees are absolute paths that workspace paths must never
+// equal or descend from. These are system directories that contain
 // critical OS state, binaries, or configuration.
 var forbiddenSystemTrees = []string{
 	"/bin",
@@ -29,8 +29,8 @@ var forbiddenSystemTrees = []string{
 	"/tmp",
 }
 
-// forbiddenWideNamespaces are top-level directories that are too broad to be
-// workspace roots themselves, but their subdirectories are allowed.
+// forbiddenWideNamespaces are top-level namespaces that are too broad to be
+// workspace paths themselves, while subdirectories are allowed.
 var forbiddenWideNamespaces = []string{
 	"/home",
 	"/opt",
@@ -39,8 +39,8 @@ var forbiddenWideNamespaces = []string{
 	"/media",
 }
 
-// adminWideNamespaceOverrides are wide namespaces that root (uid 0) may use
-// as workspace roots. Non-root users are still blocked.
+// adminWideNamespaceOverrides are namespaces that root (uid 0) may use
+// as workspace paths despite the normal wide-namespace restriction. Non-root users are still blocked.
 var adminWideNamespaceOverrides = []string{
 	"/home",
 	"/opt",
