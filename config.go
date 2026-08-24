@@ -50,34 +50,6 @@ func resolveDeploymentMode() DeploymentMode {
 	return ModeUser
 }
 
-// isPathContainedUnder returns true if the canonical path is strictly contained
-// under the canonical root directory. Both paths are resolved with EvalSymlinks
-// before comparison. A path equal to the root is not contained; the path must
-// be a proper descendant. If the root does not exist, it is used as-is (the
-// root is typically a well-known system directory).
-func isPathContainedUnder(path, root string) (bool, error) {
-	canonicalPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return false, err
-	}
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Root doesn't exist; use it as-is. The root is typically
-			// a well-known system directory that should exist at runtime.
-			canonicalRoot = filepath.Clean(root)
-		} else {
-			return false, err
-		}
-	}
-	rel, err := filepath.Rel(canonicalRoot, canonicalPath)
-	if err != nil {
-		return false, err
-	}
-	// rel must not be "." (path == root), "..", or start with "../"
-	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)), nil
-}
-
 type Config struct {
 	AllowedRoots          []string
 	SessionTTL            time.Duration
@@ -1388,15 +1360,27 @@ func validateSystemCASourcePath(caPath string) error {
 // validateSystemCASourcePathUnder is like validateSystemCASourcePath but
 // accepts an explicit root for testing. Production always uses systemCASourceRoot.
 func validateSystemCASourcePathUnder(caPath, root string) error {
-	// Check containment of the path under the system CA source root.
-	contained, err := isPathContainedUnder(caPath, root)
+	// Resolve the CA path.
+	canonicalCAPath, err := filepath.EvalSymlinks(caPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
 		}
 		return fmt.Errorf("cannot resolve trusted_ca_path: %w", err)
 	}
-	if !contained {
+
+	// Resolve the root.
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			canonicalRoot = filepath.Clean(root)
+		} else {
+			return fmt.Errorf("cannot resolve CA source root: %w", err)
+		}
+	}
+
+	// Check strict containment: path must be a proper descendant of root.
+	if !pathStrictlyWithin(canonicalRoot, canonicalCAPath) {
 		return fmt.Errorf("system mode trusted_ca_path must be under %s: %s", root, caPath)
 	}
 

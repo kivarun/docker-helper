@@ -434,7 +434,8 @@ func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
 
 // --- System-mode CA source-path policy tests ---
 
-func TestIsPathContainedUnder(t *testing.T) {
+func TestValidateSystemCASourcePathUnder(t *testing.T) {
+	// Test the canonical containment semantics using a temp root.
 	root := t.TempDir()
 	insideFile := filepath.Join(root, "subdir", "file.crt")
 	if err := os.MkdirAll(filepath.Dir(insideFile), 0755); err != nil {
@@ -444,8 +445,24 @@ func TestIsPathContainedUnder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outsideFile := filepath.Join(t.TempDir(), "outside.crt")
+	// Symlink inside root pointing to file still inside root.
+	insideTarget := filepath.Join(root, "real.crt")
+	if err := os.WriteFile(insideTarget, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	insideLink := filepath.Join(root, "link-inside.crt")
+	if err := os.Symlink(insideTarget, insideLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside root pointing to outside file.
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.crt")
 	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outsideLink := filepath.Join(root, "link-outside.crt")
+	if err := os.Symlink(outsideFile, outsideLink); err != nil {
 		t.Fatal(err)
 	}
 
@@ -462,137 +479,29 @@ func TestIsPathContainedUnder(t *testing.T) {
 	tests := []struct {
 		name    string
 		path    string
-		want    bool
 		wantErr bool
 	}{
 		{
 			name: "file inside root passes",
 			path: insideFile,
-			want: true,
-		},
-		{
-			name: "outside file fails",
-			path: outsideFile,
-			want: false,
-		},
-		{
-			name: "similarly-prefixed path fails",
-			path: similarFile,
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := isPathContainedUnder(tt.path, root)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("isPathContainedUnder(%q, %q) error = %v, wantErr %v", tt.path, root, err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("isPathContainedUnder(%q, %q) = %v, want %v", tt.path, root, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestIsPathContainedUnderSymlinkEscape(t *testing.T) {
-	root := t.TempDir()
-	outsideDir := t.TempDir()
-	outsideFile := filepath.Join(outsideDir, "outside.crt")
-	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside root pointing to outside file.
-	insideLink := filepath.Join(root, "link.crt")
-	if err := os.Symlink(outsideFile, insideLink); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside root pointing to file still inside root.
-	insideFile := filepath.Join(root, "real.crt")
-	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	insideLinkValid := filepath.Join(root, "link-valid.crt")
-	if err := os.Symlink(insideFile, insideLinkValid); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name string
-		path string
-		want bool
-	}{
-		{
-			name: "symlink inside -> outside fails",
-			path: insideLink,
-			want: false,
 		},
 		{
 			name: "symlink inside -> inside passes",
-			path: insideLinkValid,
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := isPathContainedUnder(tt.path, root)
-			if err != nil {
-				t.Fatalf("isPathContainedUnder(%q, %q) error = %v", tt.path, root, err)
-			}
-			if got != tt.want {
-				t.Errorf("isPathContainedUnder(%q, %q) = %v, want %v", tt.path, root, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestValidateSystemCASourcePath(t *testing.T) {
-	root := t.TempDir()
-	insideFile := filepath.Join(root, "subdir", "file.crt")
-	if err := os.MkdirAll(filepath.Dir(insideFile), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	outsideFile := filepath.Join(t.TempDir(), "outside.crt")
-	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside root pointing to outside file.
-	outsideDir := t.TempDir()
-	outsideTarget := filepath.Join(outsideDir, "target.crt")
-	if err := os.WriteFile(outsideTarget, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	escapeLink := filepath.Join(root, "escape.crt")
-	if err := os.Symlink(outsideTarget, escapeLink); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name    string
-		path    string
-		wantErr bool
-	}{
-		{
-			name: "file inside root passes",
-			path: insideFile,
+			path: insideLink,
 		},
 		{
-			name:    "outside file fails",
-			path:    outsideFile,
+			name:    "symlink inside -> outside fails",
+			path:    outsideLink,
 			wantErr: true,
 		},
 		{
-			name:    "symlink escape fails",
-			path:    escapeLink,
+			name:    "similarly-prefixed sibling fails",
+			path:    similarFile,
+			wantErr: true,
+		},
+		{
+			name:    "path == root fails",
+			path:    root,
 			wantErr: true,
 		},
 		{
@@ -604,40 +513,12 @@ func TestValidateSystemCASourcePath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateSystemCASourcePathWithRoot(tt.path, root)
+			err := validateSystemCASourcePathUnder(tt.path, root)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("validateSystemCASourcePathWithRoot(%q) error = %v, wantErr %v", tt.path, err, tt.wantErr)
+				t.Errorf("validateSystemCASourcePathUnder(%q, %q) error = %v, wantErr %v", tt.path, root, err, tt.wantErr)
 			}
 		})
 	}
-}
-
-// validateSystemCASourcePathWithRoot is like validateSystemCASourcePath but
-// accepts a custom root for testing. Production always uses systemCASourceRoot.
-func validateSystemCASourcePathWithRoot(caPath, root string) error {
-	contained, err := isPathContainedUnder(caPath, root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
-		}
-		return fmt.Errorf("cannot resolve trusted_ca_path: %w", err)
-	}
-	if !contained {
-		return fmt.Errorf("system mode trusted_ca_path must be under %s: %s", root, caPath)
-	}
-
-	info, err := os.Stat(caPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
-		}
-		return fmt.Errorf("cannot access trusted_ca_path: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
-	}
-
-	return nil
 }
 
 func TestSystemModeCAOutsideSourceFails(t *testing.T) {
@@ -761,107 +642,6 @@ func TestSystemCADocumentation(t *testing.T) {
 	systemSubsection := caSection[systemIdx:]
 	if !strings.Contains(systemSubsection, "/etc/docker-helper") {
 		t.Error("README.md system-mode CA section must document /etc/docker-helper as the CA source namespace")
-	}
-}
-
-// --- Runtime enforcement tests (loadConfig path) ---
-
-func TestIsPathContainedUnderRejectsRoot(t *testing.T) {
-	// path == root must return false (not a proper descendant).
-	root := t.TempDir()
-	got, err := isPathContainedUnder(root, root)
-	if err != nil {
-		t.Fatalf("isPathContainedUnder(%q, %q) error = %v", root, root, err)
-	}
-	if got {
-		t.Errorf("isPathContainedUnder(%q, %q) = true, want false (path == root is not contained)", root, root)
-	}
-}
-
-func TestValidateSystemCASourcePathUnder(t *testing.T) {
-	// Test the canonical containment semantics using a temp root.
-	root := t.TempDir()
-	insideFile := filepath.Join(root, "subdir", "file.crt")
-	if err := os.MkdirAll(filepath.Dir(insideFile), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside root pointing to file still inside root.
-	insideTarget := filepath.Join(root, "real.crt")
-	if err := os.WriteFile(insideTarget, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	insideLink := filepath.Join(root, "link-inside.crt")
-	if err := os.Symlink(insideTarget, insideLink); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside root pointing to outside file.
-	outsideDir := t.TempDir()
-	outsideFile := filepath.Join(outsideDir, "outside.crt")
-	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	outsideLink := filepath.Join(root, "link-outside.crt")
-	if err := os.Symlink(outsideFile, outsideLink); err != nil {
-		t.Fatal(err)
-	}
-
-	// Similarly-prefixed path outside the root.
-	similarRoot := root + "-other"
-	if err := os.MkdirAll(similarRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	similarFile := filepath.Join(similarRoot, "file.crt")
-	if err := os.WriteFile(similarFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name    string
-		path    string
-		wantErr bool
-	}{
-		{
-			name: "file inside root passes",
-			path: insideFile,
-		},
-		{
-			name: "symlink inside -> inside passes",
-			path: insideLink,
-		},
-		{
-			name:    "symlink inside -> outside fails",
-			path:    outsideLink,
-			wantErr: true,
-		},
-		{
-			name:    "similarly-prefixed sibling fails",
-			path:    similarFile,
-			wantErr: true,
-		},
-		{
-			name:    "path == root fails",
-			path:    root,
-			wantErr: true,
-		},
-		{
-			name:    "nonexistent file fails",
-			path:    filepath.Join(root, "nope.crt"),
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateSystemCASourcePathUnder(tt.path, root)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateSystemCASourcePathUnder(%q, %q) error = %v, wantErr %v", tt.path, root, err, tt.wantErr)
-			}
-		})
 	}
 }
 
