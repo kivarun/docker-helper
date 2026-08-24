@@ -685,6 +685,15 @@ func (d *selinuxWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceM
 		return cov, false, nil
 	}
 
+	// No existing coverage. Check whether docker-helper is allowed to create
+	// a helper-owned fcontext boundary at this workspace.
+	if !selinuxFcontextBoundaryAllowed(workspace) {
+		return workspaceMACCoverage{}, false, fmt.Errorf(
+			"cannot create helper-owned SELinux fcontext boundary at %s: exact /opt is not permitted as a recursive relabel boundary",
+			workspace,
+		)
+	}
+
 	// Prepare the workspace as a helper-owned boundary.
 	newlyCreated, err := d.mgr.ensureWorkspaceFcontext(workspace)
 	if err != nil {

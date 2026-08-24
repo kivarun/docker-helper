@@ -132,21 +132,28 @@ operator-compatible rule can also produce successful coverage.
 
 #### Durable state after successful preparation
 
-Once `ensureWorkspaceFcontext` returns success, the mapping becomes managed
-durable state. Unrelated failures in outer code (init, config write, reload)
-do not roll it back. A stale `docker_helper_workspace_t` mapping is acceptable
-because:
+A successful `ensureWorkspaceFcontext` means durable compatible coverage exists.
+It does NOT by itself mean the mapping is helper-owned.
+
+If newly created:
+    sessionMACCoordinator records helper ownership.
+
+If pre-existing or operator-compatible:
+    coverage remains operator-owned and is never claimed or deleted.
+
+Unrelated failures in outer code (init, config write, reload) do not roll back
+the mapping. A stale `docker_helper_workspace_t` mapping is acceptable because:
 
 - it is confinement metadata, not authorization;
 - config/principal/session checks remain authoritative;
 - old mappings persist while sessions may use them;
 - removal is handled by the sessionMACCoordinator when it proves no consumers
-  remain.
+  remain for helper-owned boundaries.
 
 Internal rollback inside `ensureWorkspaceFcontext` still occurs when the
 function itself fails before returning success (e.g., restorecon fails after
-adding a new rule). At that point no successful managed-state transition has
-been reported.
+adding a new rule). At that point no successful coverage transition has been
+reported.
 
 #### Existing operator policy
 
@@ -310,18 +317,22 @@ converted into broad permissions.
 
 ## 9. Release blockers and remaining UAT
 
-### `/opt` and non-home system roots (resolved)
+### `/opt` and non-home session workspaces (resolved)
 
-Non-home system `allowed_roots` (e.g., `/data`, `/projects/agents`,
-`/opt/docker-helper-workspaces`) are managed under `docker_helper_workspace_t`
-with persistent `semanage fcontext` rules and `restorecon -R` (type-only).
-The daemon and container domain receive workspace permissions for this type.
-`config allowed-root add` updates the authorization ceiling only; it does NOT
-prepare MAC state.
+Non-home session workspaces (e.g., under `/data`, `/projects/agents`,
+`/opt/docker-helper-workspaces`) receive MAC coverage via the session
+lifecycle: the sessionMACCoordinator ensures each non-home workspace has
+a persistent `semanage fcontext` boundary mapping to
+`docker_helper_workspace_t`. The daemon and container domain receive
+workspace permissions for this type.
 
-`/opt` is accepted as a global authorization ceiling. A helper-created
-recursive SELinux fcontext boundary at `/opt` is a different question and is
-not conflated with authorization.
+Global and principal allowed roots are authorization only. They do not
+trigger fcontext boundary creation.
+
+`/opt` is accepted as a global authorization ceiling. docker-helper will
+NOT create a recursive helper-owned fcontext boundary at exact `/opt`.
+If an operator-compatible boundary already exists at `/opt`, it is used
+as coverage but never claimed or deleted.
 
 The Release 2 RPM acceptance target is openSUSE Tumbleweed.
 

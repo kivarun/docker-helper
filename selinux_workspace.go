@@ -43,7 +43,7 @@ func selinuxFcontextBoundaryAllowed(canonical string) bool {
 }
 
 // selinuxFcontextManager manages persistent SELinux workspace labeling for
-// non-home workspace roots. It uses semanage fcontext + restorecon to
+// non-home workspaces. It uses semanage fcontext + restorecon to
 // create persistent mappings that survive reboot and restorecon.
 //
 // Test seams: runCommand, readPathCon, selinuxActive, and acquireLock are

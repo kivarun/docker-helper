@@ -1817,6 +1817,7 @@ type selinuxSeam struct {
 	boundaryErr        error    // returned by listCoveringBoundaries
 	actualTypeErr      error    // returned by verifyActualType
 	restoreconErr      error    // returned by restoreconRecursive
+	ensureCalled       bool     // tracks whether ensureWorkspaceFcontext was called
 	ensureCreated      bool     // newlyCreated from ensureWorkspaceFcontext
 	ensureErr          error    // error from ensureWorkspaceFcontext
 	rollbackErr        error    // error from removeWorkspaceFcontext
@@ -1838,6 +1839,7 @@ func (s *selinuxSeam) restoreconRecursive(workspace string) error {
 }
 
 func (s *selinuxSeam) ensureWorkspaceFcontext(workspace string) (bool, error) {
+	s.ensureCalled = true
 	return s.ensureCreated, s.ensureErr
 }
 
@@ -1936,6 +1938,56 @@ func TestSELinuxRealBackendEnsureCreatesNewBoundary(t *testing.T) {
 	}
 	if cov.Boundary != "/data/workspace" {
 		t.Errorf("expected boundary /data/workspace, got %s", cov.Boundary)
+	}
+}
+
+func TestSELinuxOptNoExistingBoundaryFails(t *testing.T) {
+	// workspace = /opt, no existing compatible boundary.
+	// Expected: failure, ensureWorkspaceFcontext is NOT called.
+	seam := &selinuxSeam{
+		coveringBoundaries: nil,
+	}
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
+
+	_, _, err := backend.ensureCoverage("/opt")
+	if err == nil {
+		t.Fatal("ensureCoverage must fail for /opt with no existing boundary")
+	}
+	if !strings.Contains(err.Error(), "/opt") {
+		t.Errorf("expected '/opt' in error, got: %v", err)
+	}
+	if seam.ensureCalled {
+		t.Error("ensureWorkspaceFcontext must NOT be called for /opt")
+	}
+}
+
+func TestSELinuxOptExistingBoundarySucceeds(t *testing.T) {
+	// workspace = /opt, compatible operator fcontext boundary already exists,
+	// actual type verifies correctly.
+	// Expected: coverage succeeds, Boundary == /opt, HelperOwned == false,
+	// no new boundary is created.
+	seam := &selinuxSeam{
+		coveringBoundaries: []string{"/opt"},
+		restoreconErr:      nil,
+		actualTypeErr:      nil,
+	}
+	backend := &selinuxWorkspaceMACDriver{mgr: seam}
+
+	cov, changed, err := backend.ensureCoverage("/opt")
+	if err != nil {
+		t.Fatalf("ensureCoverage should succeed with existing /opt boundary: %v", err)
+	}
+	if changed {
+		t.Error("ensureCoverage should not report changed for existing boundary")
+	}
+	if cov.Boundary != "/opt" {
+		t.Errorf("expected boundary /opt, got %s", cov.Boundary)
+	}
+	if cov.HelperOwned {
+		t.Error("existing operator boundary must not be helper-owned")
+	}
+	if seam.ensureCalled {
+		t.Error("ensureWorkspaceFcontext must NOT be called when compatible boundary exists")
 	}
 }
 
