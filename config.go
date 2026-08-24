@@ -952,7 +952,7 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	// System mode: dispatch by MAC backend.
+	// System mode: validate MAC backend and initialize.
 	backend, err := detectLSM()
 	if err != nil {
 		return fmt.Errorf("system mode requires an active MAC backend: %w", err)
@@ -960,27 +960,17 @@ func runInit(allowedRoot string, stdout, stderr io.Writer) error {
 	if backend == LSMNone {
 		return fmt.Errorf("no MAC backend active (system mode requires AppArmor or enforcing SELinux)")
 	}
-
-	switch backend {
-	case LSMAppArmor:
-		return initSystem(allowedRoot, stdout, stderr,
-			nil,
-			func(ar string, so, se io.Writer) error {
-				_, err := initCore(ar, so, se)
-				return err
-			},
-		)
-	case LSMSELinux:
-		return initSystem(allowedRoot, stdout, stderr,
-			nil,
-			func(ar string, so, se io.Writer) error {
-				_, err := initCore(ar, so, se)
-				return err
-			},
-		)
-	default:
+	if backend != LSMAppArmor && backend != LSMSELinux {
 		return fmt.Errorf("unknown MAC backend: %s", backend)
 	}
+
+	return initSystem(allowedRoot, stdout, stderr,
+		nil,
+		func(ar string, so, se io.Writer) error {
+			_, err := initCore(ar, so, se)
+			return err
+		},
+	)
 }
 
 // checkDockerAccess checks if the Docker daemon is reachable by connecting
