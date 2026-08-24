@@ -668,7 +668,7 @@ type selinuxWorkspaceMACDriver struct {
 }
 
 func (d *selinuxWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceMACCoverage, bool, error) {
-	if isHomeRoot(workspace) {
+	if isUnderHome(workspace) {
 		return workspaceMACCoverage{Boundary: workspace, HelperOwned: false}, false, nil
 	}
 
@@ -705,7 +705,7 @@ func (d *selinuxWorkspaceMACDriver) ensureCoverage(workspace string) (workspaceM
 }
 
 func (d *selinuxWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceMACCoverage, error) {
-	if isHomeRoot(workspace) {
+	if isUnderHome(workspace) {
 		return workspaceMACCoverage{Boundary: workspace, HelperOwned: false}, nil
 	}
 
@@ -745,7 +745,7 @@ func (d *selinuxWorkspaceMACDriver) findExistingCoverage(workspace string) (work
 }
 
 func (d *selinuxWorkspaceMACDriver) removeBoundary(boundary string) error {
-	if isHomeRoot(boundary) {
+	if isUnderHome(boundary) {
 		return nil
 	}
 	return d.mgr.removeWorkspaceFcontext(boundary)

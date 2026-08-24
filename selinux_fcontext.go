@@ -20,9 +20,9 @@ const (
 	selinuxFcontextLockPath = "/run/lock/docker-helper-selinux.lock"
 )
 
-// isHomeRoot returns true if the canonical path is /home or under /home.
+// isUnderHome returns true if the canonical path is /home or under /home.
 // The path must already be canonicalized (absolute, no symlinks).
-func isHomeRoot(canonical string) bool {
+func isUnderHome(canonical string) bool {
 	if canonical == "/home" {
 		return true
 	}
@@ -652,7 +652,7 @@ func (m *selinuxFcontextManager) restoreconRecursive(root string) error {
 	return nil
 }
 
-// listCoveringBoundaries returns all existing fcontext boundaries that cover
+// listCoveringFcontexts returns all existing fcontext boundaries that cover
 // the given workspace path. Returns only boundaries that map to
 // docker_helper_workspace_t. The caller determines ownership via mac_boundaries.
 func (m *selinuxFcontextManager) listCoveringFcontexts(workspace string) ([]string, error) {

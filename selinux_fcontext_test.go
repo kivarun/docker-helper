@@ -103,9 +103,9 @@ func TestSELinuxPolicyUserHomeTypeUnchanged(t *testing.T) {
 	}
 }
 
-// --- Root classification tests ---
+// --- Home-path classification tests ---
 
-func TestIsHomeRoot(t *testing.T) {
+func TestIsUnderHome(t *testing.T) {
 	tests := []struct {
 		path string
 		want bool
@@ -122,8 +122,8 @@ func TestIsHomeRoot(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {
-			if got := isHomeRoot(tc.path); got != tc.want {
-				t.Errorf("isHomeRoot(%q) = %v, want %v", tc.path, got, tc.want)
+			if got := isUnderHome(tc.path); got != tc.want {
+				t.Errorf("isUnderHome(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
 	}

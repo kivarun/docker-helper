@@ -7,26 +7,26 @@ import (
 	"io"
 )
 
-var apparmorCommand = &Command{
+var appArmorCommand = &Command{
 	Name:    "apparmor",
 	Summary: "Manage AppArmor workspace roots (system mode)",
 	Subcommands: []*Command{
-		apparmorRootCommand,
-		apparmorCheckCommand,
+		appArmorRootCommand,
+		appArmorCheckCommand,
 	},
 }
 
-var apparmorRootCommand = &Command{
+var appArmorRootCommand = &Command{
 	Name:    "root",
 	Summary: "Manage workspace roots in the AppArmor profile",
 	Subcommands: []*Command{
-		apparmorRootListCommand,
-		apparmorRootAddCommand,
-		apparmorRootRemoveCommand,
+		appArmorRootListCommand,
+		appArmorRootAddCommand,
+		appArmorRootRemoveCommand,
 	},
 }
 
-var apparmorRootListCommand = &Command{
+var appArmorRootListCommand = &Command{
 	Name:    "list",
 	Summary: "List managed workspace roots",
 	Usage:   "docker-helper apparmor root list",
@@ -39,7 +39,7 @@ var apparmorRootListCommand = &Command{
 	},
 }
 
-var apparmorRootAddCommand = &Command{
+var appArmorRootAddCommand = &Command{
 	Name:       "add",
 	Summary:    "Add a workspace root to the AppArmor profile",
 	Usage:      "docker-helper apparmor root add PATH",
@@ -54,7 +54,7 @@ var apparmorRootAddCommand = &Command{
 	},
 }
 
-var apparmorRootRemoveCommand = &Command{
+var appArmorRootRemoveCommand = &Command{
 	Name:       "remove",
 	Summary:    "Remove a workspace root from the AppArmor profile",
 	Usage:      "docker-helper apparmor root remove PATH",
@@ -69,7 +69,7 @@ var apparmorRootRemoveCommand = &Command{
 	},
 }
 
-var apparmorCheckCommand = &Command{
+var appArmorCheckCommand = &Command{
 	Name:    "check",
 	Summary: "Validate the AppArmor profile",
 	Usage:   "docker-helper apparmor check",

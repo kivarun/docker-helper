@@ -565,7 +565,7 @@ func init() {
 		principalCommand,
 		credentialCommand,
 		adminCommand,
-		apparmorCommand,
+		appArmorCommand,
 		versionCommand,
 		helpCommand,
 		pullCommand,
