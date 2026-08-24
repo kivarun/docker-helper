@@ -148,10 +148,10 @@ func escapeFcontextPath(path string) string {
 }
 
 // fcontextPattern returns the full regex pattern for the fcontext rule.
-// It correctly escapes the root and appends the descendant pattern so that
+// It correctly escapes the boundary and appends the descendant pattern so that
 // /data matches /data and /data/foo but NOT /data/foobar as a prefix match.
-func fcontextPattern(root string) string {
-	escaped := escapeFcontextPath(root)
+func fcontextPattern(boundary string) string {
+	escaped := escapeFcontextPath(boundary)
 	return escaped + "(/.*)?"
 }
 
@@ -209,7 +209,7 @@ func unescapeFcontextPath(s string) (string, bool) {
 	return b.String(), true
 }
 
-// ensureWorkspaceFcontext ensures that the canonical root has a persistent
+// ensureWorkspaceFcontext ensures that the canonical workspace has a persistent
 // SELinux mapping to docker_helper_workspace_t. It:
 //  1. Acquires the global SELinux workspace management lock;
 //  2. Checks for existing local fcontext rules;
@@ -239,7 +239,7 @@ func unescapeFcontextPath(s string) (string, bool) {
 //     operator-compatible (never helper-owned).
 //   - HelperOwned is resolved by the sessionMACCoordinator using durable
 //     ownership metadata, not by this backend function.
-func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCreated bool, err error) {
+func (m *selinuxFcontextManager) ensureWorkspaceFcontext(workspace string) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
 		return false, fmt.Errorf("cannot determine SELinux status: %w", err)
@@ -255,7 +255,8 @@ func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCrea
 	}
 	defer release() // best-effort
 
-	pattern := fcontextPattern(root)
+	boundary := workspace
+	pattern := fcontextPattern(boundary)
 
 	// Check existing local fcontext rules.
 	existing, err := m.listLocalFcontextRules()
@@ -273,7 +274,7 @@ func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCrea
 	}
 
 	// Validate ALL other rules for conflicts/overlap.
-	if err := m.checkOverlap(root, pattern, existing); err != nil {
+	if err := m.checkOverlap(boundary, pattern, existing); err != nil {
 		return false, err
 	}
 
@@ -289,10 +290,10 @@ func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCrea
 		if existingRule.fileType == selinuxWorkspaceType {
 			// Exact match already exists - idempotent path.
 			// Still need to run restorecon and verify.
-			if err := m.restoreconRecursive(root); err != nil {
-				return false, fmt.Errorf("restorecon failed for existing mapping %s: %w", root, err)
+			if err := m.restoreconRecursive(workspace); err != nil {
+				return false, fmt.Errorf("restorecon failed for existing mapping %s: %w", workspace, err)
 			}
-			if err := m.verifyActualType(root); err != nil {
+			if err := m.verifyActualType(workspace); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -300,28 +301,28 @@ func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCrea
 		// Conflicting local rule.
 		return false, fmt.Errorf(
 			"conflicting SELinux fcontext rule exists for %s: pattern %s maps to %s (expected %s); remove the conflicting rule before proceeding",
-			root, existingRule.pattern, existingRule.fileType, selinuxWorkspaceType,
+			workspace, existingRule.pattern, existingRule.fileType, selinuxWorkspaceType,
 		)
 	}
 
 	// No matching rule - add ours.
 	if err := m.addFcontextRule(pattern, selinuxWorkspaceType); err != nil {
-		return false, fmt.Errorf("cannot add fcontext rule for %s: %w", root, err)
+		return false, fmt.Errorf("cannot add fcontext rule for %s: %w", workspace, err)
 	}
 
 	// Apply restorecon recursively.
-	if err := m.restoreconRecursive(root); err != nil {
+	if err := m.restoreconRecursive(workspace); err != nil {
 		// Internal rollback: manager cannot complete its transition.
-		if rbErr := m.removeWorkspaceFcontext(root); rbErr != nil {
+		if rbErr := m.removeFcontextBoundary(boundary); rbErr != nil {
 			return false, fmt.Errorf("restorecon failed: %v; rollback also failed: %v", err, rbErr)
 		}
-		return false, fmt.Errorf("restorecon failed for %s: %w", root, err)
+		return false, fmt.Errorf("restorecon failed for %s: %w", workspace, err)
 	}
 
 	// Verify the actual on-disk type.
-	if err := m.verifyActualType(root); err != nil {
+	if err := m.verifyActualType(workspace); err != nil {
 		// Internal rollback.
-		if rbErr := m.removeWorkspaceFcontext(root); rbErr != nil {
+		if rbErr := m.removeFcontextBoundary(boundary); rbErr != nil {
 			return false, fmt.Errorf("verification failed: %v; rollback also failed: %v", err, rbErr)
 		}
 		return false, err
@@ -335,14 +336,14 @@ func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCrea
 // our exact rule already exists.
 //
 // Contract:
-//   - operator-local customization definitely inside ROOT: fail closed;
-//   - operator-local customization whose target is an ancestor of ROOT: fail closed;
-//   - unrelated sibling roots: allowed;
+//   - operator-local customization definitely inside boundary: fail closed;
+//   - operator-local customization whose target is an ancestor of boundary: fail closed;
+//   - unrelated sibling boundaries: allowed;
 //   - if an arbitrary regex/equivalence cannot be proven disjoint safely: fail closed;
 //   - rules mapping to docker_helper_workspace_t are compatible (docker-helper-owned or
 //     operator-compatible) and are allowed to overlap.
-func (m *selinuxFcontextManager) checkOverlap(root string, ourPattern string, existing []fcontextRule) error {
-	ourStem := root // the literal unescaped root
+func (m *selinuxFcontextManager) checkOverlap(boundary string, ourPattern string, existing []fcontextRule) error {
+	boundaryStem := boundary // the literal unescaped boundary
 
 	for _, rule := range existing {
 		if rule.pattern == ourPattern {
@@ -353,7 +354,7 @@ func (m *selinuxFcontextManager) checkOverlap(root string, ourPattern string, ex
 		if rule.isEquivalence {
 			// Redirect-style equivalence: DEST = SOURCE
 			if rule.equivalenceDest != "" || rule.equivalenceSource != "" {
-				if err := m.checkEquivalenceOverlap(root, rule); err != nil {
+				if err := m.checkEquivalenceOverlap(boundary, rule); err != nil {
 					return err
 				}
 				continue
@@ -382,16 +383,16 @@ func (m *selinuxFcontextManager) checkOverlap(root string, ourPattern string, ex
 			)
 		}
 
-		// Rule stem is a descendant of our root: our broad rule would override it.
-		if pathStrictlyWithin(ourStem, ruleStem) {
+		// Rule stem is a descendant of the candidate boundary: our broad rule would override it.
+		if pathStrictlyWithin(boundaryStem, ruleStem) {
 			return fmt.Errorf(
 				"operator-local fcontext rule %s (stem %s) would be overridden by %s; remove the local rule before proceeding",
 				rule.pattern, ruleStem, ourPattern,
 			)
 		}
 
-		// Rule stem is an ancestor of our root: its semantics would be overridden.
-		if pathStrictlyWithin(ruleStem, ourStem) {
+		// Rule stem is an ancestor of the candidate boundary: its semantics would be overridden.
+		if pathStrictlyWithin(ruleStem, boundaryStem) {
 			return fmt.Errorf(
 				"operator-local fcontext rule %s (stem %s) is an ancestor of %s; removing it would change operator policy",
 				rule.pattern, ruleStem, ourPattern,
@@ -402,29 +403,29 @@ func (m *selinuxFcontextManager) checkOverlap(root string, ourPattern string, ex
 }
 
 // checkEquivalenceOverlap checks if a redirect-style equivalence record
-// (DEST = SOURCE) overlaps with the selected ROOT.
-// Returns nil if the equivalence is completely disjoint from ROOT.
-// Returns an error if DEST or SOURCE equals, contains, or is contained by ROOT.
-func (m *selinuxFcontextManager) checkEquivalenceOverlap(root string, rule fcontextRule) error {
+// (DEST = SOURCE) overlaps with the selected boundary.
+// Returns nil if the equivalence is completely disjoint from the boundary.
+// Returns an error if DEST or SOURCE equals, contains, or is contained by the boundary.
+func (m *selinuxFcontextManager) checkEquivalenceOverlap(boundary string, rule fcontextRule) error {
 	dest := rule.equivalenceDest
 	source := rule.equivalenceSource
 
-	// Check if DEST overlaps with ROOT.
+	// Check if DEST overlaps with boundary.
 	if dest != "" {
-		if dest == root || pathStrictlyWithin(root, dest) || pathStrictlyWithin(dest, root) {
+		if dest == boundary || pathStrictlyWithin(boundary, dest) || pathStrictlyWithin(dest, boundary) {
 			return fmt.Errorf(
 				"SELinux fcontext equivalence destination %s overlaps with %s; remove or classify it before proceeding",
-				dest, root,
+				dest, boundary,
 			)
 		}
 	}
 
-	// Check if SOURCE overlaps with ROOT.
+	// Check if SOURCE overlaps with boundary.
 	if source != "" {
-		if source == root || pathStrictlyWithin(root, source) || pathStrictlyWithin(source, root) {
+		if source == boundary || pathStrictlyWithin(boundary, source) || pathStrictlyWithin(source, boundary) {
 			return fmt.Errorf(
 				"SELinux fcontext equivalence source %s overlaps with %s; remove or classify it before proceeding",
-				source, root,
+				source, boundary,
 			)
 		}
 	}
@@ -432,17 +433,17 @@ func (m *selinuxFcontextManager) checkEquivalenceOverlap(root string, rule fcont
 	return nil
 }
 
-// verifyActualType reads the actual on-disk SELinux type for the root and
+// verifyActualType reads the actual on-disk SELinux type for the given path and
 // verifies it matches docker_helper_workspace_t.
-func (m *selinuxFcontextManager) verifyActualType(root string) error {
-	actualType, err := m.readPathCon(root)
+func (m *selinuxFcontextManager) verifyActualType(path string) error {
+	actualType, err := m.readPathCon(path)
 	if err != nil {
-		return fmt.Errorf("cannot verify SELinux type for %s: %w", root, err)
+		return fmt.Errorf("cannot verify SELinux type for %s: %w", path, err)
 	}
 	if actualType != selinuxWorkspaceType {
 		return fmt.Errorf(
 			"SELinux type for %s is %s, expected %s after restorecon",
-			root, actualType, selinuxWorkspaceType,
+			path, actualType, selinuxWorkspaceType,
 		)
 	}
 	return nil
@@ -465,17 +466,17 @@ func (m *selinuxFcontextManager) verifyActualType(root string) error {
 // It is NOT called by outer init or config code on a previously successful
 // mapping. Once ensureWorkspaceFcontext returns success, the mapping is
 // managed durable state and removal is a separate lifecycle operation.
-func (m *selinuxFcontextManager) removeWorkspaceFcontext(root string) error {
-	pattern := fcontextPattern(root)
+func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string) error {
+	pattern := fcontextPattern(boundary)
 
 	// First remove the fcontext rule.
 	if err := m.removeFcontextRule(pattern); err != nil {
-		return fmt.Errorf("cannot remove fcontext rule for %s: %w", root, err)
+		return fmt.Errorf("cannot remove fcontext rule for %s: %w", boundary, err)
 	}
 
 	// Then restore labels to policy defaults.
-	if err := m.restoreconRecursive(root); err != nil {
-		return fmt.Errorf("restorecon rollback for %s after rule removal: %w", root, err)
+	if err := m.restoreconRecursive(boundary); err != nil {
+		return fmt.Errorf("restorecon rollback for %s after rule removal: %w", boundary, err)
 	}
 
 	return nil
@@ -643,9 +644,9 @@ func (m *selinuxFcontextManager) removeFcontextRule(pattern string) error {
 	return nil
 }
 
-func (m *selinuxFcontextManager) restoreconRecursive(root string) error {
+func (m *selinuxFcontextManager) restoreconRecursive(path string) error {
 	// Type-only restorecon: do not forcibly reset user, role, or MLS/MCS range.
-	out, err := m.runCommand(m.restoreconPath, "-R", root)
+	out, err := m.runCommand(m.restoreconPath, "-R", path)
 	if err != nil {
 		return fmt.Errorf("restorecon -R: %w: %s", err, strings.TrimSpace(string(out)))
 	}

@@ -321,7 +321,7 @@ The required semantic split for the eventual implementation is:
 The implementation batch should be designed from actual call semantics,
 not a mechanical rename.
 
-**Status:** pending correction and re-review.
+**Status:** corrected; pending final re-review.
 
 ### Verified invariants (no issues found)
 

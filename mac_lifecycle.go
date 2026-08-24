@@ -657,7 +657,7 @@ type selinuxFcontextOps interface {
 	verifyActualType(workspace string) error
 	restoreconRecursive(workspace string) error
 	ensureWorkspaceFcontext(workspace string) (bool, error)
-	removeWorkspaceFcontext(boundary string) error
+	removeFcontextBoundary(boundary string) error
 }
 
 // selinuxWorkspaceMACDriver is the MAC driver backed by selinuxFcontextManager
@@ -748,7 +748,7 @@ func (d *selinuxWorkspaceMACDriver) removeBoundary(boundary string) error {
 	if isUnderHome(boundary) {
 		return nil
 	}
-	return d.mgr.removeWorkspaceFcontext(boundary)
+	return d.mgr.removeFcontextBoundary(boundary)
 }
 
 // discoverHelperOwnedBoundaries returns nil because the driver does not know

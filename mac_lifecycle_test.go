@@ -1843,7 +1843,7 @@ func (s *selinuxSeam) ensureWorkspaceFcontext(workspace string) (bool, error) {
 	return s.ensureCreated, s.ensureErr
 }
 
-func (s *selinuxSeam) removeWorkspaceFcontext(boundary string) error {
+func (s *selinuxSeam) removeFcontextBoundary(boundary string) error {
 	return s.removeErr
 }
 

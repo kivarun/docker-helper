@@ -159,8 +159,8 @@ func TestEscapeFcontextPath(t *testing.T) {
 
 func TestFcontextPattern(t *testing.T) {
 	tests := []struct {
-		root string
-		want string
+		boundary string
+		want     string
 	}{
 		{"/data", "/data(/.*)?"},
 		{"/opt", "/opt(/.*)?"},
@@ -168,9 +168,9 @@ func TestFcontextPattern(t *testing.T) {
 		{"/data.test", "/data\\.test(/.*)?"},
 	}
 	for _, tc := range tests {
-		t.Run(tc.root, func(t *testing.T) {
-			if got := fcontextPattern(tc.root); got != tc.want {
-				t.Errorf("fcontextPattern(%q) = %q, want %q", tc.root, got, tc.want)
+		t.Run(tc.boundary, func(t *testing.T) {
+			if got := fcontextPattern(tc.boundary); got != tc.want {
+				t.Errorf("fcontextPattern(%q) = %q, want %q", tc.boundary, got, tc.want)
 			}
 		})
 	}
@@ -394,7 +394,7 @@ func TestEnsureWorkspaceFcontextExistingMappingVerifyFails(t *testing.T) {
 
 // --- Overlap detection tests ---
 
-func TestOverlapSiblingRoots(t *testing.T) {
+func TestOverlapSiblingBoundaries(t *testing.T) {
 	// /data vs /data2 should NOT conflict.
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
@@ -637,9 +637,9 @@ func TestEnsureWorkspaceFcontextExistingRuleWithUnrelatedSibling(t *testing.T) {
 	}
 }
 
-// --- Manager: removeWorkspaceFcontext tests ---
+// --- Manager: removeFcontextBoundary tests ---
 
-func TestRemoveWorkspaceFcontext(t *testing.T) {
+func TestRemoveFcontextBoundary(t *testing.T) {
 	var deleteCalled bool
 	var restoreconCalled bool
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
@@ -652,7 +652,7 @@ func TestRemoveWorkspaceFcontext(t *testing.T) {
 		}
 		return []byte{}, nil
 	}
-	if err := mgr.removeWorkspaceFcontext("/data"); err != nil {
+	if err := mgr.removeFcontextBoundary("/data"); err != nil {
 		t.Fatalf("rollback failed: %v", err)
 	}
 	if !deleteCalled {
@@ -1241,7 +1241,7 @@ func TestParseEquivalenceRedirect(t *testing.T) {
 }
 
 func TestEquivalenceDisjointAllowed(t *testing.T) {
-	// /unrelated = /other with ROOT=/data => allowed.
+	// /unrelated = /other with boundary=/data => allowed.
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -1261,8 +1261,8 @@ func TestEquivalenceDisjointAllowed(t *testing.T) {
 	}
 }
 
-func TestEquivalenceDestEqualsRoot(t *testing.T) {
-	// /data = /other => reject (DEST equals ROOT).
+func TestEquivalenceDestEqualsBoundary(t *testing.T) {
+	// /data = /other => reject (DEST equals boundary).
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -1272,15 +1272,15 @@ func TestEquivalenceDestEqualsRoot(t *testing.T) {
 	}
 	_, err := mgr.ensureWorkspaceFcontext("/data")
 	if err == nil {
-		t.Fatal("expected error for equivalence DEST equals ROOT")
+		t.Fatal("expected error for equivalence DEST equals boundary")
 	}
 	if !strings.Contains(err.Error(), "equivalence") {
 		t.Errorf("expected 'equivalence' in error, got: %v", err)
 	}
 }
 
-func TestEquivalenceDestContainsRoot(t *testing.T) {
-	// /data/sub = /other => reject (DEST is descendant of ROOT).
+func TestEquivalenceDestDescendantOfBoundary(t *testing.T) {
+	// /data/sub = /other => reject (DEST is descendant of boundary).
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -1290,15 +1290,15 @@ func TestEquivalenceDestContainsRoot(t *testing.T) {
 	}
 	_, err := mgr.ensureWorkspaceFcontext("/data")
 	if err == nil {
-		t.Fatal("expected error for equivalence DEST contains ROOT")
+		t.Fatal("expected error for equivalence DEST descendant of boundary")
 	}
 	if !strings.Contains(err.Error(), "equivalence") {
 		t.Errorf("expected 'equivalence' in error, got: %v", err)
 	}
 }
 
-func TestEquivalenceSourceEqualsRoot(t *testing.T) {
-	// /other = /data => reject (SOURCE equals ROOT).
+func TestEquivalenceSourceEqualsBoundary(t *testing.T) {
+	// /other = /data => reject (SOURCE equals boundary).
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -1308,15 +1308,15 @@ func TestEquivalenceSourceEqualsRoot(t *testing.T) {
 	}
 	_, err := mgr.ensureWorkspaceFcontext("/data")
 	if err == nil {
-		t.Fatal("expected error for equivalence SOURCE equals ROOT")
+		t.Fatal("expected error for equivalence SOURCE equals boundary")
 	}
 	if !strings.Contains(err.Error(), "equivalence") {
 		t.Errorf("expected 'equivalence' in error, got: %v", err)
 	}
 }
 
-func TestEquivalenceSourceContainsRoot(t *testing.T) {
-	// /other = /data/sub => reject (SOURCE is descendant of ROOT).
+func TestEquivalenceSourceDescendantOfBoundary(t *testing.T) {
+	// /other = /data/sub => reject (SOURCE is descendant of boundary).
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -1326,15 +1326,15 @@ func TestEquivalenceSourceContainsRoot(t *testing.T) {
 	}
 	_, err := mgr.ensureWorkspaceFcontext("/data")
 	if err == nil {
-		t.Fatal("expected error for equivalence SOURCE contains ROOT")
+		t.Fatal("expected error for equivalence SOURCE descendant of boundary")
 	}
 	if !strings.Contains(err.Error(), "equivalence") {
 		t.Errorf("expected 'equivalence' in error, got: %v", err)
 	}
 }
 
-func TestEquivalenceDestAncestorOfRoot(t *testing.T) {
-	// /parent = /other with ROOT=/parent/data => reject (DEST is ancestor of ROOT).
+func TestEquivalenceDestAncestorOfBoundary(t *testing.T) {
+	// /parent = /other with boundary=/parent/data => reject (DEST is ancestor of boundary).
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -1344,15 +1344,15 @@ func TestEquivalenceDestAncestorOfRoot(t *testing.T) {
 	}
 	_, err := mgr.ensureWorkspaceFcontext("/parent/data")
 	if err == nil {
-		t.Fatal("expected error for equivalence DEST ancestor of ROOT")
+		t.Fatal("expected error for equivalence DEST ancestor of boundary")
 	}
 	if !strings.Contains(err.Error(), "equivalence") {
 		t.Errorf("expected 'equivalence' in error, got: %v", err)
 	}
 }
 
-func TestEquivalenceSourceAncestorOfRoot(t *testing.T) {
-	// /other = /parent with ROOT=/parent/data => reject (SOURCE is ancestor of ROOT).
+func TestEquivalenceSourceAncestorOfBoundary(t *testing.T) {
+	// /other = /parent with boundary=/parent/data => reject (SOURCE is ancestor of boundary).
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -1362,7 +1362,7 @@ func TestEquivalenceSourceAncestorOfRoot(t *testing.T) {
 	}
 	_, err := mgr.ensureWorkspaceFcontext("/parent/data")
 	if err == nil {
-		t.Fatal("expected error for equivalence SOURCE ancestor of ROOT")
+		t.Fatal("expected error for equivalence SOURCE ancestor of boundary")
 	}
 	if !strings.Contains(err.Error(), "equivalence") {
 		t.Errorf("expected 'equivalence' in error, got: %v", err)
