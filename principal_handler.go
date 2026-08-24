@@ -244,8 +244,9 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !*req.Enabled && len(result.RevokedSessionIDs) > 0 {
+		cfg := a.getConfig()
 		for _, sessionID := range result.RevokedSessionIDs {
-			if err := cleanupSessionRuntimeDir(a.Config.RuntimeDir, sessionID); err != nil {
+			if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, sessionID); err != nil {
 				opLog(ctx).Warn("failed to clean up session runtime directory",
 					slog.String("operation", "principal_disable"),
 					slog.String("session_id", sessionID),
@@ -803,8 +804,9 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Best-effort cleanup of runtime directories for deleted sessions.
+	cfg := a.getConfig()
 	for _, sessionID := range sessionIDs {
-		if err := cleanupSessionRuntimeDir(a.Config.RuntimeDir, sessionID); err != nil {
+		if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, sessionID); err != nil {
 			opLog(ctx).Warn("failed to clean up session runtime directory",
 				slog.String("operation", "principal_delete"),
 				slog.String("session_id", sessionID),

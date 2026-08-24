@@ -897,3 +897,178 @@ func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
 		t.Error("principal should be deleted")
 	}
 }
+
+// TestPrincipalDisableConcurrentConfigReload verifies that handleSetPrincipal
+// uses a Config snapshot for RuntimeDir, so a concurrent setConfig does not
+// cause a data race or use-after-replace read.
+func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	baseCfg := app.getConfig()
+	allowedRoot := baseCfg.AllowedRoots[0]
+	home := filepath.Join(allowedRoot, "home", "configraceuser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1090", "1090", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "configraceuser", baseCfg.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	// Create a credential and session for the principal.
+	_, credToken, err := createCredential(app.DB, "configraceuser", "test-cred")
+	if err != nil {
+		t.Fatalf("createCredential: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+credToken)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create session: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	// Concurrently replace config while disabling the principal.
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			newCfg := baseCfg
+			newCfg.SessionTTL = time.Duration(24+i) * time.Hour
+			app.setConfig(&newCfg)
+		}
+	}()
+
+	// Disable the principal via the handler.
+	setReqBody, _ := json.Marshal(setPrincipalRequest{Enabled: boolPtr(false)})
+	setReq := httptest.NewRequest(http.MethodPatch, "/principals/configraceuser", bytes.NewReader(setReqBody))
+	setReq.Header.Set("Content-Type", "application/json")
+	withAuth(setReq)
+	setW := httptest.NewRecorder()
+
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("PATCH /principals/{username}", app.handleSetPrincipal)
+	mux2.ServeHTTP(setW, setReq)
+
+	<-done
+
+	if setW.Code != http.StatusOK {
+		t.Fatalf("handleSetPrincipal: expected %d, got %d, body: %s", http.StatusOK, setW.Code, setW.Body.String())
+	}
+
+	var setResp principalChangedResponse
+	if err := json.NewDecoder(setW.Body).Decode(&setResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !setResp.OK {
+		t.Error("expected ok=true")
+	}
+	if !setResp.Changed {
+		t.Error("expected changed=true")
+	}
+
+	// Verify the principal is disabled.
+	p, err := findPrincipalByID(app.DB, func() int {
+		id, _ := findPrincipalIDByUserName(app.DB, "configraceuser")
+		return id
+	}())
+	if err != nil {
+		t.Fatalf("findPrincipalByID: %v", err)
+	}
+	if p.Enabled {
+		t.Error("principal should be disabled")
+	}
+}
+
+// TestPrincipalDeleteConcurrentConfigReload verifies that handleDeletePrincipal
+// uses a Config snapshot for RuntimeDir, so a concurrent setConfig does not
+// cause a data race or use-after-replace read.
+func TestPrincipalDeleteConcurrentConfigReload(t *testing.T) {
+	app := newTestAppWithAuth(t)
+
+	baseCfg := app.getConfig()
+	allowedRoot := baseCfg.AllowedRoots[0]
+	home := filepath.Join(allowedRoot, "home", "delconfigraceuser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1091", "1091", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "delconfigraceuser", baseCfg.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	// Create a credential and session for the principal.
+	_, credToken, err := createCredential(app.DB, "delconfigraceuser", "test-cred")
+	if err != nil {
+		t.Fatalf("createCredential: %v", err)
+	}
+
+	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}
+	body, _ := json.Marshal(reqBody)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+credToken)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create session: expected %d, got %d", http.StatusCreated, w.Code)
+	}
+
+	// Concurrently replace config while deleting the principal.
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			newCfg := baseCfg
+			newCfg.SessionTTL = time.Duration(24+i) * time.Hour
+			app.setConfig(&newCfg)
+		}
+	}()
+
+	// Delete the principal via the handler.
+	delReq := httptest.NewRequest(http.MethodDelete, "/principals/delconfigraceuser", nil)
+	withAuth(delReq)
+	delW := httptest.NewRecorder()
+
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
+	mux2.ServeHTTP(delW, delReq)
+
+	<-done
+
+	if delW.Code != http.StatusNoContent {
+		t.Fatalf("handleDeletePrincipal: expected %d, got %d, body: %s", http.StatusNoContent, delW.Code, delW.Body.String())
+	}
+
+	// Verify the principal is deleted.
+	_, err = findPrincipalIDByUserName(app.DB, "delconfigraceuser")
+	if !errors.Is(err, ErrPrincipalNotFound) {
+		t.Error("principal should be deleted")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
