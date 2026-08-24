@@ -398,7 +398,7 @@ func (m *appArmorProfileManager) snapshotFragment() (*fragmentSnapshot, error) {
 	}, nil
 }
 
-func (m *appArmorProfileManager) preflight() error {
+func (m *appArmorProfileManager) checkPrerequisites() error {
 	info, err := os.Stat(m.parserPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -494,7 +494,7 @@ func (m *appArmorProfileManager) addManagedRoot(path string) (rootResult, error)
 	}
 	defer lockFile.Close()
 
-	if err := m.preflight(); err != nil {
+	if err := m.checkPrerequisites(); err != nil {
 		return rootResult{}, err
 	}
 
@@ -541,7 +541,7 @@ func (m *appArmorProfileManager) removeManagedRoot(path string) (rootResult, err
 	}
 	defer lockFile.Close()
 
-	if err := m.preflight(); err != nil {
+	if err := m.checkPrerequisites(); err != nil {
 		return rootResult{}, err
 	}
 
@@ -580,7 +580,7 @@ func (m *appArmorProfileManager) removeManagedRoot(path string) (rootResult, err
 }
 
 func (m *appArmorProfileManager) check() error {
-	if err := m.preflight(); err != nil {
+	if err := m.checkPrerequisites(); err != nil {
 		return err
 	}
 
