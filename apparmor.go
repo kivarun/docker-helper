@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	apparmorMainProfile     = "/etc/apparmor.d/docker-helper-system"
-	apparmorManagedFragment = "/etc/apparmor.d/docker-helper.d/managed-roots"
-	apparmorLockPath        = "/run/lock/docker-helper-apparmor.lock"
-	apparmorParserPath      = "/usr/sbin/apparmor_parser"
+	appArmorMainProfile     = "/etc/apparmor.d/docker-helper-system"
+	appArmorManagedFragment = "/etc/apparmor.d/docker-helper.d/managed-roots"
+	appArmorLockPath        = "/run/lock/docker-helper-apparmor.lock"
+	appArmorParserPath      = "/usr/sbin/apparmor_parser"
 )
 
 const (
@@ -62,10 +62,10 @@ func newProductionParserRunner() func(executable string, args []string) error {
 
 func newProductionAppArmorProfileManager() *appArmorProfileManager {
 	return newAppArmorProfileManager(
-		apparmorMainProfile,
-		apparmorManagedFragment,
-		apparmorLockPath,
-		apparmorParserPath,
+		appArmorMainProfile,
+		appArmorManagedFragment,
+		appArmorLockPath,
+		appArmorParserPath,
 		newProductionParserRunner(),
 	)
 }

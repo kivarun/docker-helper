@@ -82,7 +82,10 @@ func TestInitCoreExistingTokenFails(t *testing.T) {
 
 // --- System mode integration tests ---
 
-func TestInitSystemCallsAddRoot(t *testing.T) {
+// TestInitSystemCoreInvocation verifies that initSystem calls the core
+// callback. System init no longer prepares MAC state for the bootstrap
+// allowed root; MAC preparation occurs at session creation time.
+func TestInitSystemCoreInvocation(t *testing.T) {
 	dir := t.TempDir()
 
 	origGetConfig := getConfigPathFunc
@@ -100,33 +103,11 @@ func TestInitSystemCallsAddRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initSystem failed: %v", err)
 	}
-
-	// System init no longer prepares MAC for the bootstrap allowed root.
-	// MAC preparation is handled at session creation time.
 }
 
-func TestInitSystemAddRootFailure(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, nil,
-		func(ar string, so, se io.Writer) error {
-			return nil
-		})
-	if err != nil {
-		t.Fatalf("initSystem failed: %v", err)
-	}
-
-	// System init no longer prepares MAC; core should be called.
-}
-
-func TestInitSystemCoreFailureRollback(t *testing.T) {
+// TestInitSystemCoreFailurePropagates verifies that when the core callback
+// fails, initSystem propagates the error.
+func TestInitSystemCoreFailurePropagates(t *testing.T) {
 	dir := t.TempDir()
 
 	origGetConfig := getConfigPathFunc
@@ -143,52 +124,13 @@ func TestInitSystemCoreFailureRollback(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for core failure")
 	}
-
-	// System init no longer prepares MAC; addRoot must NOT be called.
-}
-
-func TestInitSystemCoreFailureNoRollbackWhenNotChanged(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, nil,
-		func(ar string, so, se io.Writer) error {
-			return errors.New("core init failed")
-		})
-	if err == nil {
-		t.Fatal("expected error for core failure")
+	if !strings.Contains(err.Error(), "core init failed") {
+		t.Errorf("expected core failure in error, got: %v", err)
 	}
-
-	// System init no longer prepares MAC; addRoot must NOT be called.
 }
 
-func TestInitSystemRollbackFailureReportsBothErrors(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, nil,
-		func(ar string, so, se io.Writer) error {
-			return errors.New("core init failed")
-		})
-	if err == nil {
-		t.Fatal("expected error for core failure")
-	}
-
-	// System init no longer prepares MAC; addRoot must NOT be called.
-}
-
+// TestInitSystemExistingConfigMismatch verifies that initSystem rejects a
+// new root not present in an existing config.
 func TestInitSystemExistingConfigMismatch(t *testing.T) {
 	dir := t.TempDir()
 
@@ -233,6 +175,8 @@ func TestInitSystemExistingConfigMismatch(t *testing.T) {
 	}
 }
 
+// TestInitSystemExistingConfigMatch verifies that initSystem proceeds when
+// the new root matches an existing config root.
 func TestInitSystemExistingConfigMatch(t *testing.T) {
 	dir := t.TempDir()
 
@@ -253,8 +197,6 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	addRootCalled := false
-
 	var stdout, stderr bytes.Buffer
 	err := initSystem(rootDir, &stdout, &stderr, nil,
 		func(ar string, so, se io.Writer) error {
@@ -264,18 +206,11 @@ func TestInitSystemExistingConfigMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initSystem failed: %v", err)
 	}
-
-	if !addRootCalled {
-		// System init no longer prepares MAC; addRoot must NOT be called.
-	} else {
-		t.Error("addRoot must NOT be called during system init")
-	}
 }
 
-func TestInitSystemMultiRootPreflight(t *testing.T) {
-	// Multi-root preflight: init with rootB when config has [rootA, rootB].
-	// Prove rootB is accepted (not first-root-only), backend receives canonical rootB,
-	// and core is reached.
+// TestInitSystemMultiRootConfigAccepted verifies that initSystem accepts a
+// root that is one of multiple existing config roots (not first-root-only).
+func TestInitSystemMultiRootConfigAccepted(t *testing.T) {
 	dir := t.TempDir()
 
 	origGetConfig := getConfigPathFunc
@@ -296,8 +231,7 @@ func TestInitSystemMultiRootPreflight(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Track what backend receives and what core receives.
-	var backendReceived string
+	// Track what core receives.
 	var coreReceived string
 
 	var stdout, stderr bytes.Buffer
@@ -309,17 +243,14 @@ func TestInitSystemMultiRootPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initSystem with rootB failed: %v", err)
 	}
-
-	// System init no longer prepares MAC; addRoot must NOT be called.
-	if backendReceived != "" {
-		t.Errorf("backend must NOT receive path, got %q", backendReceived)
-	}
 	if coreReceived != rootB {
 		t.Errorf("core received %q, want rootB %q", coreReceived, rootB)
 	}
 }
 
-func TestInitSystemExistingTokenNoAppArmor(t *testing.T) {
+// TestInitSystemExistingTokenFails verifies that initSystem rejects when an
+// admin token already exists.
+func TestInitSystemExistingTokenFails(t *testing.T) {
 	dir := t.TempDir()
 
 	origGetConfig := getConfigPathFunc
@@ -343,34 +274,11 @@ func TestInitSystemExistingTokenNoAppArmor(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for existing token")
 	}
-
-}
-
-func TestInitSystemAlreadyPresent(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, nil,
-		func(ar string, so, se io.Writer) error {
-			_, err := initCore(ar, so, se)
-			return err
-		})
-	if err != nil {
-		t.Fatalf("initSystem failed: %v", err)
-	}
-
-	// System init no longer prepares MAC; addRoot must NOT be called.
 }
 
 // --- User mode tests ---
 
-func TestInitUserModeNoAppArmor(t *testing.T) {
+func TestInitUserModeNoMACBackendCheck(t *testing.T) {
 	dir := t.TempDir()
 
 	origGetConfig := getConfigPathFunc
@@ -394,14 +302,14 @@ func TestInitUserModeNoAppArmor(t *testing.T) {
 		t.Fatalf("runInit failed: %v", err)
 	}
 
-	// Verify no AppArmor status message in stdout
+	// Verify no MAC backend status message in stdout
 	if strings.Contains(stdout.String(), "workspace root added") ||
 		strings.Contains(stdout.String(), "workspace root already present") {
-		t.Errorf("user mode should not print AppArmor status, got: %s", stdout.String())
+		t.Errorf("user mode should not print MAC backend status, got: %s", stdout.String())
 	}
 }
 
-func TestInitUserModeNoAppArmorRestrictions(t *testing.T) {
+func TestInitUserModeNoRestrictions(t *testing.T) {
 	dir := t.TempDir()
 
 	origGetConfig := getConfigPathFunc
@@ -423,67 +331,11 @@ func TestInitUserModeNoAppArmorRestrictions(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := runInit(rootDir, &stdout, &stderr)
 	if err != nil {
-		t.Fatalf("user mode should not apply AppArmor restrictions, got: %v", err)
+		t.Fatalf("user mode should not apply MAC backend restrictions, got: %v", err)
 	}
 }
 
 // --- Input error exit code tests ---
-
-func TestInitSystemInvalidAppArmorPath(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return configPath }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, nil,
-		func(ar string, so, se io.Writer) error {
-			_, err := initCore(ar, so, se)
-			return err
-		})
-	if err != nil {
-		t.Fatalf("initSystem failed: %v", err)
-	}
-
-	// System init no longer prepares MAC; addRoot must NOT be called.
-}
-
-// --- Ordering tests ---
-
-func TestInitSystemOrderingAddRootBeforeCore(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.json")
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return configPath }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var order []string
-
-	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, nil,
-		func(ar string, so, se io.Writer) error {
-			order = append(order, "core")
-			_, err := initCore(ar, so, se)
-			return err
-		})
-	if err != nil {
-		t.Fatalf("initSystem failed: %v", err)
-	}
-
-	// System init no longer prepares MAC; only core should be called.
-	if len(order) != 1 || order[0] != "core" {
-		t.Errorf("expected only core, got order: %v", order)
-	}
-}
-
-// --- CLI integration tests ---
 
 func TestInitCLIInputErrorExitCode(t *testing.T) {
 	dir := t.TempDir()
@@ -516,18 +368,6 @@ func TestInitCLIInputErrorExitCode(t *testing.T) {
 	}
 }
 
-func TestInitCLIAppArmorInputErrorExit2(t *testing.T) {
-	// System init no longer prepares MAC. This test is no longer relevant.
-	// MAC preparation happens at session creation time, not during init.
-	t.Skip("system init no longer prepares MAC")
-}
-
-func TestInitCLIAppArmorOperationalErrorExit1(t *testing.T) {
-	// System init no longer prepares MAC. This test is no longer relevant.
-	// MAC preparation happens at session creation time, not during init.
-	t.Skip("system init no longer prepares MAC")
-}
-
 func TestInitHelpContainsAutomationBoundary(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"init", "--help"}, &stdout, &stderr)
@@ -549,38 +389,10 @@ func TestInitHelpContainsAutomationBoundary(t *testing.T) {
 	}
 }
 
-// --- Rollback Changed=false not an error ---
+// --- Config path validation tests ---
 
-func TestInitSystemRollbackChangedFalseNotError(t *testing.T) {
-	dir := t.TempDir()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	rootDir := testAllowedRootDir(t)
-
-	var stdout, stderr bytes.Buffer
-	err := initSystem(rootDir, &stdout, &stderr, nil,
-		func(ar string, so, se io.Writer) error {
-			return errors.New("core init failed")
-		})
-	if err == nil {
-		t.Fatal("expected error for core failure")
-	}
-
-	// The error should be the core failure, not a rollback error
-	if !strings.Contains(err.Error(), "core init failed") {
-		t.Errorf("expected core failure in error, got: %v", err)
-	}
-	// Should NOT contain rollback error
-	if strings.Contains(err.Error(), "rollback") {
-		t.Errorf("should not report rollback error when Changed=false, got: %v", err)
-	}
-}
-
-// --- Existing config as directory -> preflight failure ---
-
+// TestInitSystemConfigPathIsDirectory verifies that initSystem fails when
+// the config path is a directory.
 func TestInitSystemConfigPathIsDirectory(t *testing.T) {
 	dir := t.TempDir()
 
@@ -612,8 +424,8 @@ func TestInitSystemConfigPathIsDirectory(t *testing.T) {
 	}
 }
 
-// --- Existing config read error ---
-
+// TestInitSystemExistingConfigReadError verifies that initSystem fails when
+// the existing config file cannot be read.
 func TestInitSystemExistingConfigReadError(t *testing.T) {
 	dir := t.TempDir()
 
@@ -649,8 +461,8 @@ func TestInitSystemExistingConfigReadError(t *testing.T) {
 	}
 }
 
-// --- Validate raw config error ---
-
+// TestInitSystemExistingConfigInvalid verifies that initSystem fails when
+// the existing config is invalid JSON or missing required fields.
 func TestInitSystemExistingConfigInvalid(t *testing.T) {
 	dir := t.TempDir()
 
@@ -687,7 +499,7 @@ func TestInitSystemExistingConfigInvalid(t *testing.T) {
 	}
 }
 
-// --- Validate raw config validation ---
+// --- Validate raw config error ---
 
 func TestValidateRawConfigRejectsMissingAllowedRoot(t *testing.T) {
 	raw := map[string]json.RawMessage{

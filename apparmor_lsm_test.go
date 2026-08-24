@@ -10,9 +10,9 @@ import (
 )
 
 func TestRequireAppArmorActiveWhenActive(t *testing.T) {
-	orig := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	defer func() { apparmorLSMActive = orig }()
+	orig := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	defer func() { appArmorLSMActive = orig }()
 
 	if err := requireAppArmorActive(); err != nil {
 		t.Fatalf("expected nil, got: %v", err)
@@ -20,9 +20,9 @@ func TestRequireAppArmorActiveWhenActive(t *testing.T) {
 }
 
 func TestRequireAppArmorActiveWhenInactive(t *testing.T) {
-	orig := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = orig }()
+	orig := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return false, nil }
+	defer func() { appArmorLSMActive = orig }()
 
 	err := requireAppArmorActive()
 	if err == nil {
@@ -34,11 +34,11 @@ func TestRequireAppArmorActiveWhenInactive(t *testing.T) {
 }
 
 func TestRequireAppArmorActiveReadError(t *testing.T) {
-	orig := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) {
+	orig := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) {
 		return false, os.ErrNotExist
 	}
-	defer func() { apparmorLSMActive = orig }()
+	defer func() { appArmorLSMActive = orig }()
 
 	err := requireAppArmorActive()
 	if err == nil {
@@ -50,15 +50,15 @@ func TestRequireAppArmorActiveReadError(t *testing.T) {
 }
 
 func TestRequireAppArmorConfinementEnforce(t *testing.T) {
-	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	origActive := appArmorLSMActive
+	origConfinement := appArmorProcessConfinement
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (enforce)", nil
 	}
 	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
+		appArmorLSMActive = origActive
+		appArmorProcessConfinement = origConfinement
 	}()
 
 	if err := requireAppArmorConfinement(); err != nil {
@@ -67,15 +67,15 @@ func TestRequireAppArmorConfinementEnforce(t *testing.T) {
 }
 
 func TestRequireAppArmorConfinementUnconfined(t *testing.T) {
-	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	origActive := appArmorLSMActive
+	origConfinement := appArmorProcessConfinement
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		return "unconfined", nil
 	}
 	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
+		appArmorLSMActive = origActive
+		appArmorProcessConfinement = origConfinement
 	}()
 
 	err := requireAppArmorConfinement()
@@ -88,15 +88,15 @@ func TestRequireAppArmorConfinementUnconfined(t *testing.T) {
 }
 
 func TestRequireAppArmorConfinementComplain(t *testing.T) {
-	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	origActive := appArmorLSMActive
+	origConfinement := appArmorProcessConfinement
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (complain)", nil
 	}
 	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
+		appArmorLSMActive = origActive
+		appArmorProcessConfinement = origConfinement
 	}()
 
 	err := requireAppArmorConfinement()
@@ -109,16 +109,16 @@ func TestRequireAppArmorConfinementComplain(t *testing.T) {
 }
 
 func TestRequireAppArmorConfinementInactive(t *testing.T) {
-	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	origActive := appArmorLSMActive
+	origConfinement := appArmorProcessConfinement
+	appArmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		t.Fatal("confinement should not be read when LSM is inactive")
 		return "", nil
 	}
 	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
+		appArmorLSMActive = origActive
+		appArmorProcessConfinement = origConfinement
 	}()
 
 	err := requireAppArmorConfinement()
@@ -128,15 +128,15 @@ func TestRequireAppArmorConfinementInactive(t *testing.T) {
 }
 
 func TestRequireAppArmorConfinementWrongProfile(t *testing.T) {
-	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	origActive := appArmorLSMActive
+	origConfinement := appArmorProcessConfinement
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		return "other-profile (enforce)", nil
 	}
 	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
+		appArmorLSMActive = origActive
+		appArmorProcessConfinement = origConfinement
 	}()
 
 	err := requireAppArmorConfinement()
@@ -155,9 +155,9 @@ func TestRequireAppArmorConfinementWrongProfile(t *testing.T) {
 // were called first, the error would be about missing config, not MAC backend.
 // The "MAC backend" error proves preflight ran before loadConfig.
 func TestServeSystemModePreflightInactive(t *testing.T) {
-	origActive := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = origActive }()
+	origActive := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return false, nil }
+	defer func() { appArmorLSMActive = origActive }()
 
 	mockSELinuxInactive(t)
 
@@ -191,13 +191,13 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 // runs before loadConfig. It uses a nonexistent config path: if loadConfig
 // were called first, the error would be about missing config, not confinement.
 func TestServeSystemModePreflightUnconfined(t *testing.T) {
-	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) { return "unconfined", nil }
+	origActive := appArmorLSMActive
+	origConfinement := appArmorProcessConfinement
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) { return "unconfined", nil }
 	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
+		appArmorLSMActive = origActive
+		appArmorProcessConfinement = origConfinement
 	}()
 
 	mockSELinuxInactive(t)
@@ -233,15 +233,15 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 // next startup check (lock, admin token, etc.). This proves the preflight
 // does not block a properly confined process.
 func TestServeSystemModePreflightEnforce(t *testing.T) {
-	origActive := apparmorLSMActive
-	origConfinement := apparmorProcessConfinement
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	origActive := appArmorLSMActive
+	origConfinement := appArmorProcessConfinement
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (enforce)", nil
 	}
 	defer func() {
-		apparmorLSMActive = origActive
-		apparmorProcessConfinement = origConfinement
+		appArmorLSMActive = origActive
+		appArmorProcessConfinement = origConfinement
 	}()
 
 	mockSELinuxInactive(t)
@@ -284,7 +284,7 @@ func TestServeSystemModePreflightEnforce(t *testing.T) {
 // --- Integration: init preflight ---
 
 func TestInitSystemModePreflightInactive(t *testing.T) {
-	mockApparmorActive(t, false)
+	mockAppArmorActive(t, false)
 	mockSELinuxInactive(t)
 
 	origUID := EffectiveUID
@@ -311,7 +311,7 @@ func TestInitSystemModePreflightInactive(t *testing.T) {
 // --- Integration: AppArmor CLI preflight ---
 
 func TestAppArmorRootListInactive(t *testing.T) {
-	mockApparmorActive(t, false)
+	mockAppArmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = origUID }()
@@ -324,7 +324,7 @@ func TestAppArmorRootListInactive(t *testing.T) {
 }
 
 func TestAppArmorRootAddInactive(t *testing.T) {
-	mockApparmorActive(t, false)
+	mockAppArmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = origUID }()
@@ -342,7 +342,7 @@ func TestAppArmorRootAddInactive(t *testing.T) {
 }
 
 func TestAppArmorRootRemoveInactive(t *testing.T) {
-	mockApparmorActive(t, false)
+	mockAppArmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = origUID }()
@@ -358,7 +358,7 @@ func TestAppArmorRootRemoveInactive(t *testing.T) {
 }
 
 func TestAppArmorCheckInactive(t *testing.T) {
-	mockApparmorActive(t, false)
+	mockAppArmorActive(t, false)
 	origUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = origUID }()
@@ -379,15 +379,15 @@ func TestAppArmorCheckInactive(t *testing.T) {
 // fails with a clear diagnostic before later initialization (admin token,
 // database, listener) can hide the result.
 func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
-	origActive := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	t.Cleanup(func() { apparmorLSMActive = origActive })
+	origActive := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	t.Cleanup(func() { appArmorLSMActive = origActive })
 
-	origConfinement := apparmorProcessConfinement
-	apparmorProcessConfinement = func() (string, error) {
+	origConfinement := appArmorProcessConfinement
+	appArmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (enforce)", nil
 	}
-	t.Cleanup(func() { apparmorProcessConfinement = origConfinement })
+	t.Cleanup(func() { appArmorProcessConfinement = origConfinement })
 
 	mockSELinuxInactive(t)
 
@@ -446,9 +446,9 @@ func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
 // --- User mode should not trigger AppArmor checks ---
 
 func TestServeUserModeNoAppArmorCheck(t *testing.T) {
-	origActive := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = origActive }()
+	origActive := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return false, nil }
+	defer func() { appArmorLSMActive = origActive }()
 
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc
@@ -479,9 +479,9 @@ func TestServeUserModeNoAppArmorCheck(t *testing.T) {
 }
 
 func TestInitUserModeNoAppArmorCheck(t *testing.T) {
-	origActive := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return false, nil }
-	defer func() { apparmorLSMActive = origActive }()
+	origActive := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return false, nil }
+	defer func() { appArmorLSMActive = origActive }()
 
 	origUID := EffectiveUID
 	origGetConfig := getConfigPathFunc

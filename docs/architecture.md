@@ -463,8 +463,8 @@ unset. Reports `unset` or `unchanged`. The same transactional rollback
 semantics apply.
 
 `docker-helper config allowed-root <list|add|remove> [PATH]` — manages the
-global allowed_roots array. `add` canonicalizes and validates the path; in
-system mode, also prepares the active MAC backend (AppArmor or SELinux).
+global allowed_roots array. `add` canonicalizes and validates the path;
+authorization-only, does NOT prepare MAC state.
 `remove` resolves and matches the stored canonical form; rejects removal of
 the final global root. `list` prints one canonical root per line.
 
@@ -694,8 +694,7 @@ same user-scoped credential store directly.
 
 Application acceptance of a root does not by itself prove MAC access. AppArmor
 requires the corresponding managed-root rule. SELinux requires a permitted
-workspace file type; exact `/opt` is rejected by `config allowed-root add` in
-SELinux mode.
+workspace file type.
 
 ### Three-level authorization model
 

@@ -4691,7 +4691,7 @@ func TestDebPostinstallNeitherMAC(t *testing.T) {
 }
 
 // TestSELinuxPolicyWorkspaceType verifies that the SELinux policy
-// defines docker_helper_workspace_t for non-home system allowed_roots
+// defines docker_helper_workspace_t for non-home workspace roots
 // while retaining user_home_type for /home paths.
 func TestSELinuxPolicyWorkspaceType(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")

@@ -47,10 +47,12 @@ This type is **not** `usr_t`, `default_t`, `var_t`, or any other generic host
 type. The daemon and container domains receive only the permissions required
 for workspace access, equivalent to what they have for `user_home_type`.
 
+MAC preparation for these roots occurs at session creation time for the
+concrete workspace, not when the root is added via `config allowed-root add`.
+
 #### Persistent labeling
 
-When docker-helper initializes or changes a non-home global allowed root under
-active SELinux, it:
+When a session workspace requires MAC coverage under active SELinux, it:
 
 1. Creates a persistent `semanage fcontext` rule for the canonical root and
    descendants: `<escaped-root>(/.*)? -> docker_helper_workspace_t`
@@ -249,10 +251,6 @@ Non-home system `allowed_roots` (e.g., `/data`, `/projects/agents`,
 with persistent `semanage fcontext` rules and `restorecon -R` (type-only).
 The daemon and container domains receive workspace permissions for this type.
 `config allowed-root add` updates the authorization ceiling only; it does NOT prepare MAC state.
-
-Exact `/opt` is rejected by `config allowed-root add` in SELinux mode because
-it would recursively relabel the entire `/opt` namespace. Use a dedicated child
-such as `/opt/docker-helper-workspaces` instead.
 
 Monotonic managed-label lifecycle (R2): once `ensureWorkspaceLabel` returns
 success, the mapping is managed durable state. Outer init/config code does NOT

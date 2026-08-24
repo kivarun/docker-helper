@@ -901,18 +901,18 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		origSEL := selinuxEnabled
 		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { apparmorLSMActive = origAA }()
+		origAA := appArmorLSMActive
+		appArmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { appArmorLSMActive = origAA }()
 
 		// /opt is accepted as authorization ceiling; MAC preparation is skipped.
 		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceLabel
-		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+		origEnsure := selinuxEnsureWorkspaceFcontext
+		selinuxEnsureWorkspaceFcontext = func(string) (bool, error) {
 			selinuxCalled = true
 			return false, nil
 		}
-		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+		defer func() { selinuxEnsureWorkspaceFcontext = origEnsure }()
 
 		origData, _ := os.ReadFile(configPath)
 
@@ -949,9 +949,9 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		origSEL := selinuxEnabled
 		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { apparmorLSMActive = origAA }()
+		origAA := appArmorLSMActive
+		appArmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { appArmorLSMActive = origAA }()
 
 		// /home is a home root, so no SELinux preparation.
 		origData, _ := os.ReadFile(configPath)
@@ -1029,18 +1029,18 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		origSEL := selinuxEnabled
 		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { apparmorLSMActive = origAA }()
+		origAA := appArmorLSMActive
+		appArmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { appArmorLSMActive = origAA }()
 
 		// Track SELinux preparation.
 		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceLabel
-		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+		origEnsure := selinuxEnsureWorkspaceFcontext
+		selinuxEnsureWorkspaceFcontext = func(string) (bool, error) {
 			selinuxCalled = true
 			return false, nil
 		}
-		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+		defer func() { selinuxEnsureWorkspaceFcontext = origEnsure }()
 
 		// Use a non-/opt path to test config validation failure.
 		newRoot := testAllowedRootDir(t)
@@ -1125,9 +1125,9 @@ func TestConfigAllowedRootAddZeroMAC(t *testing.T) {
 		origSEL := selinuxEnabled
 		selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { apparmorLSMActive = origAA }()
+		origAA := appArmorLSMActive
+		appArmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { appArmorLSMActive = origAA }()
 
 		newRoot := testAllowedRootDir(t)
 		var stdout, stderr bytes.Buffer
@@ -1185,17 +1185,17 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 		origSEL := selinuxEnabled
 		selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 		defer func() { selinuxEnabled = origSEL }()
-		origAA := apparmorLSMActive
-		apparmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { apparmorLSMActive = origAA }()
+		origAA := appArmorLSMActive
+		appArmorLSMActive = func() (bool, error) { return false, nil }
+		defer func() { appArmorLSMActive = origAA }()
 
 		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceLabel
-		selinuxEnsureWorkspaceLabel = func(string) (bool, error) {
+		origEnsure := selinuxEnsureWorkspaceFcontext
+		selinuxEnsureWorkspaceFcontext = func(string) (bool, error) {
 			selinuxCalled = true
 			return false, nil
 		}
-		defer func() { selinuxEnsureWorkspaceLabel = origEnsure }()
+		defer func() { selinuxEnsureWorkspaceFcontext = origEnsure }()
 
 		origData, _ := os.ReadFile(configPath)
 

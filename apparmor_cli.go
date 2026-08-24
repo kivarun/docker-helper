@@ -33,7 +33,7 @@ var apparmorRootListCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runApparmorRootList(stdout, stderr)
+				return runAppArmorRootList(stdout, stderr)
 			},
 		}
 	},
@@ -48,7 +48,7 @@ var apparmorRootAddCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runApparmorRootAdd(fs.Args()[0], stdout, stderr)
+				return runAppArmorRootAdd(fs.Args()[0], stdout, stderr)
 			},
 		}
 	},
@@ -63,7 +63,7 @@ var apparmorRootRemoveCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runApparmorRootRemove(fs.Args()[0], stdout, stderr)
+				return runAppArmorRootRemove(fs.Args()[0], stdout, stderr)
 			},
 		}
 	},
@@ -76,7 +76,7 @@ var apparmorCheckCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				return runApparmorCheck(stdout, stderr)
+				return runAppArmorCheck(stdout, stderr)
 			},
 		}
 	},
@@ -89,7 +89,7 @@ func requireRoot() error {
 	return nil
 }
 
-func runApparmorRootList(stdout, stderr io.Writer) int {
+func runAppArmorRootList(stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -109,7 +109,7 @@ func runApparmorRootList(stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runApparmorRootAdd(path string, stdout, stderr io.Writer) int {
+func runAppArmorRootAdd(path string, stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -139,7 +139,7 @@ func runApparmorRootAdd(path string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runApparmorRootRemove(path string, stdout, stderr io.Writer) int {
+func runAppArmorRootRemove(path string, stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -169,7 +169,7 @@ func runApparmorRootRemove(path string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runApparmorCheck(stdout, stderr io.Writer) int {
+func runAppArmorCheck(stdout, stderr io.Writer) int {
 	if err := requireRoot(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

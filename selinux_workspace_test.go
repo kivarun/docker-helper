@@ -199,9 +199,9 @@ func TestFcontextStem(t *testing.T) {
 	}
 }
 
-// --- Manager: ensureWorkspaceLabel tests ---
+// --- Manager: ensureWorkspaceFcontext tests ---
 
-func TestEnsureWorkspaceLabelNotEnforcing(t *testing.T) {
+func TestEnsureWorkspaceFcontextNotEnforcing(t *testing.T) {
 	mgr := newTestManager(func() (bool, bool, error) { return false, false, nil })
 	created, err := mgr.ensureWorkspaceFcontext("/data")
 	if err != nil {
@@ -212,7 +212,7 @@ func TestEnsureWorkspaceLabelNotEnforcing(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelPermissive(t *testing.T) {
+func TestEnsureWorkspaceFcontextPermissive(t *testing.T) {
 	mgr := newTestManager(func() (bool, bool, error) { return true, false, nil })
 	created, err := mgr.ensureWorkspaceFcontext("/data")
 	if err != nil {
@@ -223,7 +223,7 @@ func TestEnsureWorkspaceLabelPermissive(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelNewRule(t *testing.T) {
+func TestEnsureWorkspaceFcontextNewRule(t *testing.T) {
 	var calls [][]string
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
@@ -260,7 +260,7 @@ func TestEnsureWorkspaceLabelNewRule(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelIdempotent(t *testing.T) {
+func TestEnsureWorkspaceFcontextIdempotent(t *testing.T) {
 	var addCalled bool
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
@@ -289,7 +289,7 @@ func TestEnsureWorkspaceLabelIdempotent(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelConflictingRule(t *testing.T) {
+func TestEnsureWorkspaceFcontextConflictingRule(t *testing.T) {
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && len(args) > 1 && args[1] == "-l" {
@@ -306,7 +306,7 @@ func TestEnsureWorkspaceLabelConflictingRule(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelRestoreconFails(t *testing.T) {
+func TestEnsureWorkspaceFcontextRestoreconFails(t *testing.T) {
 	var deleteCalled bool
 	var restoreconCalls int
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
@@ -344,7 +344,7 @@ func TestEnsureWorkspaceLabelRestoreconFails(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelExistingMappingRunsRestorecon(t *testing.T) {
+func TestEnsureWorkspaceFcontextExistingMappingRunsRestorecon(t *testing.T) {
 	var restoreconCalled bool
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
@@ -373,7 +373,7 @@ func TestEnsureWorkspaceLabelExistingMappingRunsRestorecon(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelExistingMappingVerifyFails(t *testing.T) {
+func TestEnsureWorkspaceFcontextExistingMappingVerifyFails(t *testing.T) {
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" {
@@ -590,10 +590,10 @@ func TestOverlapEscapedPathPlusSibling(t *testing.T) {
 
 // --- Item 2: always check other local rules even when our exact rule exists ---
 
-func TestEnsureWorkspaceLabelExistingRuleWithNestedConflict(t *testing.T) {
+func TestEnsureWorkspaceFcontextExistingRuleWithNestedConflict(t *testing.T) {
 	// existing: /data(/.*)? -> docker_helper_workspace_t
 	// existing: /data/secrets(/.*)? -> operator_type
-	// ensureWorkspaceLabel("/data") MUST fail before restorecon.
+	// ensureWorkspaceFcontext("/data") MUST fail before restorecon.
 	var restoreconCalled bool
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
@@ -617,10 +617,10 @@ func TestEnsureWorkspaceLabelExistingRuleWithNestedConflict(t *testing.T) {
 	}
 }
 
-func TestEnsureWorkspaceLabelExistingRuleWithUnrelatedSibling(t *testing.T) {
+func TestEnsureWorkspaceFcontextExistingRuleWithUnrelatedSibling(t *testing.T) {
 	// existing: /data(/.*)? -> docker_helper_workspace_t
 	// existing: /data2(/.*)? -> other_type
-	// ensureWorkspaceLabel("/data") => idempotent success.
+	// ensureWorkspaceFcontext("/data") => idempotent success.
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
 		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
@@ -640,68 +640,9 @@ func TestEnsureWorkspaceLabelExistingRuleWithUnrelatedSibling(t *testing.T) {
 	}
 }
 
-// --- Manager: verifyWorkspaceLabel tests ---
+// --- Manager: removeWorkspaceFcontext tests ---
 
-func TestVerifyWorkspaceLabelOK(t *testing.T) {
-	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.readPathCon = func(path string) (string, error) {
-		return selinuxWorkspaceType, nil
-	}
-	if err := mgr.verifyWorkspaceLabel("/data"); err != nil {
-		t.Fatalf("expected nil, got: %v", err)
-	}
-}
-
-func TestVerifyWorkspaceLabelWrongType(t *testing.T) {
-	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.readPathCon = func(path string) (string, error) {
-		return "default_t", nil
-	}
-	err := mgr.verifyWorkspaceLabel("/data")
-	if err == nil {
-		t.Fatal("expected error for wrong type")
-	}
-	if !strings.Contains(err.Error(), "default_t") {
-		t.Errorf("expected type in error, got: %v", err)
-	}
-}
-
-func TestVerifyWorkspaceLabelHomeRoot(t *testing.T) {
-	var readCalled bool
-	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.readPathCon = func(path string) (string, error) {
-		readCalled = true
-		return "user_home_t", nil
-	}
-	if err := mgr.verifyWorkspaceLabel("/home/alice"); err != nil {
-		t.Fatalf("expected nil for home root, got: %v", err)
-	}
-	if readCalled {
-		t.Error("should not read path context for home root")
-	}
-}
-
-func TestVerifyWorkspaceLabelNoMutation(t *testing.T) {
-	var runCommandCalled bool
-	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
-		runCommandCalled = true
-		return []byte{}, nil
-	}
-	mgr.readPathCon = func(path string) (string, error) {
-		return selinuxWorkspaceType, nil
-	}
-	if err := mgr.verifyWorkspaceLabel("/data"); err != nil {
-		t.Fatalf("expected nil, got: %v", err)
-	}
-	if runCommandCalled {
-		t.Error("verifyWorkspaceLabel must not call runCommand (no mutation)")
-	}
-}
-
-// --- Manager: rollback tests ---
-
-func TestRollbackWorkspaceLabel(t *testing.T) {
+func TestRemoveWorkspaceFcontext(t *testing.T) {
 	var deleteCalled bool
 	var restoreconCalled bool
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
@@ -969,7 +910,7 @@ func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
 }
 
 func TestSELinuxWorkspaceLockAcquisitionFailure(t *testing.T) {
-	// Lock acquisition failure: ensureWorkspaceLabel returns error.
+	// Lock acquisition failure: ensureWorkspaceFcontext returns error.
 	// No semanage/restorecon mutation occurs after lock acquisition failure.
 	var mutationOccurred bool
 
@@ -1000,24 +941,12 @@ func syntheticResolveRoot(path string) (string, error) {
 	return path, nil
 }
 
-func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
+func TestInitSELinuxNoMACPreparation(t *testing.T) {
+	// System init does not prepare MAC state; that happens at session creation.
 	dir := t.TempDir()
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var ensureCalled bool
-	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
-		if len(args) > 0 && args[0] == "fcontext" && args[1] == "-l" {
-			return []byte{}, nil
-		}
-		return []byte{}, nil
-	}
-	mgr.readPathCon = func(path string) (string, error) {
-		ensureCalled = true
-		return selinuxWorkspaceType, nil
-	}
 
 	var coreCalled bool
 	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
@@ -1030,71 +959,17 @@ func TestInitSELinuxNonHomeRootPreparesLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initSystem failed: %v", err)
 	}
-	// System init no longer prepares MAC; ensureWorkspaceLabel must NOT be called.
-	if ensureCalled {
-		t.Error("ensureWorkspaceLabel must NOT be called during system init")
-	}
 	if !coreCalled {
 		t.Error("core should be called during system init")
 	}
 }
 
-func TestInitSELinuxHomeRootNoSELinuxPrep(t *testing.T) {
+func TestInitSELinuxCoreFailurePropagates(t *testing.T) {
+	// Core failure during init propagates; no MAC state to roll back.
 	dir := t.TempDir()
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
 	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var ensureCalled bool
-	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
-		ensureCalled = true
-		return []byte{}, nil
-	}
-
-	var coreCalled bool
-	err := initSystem("/home/alice", &bytes.Buffer{}, &bytes.Buffer{},
-		syntheticResolveRoot,
-		func(ar string, so, se io.Writer) error {
-			coreCalled = true
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("initSystem failed: %v", err)
-	}
-	if ensureCalled {
-		t.Error("ensureWorkspaceLabel should NOT be called for home root")
-	}
-	if !coreCalled {
-		t.Error("core should be called")
-	}
-}
-
-func TestInitSELinuxCoreFailureNoRollback(t *testing.T) {
-	// Monotonic R2 lifecycle: core failure after successful ensure
-	// MUST NOT delete the newly prepared mapping.
-	dir := t.TempDir()
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var rollbackCalled bool
-	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
-	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
-		if len(args) > 0 && args[0] == "fcontext" {
-			if args[1] == "-l" {
-				return []byte{}, nil
-			}
-			if args[1] == "-d" {
-				rollbackCalled = true
-			}
-		}
-		return []byte{}, nil
-	}
-	mgr.readPathCon = func(path string) (string, error) {
-		return selinuxWorkspaceType, nil
-	}
 
 	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
 		syntheticResolveRoot,
@@ -1104,9 +979,6 @@ func TestInitSELinuxCoreFailureNoRollback(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected error for core failure")
-	}
-	if rollbackCalled {
-		t.Error("rollback MUST NOT be called when core fails (monotonic R2 lifecycle)")
 	}
 }
 
@@ -1138,14 +1010,14 @@ func TestInitSELinuxNilManager(t *testing.T) {
 
 func TestServeDetectLSMError(t *testing.T) {
 	// runServe: detectLSM error => startup fails closed.
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) {
 		return false, false, os.ErrPermission
 	}
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -1645,13 +1517,14 @@ func TestRPMRequiresSemanageProvider(t *testing.T) {
 
 func TestSELinuxRootSlashConflictingFcontext(t *testing.T) {
 	// An operator-local fcontext rule at "/" must conflict with any workspace.
+	// pathStrictlyWithin treats "/" as an ancestor of "/data".
 	mgr := &selinuxFcontextManager{
 		semanagePath:   "/usr/sbin/semanage",
 		restoreconPath: "/usr/sbin/restorecon",
 		runCommand: func(cmd string, args ...string) ([]byte, error) {
 			if args[0] == "fcontext" {
 				// Simulate an existing rule at "/" that maps to a different type.
-				return []byte("/    --    system_u:object_r:default_t:s0\n"), nil
+				return []byte("/(/.*)?  gen_context(system_u:object_r:default_t:s0)"), nil
 			}
 			return nil, nil
 		},
@@ -1671,8 +1544,8 @@ func TestSELinuxRootSlashConflictingFcontext(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureWorkspaceFcontext must fail when operator-local rule at / overlaps /data")
 	}
-	if !strings.Contains(err.Error(), "overlap") {
-		t.Errorf("expected overlap error, got: %v", err)
+	if !strings.Contains(err.Error(), "ancestor") {
+		t.Errorf("expected ancestor error, got: %v", err)
 	}
 }
 

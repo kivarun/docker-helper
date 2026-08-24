@@ -120,16 +120,16 @@ func TestDetectLSMMatrix(t *testing.T) {
 		},
 	}
 
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			apparmorLSMActive = func() (bool, error) {
+			appArmorLSMActive = func() (bool, error) {
 				return tc.apparmorActive, tc.apparmorErr
 			}
 			selinuxEnabled = func() (bool, bool, error) {
@@ -166,12 +166,12 @@ func (e *malformedEnforceError) Error() string {
 // --- requireMACBackend ---
 
 func TestRequireMACBackendAppArmor(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -181,12 +181,12 @@ func TestRequireMACBackendAppArmor(t *testing.T) {
 }
 
 func TestRequireMACBackendSELinux(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -196,12 +196,12 @@ func TestRequireMACBackendSELinux(t *testing.T) {
 }
 
 func TestRequireMACBackendNone(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -215,12 +215,12 @@ func TestRequireMACBackendNone(t *testing.T) {
 }
 
 func TestRequireMACBackendBoth(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -234,12 +234,12 @@ func TestRequireMACBackendBoth(t *testing.T) {
 }
 
 func TestRequireMACBackendPermissive(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -255,17 +255,17 @@ func TestRequireMACBackendPermissive(t *testing.T) {
 // --- requireMACConfinement ---
 
 func TestRequireMACConfinementAppArmorEnforce(t *testing.T) {
-	origAA := apparmorLSMActive
-	origAAConf := apparmorProcessConfinement
+	origAA := appArmorLSMActive
+	origAAConf := appArmorProcessConfinement
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (enforce)", nil
 	}
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
-		apparmorProcessConfinement = origAAConf
+		appArmorLSMActive = origAA
+		appArmorProcessConfinement = origAAConf
 		selinuxEnabled = origSEL
 	}()
 
@@ -275,15 +275,15 @@ func TestRequireMACConfinementAppArmorEnforce(t *testing.T) {
 }
 
 func TestRequireMACConfinementAppArmorUnconfined(t *testing.T) {
-	origAA := apparmorLSMActive
-	origAAConf := apparmorProcessConfinement
+	origAA := appArmorLSMActive
+	origAAConf := appArmorProcessConfinement
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) { return "unconfined", nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) { return "unconfined", nil }
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
-		apparmorProcessConfinement = origAAConf
+		appArmorLSMActive = origAA
+		appArmorProcessConfinement = origAAConf
 		selinuxEnabled = origSEL
 	}()
 
@@ -297,16 +297,16 @@ func TestRequireMACConfinementAppArmorUnconfined(t *testing.T) {
 }
 
 func TestRequireMACConfinementSELinuxCorrect(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
 	origSELCtx := selinuxProcessContext
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	selinuxProcessContext = func() (string, error) {
 		return "system_u:system_r:docker_helper_t:s0", nil
 	}
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 		selinuxProcessContext = origSELCtx
 	}()
@@ -317,16 +317,16 @@ func TestRequireMACConfinementSELinuxCorrect(t *testing.T) {
 }
 
 func TestRequireMACConfinementSELinuxWrongType(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
 	origSELCtx := selinuxProcessContext
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	selinuxProcessContext = func() (string, error) {
 		return "system_u:system_r:unconfined_t:s0", nil
 	}
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 		selinuxProcessContext = origSELCtx
 	}()
@@ -341,12 +341,12 @@ func TestRequireMACConfinementSELinuxWrongType(t *testing.T) {
 }
 
 func TestRequireMACConfinementNone(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -360,12 +360,12 @@ func TestRequireMACConfinementNone(t *testing.T) {
 }
 
 func TestRequireMACConfinementBoth(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -433,18 +433,18 @@ func TestSELinuxConfinementTypeVariants(t *testing.T) {
 		{"malformed", "bad-context", true},
 	}
 
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
 	origSELCtx := selinuxProcessContext
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 		selinuxProcessContext = origSELCtx
 	}()
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			apparmorLSMActive = func() (bool, error) { return false, nil }
+			appArmorLSMActive = func() (bool, error) { return false, nil }
 			selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 			selinuxProcessContext = func() (string, error) { return tc.ctx, nil }
 
@@ -573,16 +573,16 @@ func TestParseSELinuxEnforceValue(t *testing.T) {
 // --- Integration: serve preflight (SELinux path) ---
 
 func TestServeSystemModePreflightSELinuxEnforcing(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
 	origSELCtx := selinuxProcessContext
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	selinuxProcessContext = func() (string, error) {
 		return "system_u:system_r:docker_helper_t:s0", nil
 	}
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 		selinuxProcessContext = origSELCtx
 	}()
@@ -620,12 +620,12 @@ func TestServeSystemModePreflightSELinuxEnforcing(t *testing.T) {
 }
 
 func TestServeSystemModePreflightSELinuxPermissive(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -654,12 +654,12 @@ func TestServeSystemModePreflightSELinuxPermissive(t *testing.T) {
 }
 
 func TestServeSystemModePreflightBothActive(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -688,12 +688,12 @@ func TestServeSystemModePreflightBothActive(t *testing.T) {
 }
 
 func TestServeSystemModePreflightBothAppArmorPermissiveSELinux(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -721,12 +721,12 @@ func TestServeSystemModePreflightBothAppArmorPermissiveSELinux(t *testing.T) {
 // --- Integration: init preflight (SELinux path) ---
 
 func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -762,12 +762,12 @@ func TestInitSystemModePreflightSELinuxEnforcing(t *testing.T) {
 }
 
 func TestInitSystemModePreflightSELinuxPermissive(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return true, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -795,12 +795,12 @@ func TestInitSystemModePreflightSELinuxPermissive(t *testing.T) {
 // --- Integration: user mode must not require MAC ---
 
 func TestServeUserModeNoMACCheck(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -833,12 +833,12 @@ func TestServeUserModeNoMACCheck(t *testing.T) {
 }
 
 func TestInitUserModeNoMACCheck(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -870,17 +870,17 @@ func TestInitUserModeNoMACCheck(t *testing.T) {
 // --- Integration: AppArmor path still works through MAC abstraction ---
 
 func TestServeSystemModePreflightAppArmorViaMAC(t *testing.T) {
-	origAA := apparmorLSMActive
-	origAAConf := apparmorProcessConfinement
+	origAA := appArmorLSMActive
+	origAAConf := appArmorProcessConfinement
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
-	apparmorProcessConfinement = func() (string, error) {
+	appArmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorProcessConfinement = func() (string, error) {
 		return "docker-helper-system (enforce)", nil
 	}
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
-		apparmorProcessConfinement = origAAConf
+		appArmorLSMActive = origAA
+		appArmorProcessConfinement = origAAConf
 		selinuxEnabled = origSEL
 	}()
 
@@ -913,12 +913,12 @@ func TestServeSystemModePreflightAppArmorViaMAC(t *testing.T) {
 }
 
 func TestInitSystemModePreflightAppArmorViaMAC(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 
@@ -947,11 +947,11 @@ func TestInitSystemModePreflightAppArmorViaMAC(t *testing.T) {
 // --- Error propagation ---
 
 func TestDetectLSMAppArmorReadError(t *testing.T) {
-	origAA := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) {
+	origAA := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) {
 		return false, &os.PathError{Op: "read", Path: "/sys/module/apparmor/parameters/enabled", Err: os.ErrPermission}
 	}
-	defer func() { apparmorLSMActive = origAA }()
+	defer func() { appArmorLSMActive = origAA }()
 
 	_, err := detectLSM()
 	if err == nil {
@@ -963,14 +963,14 @@ func TestDetectLSMAppArmorReadError(t *testing.T) {
 }
 
 func TestDetectLSMSELinuxReadError(t *testing.T) {
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	selinuxEnabled = func() (bool, bool, error) {
 		return false, false, &os.PathError{Op: "read", Path: "/sys/fs/selinux/enforce", Err: os.ErrPermission}
 	}
 	defer func() {
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 		selinuxEnabled = origSEL
 	}()
 

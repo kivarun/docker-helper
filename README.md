@@ -1013,12 +1013,8 @@ On an enforcing SELinux system, the systemd service runs in
 
 - Explicitly managed non-home workspace roots (e.g., `/opt/docker-helper-workspaces`)
   use the dedicated `docker_helper_workspace_t` SELinux type.
-  `config allowed-root add` creates a persistent `semanage fcontext` rule and
-  applies `restorecon` recursively. This mapping survives reboot and `restorecon`.
-
-- `docker-helper config allowed-root add /opt` is rejected in SELinux mode because
-  exact `/opt` is too broad as a recursive managed relabel boundary. Use a dedicated
-  child such as `/opt/docker-helper-workspaces` instead.
+  MAC preparation occurs at session creation time for the concrete workspace,
+  not when the root is added.
 
 - Previously managed roots may retain the `docker_helper_workspace_t` label
   after an authorization change, because existing sessions can still reference
@@ -1173,14 +1169,9 @@ The separation is intentional:
 
 - `principal create` and `principal allowed-root add` define per-principal
   workspace policy;
-- `config allowed-root add` prepares the MAC backend and updates the
-  system-wide authorization ceiling;
+- `config allowed-root add` updates the system-wide authorization ceiling only;
 - `apparmor root add` is an advanced backend-specific operation;
 - `credential create` produces a launcher token for session creation.
-
-The common `config allowed-root add` workflow handles both authorization and MAC
-preparation. Advanced operators may use `apparmor root add` directly when
-needed.
 
 If the operator does not want the default home root to remain usable,
 they may remove it:

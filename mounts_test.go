@@ -541,12 +541,12 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 
 	// Mock SELinux enforcing
 	origSEL := selinuxEnabled
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	t.Cleanup(func() {
 		selinuxEnabled = origSEL
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 	})
 
 	reqBody := map[string]any{"image": "alpine:latest"}
@@ -592,12 +592,12 @@ func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 
 	// Mock AppArmor active, SELinux inactive
 	origSEL := selinuxEnabled
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
-	apparmorLSMActive = func() (bool, error) { return true, nil }
+	appArmorLSMActive = func() (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		selinuxEnabled = origSEL
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 	})
 
 	reqBody := map[string]any{"image": "alpine:latest"}
@@ -647,12 +647,12 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 
 	// Mock LSM detection error
 	origSEL := selinuxEnabled
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	selinuxEnabled = func() (bool, bool, error) { return false, false, fmt.Errorf("test error") }
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	t.Cleanup(func() {
 		selinuxEnabled = origSEL
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 	})
 
 	reqBody := map[string]any{"image": "alpine:latest"}
@@ -701,12 +701,12 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 
 	// Mock: no MAC backend active (LSMNone)
 	origSEL := selinuxEnabled
-	origAA := apparmorLSMActive
+	origAA := appArmorLSMActive
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
-	apparmorLSMActive = func() (bool, error) { return false, nil }
+	appArmorLSMActive = func() (bool, error) { return false, nil }
 	t.Cleanup(func() {
 		selinuxEnabled = origSEL
-		apparmorLSMActive = origAA
+		appArmorLSMActive = origAA
 	})
 
 	reqBody := map[string]any{"image": "alpine:latest"}

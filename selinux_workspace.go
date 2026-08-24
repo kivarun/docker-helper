@@ -30,7 +30,7 @@ func isHomeRoot(canonical string) bool {
 }
 
 // selinuxFcontextManager manages persistent SELinux workspace labeling for
-// non-home system allowed_roots. It uses semanage fcontext + restorecon to
+// non-home workspace roots. It uses semanage fcontext + restorecon to
 // create persistent mappings that survive reboot and restorecon.
 //
 // Test seams: runCommand, readPathCon, selinuxActive, and acquireLock are
@@ -47,9 +47,9 @@ type selinuxFcontextManager struct {
 	acquireLock func() (func() error, error)
 }
 
-// selinuxEnsureWorkspaceLabel is the injectable seam for testing.
-// It wraps the production ensureWorkspaceLabel call.
-var selinuxEnsureWorkspaceLabel = func(root string) (bool, error) {
+// selinuxEnsureWorkspaceFcontext is the injectable seam for testing.
+// It wraps the production ensureWorkspaceFcontext call.
+var selinuxEnsureWorkspaceFcontext = func(root string) (bool, error) {
 	mgr := newSELinuxFcontextManager()
 	return mgr.ensureWorkspaceFcontext(root)
 }
@@ -203,7 +203,7 @@ func unescapeFcontextPath(s string) (string, bool) {
 	return b.String(), true
 }
 
-// ensureWorkspaceLabel ensures that the canonical root has a persistent
+// ensureWorkspaceFcontext ensures that the canonical root has a persistent
 // SELinux mapping to docker_helper_workspace_t. It:
 //  1. Acquires the global SELinux workspace management lock;
 //  2. Checks for existing local fcontext rules;
@@ -428,48 +428,13 @@ func (m *selinuxFcontextManager) verifyActualType(root string) error {
 	return nil
 }
 
-// verifyWorkspaceLabel checks that the canonical root has the expected
-// SELinux type. It does NOT mutate any state. Used during daemon startup
-// and reload to fail closed if a manually edited config bypasses the
-// managed-label invariant.
-func (m *selinuxFcontextManager) verifyWorkspaceLabel(root string) error {
-	active, enforcing, err := m.selinuxActive()
-	if err != nil {
-		return fmt.Errorf("cannot determine SELinux status: %w", err)
-	}
-	if !active || !enforcing {
-		return nil
-	}
-
-	if isHomeRoot(root) {
-		return nil
-	}
-
-	actualType, err := m.readPathCon(root)
-	if err != nil {
-		return fmt.Errorf(
-			"cannot read SELinux type for allowed root %s: %v; "+
-				"ensure the root is prepared via docker-helper init or docker-helper config allowed-root add PATH",
-			root, err,
-		)
-	}
-	if actualType != selinuxWorkspaceType {
-		return fmt.Errorf(
-			"allowed root %s has SELinux type %s, expected %s; "+
-				"prepare the root via docker-helper init or docker-helper config allowed-root add PATH",
-			root, actualType, selinuxWorkspaceType,
-		)
-	}
-	return nil
-}
-
-// rollbackWorkspaceLabel removes a newly-created fcontext rule and runs
+// removeWorkspaceFcontext removes a newly-created fcontext rule and runs
 // restorecon to revert labels. Only called internally when the manager
 // itself cannot complete its transition before returning success.
 //
 // Outer callers (init, config allowed-root add) MUST NOT call this on a
 // mapping that was previously returned as successful. Once
-// ensureWorkspaceLabel returns success, the mapping is managed durable state.
+// ensureWorkspaceFcontext returns success, the mapping is managed durable state.
 func (m *selinuxFcontextManager) removeWorkspaceFcontext(root string) error {
 	pattern := fcontextPattern(root)
 

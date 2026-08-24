@@ -1817,9 +1817,9 @@ type selinuxSeam struct {
 	boundaryErr        error    // returned by listCoveringBoundaries
 	actualTypeErr      error    // returned by verifyActualType
 	restoreconErr      error    // returned by restoreconRecursive
-	ensureCreated      bool     // newlyCreated from ensureWorkspaceLabel
-	ensureErr          error    // error from ensureWorkspaceLabel
-	rollbackErr        error    // error from rollbackWorkspaceLabel
+	ensureCreated      bool     // newlyCreated from ensureWorkspaceFcontext
+	ensureErr          error    // error from ensureWorkspaceFcontext
+	rollbackErr        error    // error from removeWorkspaceFcontext
 }
 
 func (s *selinuxSeam) listCoveringFcontexts(workspace string) ([]string, error) {

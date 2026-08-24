@@ -61,13 +61,13 @@ func setupAppArmorTest(t *testing.T) (dir string, mgr *appArmorProfileManager, c
 	return dir, mgr, captured
 }
 
-// mockApparmorActive sets apparmorLSMActive to return (active, nil) and
+// mockAppArmorActive sets appArmorLSMActive to return (active, nil) and
 // returns a cleanup function to restore the original.
-func mockApparmorActive(t *testing.T, active bool) {
+func mockAppArmorActive(t *testing.T, active bool) {
 	t.Helper()
-	saved := apparmorLSMActive
-	apparmorLSMActive = func() (bool, error) { return active, nil }
-	t.Cleanup(func() { apparmorLSMActive = saved })
+	saved := appArmorLSMActive
+	appArmorLSMActive = func() (bool, error) { return active, nil }
+	t.Cleanup(func() { appArmorLSMActive = saved })
 }
 
 // mockSELinuxInactive disables SELinux detection for tests that target
@@ -150,7 +150,7 @@ func TestAppArmorRequiresRoot(t *testing.T) {
 // --- Absolute/existing-directory validation ---
 
 func TestAppArmorRootAddRelativePath(t *testing.T) {
-	mockApparmorActive(t, true)
+	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -166,7 +166,7 @@ func TestAppArmorRootAddRelativePath(t *testing.T) {
 }
 
 func TestAppArmorRootAddNonExistentPath(t *testing.T) {
-	mockApparmorActive(t, true)
+	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -182,7 +182,7 @@ func TestAppArmorRootAddNonExistentPath(t *testing.T) {
 }
 
 func TestAppArmorRootAddFileNotDirectory(t *testing.T) {
-	mockApparmorActive(t, true)
+	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -277,7 +277,7 @@ func TestAppArmorRootAddGlobRejected(t *testing.T) {
 }
 
 func TestAppArmorRootAddCLIRejectsGlob(t *testing.T) {
-	mockApparmorActive(t, true)
+	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
@@ -1676,7 +1676,7 @@ func TestFragmentRoundTripSpecialChars(t *testing.T) {
 // --- CLI exit codes ---
 
 func TestAppArmorCLIExitCodes(t *testing.T) {
-	mockApparmorActive(t, true)
+	mockAppArmorActive(t, true)
 	saved := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = saved }()
