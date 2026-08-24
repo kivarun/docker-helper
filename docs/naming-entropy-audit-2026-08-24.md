@@ -10,396 +10,437 @@ same concept.
 
 ## P1 — terminology obscures architecture/security semantics
 
-### 1. `Root` used for three different concepts
+### 1. `workspace_root` / `Root` / path-safety conflation
 
-**Current names:** `allowed_root`, `AllowedRoots`, `workspace_root`,
-`workspaceRoot`, `workspace_root.go`, `workspaceRootForAdd`, `workspaceRootPolicy`,
-`workspaceRootInvariants`, `workspaceRootDir`, `testAllowedRootDir`,
-`testWorkspaceDir`, `principal_allowed_roots`, `addPrincipalAllowedRoot`,
-`removePrincipalAllowedRoot`
+**Current names:** `workspace_root.go`, `workspace_root_test.go`,
+`workspace_root_invariant_test.go`, `canonicalizeWorkspaceRootForAdd`,
+`validateWorkspaceRootPolicy`, `isForbiddenWorkspaceRoot`,
+`validateRootPathForAdd`, `validateRootLexical`, `validateRootPathForRemove`
 
-**Actual domain concepts:**
-- global allowed root = authorization ceiling
-- principal allowed root = authorization narrowing
-- workspace = concrete session capability path
+**Production call-site inventory:**
 
-**Why ambiguous:** The word "root" conflates authorization ceilings with
-concrete workspace paths. `workspace_root` in `workspace_root.go` refers to
-the authorization ceiling, not the session workspace. The filename
-`workspace_root.go` suggests it owns workspace semantics, but it only owns
-authorization-root policy validation. The function
-`canonicalizeWorkspaceRootForAdd` operates on an authorization root, not a
-workspace. `testAllowedRootDir` and `testWorkspaceDir` create different
-things but both use "workspace" in the name.
+`canonicalizeWorkspaceRootForAdd` (generic path canonicalization + safety):
+- `config.go:535` — allowed_roots config field (authorization ceiling)
+- `config.go:791` — init allowed_root (authorization ceiling)
+- `config.go:1108` — resolveAllowedRoot (authorization ceiling)
+- `config_cli.go:350` — config allowed-root add (authorization ceiling)
+- `principal.go:75` — principal allowed root add (authorization narrowing)
+- `principal.go:139` — principal home directory (authorization narrowing)
+- `apparmor.go:121` — AppArmor managed root add (MAC boundary, NOT authorization)
+
+`validateWorkspaceRootPolicy` (pure policy check, no filesystem):
+- `config.go:673` — validateAllowedRootValue (authorization ceiling)
+- `apparmor.go:594` — check() managed root diagnosis (MAC boundary, NOT authorization)
+
+`isForbiddenWorkspaceRoot` (forbidden-tree check):
+- `workspace_root.go:133` — called by canonicalizeWorkspaceRootForAdd
+- `workspace_root.go:150` — called by validateWorkspaceRootPolicy
+- `init_test.go` — test-only
+
+`validateRootPathForAdd` (AppArmor-specific, wraps canonicalizeWorkspaceRootForAdd):
+- `apparmor.go:486` — addManagedRoot (MAC boundary)
+
+`validateRootLexical` (AppArmor-specific fragment format):
+- `apparmor.go:127,146,153,164,241` — AppArmor managed fragment operations (MAC boundary)
+
+**Actual domain concepts (four, not three):**
+
+1. Generic host path safety/canonicalization — tilde expansion, absolute path,
+   existence, directory check, symlink resolution, forbidden-tree rejection
+2. Global allowed root — authorization ceiling
+3. Principal allowed root — authorization narrowing
+4. AppArmor managed profile boundary — MAC boundary/resource
+
+**Why ambiguous:** The name `canonicalizeWorkspaceRootForAdd` suggests it
+operates on "workspace roots" (authorization), but it is genuinely shared
+across four concerns. The AppArmor managed root path is a MAC boundary, not
+an authorization root, yet it uses the same canonicalization function.
+Similarly, `validateWorkspaceRootPolicy` is used for both authorization
+roots and MAC boundaries. The word "workspace root" in these function names
+conflates generic path admissibility with authorization policy.
+
+The filename `workspace_root.go` suggests the file owns "workspace root"
+semantics, but it actually owns generic host path safety. The file has no
+authorization-specific logic — it only checks forbidden trees and wide
+namespaces.
+
+**Public CLI vocabulary (separate concern, higher migration risk):**
+
+`docker-helper apparmor root list|add|remove` — these "root" objects are
+AppArmor managed MAC boundaries, not authorization roots. The public CLI
+uses "workspace roots" in the Summary strings. This is a public contract
+that operators see. Renaming it changes the CLI help and any scripts that
+parse it.
 
 **Proposed canonical terms:**
-- `allowed_root` / `AllowedRoot` — keep for authorization ceiling (config
-  field, DB column, CLI subcommand)
-- `workspace_root.go` -> `allowed_root_policy.go` — the file owns
-  authorization-root policy, not workspace semantics
-- `canonicalizeWorkspaceRootForAdd` -> `canonicalizeAllowedRootForAdd`
-- `validateWorkspaceRootPolicy` -> `validateAllowedRootPolicy`
-- `isForbiddenWorkspaceRoot` -> `isForbiddenAllowedRoot`
-- `testAllowedRootDir` -> `testAllowedRootDir` (keep, it creates an allowed
-  root test directory)
-- `testWorkspaceDir` -> `testWorkspaceDir` (keep, it creates a workspace
-  directory under an allowed root)
+
+Generic path safety (neutral, shared):
+- `workspace_root.go` -> `path_safety.go`
+- `workspace_root_test.go` -> `path_safety_test.go`
+- `workspace_root_invariant_test.go` -> `path_safety_invariant_test.go`
+- `canonicalizeWorkspaceRootForAdd` -> `canonicalizePathForAdd`
+- `validateWorkspaceRootPolicy` -> `validatePathPolicy`
+- `isForbiddenWorkspaceRoot` -> `isForbiddenPath`
+
+Authorization-specific callers keep their domain-specific names:
+- `validateAllowedRootValue` (config.go) — keep
+- `resolveAllowedRoot` (config.go) — keep
+- `validateRootPathForAdd` (apparmor.go) — keep (AppArmor-specific)
+- `validateRootLexical` (apparmor.go) — keep (AppArmor-specific)
+
+Public CLI contract (classified separately, higher risk):
+- `docker-helper apparmor root` — rename to `docker-helper apparmor boundary`
+- CLI Summary strings — update to "MAC boundaries" / "profile boundaries"
+- Fragment header comment — update "workspace roots" to "MAC boundaries"
 
 **Affected production files:** `workspace_root.go`, `config.go`, `config_cli.go`,
-`principal.go`, `apparmor.go`
+`principal.go`, `apparmor.go`, `apparmor_cli.go`
 
 **Affected tests/docs:** `workspace_root_test.go`, `workspace_root_invariant_test.go`,
-`test_helpers_test.go`, `run_mount_policy_test.go`, `multi_root_regression_test.go`,
-many others
+`test_helpers_test.go`, `init_test.go`, `apparmor_test.go`, `apparmor_lsm_test.go`,
+`packaging_test.go`, many others
 
-**Behavioral risk:** Low. Pure rename. The concepts are already distinct in
-behavior; only the names are misleading.
+**Behavioral risk:**
+- Internal Go symbol rename: Low. Pure rename.
+- Public CLI contract rename: Medium. Changes CLI help, operator scripts.
 
-**Recommended batch:** B1 (allowed-root naming)
+**Recommended batch:** B1 (generic path safety), B1c (public CLI contract —
+separate sub-batch)
 
-### 2. `Preflight` used for two different concerns
+---
+
+### 2. `Preflight` — temporal word reused across domains
 
 **Current names:** `preflight()` on `appArmorProfileManager`,
 `TestServeSystemModePreflight*`, `TestInitSystemModePreflight*`,
 `TestCAPreflight*`, `ca_config_preflight_test.go`,
-`setupCAConfigPreflightTest`, `validateCAConfig`
+`setupCAConfigPreflightTest`
 
-**Actual domain concepts:**
-- AppArmor preflight = verify parser/profile availability before mutation
-- CA preflight = validate CA file before config write
-- serve/init preflight = verify MAC backend confinement before startup
+**What each name actually communicates:**
 
-**Why ambiguous:** "Preflight" is used for three structurally different
-checks: (1) tool availability before a mutation, (2) data validation before
-a config write, (3) confinement verification before daemon startup. They
-happen to all run "before" something, but the semantics are different.
+`appArmorProfileManager.preflight()`:
+- Checks parser availability AND main profile existence/permissions
+- Used before add/remove/check operations
+- Not a "tool check" — also validates the profile itself
+- This is a prerequisite validation for the profile manager
 
-**Proposed canonical terms:**
-- `appArmorProfileManager.preflight()` -> `appArmorProfileManager.checkTools()`
-  or keep as `preflight()` but document it as "tool availability check"
-- CA preflight -> `validateCAConfig` (already exists, this is the canonical name)
-- serve/init preflight -> `requireMACConfinement` (already exists in `lsm.go`)
+CA `*Preflight*` tests:
+- Prove that CA validation occurs before config mutation
+- The word "preflight" here describes the ordering guarantee:
+  validation-before-side-effects
+- The canonical function is `validateCAConfig` in production code
 
-**Affected production files:** `apparmor.go`, `ca.go`, `lsm.go`, `config.go`
+Serve/init `*Preflight*` tests:
+- Prove that MAC confinement check occurs before loadConfig
+- The word "preflight" describes the ordering guarantee:
+  confinement-before-configuration
+- The canonical function is `requireMACConfinement` in production code
 
-**Affected tests:** `apparmor_test.go`, `apparmor_lsm_test.go`,
-`ca_config_preflight_test.go`, `lsm_test.go`
-
-**Behavioral risk:** Low. The AppArmor `preflight()` is a narrow internal
-method. The CA and serve/init preflight tests already describe the actual
-behavior in their names.
-
-**Recommended batch:** B2 (preflight disambiguation)
-
-### 3. `Manager` used for both lifecycle owners and mechanics
-
-**Current names:** `appArmorProfileManager`, `selinuxFcontextManager`
-
-**Actual domain concepts:**
-- `appArmorProfileManager` = native AppArmor profile/managed-fragment
-  mechanics (no lifecycle decisions)
-- `selinuxFcontextManager` = native SELinux fcontext mechanics (no lifecycle
-  decisions)
-
-**Why ambiguous:** The MAC naming grammar says `workspaceMACDriver` = backend
-mechanics only; no lifecycle decisions. The `*Manager` types are the
-native mechanics layer, not lifecycle owners. The word "Manager" suggests
-lifecycle/ownership authority. The `sessionMACCoordinator` is the actual
-lifecycle owner.
+**Verdict:** The reuse of "preflight" across these domains is not a naming
+collision. The word "preflight" is a temporal descriptor meaning
+"validation before side effects." Each domain uses it to describe the same
+temporal concept. The production functions have distinct names
+(`preflight`, `validateCAConfig`, `requireMACConfinement`). The test names
+describe what they prove (ordering), not the production function they call.
 
 **Proposed canonical terms:**
-- `appArmorProfileManager` -> `appArmorProfileManager` (keep — the word
-  "Profile" makes it clear this is profile mechanics, not lifecycle)
-- `selinuxFcontextManager` -> `selinuxFcontextManager` (keep — the word
-  "fcontext" makes it clear this is fcontext mechanics, not lifecycle)
+- `appArmorProfileManager.preflight()` -> `appArmorProfileManager.checkPrerequisites()`
+  (more accurate than `checkTools()` — it checks both parser AND profile)
+- CA test names: keep `*Preflight*` (they describe ordering guarantees)
+- Serve/init test names: keep `*Preflight*` (they describe ordering guarantees)
 
-**Verdict:** These names are actually fine because the domain-specific
-qualifier ("Profile", "fcontext") makes the scope clear. The MAC naming
-grammar already records them. No change needed.
+**Affected production files:** `apparmor.go`
 
-**Classification downgrade:** P1 -> P3 (polish only, names are acceptable)
+**Affected tests:** `apparmor_test.go`
+
+**Behavioral risk:** Low. The `preflight()` method is internal to
+`appArmorProfileManager`.
+
+**Classification:** P2 (internal symbol rename only; test names are correct)
+
+---
 
 ## P2 — meaningful project-wide inconsistency
 
-### 4. `Request`/`Response` types split across two files
+### 3. API DTO ownership — shared types not in `api_contract.go`
 
-**Current names:**
-- `api_contract.go`: `pullRequest`, `buildRequest`, `runRequest`,
-  `mountRequest`, `pullResponse`, `operationCreatedResponse`,
-  `operationStatusResponse`, `principalSummary`, `listPrincipalsResponse`,
-  `rotateAdminTokenResponse`, `operationLogsResponse`, `operationCancelResponse`
-- `sessions.go`: `sessionRequest`, `sessionJSON`, `createSessionResponse`,
-  `listSessionsResponse`, `sessionAuthContext`
-- `principal_handler.go`: `createPrincipalRequest`, `setPrincipalRequest`,
-  `allowedRootRequest`, `principalResponse`, `principalChangedResponse`,
-  `createCredentialRequest`, `credentialJSON`, `createCredentialResponse`,
-  `listCredentialsResponse`, `revokeCredentialResponse`
-- `response.go`: `response` (generic error/OK response)
+**Canonical rule:** `api_contract.go` owns DTOs shared by server handlers
+and `apiClient`. It does NOT need to own every handler-local request/response
+struct.
 
-**Actual domain concept:** HTTP request/response types for the API contract.
+**Inventory by actual production use-site:**
 
-**Why ambiguous:** Request/response types are split across three files with
-no consistent pattern. `api_contract.go` is documented as "Shared API
-request/response types" but `sessions.go` and `principal_handler.go` define
-their own request/response types. The generic `response` type in
-`response.go` is used for error responses and health checks, while
-`pullResponse` in `api_contract.go` is a success response with the same
-shape.
+`sessionRequest` (sessions.go:12):
+- Server: `sessions.go:131` — handleCreateSession
+- Client: `client.go:142` — apiClient.createSession
+- **Shared** -> candidate for `api_contract.go`
+
+`sessionJSON` (sessions.go:16):
+- Server: `sessions.go:35,254-260` — sessionToJSON, listSessionsResponse
+- Client: `client.go` — not directly used (client uses listSessionsResponse)
+- Tests: `client_test.go` — used in test servers
+- **Shared** (used by server and test servers) -> candidate for `api_contract.go`
+
+`createSessionResponse` (sessions.go:24):
+- Server: `sessions.go:207` — handleCreateSession
+- Client: `client.go:158` — apiClient.createSession
+- **Shared** -> candidate for `api_contract.go`
+
+`listSessionsResponse` (sessions.go:30):
+- Server: `sessions.go:254` — handleListSessions
+- Client: `client.go:133` — apiClient.listSessions
+- **Shared** -> candidate for `api_contract.go`
+
+`sessionAuthContext` (sessions.go:50):
+- Server: `sessions.go` — authenticateSessionRequest
+- Client: NOT used
+- **NOT shared** -> stays with session authentication
+
+Principal handler types (principal_handler.go):
+- `createPrincipalRequest`, `setPrincipalRequest`, `allowedRootRequest`:
+  Used by server handlers AND `apiClient` methods in `client.go`
+  -> **Shared** -> candidates for `api_contract.go`
+- `principalResponse`, `principalChangedResponse`:
+  Used by server handlers AND `apiClient` methods AND `principal_cli.go`
+  -> **Shared** -> candidates for `api_contract.go`
+- `createCredentialRequest`, `credentialJSON`, `createCredentialResponse`,
+  `listCredentialsResponse`, `revokeCredentialResponse`:
+  Used by server handlers AND `apiClient` methods in `client.go`
+  -> **Shared** -> candidates for `api_contract.go`
+
+**Real inconsistency: registry DTO split**
+
+`registryLoginRequest` (registry.go:13):
+- Server: `registry.go:27` — handleRegistryLogin
+- Client: `client.go:183` — apiClient.registryLogin
+- **Shared** but lives in `registry.go`, not `api_contract.go`
+
+`registryLoginResponse` (client.go:177):
+- Client: `client.go:203` — apiClient.registryLogin
+- Server: NOT used (server uses generic `response` envelope)
+- **Client-only** — this is a separate duplicate of the generic response shape
+
+This is a real inconsistency: `registryLoginRequest` is shared but not in
+`api_contract.go`, and `registryLoginResponse` is client-only while the
+server uses the generic `response` envelope.
+
+**Generic `response` type (response.go:42):**
+
+Production call-sites:
+- `response.go:73` — writeError (error responses)
+- `response.go:100` — writeUnauthorizedAdmin (401)
+- `response.go:109` — writeUnauthorizedSession (401)
+- `response.go:186` — handleHealth (200)
+- `reload.go:145` — handleReload success (200)
+
+Test call-sites (decode error responses):
+- `build_test.go:316,602` — decode error response
+- `mounts_test.go:260,851,902,949` — decode error response
+- `admin_auth_test.go:127` — decode error response
+
+The `response` type is the generic server-side response envelope. It is used
+for error responses, unauthorized responses, and simple success responses.
+The name `response` is narrow and unambiguous within the package. It is not
+shared with the client (client uses specific response types). No rename needed.
 
 **Proposed canonical terms:**
-- Keep `api_contract.go` as the canonical location for shared types
-- Move `sessionRequest`, `sessionJSON`, `createSessionResponse`,
-  `listSessionsResponse` from `sessions.go` to `api_contract.go`
-- Move `createPrincipalRequest`, `setPrincipalRequest`, `allowedRootRequest`,
-  `principalResponse`, `principalChangedResponse`, `createCredentialRequest`,
-  `credentialJSON`, `createCredentialResponse`, `listCredentialsResponse`,
-  `revokeCredentialResponse` from `principal_handler.go` to `api_contract.go`
-- Rename generic `response` in `response.go` to `errorResponse` or
-  `healthResponse` to distinguish from `pullResponse`
+- Move shared session types from `sessions.go` to `api_contract.go`:
+  `sessionRequest`, `sessionJSON`, `createSessionResponse`, `listSessionsResponse`
+- Move shared principal types from `principal_handler.go` to `api_contract.go`:
+  `createPrincipalRequest`, `setPrincipalRequest`, `allowedRootRequest`,
+  `principalResponse`, `principalChangedResponse`,
+  `createCredentialRequest`, `credentialJSON`, `createCredentialResponse`,
+  `listCredentialsResponse`, `revokeCredentialResponse`
+- Move `registryLoginRequest` from `registry.go` to `api_contract.go`
+- Keep `sessionAuthContext` in `sessions.go` (not shared)
+- Keep `registryLoginResponse` in `client.go` (client-only)
+- Keep generic `response` in `response.go` (server-only envelope)
 
 **Affected production files:** `api_contract.go`, `sessions.go`,
-`principal_handler.go`, `response.go`
+`principal_handler.go`, `registry.go`, `client.go`
 
 **Affected tests:** None directly (tests use these types transparently)
 
 **Behavioral risk:** Low. Pure file reorganization.
 
-**Recommended batch:** B3 (API contract consolidation)
+**Recommended batch:** B2 (API DTO consolidation)
 
-### 5. `Fn` seam naming vs `Deps` seam naming vs `Hooks` seam naming
+---
 
-**Current names:**
-- `App.PinMountFn`, `App.StageBuildContextFn`, `App.RotateRenameFn` —
-  `*Fn` suffix on `App` fields
-- `reloadDeps` — `Deps` suffix on struct type
-- `stagingHooks` — `Hooks` suffix on struct type
-- `stagingSyscall` — `Syscall` suffix on struct type
-- `mountSeam` — `Seam` suffix on interface type
-- `selinuxSeam` — `Seam` suffix on test struct type
+## Validated vocabulary — keep as-is
 
-**Actual domain concept:** Test injection points for production dependencies.
+The following were investigated and found to be acceptable:
 
-**Why ambiguous:** The same concept (injectable production dependency) has
-five different naming conventions. `*Fn` is used for function-type seams on
-`App`. `*Deps` is used for struct-type dependency injection. `*Hooks` is
-used for callback injection points. `*Syscall` is used for syscall
-abstraction. `*Seam` is used for both interface types and test mock types.
+- `appArmorProfileManager` / `selinuxFcontextManager` — the domain-specific
+  qualifier ("Profile", "fcontext") makes the scope clear. The MAC naming
+  grammar records them as native mechanics types, not lifecycle owners.
 
-**Proposed canonical terms:**
-- `*Fn` on `App` fields -> keep (standard Go convention for function fields)
-- `reloadDeps` -> `reloadDeps` (keep, `Deps` is clear for struct injection)
-- `stagingHooks` -> `stagingHooks` (keep, `Hooks` is clear for callbacks)
-- `stagingSyscall` -> `stagingSyscall` (keep, `Syscall` is clear)
-- `mountSeam` -> `mountSeam` (keep, `Seam` is clear for interface types)
-- `selinuxSeam` -> `selinuxSeam` (keep, `Seam` is clear for test mocks)
+- `*Fn` suffix on `App` fields (`PinMountFn`, `StageBuildContextFn`,
+  `RotateRenameFn`) — standard Go convention for function fields.
 
-**Verdict:** The naming is actually consistent by convention:
-- `*Fn` = function field on `App`
-- `*Deps` = struct holding multiple production dependencies
-- `*Hooks` = callback injection points
-- `*Syscall` = syscall abstraction
-- `*Seam` = interface or test mock
+- `reloadDeps` — `Deps` suffix is clear for struct-type dependency injection.
 
-The conventions are different but each is appropriate for its use case.
-No change needed.
+- `stagingHooks` — `Hooks` suffix is clear for callback injection points.
 
-**Classification downgrade:** P2 -> P3 (polish only, conventions are acceptable)
+- `stagingSyscall` — `Syscall` suffix is clear for syscall abstraction.
 
-### 6. `workspace_root.go` filename vs actual concern
+- `mountSeam` — `Seam` suffix is clear for syscall seam interface.
 
-**Current names:** `workspace_root.go`, `workspace_root_test.go`,
-`workspace_root_invariant_test.go`
+- `selinuxSeam` — `Seam` suffix is clear for test mock.
 
-**Actual domain concept:** Authorization-root policy validation.
+- `sessionJSON` / `credentialJSON` — distinguish JSON-serializable forms
+  from internal types.
 
-**Why ambiguous:** The filename suggests the file owns "workspace root"
-semantics, but it only owns authorization-root policy. The workspace root
-is an authorization ceiling, not a workspace. The file should be named
-`allowed_root_policy.go` to match its actual concern.
+- `stagedBuildContext.Cleanup()` / `pinnedMount.Cleanup()` — consistent
+  idempotent cleanup pattern.
 
-**Proposed canonical terms:**
-- `workspace_root.go` -> `allowed_root_policy.go`
-- `workspace_root_test.go` -> `allowed_root_policy_test.go`
-- `workspace_root_invariant_test.go` -> `allowed_root_invariant_test.go`
+- `testWorkspaceMACDriver` / `failingWorkspaceMACDriver` / `selinuxTestDriver` —
+  each name describes its test role.
 
-**Affected production files:** `workspace_root.go`
+- `newTestManager` — consistent with the type it creates
+  (`selinuxFcontextManager`).
 
-**Affected tests:** `workspace_root_test.go`, `workspace_root_invariant_test.go`
+- Acronym casing in identifiers (`selinuxFcontextManager`, `apparmor.go`) —
+  Go naming conventions take precedence over documentation casing.
 
-**Behavioral risk:** None. Pure file rename.
+- `response` (response.go) — narrow, unambiguous within the package.
+  Server-side generic response envelope. Not shared with client.
 
-**Recommended batch:** B1 (allowed-root naming)
+---
 
-### 7. `response` type shadowing in `response.go`
+## Second-pass vocabulary boundaries
 
-**Current names:** `response` (generic OK/error response in `response.go`),
-`pullResponse` (in `api_contract.go`)
+### allowed root / workspace / path / root / MAC boundary
 
-**Actual domain concept:** HTTP response body types.
+- `allowed_root` / `AllowedRoots` — authorization ceiling, correct
+- `workspace` — concrete session capability path, correct
+- `path` — generic filesystem path, correct
+- `root` in `validateRootPathForAdd`, `validateRootLexical` — AppArmor
+  managed MAC boundary, correct within AppArmor context
+- `root` in `docker-helper apparmor root` — public CLI for MAC boundary,
+  classified in Finding 1 as public-contract rename
 
-**Why ambiguous:** The generic `response` type has the same shape as
-`pullResponse` but is used for error responses and health checks. The name
-`response` is too generic and shadows the concept of "response" in general
-code. `pullResponse` is a specific success response.
+### principal / user / username
 
-**Proposed canonical terms:**
-- `response` -> `genericResponse` or keep as `response` with a clearer
-  comment distinguishing it from endpoint-specific response types
+- `Principal` — domain type, correct
+- `username` — field in Principal, correct
+- No conflation found.
 
-**Affected production files:** `response.go`
+### credential / token / credential ID / credential name
 
-**Affected tests:** None directly
+- `Credential` — domain type, correct
+- `CredentialAuthResult` — auth result, correct
+- `credentialJSON` — JSON-serializable form, correct
+- `token` — admin token vs credential token, distinct concepts
+- No conflation found.
 
-**Behavioral risk:** None.
+### operation / job / task
 
-**Recommended batch:** B3 (API contract consolidation)
+- `operation` — domain term, used consistently
+- No "job" or "task" found in production code.
 
-### 8. `sessionJSON` vs `sessionRequest` naming
+### context / workspace / workdir / mount source
 
-**Current names:** `sessionJSON` (serializable session representation),
-`sessionRequest` (create session request body)
+- `workspace` — session capability path, correct
+- `workdir` — container working directory, correct
+- `context` — build context path, correct
+- `mount source` — bind mount source, correct
+- No conflation found.
 
-**Actual domain concept:** Session serialization for API.
+### config singular/plural terminology
 
-**Why ambiguous:** `sessionJSON` suggests a JSON-specific representation,
-but it's used as the serializable form of `Session`. The name `sessionJSON`
-is inconsistent with `sessionRequest` which uses `Request` suffix.
+- `allowed_root` (singular, legacy) vs `allowed_roots` (plural, current) —
+  legacy migration handled, correct
+- `config set` / `config show` / `config allowed-root` — consistent CLI verbs
 
-**Proposed canonical terms:**
-- `sessionJSON` -> `sessionJSON` (keep — the name is descriptive of its
-  purpose as a JSON-serializable form)
+### public CLI nouns vs internal domain nouns
 
-**Verdict:** The name is acceptable. It clearly distinguishes the
-JSON-serializable form from the internal `Session` type.
+- `docker-helper apparmor root` — public CLI for MAC boundary (Finding 1)
+- `docker-helper config allowed-root` — public CLI for authorization ceiling, correct
+- `docker-helper principal` — public CLI for principal, correct
 
-**Classification downgrade:** P2 -> P3 (polish only)
+### test names/comments vs behavior proved
 
-## P3 — polish/readability only
+- CA `*Preflight*` tests — prove validation-before-mutation ordering, correct
+- Serve/init `*Preflight*` tests — prove confinement-before-config ordering, correct
+- No stale test names found beyond those already addressed.
 
-### 9. Acronym casing inconsistency
-
-**Current names:** `selinux`, `apparmor`, `apparmor_parser`, `apparmor.d`,
-`apparmor_lsm`, `apparmor_cli`, `selinux_workspace`, `selinuxFcontextManager`
-
-**Actual domain concept:** Backend-specific identifiers.
-
-**Why ambiguous:** The MAC naming grammar specifies `AppArmor` and `SELinux`
-casing. File names use lowercase (`apparmor.go`, `selinux_workspace.go`),
-which is correct for Go file naming. Type names use mixed casing
-(`selinuxFcontextManager` — lowercase `selinux`, uppercase `Fcontext`).
-
-**Proposed canonical terms:**
-- `selinuxFcontextManager` -> `selinuxFcontextManager` (keep — Go convention
-  for unexported types uses lowercase prefix; the MAC grammar casing applies
-  to documentation, not Go identifiers)
-- File names: keep lowercase (Go convention)
-
-**Verdict:** Acceptable as-is. Go naming conventions take precedence over
-documentation casing for identifiers.
-
-### 10. `stagedBuildContext` vs `pinnedMount` — cleanup pattern
-
-**Current names:** `stagedBuildContext.Cleanup()`, `pinnedMount.Cleanup()`
-
-**Actual domain concept:** Resource cleanup with idempotent, concurrency-safe
-semantics.
-
-**Why ambiguous:** Not ambiguous. Both follow the same pattern. The names
-are clear.
-
-**Verdict:** Acceptable as-is.
-
-### 11. `testWorkspaceMACDriver` vs `failingWorkspaceMACDriver` vs `selinuxTestDriver`
-
-**Current names:** `testWorkspaceMACDriver`, `failingWorkspaceMACDriver`,
-`selinuxTestDriver` (all in `mac_lifecycle_test.go`)
-
-**Actual domain concept:** Test mock implementations of `workspaceMACDriver`.
-
-**Why ambiguous:** The naming is descriptive of each mock's behavior.
-`testWorkspaceMACDriver` = general-purpose mock, `failingWorkspaceMACDriver`
-= always-fails mock, `selinuxTestDriver` = SELinux-specific mock.
-
-**Verdict:** Acceptable as-is. Each name describes its test role.
-
-### 12. `newTestManager` in `selinux_workspace_test.go`
-
-**Current names:** `newTestManager` (creates `selinuxFcontextManager` for tests)
-
-**Actual domain concept:** Test constructor for `selinuxFcontextManager`.
-
-**Why ambiguous:** `Manager` in the function name refers to the type name
-`selinuxFcontextManager`, not to lifecycle management. The name is consistent
-with the type it creates.
-
-**Verdict:** Acceptable as-is.
-
-## Names that look unusual but SHOULD NOT be changed
-
-- `workspaceMACDriver` — canonical MAC grammar term, correct
-- `sessionMACCoordinator` — canonical MAC grammar term, correct
-- `workspaceMACCoverage` — canonical MAC grammar term, correct
-- `HelperOwned` — canonical MAC grammar term, correct
-- `mac_lifecycle.go` — correct filename for MAC lifecycle code
-- `mac_lifecycle_test.go` — correct filename for MAC lifecycle tests
-- `mountSeam` — correct name for syscall seam interface
-- `stagingHooks` — correct name for callback injection
-- `reloadDeps` — correct name for dependency injection struct
-- `*Fn` suffix on `App` fields — standard Go convention
-- `pinnedMount` — correct name for inode-pinning result
-- `stagedBuildContext` — correct name for build staging result
+---
 
 ## Proposed rename batches
 
-### B1: Allowed-root naming (P1)
+### B1: Generic path safety (P1, internal symbols)
 
-Smallest high-impact batch. Fixes the most architecturally misleading names.
+Separates generic host path safety from authorization/MAC-specific concerns.
 
 **Changes:**
-- `workspace_root.go` -> `allowed_root_policy.go`
-- `workspace_root_test.go` -> `allowed_root_policy_test.go`
-- `workspace_root_invariant_test.go` -> `allowed_root_invariant_test.go`
-- `canonicalizeWorkspaceRootForAdd` -> `canonicalizeAllowedRootForAdd`
-- `validateWorkspaceRootPolicy` -> `validateAllowedRootPolicy`
-- `isForbiddenWorkspaceRoot` -> `isForbiddenAllowedRoot`
+- `workspace_root.go` -> `path_safety.go`
+- `workspace_root_test.go` -> `path_safety_test.go`
+- `workspace_root_invariant_test.go` -> `path_safety_invariant_test.go`
+- `canonicalizeWorkspaceRootForAdd` -> `canonicalizePathForAdd`
+- `validateWorkspaceRootPolicy` -> `validatePathPolicy`
+- `isForbiddenWorkspaceRoot` -> `isForbiddenPath`
 
 **Affected files:** ~15 production + test files
 
-**Risk:** Low. Pure rename. The concepts are already distinct in behavior.
+**Risk:** Low. Pure rename. The functions are genuinely shared across
+authorization and MAC boundary concerns; the neutral names reflect that.
 
-### B2: Preflight disambiguation (P1)
+### B1c: Public CLI contract (P1, public vocabulary)
 
-**Changes:**
-- `appArmorProfileManager.preflight()` -> `appArmorProfileManager.checkTools()`
-- Rename CA preflight test file: `ca_config_preflight_test.go` ->
-  `ca_config_validation_test.go`
-- Rename `setupCAConfigPreflightTest` -> `setupCAConfigValidationTest`
-- Update test names in `apparmor_lsm_test.go` and `lsm_test.go` to use
-  `MACConfinement` instead of `Preflight`
-
-**Affected files:** ~5 production + test files
-
-**Risk:** Low. The `preflight()` method is internal to `appArmorProfileManager`.
-
-### B3: API contract consolidation (P2)
+Higher migration risk. Changes what operators see in CLI help.
 
 **Changes:**
-- Move request/response types from `sessions.go` and `principal_handler.go`
-  into `api_contract.go`
-- Rename generic `response` in `response.go` to `genericResponse`
+- `docker-helper apparmor root` -> `docker-helper apparmor boundary`
+- CLI Summary strings: "workspace roots" -> "MAC boundaries"
+- Fragment header: "Managed AppArmor workspace roots" -> "Managed AppArmor MAC boundaries"
+
+**Affected files:** `apparmor_cli.go`, `apparmor.go`, `packaging_test.go`
+
+**Risk:** Medium. Changes CLI help, operator scripts, packaging tests.
+
+### B2: API DTO consolidation (P2)
+
+Moves shared DTOs to `api_contract.go`.
+
+**Changes:**
+- Move `sessionRequest`, `sessionJSON`, `createSessionResponse`,
+  `listSessionsResponse` from `sessions.go` to `api_contract.go`
+- Move `createPrincipalRequest`, `setPrincipalRequest`, `allowedRootRequest`,
+  `principalResponse`, `principalChangedResponse`,
+  `createCredentialRequest`, `credentialJSON`, `createCredentialResponse`,
+  `listCredentialsResponse`, `revokeCredentialResponse`
+  from `principal_handler.go` to `api_contract.go`
+- Move `registryLoginRequest` from `registry.go` to `api_contract.go`
 
 **Affected files:** `api_contract.go`, `sessions.go`, `principal_handler.go`,
-`response.go`
+`registry.go`
 
 **Risk:** Low. Pure file reorganization.
+
+### B3: AppArmor preflight rename (P2, internal symbol)
+
+**Changes:**
+- `appArmorProfileManager.preflight()` -> `appArmorProfileManager.checkPrerequisites()`
+
+**Affected files:** `apparmor.go`, `apparmor_test.go`
+
+**Risk:** Low. Internal method rename.
+
+---
 
 ## Summary
 
 | Priority | Count | Description |
 |----------|-------|-------------|
-| P1 | 2 | `Root` conflation, `Preflight` conflation |
-| P2 | 2 | API contract split, seam naming conventions |
-| P3 | 4 | Manager naming (downgraded), seam naming (downgraded), sessionJSON (downgraded), acronym casing |
+| P1 | 2 | Path safety conflation (internal + public CLI) |
+| P2 | 2 | API DTO ownership, AppArmor preflight rename |
 
-**Recommended first batch:** B1 (allowed-root naming). It fixes the most
-architecturally misleading names with the lowest risk.
+**Validated vocabulary (no change needed):** 12 items (Manager naming,
+seam conventions, sessionJSON, cleanup pattern, test mocks, acronym casing,
+response envelope, credential/operation terminology)
+
+**Recommended first batch:** B1 (generic path safety). It disambiguates the
+most architecturally misleading names — functions that are genuinely shared
+across authorization and MAC boundary concerns but carry "workspace root"
+in their names — with the lowest risk.
