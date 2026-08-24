@@ -334,7 +334,7 @@ func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
 }
 
 // TestSELinuxCoverageListFailureFailsClosed verifies that when
-// listCoveringBoundaries fails, ensureCoverage and verifyCoverage return errors.
+// listCoveringFcontexts fails, ensureCoverage and verifyCoverage return errors.
 func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
@@ -348,7 +348,7 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	// Create a mock SELinux manager that fails on listCoveringBoundaries.
+	// Create a mock SELinux manager that fails on listCoveringFcontexts.
 	mgr := &selinuxFcontextManager{
 		semanagePath:   "/usr/sbin/semanage",
 		restoreconPath: "/usr/sbin/restorecon",
@@ -368,16 +368,16 @@ func TestSELinuxCoverageListFailureFailsClosed(t *testing.T) {
 
 	backend := &selinuxWorkspaceMACDriver{mgr: mgr}
 
-	// ensureCoverage should fail when listCoveringBoundaries fails.
+	// ensureCoverage should fail when listCoveringFcontexts fails.
 	_, _, err = backend.ensureCoverage("/data/workspace")
 	if err == nil {
-		t.Error("ensureCoverage should fail when listCoveringBoundaries fails")
+		t.Error("ensureCoverage should fail when listCoveringFcontexts fails")
 	}
 
-	// verifyCoverage should fail when listCoveringBoundaries fails.
+	// verifyCoverage should fail when listCoveringFcontexts fails.
 	_, err = backend.verifyCoverage("/data/workspace")
 	if err == nil {
-		t.Error("verifyCoverage should fail when listCoveringBoundaries fails")
+		t.Error("verifyCoverage should fail when listCoveringFcontexts fails")
 	}
 }
 
@@ -1813,8 +1813,8 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 // selinuxSeam is an injectable mock selinuxFcontextManager for testing
 // the real selinuxWorkspaceMACDriver path.
 type selinuxSeam struct {
-	coveringBoundaries []string // returned by listCoveringBoundaries
-	boundaryErr        error    // returned by listCoveringBoundaries
+	coveringBoundaries []string // returned by listCoveringFcontexts
+	boundaryErr        error    // returned by listCoveringFcontexts
 	actualTypeErr      error    // returned by verifyActualType
 	restoreconErr      error    // returned by restoreconRecursive
 	ensureCalled       bool     // tracks whether ensureWorkspaceFcontext was called

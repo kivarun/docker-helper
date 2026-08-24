@@ -76,8 +76,8 @@ workspace-use leases, and overlapping boundaries.
 An operator-created `semanage fcontext` rule that maps to
 `docker_helper_workspace_t` provides usable MAC coverage. docker-helper will
 use it as coverage for sessions but will never claim ownership or attempt to
-delete it. This is enforced by the SELinux driver always returning
-`HelperOwned: false` for discovered boundaries.
+delete it. The driver reports discovered coverage conservatively; the
+coordinator resolves durable helper ownership from `mac_boundaries` metadata.
 
 ## 3. Effective SELinux fcontext boundary
 
@@ -119,27 +119,30 @@ persistent SELinux file-context database.
 #### Coverage versus ownership
 
 A successful `ensureWorkspaceFcontext` means durable compatible coverage exists.
-It does NOT by itself mean the mapping is helper-owned: an existing
-operator-compatible rule can also produce successful coverage.
+It does NOT by itself mean the mapping is helper-owned.
 
     newlyCreated == true
-        docker-helper created the boundary; sessionMACCoordinator records
-        ownership metadata
+        docker-helper created the boundary;
+        sessionMACCoordinator records ownership metadata
 
-    HelperOwned
-        resolved by sessionMACCoordinator using durable ownership metadata
-        (mac_boundaries table), not by the backend
+    newlyCreated == false
+        compatible coverage already existed;
+        sessionMACCoordinator resolves HelperOwned from durable
+        mac_boundaries metadata
+
+    no helper ownership metadata
+        treat as operator-compatible;
+        never claim or delete it
+
+The driver reports discovered coverage conservatively; the coordinator
+resolves durable helper ownership.
 
 #### Durable state after successful preparation
 
-A successful `ensureWorkspaceFcontext` means durable compatible coverage exists.
-It does NOT by itself mean the mapping is helper-owned.
-
-If newly created:
-    sessionMACCoordinator records helper ownership.
-
-If pre-existing or operator-compatible:
-    coverage remains operator-owned and is never claimed or deleted.
+If newly created, sessionMACCoordinator records helper ownership.
+If pre-existing, the coordinator resolves HelperOwned from durable
+`mac_boundaries` metadata; absence of metadata means operator-compatible
+(never claimed or deleted).
 
 Unrelated failures in outer code (init, config write, reload) do not roll back
 the mapping. A stale `docker_helper_workspace_t` mapping is acceptable because:
