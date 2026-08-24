@@ -660,7 +660,9 @@ type selinuxFcontextOps interface {
 	removeWorkspaceFcontext(boundary string) error
 }
 
-// selinuxWorkspaceMACDriver wraps the SELinux workspace manager for the coordinator.
+// selinuxWorkspaceMACDriver is the MAC driver backed by selinuxFcontextManager
+// and SELinux fcontext mechanics. It reports discovered coverage conservatively;
+// sessionMACCoordinator resolves HelperOwned using mac_boundaries metadata.
 type selinuxWorkspaceMACDriver struct {
 	mgr selinuxFcontextOps
 }
@@ -718,7 +720,8 @@ func (d *selinuxWorkspaceMACDriver) verifyCoverage(workspace string) (workspaceM
 		if err := d.mgr.verifyActualType(workspace); err != nil {
 			return workspaceMACCoverage{}, fmt.Errorf("existing SELinux boundary %s exists but actual type for %s is incorrect: %w", boundary, workspace, err)
 		}
-		// SELinux operator-compatible fcontext rules are NOT helper-owned.
+		// Driver reports discovered coverage conservatively;
+		// sessionMACCoordinator resolves HelperOwned using mac_boundaries metadata.
 		return workspaceMACCoverage{Boundary: boundary, HelperOwned: false}, nil
 	}
 
@@ -734,7 +737,8 @@ func (d *selinuxWorkspaceMACDriver) findExistingCoverage(workspace string) (work
 		return workspaceMACCoverage{}, false, fmt.Errorf("cannot list covering SELinux boundaries: %w", err)
 	}
 	for _, boundary := range boundaries {
-		// SELinux operator-compatible fcontext rules are NOT helper-owned.
+		// Driver reports discovered coverage conservatively;
+		// sessionMACCoordinator resolves HelperOwned using mac_boundaries metadata.
 		return workspaceMACCoverage{Boundary: boundary, HelperOwned: false}, true, nil
 	}
 	return workspaceMACCoverage{}, false, nil
@@ -747,9 +751,9 @@ func (d *selinuxWorkspaceMACDriver) removeBoundary(boundary string) error {
 	return d.mgr.removeWorkspaceFcontext(boundary)
 }
 
-// SELinux operator-compatible fcontext rules MUST NOT become helper-owned.
-// discoverHelperOwnedBoundaries returns nil because SELinux boundaries are
-// never intrinsically attributable to docker-helper.
+// discoverHelperOwnedBoundaries returns nil because the driver does not know
+// durable helper ownership; sessionMACCoordinator resolves HelperOwned using
+// mac_boundaries metadata.
 func (d *selinuxWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	return nil, nil
 }

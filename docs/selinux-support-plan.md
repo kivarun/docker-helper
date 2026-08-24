@@ -243,7 +243,7 @@ The compiled module defines:
 | `docker_helper_config_t` | `/etc/docker-helper/**` |
 | `docker_helper_state_t` | `/var/lib/docker-helper/**` |
 | `docker_helper_runtime_t` | `/run/docker-helper/**` |
-| `docker_helper_workspace_t` | non-home system workspace files |
+| `docker_helper_workspace_t` | non-home workspace files |
 
 The daemon's `sys_admin` and `dac_read_search` capabilities are required by the
 mount-pin and private-workspace design and were proven through enforcing UAT.
@@ -259,7 +259,7 @@ files.
 
 The daemon and container domains receive workspace permissions for both
 `user_home_type` (for `/home` paths) and `docker_helper_workspace_t` (for
-non-home system roots). No broad `usr_t`, `default_t`, or `var_t` grants are
+non-home workspaces). No broad `usr_t`, `default_t`, or `var_t` grants are
 added.
 
 This is an explicit compatibility dependency on the installed base policy and

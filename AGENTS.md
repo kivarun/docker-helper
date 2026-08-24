@@ -687,3 +687,74 @@ current work unless compatibility explicitly requires coexistence.
 When replacing a path, remove obsolete production helpers, seams, tests,
 comments, and documentation that existed solely for the replaced implementation.
 Do not preserve dead implementation solely because tests depend on it.
+
+# MAC naming grammar
+
+One domain concept -> one canonical term.
+Different lifecycle/backend implementations must not introduce synonyms
+for one concept.
+Different concepts must not share one word.
+
+Canonical MAC vocabulary:
+
+    global allowed root
+        authorization ceiling only
+
+    principal allowed root
+        authorization narrowing only
+
+    workspace
+        concrete session capability path
+
+    MAC boundary
+        durable confinement resource
+
+    workspaceMACCoverage
+        effective coverage for a concrete workspace
+
+    HelperOwned
+        docker-helper durable ownership of a boundary
+
+    session MAC binding
+        session -> MAC boundary relationship
+
+    workspace-use lease
+        active operation consumer
+
+    boundaryConsumerCounts
+        direct boundary consumer counts
+
+    sessionMACCoordinator
+        lifecycle owner
+
+    workspaceMACDriver
+        backend mechanics only; no lifecycle decisions
+
+    appArmorWorkspaceMACDriver
+    selinuxWorkspaceMACDriver
+
+    appArmorProfileManager
+        native AppArmor profile/managed-fragment mechanics
+
+    selinuxFcontextManager
+        native SELinux fcontext mechanics
+
+Containment:
+
+    pathWithin(root, path)
+    pathStrictlyWithin(root, path)
+
+Argument order is always root first.
+
+Casing in this vocabulary:
+
+    AppArmor
+    SELinux
+    API
+    ASN1
+
+Distinctions:
+
+    authorization root != MAC boundary
+    coverage != ownership
+    driver != lifecycle owner

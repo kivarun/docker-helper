@@ -76,7 +76,7 @@ type inputError struct {
 
 func (e *inputError) Error() string { return e.msg }
 
-// rootResult is the structured return value for addRoot and removeRoot.
+// rootResult is the structured return value for addManagedRoot and removeManagedRoot.
 type rootResult struct {
 	Path    string
 	Changed bool
