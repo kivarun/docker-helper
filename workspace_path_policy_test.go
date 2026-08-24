@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestValidatePathSafety(t *testing.T) {
+func TestValidateWorkspacePathSafety(t *testing.T) {
 	// Use deterministic non-root UID so expected results are the same
 	// regardless of the real host UID running go test.
 	origUID := EffectiveUID
@@ -79,23 +79,23 @@ func TestValidatePathSafety(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validatePathSafety(tt.path)
+			err := validateWorkspacePathSafety(tt.path)
 			if tt.wantErr && err == nil {
-				t.Errorf("validatePathSafety(%q) = nil, want error", tt.path)
+				t.Errorf("validateWorkspacePathSafety(%q) = nil, want error", tt.path)
 			}
 			if !tt.wantErr && err != nil {
-				t.Errorf("validatePathSafety(%q) = %v, want nil", tt.path, err)
+				t.Errorf("validateWorkspacePathSafety(%q) = %v, want nil", tt.path, err)
 			}
 			if tt.wantErr && tt.errSub != "" && err != nil {
 				if !strings.Contains(err.Error(), tt.errSub) {
-					t.Errorf("validatePathSafety(%q) error = %q, want contains %q", tt.path, err.Error(), tt.errSub)
+					t.Errorf("validateWorkspacePathSafety(%q) error = %q, want contains %q", tt.path, err.Error(), tt.errSub)
 				}
 			}
 		})
 	}
 }
 
-func TestValidatePathPolicy(t *testing.T) {
+func TestValidateWorkspacePathPolicy(t *testing.T) {
 	// Use deterministic non-root UID so expected results are the same
 	// regardless of the real host UID running go test.
 	origUID := EffectiveUID
@@ -124,18 +124,18 @@ func TestValidatePathPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validatePathPolicy(tt.path)
+			err := validateWorkspacePathPolicy(tt.path)
 			if tt.wantErr && err == nil {
-				t.Errorf("validatePathPolicy(%q) = nil, want error", tt.path)
+				t.Errorf("validateWorkspacePathPolicy(%q) = nil, want error", tt.path)
 			}
 			if !tt.wantErr && err != nil {
-				t.Errorf("validatePathPolicy(%q) = %v, want nil", tt.path, err)
+				t.Errorf("validateWorkspacePathPolicy(%q) = %v, want nil", tt.path, err)
 			}
 		})
 	}
 }
 
-func TestCanonicalizePathForAdd(t *testing.T) {
+func TestCanonicalizeWorkspacePathForAdd(t *testing.T) {
 	tests := []struct {
 		name    string
 		path    string
@@ -149,18 +149,18 @@ func TestCanonicalizePathForAdd(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := canonicalizePathForAdd(tt.path)
+			_, err := canonicalizeWorkspacePathForAdd(tt.path)
 			if tt.wantErr && err == nil {
-				t.Errorf("canonicalizePathForAdd(%q) = nil error, want error", tt.path)
+				t.Errorf("canonicalizeWorkspacePathForAdd(%q) = nil error, want error", tt.path)
 			}
 			if !tt.wantErr && err != nil {
-				t.Errorf("canonicalizePathForAdd(%q) = %v, want nil", tt.path, err)
+				t.Errorf("canonicalizeWorkspacePathForAdd(%q) = %v, want nil", tt.path, err)
 			}
 		})
 	}
 }
 
-func TestCanonicalizePathForAddSymlinkEscape(t *testing.T) {
+func TestCanonicalizeWorkspacePathForAddSymlinkEscape(t *testing.T) {
 	// Create a symlink in a non-forbidden location that points to a forbidden location
 	linkParent := testAllowedRootDir(t)
 	linkPath := filepath.Join(linkParent, "escape-link")
@@ -170,13 +170,13 @@ func TestCanonicalizePathForAddSymlinkEscape(t *testing.T) {
 	defer os.Remove(linkPath)
 
 	// The symlink should be resolved and rejected because /var is forbidden
-	_, err := canonicalizePathForAdd(linkPath)
+	_, err := canonicalizeWorkspacePathForAdd(linkPath)
 	if err == nil {
 		t.Error("expected error for symlink to /var, got nil")
 	}
 }
 
-func TestCanonicalizePathForAddTildeExpansion(t *testing.T) {
+func TestCanonicalizeWorkspacePathForAddTildeExpansion(t *testing.T) {
 	// Tilde expansion uses the real user home, so this test needs the home
 	// itself to be a policy-legal workspace root. For root, the home is a
 	// forbidden system tree and ~ expansion is rejected by the policy.
@@ -188,7 +188,7 @@ func TestCanonicalizePathForAddTildeExpansion(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot canonicalize home: %v", err)
 	}
-	if err := validatePathSafety(canonicalHome); err != nil {
+	if err := validateWorkspacePathSafety(canonicalHome); err != nil {
 		t.Skipf("home %s is not a valid workspace root: %v", canonicalHome, err)
 	}
 
@@ -206,13 +206,13 @@ func TestCanonicalizePathForAddTildeExpansion(t *testing.T) {
 	}
 	tildePath := "~/" + rel
 
-	canonical, err := canonicalizePathForAdd(tildePath)
+	canonical, err := canonicalizeWorkspacePathForAdd(tildePath)
 	if err != nil {
-		t.Fatalf("canonicalizePathForAdd(%q) = %v", tildePath, err)
+		t.Fatalf("canonicalizeWorkspacePathForAdd(%q) = %v", tildePath, err)
 	}
 	expected, _ := filepath.EvalSymlinks(testDir)
 	if canonical != expected {
-		t.Errorf("canonicalizePathForAdd(%q) = %q, want %q", tildePath, canonical, expected)
+		t.Errorf("canonicalizeWorkspacePathForAdd(%q) = %q, want %q", tildePath, canonical, expected)
 	}
 }
 
@@ -222,14 +222,14 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 
 	t.Run("root allowed home", func(t *testing.T) {
 		EffectiveUID = func() int { return 0 }
-		if err := validatePathSafety("/home"); err != nil {
+		if err := validateWorkspacePathSafety("/home"); err != nil {
 			t.Errorf("root /home should be allowed, got: %v", err)
 		}
 	})
 
 	t.Run("root still blocked srv", func(t *testing.T) {
 		EffectiveUID = func() int { return 0 }
-		err := validatePathSafety("/srv")
+		err := validateWorkspacePathSafety("/srv")
 		if err == nil {
 			t.Error("root /srv should still be blocked")
 		}
@@ -237,7 +237,7 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 
 	t.Run("root still blocked mnt", func(t *testing.T) {
 		EffectiveUID = func() int { return 0 }
-		err := validatePathSafety("/mnt")
+		err := validateWorkspacePathSafety("/mnt")
 		if err == nil {
 			t.Error("root /mnt should still be blocked")
 		}
@@ -245,7 +245,7 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 
 	t.Run("root still blocked media", func(t *testing.T) {
 		EffectiveUID = func() int { return 0 }
-		err := validatePathSafety("/media")
+		err := validateWorkspacePathSafety("/media")
 		if err == nil {
 			t.Error("root /media should still be blocked")
 		}
@@ -253,7 +253,7 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 
 	t.Run("non-root blocked home", func(t *testing.T) {
 		EffectiveUID = func() int { return 1000 }
-		err := validatePathSafety("/home")
+		err := validateWorkspacePathSafety("/home")
 		if err == nil {
 			t.Error("non-root /home should be blocked")
 		}
@@ -261,14 +261,14 @@ func TestAdminWideNamespaceBypass(t *testing.T) {
 
 	t.Run("root allowed opt", func(t *testing.T) {
 		EffectiveUID = func() int { return 0 }
-		if err := validatePathSafety("/opt"); err != nil {
+		if err := validateWorkspacePathSafety("/opt"); err != nil {
 			t.Errorf("root /opt should be allowed, got: %v", err)
 		}
 	})
 
 	t.Run("non-root blocked opt", func(t *testing.T) {
 		EffectiveUID = func() int { return 1000 }
-		err := validatePathSafety("/opt")
+		err := validateWorkspacePathSafety("/opt")
 		if err == nil {
 			t.Error("non-root /opt should be blocked")
 		}
@@ -313,12 +313,12 @@ func TestWideNamespaceExactRootPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			EffectiveUID = func() int { return tt.uid }
-			err := validatePathSafety(tt.path)
+			err := validateWorkspacePathSafety(tt.path)
 			if tt.wantErr && err == nil {
-				t.Errorf("validatePathSafety(%q) = nil, want error", tt.path)
+				t.Errorf("validateWorkspacePathSafety(%q) = nil, want error", tt.path)
 			}
 			if !tt.wantErr && err != nil {
-				t.Errorf("validatePathSafety(%q) = %v, want nil", tt.path, err)
+				t.Errorf("validateWorkspacePathSafety(%q) = %v, want nil", tt.path, err)
 			}
 			if tt.wantErr && tt.errSub != "" && err != nil {
 				if !strings.Contains(err.Error(), tt.errSub) {
@@ -346,7 +346,7 @@ func TestCanonicalSymlinkToExactWideNamespace(t *testing.T) {
 	}
 	defer os.Remove(linkPath)
 
-	_, err := canonicalizePathForAdd(linkPath)
+	_, err := canonicalizeWorkspacePathForAdd(linkPath)
 	if err == nil {
 		t.Error("symlink to exact /home should be rejected for non-root")
 	}
@@ -358,7 +358,7 @@ func TestCanonicalSymlinkToExactWideNamespace(t *testing.T) {
 	}
 	defer os.Remove(linkPath2)
 
-	_, err = canonicalizePathForAdd(linkPath2)
+	_, err = canonicalizeWorkspacePathForAdd(linkPath2)
 	if err == nil {
 		t.Error("symlink to exact /opt should be rejected for non-root")
 	}

@@ -504,7 +504,7 @@ func resolveAllowedRoots(raw map[string]json.RawMessage, fc *fileConfig) ([]stri
 		if !filepath.IsAbs(r) {
 			return nil, fmt.Errorf("allowed_roots entry %q is not an absolute path", r)
 		}
-		canon, err := canonicalizePathForAdd(r)
+		canon, err := canonicalizeWorkspacePathForAdd(r)
 		if err != nil {
 			return nil, fmt.Errorf("invalid allowed_roots entry %q: %w", r, err)
 		}
@@ -631,9 +631,9 @@ func parseDurationPositive(s, name string) (time.Duration, error) {
 }
 
 // validateAllowedRootValue validates that the parsed allowed_root value
-// is non-empty, absolute, and passes the shared path-safety policy.
+// is non-empty, absolute, and passes the workspace-path policy.
 // Note: this is a lexical check only (no filesystem access); the full
-// canonicalization + policy is applied by canonicalizePathForAdd.
+// canonicalization + policy is applied by canonicalizeWorkspacePathForAdd.
 func validateAllowedRootValue(s string) error {
 	if s == "" {
 		return fmt.Errorf("allowed_root must be a non-empty absolute path")
@@ -642,7 +642,7 @@ func validateAllowedRootValue(s string) error {
 		return fmt.Errorf("allowed_root must be a non-empty absolute path")
 	}
 	// Apply the security policy to the canonical path.
-	return validatePathPolicy(filepath.Clean(s))
+	return validateWorkspacePathPolicy(filepath.Clean(s))
 }
 
 // validateHTTPAddress validates that the http_address value is a loopback
@@ -760,7 +760,7 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		// Canonicalize the allowed root before writing (with full policy check).
-		canonRoot, err := canonicalizePathForAdd(allowedRoot)
+		canonRoot, err := canonicalizeWorkspacePathForAdd(allowedRoot)
 		if err != nil {
 			return nil, fmt.Errorf("invalid allowed root: %w", err)
 		}
@@ -1067,7 +1067,7 @@ func installCredentialForInit(token string, stdout, stderr io.Writer) error {
 // and verifies that the path exists and is a directory.
 // The caller must provide a non-empty path.
 func resolveAllowedRoot(path string) (string, error) {
-	return canonicalizePathForAdd(path)
+	return canonicalizeWorkspacePathForAdd(path)
 }
 
 // expandTilde expands a path starting with ~/ to the user's home directory.

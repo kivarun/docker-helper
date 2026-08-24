@@ -55,12 +55,12 @@ func isAdminWideNamespaceOverride(ns string) bool {
 	return false
 }
 
-// validatePathSafety validates a canonical host path against the shared
-// path-safety policy. It rejects the filesystem root, forbidden system trees
+// validateWorkspacePathSafety validates a canonical host path against the shared
+// workspace-path policy. It rejects the filesystem root, forbidden system trees
 // and everything under them, and forbidden wide namespaces (the namespace
 // itself only, not subdirectories). When running as root (uid 0), /home and
 // /opt are permitted via the admin override.
-func validatePathSafety(canonical string) error {
+func validateWorkspacePathSafety(canonical string) error {
 	if canonical == "/" {
 		return fmt.Errorf("workspace root cannot be the filesystem root /")
 	}
@@ -91,16 +91,16 @@ func validatePathSafety(canonical string) error {
 	return nil
 }
 
-// canonicalizePathForAdd validates and canonicalizes a host path for addition.
+// canonicalizeWorkspacePathForAdd validates and canonicalizes a workspace path for addition.
 // It:
 //   - expands ~ to the user's home directory
 //   - resolves to an absolute path
 //   - verifies the path exists and is a directory
 //   - resolves all symlinks
-//   - applies the shared path-safety policy
+//   - applies the workspace-path policy
 //
 // Returns the canonical path on success.
-func canonicalizePathForAdd(path string) (string, error) {
+func canonicalizeWorkspacePathForAdd(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("workspace root must be a non-empty path")
 	}
@@ -129,22 +129,22 @@ func canonicalizePathForAdd(path string) (string, error) {
 		return "", fmt.Errorf("cannot resolve workspace root symlinks: %w", err)
 	}
 
-	if err := validatePathSafety(canonical); err != nil {
+	if err := validateWorkspacePathSafety(canonical); err != nil {
 		return "", err
 	}
 
 	return canonical, nil
 }
 
-// validatePathPolicy checks a canonical path against the shared path-safety
+// validateWorkspacePathPolicy checks a canonical path against the workspace-path
 // policy without filesystem access. This is the pure policy check that
 // can be tested deterministically.
-func validatePathPolicy(canonical string) error {
+func validateWorkspacePathPolicy(canonical string) error {
 	if canonical == "" {
 		return fmt.Errorf("workspace root must be a non-empty path")
 	}
 	if !filepath.IsAbs(canonical) {
 		return fmt.Errorf("workspace root must be an absolute path: %s", canonical)
 	}
-	return validatePathSafety(canonical)
+	return validateWorkspacePathSafety(canonical)
 }

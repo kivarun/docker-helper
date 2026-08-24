@@ -63,7 +63,7 @@ func allocateTestWorkspaceRoot(candidates []string) (string, error) {
 			os.RemoveAll(dir)
 			continue
 		}
-		if err := validatePathPolicy(canonical); err != nil {
+		if err := validateWorkspacePathPolicy(canonical); err != nil {
 			os.RemoveAll(dir)
 			continue
 		}
@@ -84,7 +84,7 @@ func TestWorkspaceRootAllocationForbiddenCandidates(t *testing.T) {
 	// tree, so every child created in it is rejected by the production
 	// policy, yet the test owns the directory it inspects.
 	rejectedBase := t.TempDir()
-	if err := validatePathPolicy(filepath.Join(rejectedBase, "child")); err == nil {
+	if err := validateWorkspacePathPolicy(filepath.Join(rejectedBase, "child")); err == nil {
 		t.Skipf("temp base %s is policy-legal; cannot exercise policy rejection", rejectedBase)
 	}
 
@@ -93,7 +93,7 @@ func TestWorkspaceRootAllocationForbiddenCandidates(t *testing.T) {
 	var goodBase string
 	for _, c := range candidateBasePaths() {
 		canonical, err := filepath.EvalSymlinks(c)
-		if err != nil || validatePathPolicy(canonical) != nil {
+		if err != nil || validateWorkspacePathPolicy(canonical) != nil {
 			continue
 		}
 		probe, err := os.MkdirTemp(canonical, ".docker-helper-test-*")
@@ -114,7 +114,7 @@ func TestWorkspaceRootAllocationForbiddenCandidates(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	if err := validatePathPolicy(dir); err != nil {
+	if err := validateWorkspacePathPolicy(dir); err != nil {
 		t.Fatalf("allocated root %q rejected by production policy: %v", dir, err)
 	}
 	if !strings.HasPrefix(dir, goodBase+string(filepath.Separator)) {
@@ -145,7 +145,7 @@ func TestWorkspaceRootAllocationForbiddenHome(t *testing.T) {
 
 	root := testAllowedRootDir(t)
 
-	if err := validatePathPolicy(root); err != nil {
+	if err := validateWorkspacePathPolicy(root); err != nil {
 		t.Fatalf("workspace root %q rejected by production policy: %v", root, err)
 	}
 	if strings.HasPrefix(root, "/tmp/") {
@@ -171,7 +171,7 @@ func TestWorkspaceRootAllocationRootFallback(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	if err := validatePathPolicy(dir); err != nil {
+	if err := validateWorkspacePathPolicy(dir); err != nil {
 		t.Fatalf("allocated root %q rejected by production policy: %v", dir, err)
 	}
 	if !strings.HasPrefix(dir, "/.docker-helper-test-") {

@@ -58,7 +58,7 @@ func resolveOSUser(username string) (uid int, gid int, home string, err error) {
 
 // validateAllowedRootForAdd validates a path for ADD operations.
 // Requires: absolute, no tilde, exists, is directory.
-// Applies the shared path-safety policy.
+// Applies the workspace-path policy.
 // Returns the canonical path.
 func validateAllowedRootForAdd(path string) (string, error) {
 	if path == "" {
@@ -72,7 +72,7 @@ func validateAllowedRootForAdd(path string) (string, error) {
 		return "", fmt.Errorf("tilde expansion not supported; use absolute path: %w", ErrInvalidAllowedRoot)
 	}
 
-	cleaned, err := canonicalizePathForAdd(path)
+	cleaned, err := canonicalizeWorkspacePathForAdd(path)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", err.Error(), ErrInvalidAllowedRoot)
 	}
@@ -136,7 +136,7 @@ func createPrincipal(db *sql.DB, username string, globalRoots []string) (*Princi
 	}
 
 	// Canonicalize the home directory and apply the workspace root policy.
-	canonicalHome, err := canonicalizePathForAdd(home)
+	canonicalHome, err := canonicalizeWorkspacePathForAdd(home)
 	if err != nil {
 		return nil, fmt.Errorf("OS user %q home directory %q is not a valid workspace root: %s", username, home, err)
 	}

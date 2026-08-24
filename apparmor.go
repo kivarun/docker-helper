@@ -117,8 +117,8 @@ func validateBoundaryPathForAdd(path string) (string, error) {
 		return "", &inputError{msg: "path must be absolute"}
 	}
 
-	// Use the shared path-safety policy for canonicalization and security checks.
-	canonical, err := canonicalizePathForAdd(path)
+	// Use the workspace-path policy for canonicalization and security checks.
+	canonical, err := canonicalizeWorkspacePathForAdd(path)
 	if err != nil {
 		return "", &inputError{msg: err.Error()}
 	}
@@ -589,9 +589,9 @@ func (m *appArmorProfileManager) check() error {
 		return fmt.Errorf("managed fragment is malformed: %w", err)
 	}
 
-	// Diagnose managed boundaries that violate the shared path-safety policy.
+	// Diagnose managed boundaries that violate the workspace-path policy.
 	for _, boundary := range boundaries {
-		if err := validatePathPolicy(boundary); err != nil {
+		if err := validateWorkspacePathPolicy(boundary); err != nil {
 			return fmt.Errorf("managed root %q violates workspace root policy: %s", boundary, err)
 		}
 	}
