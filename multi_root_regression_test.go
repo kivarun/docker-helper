@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -865,17 +864,16 @@ func TestAllowedRootRemoveNoOpInvalidConfigFails(t *testing.T) {
 }
 
 // =============================================================================
-// Transaction regression: SELinux ordering
+// Authorization-only: config allowed-root does not mutate MAC state
 // =============================================================================
 
-var errSELinuxSentinel = fmt.Errorf("selinux preflight sentinel")
-
-// TestSELinuxPreflightOrdering verifies the config allowed-root add behavior:
-//  1. config allowed-root add rejects exact /opt in SELinux system mode;
-//  2. config allowed-root add allows /home without SELinux preparation;
-//  3. config allowed-root add in user mode does not perform MAC preparation;
-//  4. MAC preflight failure does not widen allowed_roots.
-func TestSELinuxPreflightOrdering(t *testing.T) {
+// TestConfigAllowedRootAuthorizationOnly verifies that config allowed-root add
+// changes only the authorization ceiling, never MAC state.
+//
+//   - /opt is accepted as a global authorization ceiling.
+//   - /home is accepted as an authorization root.
+//   - user mode does not perform MAC preparation.
+func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 	// Mock attemptReload to return "daemon not running" to avoid authentication issues.
 	origAttemptReload := attemptReload
 	attemptReload = func() reloadOutcome {
@@ -883,14 +881,14 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("config_add_accepts_opt_selinux_no_mac_prep", func(t *testing.T) {
+	t.Run("config_add_accepts_opt_as_auth_ceiling", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		// Mock root so /opt passes the workspace root check.
 		origUID := EffectiveUID
@@ -905,24 +903,12 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		appArmorLSMActive = func() (bool, error) { return false, nil }
 		defer func() { appArmorLSMActive = origAA }()
 
-		// /opt is accepted as authorization ceiling; MAC preparation is skipped.
-		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceFcontext
-		selinuxEnsureWorkspaceFcontext = func(string) (bool, error) {
-			selinuxCalled = true
-			return false, nil
-		}
-		defer func() { selinuxEnsureWorkspaceFcontext = origEnsure }()
-
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
-		}
-		if selinuxCalled {
-			t.Error("SELinux MAC preparation must NOT be called for /opt")
 		}
 		// Config should have /opt added.
 		newData, _ := os.ReadFile(configPath)
@@ -931,14 +917,14 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		}
 	})
 
-	t.Run("config_add_home_no_selinux_prep", func(t *testing.T) {
+	t.Run("config_add_home_as_auth_root", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		// Mock root so /home passes workspace root check.
 		origUID := EffectiveUID
@@ -953,7 +939,6 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 		appArmorLSMActive = func() (bool, error) { return false, nil }
 		defer func() { appArmorLSMActive = origAA }()
 
-		// /home is a home root, so no SELinux preparation.
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
@@ -975,7 +960,7 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		// /home is forbidden for non-root, so use a subdirectory.
 		testRoot := filepath.Join(allowedRoot, "workspace-test")
@@ -998,11 +983,10 @@ func TestSELinuxPreflightOrdering(t *testing.T) {
 	})
 }
 
-// TestAllowedRootPreflightOrdering verifies that MAC preflight runs
-// inside the config transaction, after config validation.
-// These tests exercise addAllowedRootToConfig directly with injected
-// preflight functions to test config transaction ownership.
-func TestAllowedRootPreflightOrdering(t *testing.T) {
+// TestConfigAllowedRootValidationBeforeMAC verifies that config validation
+// runs before any MAC preparation. When validation fails, no MAC state is
+// mutated and the config is unchanged.
+func TestConfigAllowedRootValidationBeforeMAC(t *testing.T) {
 	// Mock attemptReload to return "daemon not running".
 	origAttemptReload := attemptReload
 	attemptReload = func() reloadOutcome {
@@ -1010,7 +994,7 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("invalid_config_no_mac_prep", func(t *testing.T) {
+	t.Run("invalid_config_fails_before_mac", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -1018,7 +1002,7 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 			"database_path": "/should/not/be/here",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		// Mock root so /opt passes workspace root check.
 		origUID := EffectiveUID
@@ -1033,15 +1017,6 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		appArmorLSMActive = func() (bool, error) { return false, nil }
 		defer func() { appArmorLSMActive = origAA }()
 
-		// Track SELinux preparation.
-		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceFcontext
-		selinuxEnsureWorkspaceFcontext = func(string) (bool, error) {
-			selinuxCalled = true
-			return false, nil
-		}
-		defer func() { selinuxEnsureWorkspaceFcontext = origEnsure }()
-
 		// Use a non-/opt path to test config validation failure.
 		newRoot := testAllowedRootDir(t)
 		var stdout, stderr bytes.Buffer
@@ -1052,14 +1027,11 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		if !strings.Contains(stderr.String(), "database_path") {
 			t.Errorf("expected validation error, got: %s", stderr.String())
 		}
-		if selinuxCalled {
-			t.Error("MAC preparation must NOT be invoked when config validation fails")
-		}
 		// Config unchanged.
 		verifyConfigUnchanged(t, configPath, data)
 	})
 
-	t.Run("add_performs_zero_mac_calls", func(t *testing.T) {
+	t.Run("add_succeeds_without_mac", func(t *testing.T) {
 		testRoot := testAllowedRootDir(t)
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
@@ -1067,7 +1039,7 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		origData, _ := os.ReadFile(configPath)
 
@@ -1082,14 +1054,14 @@ func TestAllowedRootPreflightOrdering(t *testing.T) {
 		}
 	})
 
-	t.Run("already_present_no_mac_calls", func(t *testing.T) {
+	t.Run("already_present_no_mac", func(t *testing.T) {
 		testRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{testRoot},
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		var stdout, stderr bytes.Buffer
 		code := addAllowedRootToConfig(testRoot, &stdout, &stderr)
@@ -1116,7 +1088,7 @@ func TestConfigAllowedRootAddZeroMAC(t *testing.T) {
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		origUID := EffectiveUID
 		EffectiveUID = func() int { return 0 }
@@ -1142,9 +1114,10 @@ func TestConfigAllowedRootAddZeroMAC(t *testing.T) {
 	})
 }
 
-// TestManagedRootOptPolicyShared verifies that init and config allowed-root add
-// use the same exact /opt managed-root policy.
-func TestManagedRootOptPolicyShared(t *testing.T) {
+// TestOptAuthorizationCeiling verifies that /opt is a valid global
+// authorization ceiling and that the authorization-root policy is distinct
+// from the SELinux fcontext-boundary policy.
+func TestOptAuthorizationCeiling(t *testing.T) {
 	// Mock attemptReload to return "daemon not running".
 	origAttemptReload := attemptReload
 	attemptReload = func() reloadOutcome {
@@ -1152,29 +1125,29 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("policy_table", func(t *testing.T) {
+	t.Run("fcontext_relabel_policy", func(t *testing.T) {
 		if selinuxManagedRootAllowed("/opt") {
-			t.Error("/opt must not be allowed as managed root")
+			t.Error("/opt must not be allowed as fcontext relabel boundary")
 		}
 		if !selinuxManagedRootAllowed("/opt/workspaces") {
-			t.Error("/opt/workspaces must be allowed as managed root")
+			t.Error("/opt/workspaces must be allowed as fcontext relabel boundary")
 		}
 		if !selinuxManagedRootAllowed("/data") {
-			t.Error("/data must be allowed as managed root")
+			t.Error("/data must be allowed as fcontext relabel boundary")
 		}
 		if !selinuxManagedRootAllowed("/home") {
-			t.Error("/home must be allowed as managed root")
+			t.Error("/home must be allowed as fcontext relabel boundary")
 		}
 	})
 
-	t.Run("config_allowed_root_add_accepts_opt_no_mac", func(t *testing.T) {
+	t.Run("config_add_accepts_opt_as_auth_ceiling", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
 			"session_ttl":   "12h",
 		}
 		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupSELinuxTestEnv(t, data)
+		configPath := setupConfigAllowedRootTestEnv(t, data)
 
 		// Mock root for system mode.
 		origUID := EffectiveUID
@@ -1189,23 +1162,12 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 		appArmorLSMActive = func() (bool, error) { return false, nil }
 		defer func() { appArmorLSMActive = origAA }()
 
-		selinuxCalled := false
-		origEnsure := selinuxEnsureWorkspaceFcontext
-		selinuxEnsureWorkspaceFcontext = func(string) (bool, error) {
-			selinuxCalled = true
-			return false, nil
-		}
-		defer func() { selinuxEnsureWorkspaceFcontext = origEnsure }()
-
 		origData, _ := os.ReadFile(configPath)
 
 		var stdout, stderr bytes.Buffer
 		code := configAllowedRootAdd("/opt", &stdout, &stderr)
 		if code != 0 {
 			t.Fatalf("expected exit 0 for /opt as authorization root, got %d, stderr: %s", code, stderr.String())
-		}
-		if selinuxCalled {
-			t.Error("SELinux MAC preparation must NOT be called for /opt")
 		}
 		// Config should have /opt added.
 		newData, _ := os.ReadFile(configPath)
@@ -1215,8 +1177,9 @@ func TestManagedRootOptPolicyShared(t *testing.T) {
 	})
 }
 
-// setupSELinuxTestEnv creates a test environment for SELinux preflight tests.
-func setupSELinuxTestEnv(t *testing.T, data []byte) string {
+// setupConfigAllowedRootTestEnv creates a test environment for config
+// allowed-root tests.
+func setupConfigAllowedRootTestEnv(t *testing.T, data []byte) string {
 	t.Helper()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

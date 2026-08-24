@@ -24,7 +24,62 @@ SELinux does not enforce each configured allowed root as an independent path.
 Canonical docker-helper path validation is the authoritative boundary in both
 backends.
 
-## 2. Workspace-root SELinux labeling
+## 2. Canonical lifecycle model
+
+The MAC lifecycle follows a strict separation between authorization and
+confinement:
+
+    global allowed root
+        = authorization ceiling only
+
+    principal allowed root
+        = authorization narrowing only
+
+    session workspace
+        = concrete capability
+
+    SELinux fcontext boundary
+        = effective MAC coverage resource
+
+    helper-owned boundary
+        = lifecycle-managed by sessionMACCoordinator
+
+    operator-compatible boundary
+        = usable as coverage but never helper-owned/deleted
+
+### Authorization changes do not directly mutate MAC state
+
+Adding or removing an allowed root via `config allowed-root` changes only the
+authorization ceiling. It does not create, remove, or otherwise mutate SELinux
+fcontext rules or labels.
+
+### Session creation prepares and verifies MAC coverage
+
+When a session is created for a concrete workspace, the sessionMACCoordinator
+ensures that the workspace has valid MAC coverage. For SELinux, this means:
+
+- If the workspace is under `/home`, no fcontext preparation is needed
+  (`user_home_type` provides coverage).
+- If the workspace is outside `/home`, the coordinator calls the SELinux driver
+  to ensure or verify a persistent `semanage fcontext` boundary mapping to
+  `docker_helper_workspace_t`.
+
+### Helper-owned boundaries are lifecycle-managed
+
+Boundaries created by docker-helper are tracked in the `mac_boundaries` table
+and are eligible for removal when the sessionMACCoordinator proves there are no
+direct or intersecting consumers. This includes session bindings, active
+workspace-use leases, and overlapping boundaries.
+
+### Operator-compatible boundaries are never claimed or deleted
+
+An operator-created `semanage fcontext` rule that maps to
+`docker_helper_workspace_t` provides usable MAC coverage. docker-helper will
+use it as coverage for sessions but will never claim ownership or attempt to
+delete it. This is enforced by the SELinux driver always returning
+`HelperOwned: false` for discovered boundaries.
+
+## 3. Workspace-root SELinux labeling
 
 ### `/home` and descendants
 
@@ -33,11 +88,11 @@ labels. docker-helper does not create `semanage fcontext` rules or run
 `restorecon` on `/home` paths. The existing `user_home_type` policy grants the
 daemon and container domain the necessary workspace permissions.
 
-### Non-home system allowed_roots
+### Non-home system allowed roots
 
 A non-home system global allowed root (e.g., `/data`, `/projects/agents`,
-`/opt/docker-helper-workspaces`) is managed by docker-helper under a
-dedicated SELinux type:
+`/opt/docker-helper-workspaces`) provides MAC coverage under a dedicated
+SELinux type:
 
 ```
 docker_helper_workspace_t
@@ -62,26 +117,23 @@ When a session workspace requires MAC coverage under active SELinux, it:
 The mapping survives `restorecon` and reboot because it is stored in the
 persistent SELinux file-context database.
 
-#### Monotonic managed-label lifecycle (R2)
+#### Durable state after successful preparation
 
-Once `ensureWorkspaceLabel(ROOT)` returns success, the mapping becomes managed
-durable state. Outer init and config code MUST NOT automatically remove it on a
-later unrelated failure.
+Once `ensureWorkspaceFcontext` returns success, the mapping becomes managed
+durable state. Unrelated failures in outer code (init, config write, reload)
+do not roll it back. A stale `docker_helper_workspace_t` mapping is acceptable
+because:
 
-This applies to:
-- init core failure (e.g., admin.token creation fails);
-- config write/reload/rollback failure.
-
-A stale `docker_helper_workspace_t` mapping is acceptable because:
 - it is confinement metadata, not authorization;
 - config/principal/session checks remain authoritative;
-- old mappings already intentionally persist while sessions may use them;
-- session-aware garbage collection remains post-2.0.
+- old mappings persist while sessions may use them;
+- removal is handled by the sessionMACCoordinator when it proves no consumers
+  remain.
 
-Internal rollback inside `ensureWorkspaceLabel` still occurs when the manager
-itself fails before returning success (e.g., restorecon fails after adding a
-new rule). At that point no successful managed-state transition has been
-reported.
+Internal rollback inside `ensureWorkspaceFcontext` still occurs when the
+function itself fails before returning success (e.g., restorecon fails after
+adding a new rule). At that point no successful managed-state transition has
+been reported.
 
 #### Existing operator policy
 
@@ -107,19 +159,20 @@ docker-helper does not use Docker `:z`/`:Z` mount options or `label=disable`.
 The SELinux labeling is managed natively through `semanage fcontext` and
 `restorecon`.
 
-#### Previously managed roots
+#### Allowed-root removal does not trigger MAC cleanup
 
-When a global allowed root is removed, docker-helper does NOT automatically remove or
-relabel the previous root. Existing sessions may still reference the old root,
-and the `docker_helper_workspace_t` label may persist. This is acceptable
-because SELinux labeling is confinement metadata, not authorization. The
-application/session policy still controls access.
+When a global allowed root is removed, docker-helper does NOT automatically
+remove or relabel the previous root. Existing sessions may still reference the
+old root, and the `docker_helper_workspace_t` label may persist. This is
+acceptable because SELinux labeling is confinement metadata, not authorization.
+The application/session policy still controls access.
 
 Persistent SELinux metadata (fcontext rules, restored labels) may outlive
 authorization changes. This is not a separate authorization or domain layer:
 `config allowed-root` and principal/session checks remain authoritative.
 
-Session-aware SELinux label garbage collection is deferred to post-2.0.
+Helper-owned boundary removal is triggered by the sessionMACCoordinator when
+it proves there are no consumers, not by config changes.
 
 #### Type-only restorecon
 
@@ -128,7 +181,7 @@ SELinux TYPE. The user, role, and MLS/MCS range are not forcibly reset. An
 existing customizable label (e.g., from `chcon`) that ordinary `restorecon`
 will not replace is correctly treated as a verification failure.
 
-## 3. Detection and confinement
+## 4. Detection and confinement
 
 `detectLSM` is the backend-neutral authority. It distinguishes:
 
@@ -155,7 +208,7 @@ Each confinement directive is effective only for its active LSM. The policy
 permits the systemd transition and inherited journald stream socket used for
 both stdout and stderr.
 
-## 4. Policy structure
+## 5. Policy structure
 
 The compiled module defines:
 
@@ -190,7 +243,7 @@ This is an explicit compatibility dependency on the installed base policy and
 container-selinux. A raw `checkmodule` syntax pass alone does not prove that
 dependency across distributions.
 
-## 5. CA hashing and injection under SELinux
+## 6. CA hashing and injection under SELinux
 
 Trusted CA injection no longer executes `/usr/bin/openssl` at runtime. The
 helper validates one PEM X.509 CA and computes the OpenSSL 3.x
@@ -202,7 +255,7 @@ The common-case hash corpus was checked against OpenSSL 3.5.7. Differential
 coverage of uncommon ASN.1 string encodings remains a release-hardening task;
 see the dated release audit.
 
-## 6. Packaging contract
+## 7. Packaging contract
 
 The policy is compiled during the release build:
 
@@ -225,7 +278,7 @@ Fedora/RHEL portability is future work.
 The release workflow must install both `checkmodule` and `semodule_package`
 before running `build-packages.sh`; the current isolated release job does not.
 
-## 7. Evidence completed
+## 8. Evidence completed
 
 Live enforcing work on openSUSE Tumbleweed established:
 
@@ -242,20 +295,20 @@ The detailed host facts and commands are retained in
 `packaging/selinux/LIVE-TEST.md`. Harmless cgroup/sysctl probe AVCs were not
 converted into broad permissions.
 
-## 8. Release blockers and remaining UAT
+## 9. Release blockers and remaining UAT
 
 ### `/opt` and non-home system roots (resolved)
 
 Non-home system `allowed_roots` (e.g., `/data`, `/projects/agents`,
 `/opt/docker-helper-workspaces`) are managed under `docker_helper_workspace_t`
 with persistent `semanage fcontext` rules and `restorecon -R` (type-only).
-The daemon and container domains receive workspace permissions for this type.
-`config allowed-root add` updates the authorization ceiling only; it does NOT prepare MAC state.
+The daemon and container domain receive workspace permissions for this type.
+`config allowed-root add` updates the authorization ceiling only; it does NOT
+prepare MAC state.
 
-Monotonic managed-label lifecycle (R2): once `ensureWorkspaceLabel` returns
-success, the mapping is managed durable state. Outer init/config code does NOT
-roll it back on subsequent failures. A stale mapping is acceptable because it
-is confinement metadata, not authorization.
+`/opt` is accepted as a global authorization ceiling. A helper-created
+recursive SELinux fcontext boundary at `/opt` is a different question and is
+not conflated with authorization.
 
 The Release 2 RPM acceptance target is openSUSE Tumbleweed.
 
@@ -280,7 +333,7 @@ There is no `docker-helper selinux check` command in the Release 2 CLI. Module,
 label, and AVC diagnostics use standard host tools (`semodule`, `matchpathcon`,
 `stat -Z`, and `ausearch`) during package acceptance.
 
-## 9. Future work
+## 10. Future work
 
 - An opt-in strict SELinux workspace mode using dedicated or deliberately
   relabelled storage.

@@ -496,7 +496,8 @@ func (c *sessionMACCoordinator) recordBoundaryOwnership(boundary string) error {
 	return err
 }
 
-// isBoundaryOwnedByHelper checks if the boundary is owned by the current driver.
+// isBoundaryOwnedByHelper checks if the boundary is owned by docker-helper
+// for the current backend.
 func (c *sessionMACCoordinator) isBoundaryOwnedByHelper(boundary string) (bool, error) {
 	var backend string
 	err := c.db.QueryRow(
@@ -528,7 +529,8 @@ func (c *sessionMACCoordinator) backendType() string {
 	return c.driver.backendType()
 }
 
-// listOwnedBoundaries returns all boundaries owned by the current driver.
+// listOwnedBoundaries returns all boundaries owned by docker-helper for the
+// current backend.
 func (c *sessionMACCoordinator) listOwnedBoundaries() ([]string, error) {
 	rows, err := c.db.Query(
 		`SELECT boundary FROM mac_boundaries WHERE backend = ?`,

@@ -47,13 +47,6 @@ type selinuxFcontextManager struct {
 	acquireLock func() (func() error, error)
 }
 
-// selinuxEnsureWorkspaceFcontext is the injectable seam for testing.
-// It wraps the production ensureWorkspaceFcontext call.
-var selinuxEnsureWorkspaceFcontext = func(root string) (bool, error) {
-	mgr := newSELinuxFcontextManager()
-	return mgr.ensureWorkspaceFcontext(root)
-}
-
 func newSELinuxFcontextManager() *selinuxFcontextManager {
 	rc := func(cmd string, args ...string) ([]byte, error) {
 		c := exec.Command(cmd, args...)
@@ -214,11 +207,15 @@ func unescapeFcontextPath(s string) (string, bool) {
 //
 // Returns whether a new mapping was created (true) or already existed (false).
 //
-// Monotonic managed-label lifecycle (R2):
-// Once this function returns success, the mapping is managed durable state.
-// The caller MUST NOT roll it back on subsequent failures.
-// Internal rollback only occurs when the manager itself cannot complete
-// before returning success.
+// This is the backend-internal atomic preparation primitive. If preparation
+// fails before successful return, it may roll back its own partial changes
+// (e.g., removing a newly-added fcontext rule when restorecon fails).
+//
+// After successful return:
+//
+//   - unrelated config/init/reload failures do not roll it back;
+//   - normal later removal is a separate lifecycle operation owned by
+//     sessionMACCoordinator (via selinuxWorkspaceMACDriver.removeBoundary).
 func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {
@@ -428,13 +425,23 @@ func (m *selinuxFcontextManager) verifyActualType(root string) error {
 	return nil
 }
 
-// removeWorkspaceFcontext removes a newly-created fcontext rule and runs
-// restorecon to revert labels. Only called internally when the manager
-// itself cannot complete its transition before returning success.
+// removeWorkspaceFcontext removes an fcontext rule and runs restorecon to
+// revert labels. It is the backend-native removal primitive used in two
+// contexts:
 //
-// Outer callers (init, config allowed-root add) MUST NOT call this on a
-// mapping that was previously returned as successful. Once
-// ensureWorkspaceFcontext returns success, the mapping is managed durable state.
+//  1. Internal rollback: when ensureWorkspaceFcontext fails before successful
+//     return and needs to undo its own partial changes.
+//
+//  2. Lifecycle removal: called through sessionMACCoordinator when all
+//     consumers are gone, via the call path:
+//
+//     sessionMACCoordinator
+//     -> selinuxWorkspaceMACDriver.removeBoundary
+//     -> selinuxFcontextManager.removeWorkspaceFcontext
+//
+// It is NOT called by outer init or config code on a previously successful
+// mapping. Once ensureWorkspaceFcontext returns success, the mapping is
+// managed durable state and removal is a separate lifecycle operation.
 func (m *selinuxFcontextManager) removeWorkspaceFcontext(root string) error {
 	pattern := fcontextPattern(root)
 
