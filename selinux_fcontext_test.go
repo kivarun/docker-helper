@@ -932,8 +932,6 @@ func TestSELinuxWorkspaceLockAcquisitionFailure(t *testing.T) {
 	}
 }
 
-
-
 // --- Constant tests ---
 
 // --- Item 1: canonical round-trip classification ---

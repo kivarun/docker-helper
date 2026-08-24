@@ -1,19 +1,20 @@
-# Naming entropy audit — MAC/path-safety reference area
+# Naming entropy audit — MAC/workspace-path reference area
 
 Date: 2026-08-24
 
 Reference model: `AGENTS.md` § MAC naming grammar.
 
-**Scope:** This audit covers the MAC lifecycle, AppArmor/SELinux, containment,
-init dispatch, and shared path-safety vocabulary. It is a completed
-reference-area audit/refactoring.
+**Scope:** This audit covers the MAC lifecycle, AppArmor/SELinux native
+mechanics, MAC boundaries, canonical path containment, init/reload lifecycle,
+and shared workspace-path policy. It is a completed reference-area
+audit/refactoring.
 
 **This is not a project-wide naming audit.** It makes no claim that naming
 across the whole repository is clean. The next phase is a fresh project-wide
 audit using this area as the quality/reference model.
 
-Within the reference scope covered by this audit, no actionable naming debt
-remains. This is not a project-wide cleanliness claim.
+The identified refactor batches in this reference scope have been applied.
+Final acceptance of the reference area is pending a separate control review.
 
 Rule: one domain concept -> one canonical term. Different concepts must not
 share one word. Different implementations must not invent synonyms for the
@@ -34,29 +35,48 @@ This refactor demonstrates the following principles:
   implementation. `backend` is the selected/persisted AppArmor|SELinux
   identity.
 
-- **Authorization root vs concrete workspace vs generic path.**
-  `allowed_root` is the authorization ceiling. `workspace` is a concrete
-  session capability path. `path` is a generic filesystem path.
+- **Domain concept separation.**
+  - `allowed root` = authorization ceiling
+  - `workspace` = concrete session capability
+  - `workspace path` = a host path subject to the shared workspace-path
+    admissibility policy
+  - `MAC boundary` = AppArmor/SELinux coverage boundary used by MAC mechanics
+  - `generic path` = filesystem path where no workspace-policy semantics apply
+
+  An allowed root and a MAC boundary may both be subject to the same
+  workspace-path admissibility policy, but they are NOT the same domain concept.
 
 - **Canonicalization separate from containment.** `pathWithin` and
   `pathStrictlyWithin` operate on canonical paths. Callers resolve
   symlinks before calling.
 
-- **Generic helpers use generic names.** `canonicalizePathForAdd`,
-  `validatePathPolicy`, `validatePathSafety` are shared across
-  authorization and MAC boundary concerns.
+- **Shared implementation does not imply generic semantics.** Helpers
+  shared by authorization and MAC boundary code are named after the semantic
+  policy they implement:
+  - `canonicalizeWorkspacePathForAdd`
+  - `validateWorkspacePathPolicy`
+  - `validateWorkspacePathSafety`
+
+  Truly generic canonical containment remains separately named:
+  - `pathWithin`
+  - `pathStrictlyWithin`
+  - `path_containment.go`
 
 - **Domain-specific wrappers retain domain vocabulary.**
-  `validateAllowedRootValue`, `validateRootPathForAdd`,
-  `validateRootLexical` keep their domain-specific names.
+  - `validateAllowedRootValue` (authorization)
+  - `validateBoundaryPathForAdd`, `validateBoundaryPathForRemove`,
+    `validateBoundaryLexical` (AppArmor MAC boundary)
 
 - **Test names describe the invariant/role they actually exercise.**
-  `TestValidatePathSafety`, `TestCanonicalizePathForAdd`, not
-  `TestIsForbiddenWorkspaceRoot`.
+  `TestValidateWorkspacePathSafety`, `TestCanonicalizeWorkspacePathForAdd`,
+  not `TestIsForbiddenWorkspaceRoot`.
 
 - **Historical architecture names must not survive after ownership changes.**
   `selinux_workspace.go` -> `selinux_fcontext.go` when the file's
   responsibility is fcontext mechanics, not workspace management.
+
+- **Test seams, test filenames/names and comments must follow current
+  ownership; historical architecture should not survive only in tests.**
 
 - **Public CLI vocabulary has higher migration cost and is not renamed
   merely for internal aesthetic consistency.** `docker-helper apparmor root`
@@ -113,28 +133,80 @@ names unchanged.
 `runInit` that called `initSystem` with identical arguments. Backend is now
 validated once, then `initSystem` is called once.
 
-### workspace_root.* -> path_safety.*
-
-**Renamed:**
-- `workspace_root.go` -> `path_safety.go`
-- `workspace_root_test.go` -> `path_safety_test.go`
-- `workspace_root_invariant_test.go` -> `path_safety_invariant_test.go`
-
-### Generic path safety helpers
-
-**Renamed:**
-- `canonicalizeWorkspaceRootForAdd` -> `canonicalizePathForAdd`
-- `validateWorkspaceRootPolicy` -> `validatePathPolicy`
-- `isForbiddenWorkspaceRoot` -> `validatePathSafety`
-
-Public error messages preserved (still say "workspace root").
-
 ### appArmorProfileManager.preflight -> checkPrerequisites
 
 **Renamed:** `appArmorProfileManager.preflight()` ->
 `appArmorProfileManager.checkPrerequisites()`. The method checks manager
 prerequisites (parser existence, executability, profile existence), not a
 generic preflight.
+
+### workspace_root.* -> workspace_path_policy.* (two-step rename)
+
+The first rename (`workspace_root.*` -> `path_safety.*`) was itself too broad.
+The code implements workspace-path admissibility policy, including forbidden
+system trees, broad namespace restrictions and EUID-dependent exceptions; it
+is not a generic filesystem-safety library.
+
+**Final files:**
+- `workspace_path_policy.go`
+- `workspace_path_policy_test.go`
+- `workspace_path_policy_invariant_test.go`
+
+**Final helpers:**
+- `canonicalizeWorkspacePathForAdd`
+- `validateWorkspacePathPolicy`
+- `validateWorkspacePathSafety`
+
+### AppArmor internal root -> boundary vocabulary
+
+Internal AppArmor mechanics previously used authorization-style "root"
+vocabulary for MAC boundaries. Renamed to use "boundary" internally.
+
+**Internal vocabulary:**
+- `boundaryResult`
+- `fragmentSnapshot.boundaries`
+- `validateBoundaryLexical`
+- `validateBoundaryPathForAdd`
+- `validateBoundaryPathForRemove`
+- `addManagedBoundary`
+- `removeManagedBoundary`
+- `listManagedBoundaries`
+- `appArmorWorkspaceMACDriver` uses boundary vocabulary
+
+**Explicit compatibility exception** (intentionally retain "root"):
+- `docker-helper apparmor root` (public CLI)
+- `appArmorRootCommand` / `runAppArmorRoot*` (CLI adapter)
+- `managed-roots` (persisted artifact naming)
+- `# root-json:` (persisted syntax)
+
+Internal implementation vocabulary is boundary; compatibility adapters retain
+root.
+
+### Obsolete architecture residue cleanup
+
+**Deleted:** dead `appArmorManagedRoots` test seam.
+
+**Renamed:** `TestServeSystemModeAppArmorManagedRootsMissing` to
+`TestServeSystemModeDoesNotVerifyGlobalRootsAgainstAppArmor` to describe the
+current invariant (global allowed roots are authorization-only; serve startup
+does not require AppArmor coverage for them).
+
+**Moved:** generic `initSystem` tests out of `selinux_fcontext_test.go` to
+`init_test.go`:
+- `TestInitSELinuxNoMACPreparation` -> `TestInitSystemNoMACPreparation`
+- `TestInitSELinuxCoreFailurePropagates` (duplicate, removed)
+- `TestInitSELinuxNilManager` -> `TestInitSystemPassesAllowedRootToCore`
+
+**Moved:** `TestServeDetectLSMError` from `selinux_fcontext_test.go` to
+`lsm_test.go`.
+
+**Removed:** unused `reloadDeps.deploymentMode`.
+
+**Fixed:** reload lifecycle comment (reload does not verify MAC coverage for
+global roots; MAC state follows session workspace lifecycle).
+
+**Fixed:** `initCore` comment generalized from "no AppArmor operations" to
+"file-based initialization only; does not prepare MAC state".
 
 ## Canonical vocabulary
 
@@ -147,6 +219,7 @@ generic preflight.
 - `HelperOwned` — docker-helper durable ownership of a boundary
 - `appArmorProfileManager` — native AppArmor profile/managed-fragment mechanics
 - `selinuxFcontextManager` — native SELinux fcontext mechanics
+- `MAC boundary` / `boundary` — AppArmor/SELinux coverage boundary
 - `backend` — selected/persisted AppArmor|SELinux identity
 - `driver` — `workspaceMACDriver` implementation
 
@@ -154,8 +227,11 @@ generic preflight.
 
 - `allowed_root` / `AllowedRoots` — authorization ceiling
 - `workspace` — concrete session capability path
-- `path` — generic filesystem path
-- `path_safety.go` — generic host path safety/canonicalization
+- `workspace path` — host path governed by workspace-path admissibility policy
+- `MAC boundary` — MAC coverage boundary; not an authorization root
+- `workspace_path_policy.go` — shared workspace-path admissibility policy
+- `path_containment.go` — generic canonical-path containment primitives
+- `path` — generic filesystem path only when no more specific domain term applies
 
 ### Accepted public CLI vocabulary
 
