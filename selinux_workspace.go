@@ -29,6 +29,19 @@ func isHomeRoot(canonical string) bool {
 	return strings.HasPrefix(canonical, "/home/")
 }
 
+// selinuxFcontextBoundaryAllowed returns true if the given canonical path is
+// allowed as a helper-created recursive SELinux fcontext boundary. Exact /opt
+// is rejected because it would make the entire standard namespace a recursive
+// relabel boundary.
+//
+// Note: /opt is still a valid authorization ceiling. This function only
+// controls whether docker-helper creates a helper-owned fcontext boundary at
+// the path. The authorization-root policy and the fcontext-boundary policy are
+// distinct.
+func selinuxFcontextBoundaryAllowed(canonical string) bool {
+	return canonical != "/opt"
+}
+
 // selinuxFcontextManager manages persistent SELinux workspace labeling for
 // non-home workspace roots. It uses semanage fcontext + restorecon to
 // create persistent mappings that survive reboot and restorecon.
@@ -216,6 +229,16 @@ func unescapeFcontextPath(s string) (string, bool) {
 //   - unrelated config/init/reload failures do not roll it back;
 //   - normal later removal is a separate lifecycle operation owned by
 //     sessionMACCoordinator (via selinuxWorkspaceMACDriver.removeBoundary).
+//
+// Coverage versus ownership:
+//
+//   - newlyCreated == true means docker-helper created the boundary;
+//     the sessionMACCoordinator records ownership metadata separately.
+//   - newlyCreated == false means a compatible boundary already existed;
+//     it may be helper-owned (tracked in mac_boundaries) or
+//     operator-compatible (never helper-owned).
+//   - HelperOwned is resolved by the sessionMACCoordinator using durable
+//     ownership metadata, not by this backend function.
 func (m *selinuxFcontextManager) ensureWorkspaceFcontext(root string) (newlyCreated bool, err error) {
 	active, enforcing, err := m.selinuxActive()
 	if err != nil {

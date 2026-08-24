@@ -79,7 +79,7 @@ use it as coverage for sessions but will never claim ownership or attempt to
 delete it. This is enforced by the SELinux driver always returning
 `HelperOwned: false` for discovered boundaries.
 
-## 3. Workspace-root SELinux labeling
+## 3. Effective SELinux fcontext boundary
 
 ### `/home` and descendants
 
@@ -88,34 +88,47 @@ labels. docker-helper does not create `semanage fcontext` rules or run
 `restorecon` on `/home` paths. The existing `user_home_type` policy grants the
 daemon and container domain the necessary workspace permissions.
 
-### Non-home system allowed roots
+### Non-home session workspace -> effective fcontext boundary
 
-A non-home system global allowed root (e.g., `/data`, `/projects/agents`,
-`/opt/docker-helper-workspaces`) provides MAC coverage under a dedicated
-SELinux type:
+A global allowed root is authorization only. It does not create, remove, or
+otherwise mutate SELinux fcontext rules.
 
-```
-docker_helper_workspace_t
-```
+When a session workspace is outside `/home`, the sessionMACCoordinator ensures
+that the workspace has valid MAC coverage. The effective boundary is the
+concrete workspace path or a compatible ancestor that already has a persistent
+`semanage fcontext` rule mapping to `docker_helper_workspace_t`.
 
-This type is **not** `usr_t`, `default_t`, `var_t`, or any other generic host
-type. The daemon and container domains receive only the permissions required
-for workspace access, equivalent to what they have for `user_home_type`.
-
-MAC preparation for these roots occurs at session creation time for the
-concrete workspace, not when the root is added via `config allowed-root add`.
+The type `docker_helper_workspace_t` is **not** `usr_t`, `default_t`, `var_t`,
+or any other generic host type. The daemon and container domains receive only
+the permissions required for workspace access, equivalent to what they have for
+`user_home_type`.
 
 #### Persistent labeling
 
-When a session workspace requires MAC coverage under active SELinux, it:
+When a session workspace requires MAC coverage under active SELinux and no
+compatible boundary already exists, the SELinux driver:
 
-1. Creates a persistent `semanage fcontext` rule for the canonical root and
-   descendants: `<escaped-root>(/.*)? -> docker_helper_workspace_t`
+1. Creates a persistent `semanage fcontext` rule for the canonical workspace
+   and descendants: `<escaped-workspace>(/.*)? -> docker_helper_workspace_t`
 2. Applies the rule recursively with `restorecon -R` (type-only, no `-F`)
-3. Verifies the root's actual SELinux type is `docker_helper_workspace_t`
+3. Verifies the workspace's actual SELinux type is `docker_helper_workspace_t`
 
 The mapping survives `restorecon` and reboot because it is stored in the
 persistent SELinux file-context database.
+
+#### Coverage versus ownership
+
+A successful `ensureWorkspaceFcontext` means durable compatible coverage exists.
+It does NOT by itself mean the mapping is helper-owned: an existing
+operator-compatible rule can also produce successful coverage.
+
+    newlyCreated == true
+        docker-helper created the boundary; sessionMACCoordinator records
+        ownership metadata
+
+    HelperOwned
+        resolved by sessionMACCoordinator using durable ownership metadata
+        (mac_boundaries table), not by the backend
 
 #### Durable state after successful preparation
 
@@ -149,7 +162,7 @@ docker-helper does not blindly overwrite an existing conflicting local
 
 #### Regex escaping
 
-The root path is correctly escaped when constructing the fcontext regex to
+The workspace path is correctly escaped when constructing the fcontext regex to
 avoid over-matching. For example, `/data` produces a pattern that matches
 `/data` and `/data/...` but not `/data/foobar` as a separate root.
 
@@ -162,8 +175,8 @@ The SELinux labeling is managed natively through `semanage fcontext` and
 #### Allowed-root removal does not trigger MAC cleanup
 
 When a global allowed root is removed, docker-helper does NOT automatically
-remove or relabel the previous root. Existing sessions may still reference the
-old root, and the `docker_helper_workspace_t` label may persist. This is
+remove or relabel any fcontext boundary. Existing sessions may still reference
+the old root, and the `docker_helper_workspace_t` label may persist. This is
 acceptable because SELinux labeling is confinement metadata, not authorization.
 The application/session policy still controls access.
 

@@ -869,10 +869,6 @@ func TestAllowedRootRemoveNoOpInvalidConfigFails(t *testing.T) {
 
 // TestConfigAllowedRootAuthorizationOnly verifies that config allowed-root add
 // changes only the authorization ceiling, never MAC state.
-//
-//   - /opt is accepted as a global authorization ceiling.
-//   - /home is accepted as an authorization root.
-//   - user mode does not perform MAC preparation.
 func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 	// Mock attemptReload to return "daemon not running" to avoid authentication issues.
 	origAttemptReload := attemptReload
@@ -953,7 +949,7 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 		}
 	})
 
-	t.Run("config_add_user_mode_no_mac", func(t *testing.T) {
+	t.Run("config_add_user_mode", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -983,10 +979,10 @@ func TestConfigAllowedRootAuthorizationOnly(t *testing.T) {
 	})
 }
 
-// TestConfigAllowedRootValidationBeforeMAC verifies that config validation
-// runs before any MAC preparation. When validation fails, no MAC state is
-// mutated and the config is unchanged.
-func TestConfigAllowedRootValidationBeforeMAC(t *testing.T) {
+// TestConfigAllowedRootValidationBeforeConfigChange verifies that config
+// validation runs before the config is persisted. When validation fails,
+// the config is unchanged.
+func TestConfigAllowedRootValidationBeforeConfigChange(t *testing.T) {
 	// Mock attemptReload to return "daemon not running".
 	origAttemptReload := attemptReload
 	attemptReload = func() reloadOutcome {
@@ -994,7 +990,7 @@ func TestConfigAllowedRootValidationBeforeMAC(t *testing.T) {
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("invalid_config_fails_before_mac", func(t *testing.T) {
+	t.Run("invalid_config_fails_before_persist", func(t *testing.T) {
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{allowedRoot},
@@ -1031,7 +1027,7 @@ func TestConfigAllowedRootValidationBeforeMAC(t *testing.T) {
 		verifyConfigUnchanged(t, configPath, data)
 	})
 
-	t.Run("add_succeeds_without_mac", func(t *testing.T) {
+	t.Run("add_succeeds", func(t *testing.T) {
 		testRoot := testAllowedRootDir(t)
 		allowedRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
@@ -1054,7 +1050,7 @@ func TestConfigAllowedRootValidationBeforeMAC(t *testing.T) {
 		}
 	})
 
-	t.Run("already_present_no_mac", func(t *testing.T) {
+	t.Run("already_present", func(t *testing.T) {
 		testRoot := testAllowedRootDir(t)
 		cfg := map[string]any{
 			"allowed_roots": []string{testRoot},
@@ -1072,48 +1068,6 @@ func TestConfigAllowedRootValidationBeforeMAC(t *testing.T) {
 	})
 }
 
-// TestConfigAllowedRootAddZeroMAC verifies that config allowed-root add
-// performs zero MAC calls. MAC preparation is handled at session creation time.
-func TestConfigAllowedRootAddZeroMAC(t *testing.T) {
-	origAttemptReload := attemptReload
-	attemptReload = func() reloadOutcome {
-		return reloadOutcome{reloadDaemonNotRunning, nil}
-	}
-	defer func() { attemptReload = origAttemptReload }()
-
-	t.Run("system_mode_no_backend_succeeds", func(t *testing.T) {
-		allowedRoot := testAllowedRootDir(t)
-		cfg := map[string]any{
-			"allowed_roots": []string{allowedRoot},
-			"session_ttl":   "12h",
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		configPath := setupConfigAllowedRootTestEnv(t, data)
-
-		origUID := EffectiveUID
-		EffectiveUID = func() int { return 0 }
-		defer func() { EffectiveUID = origUID }()
-
-		origSEL := selinuxEnabled
-		selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
-		defer func() { selinuxEnabled = origSEL }()
-		origAA := appArmorLSMActive
-		appArmorLSMActive = func() (bool, error) { return false, nil }
-		defer func() { appArmorLSMActive = origAA }()
-
-		newRoot := testAllowedRootDir(t)
-		var stdout, stderr bytes.Buffer
-		code := configAllowedRootAdd(newRoot, &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("expected exit 0, got %d, stderr: %s", code, stderr.String())
-		}
-		newData, _ := os.ReadFile(configPath)
-		if bytes.Equal(data, newData) {
-			t.Error("config should have been updated with the new root")
-		}
-	})
-}
-
 // TestOptAuthorizationCeiling verifies that /opt is a valid global
 // authorization ceiling and that the authorization-root policy is distinct
 // from the SELinux fcontext-boundary policy.
@@ -1125,18 +1079,18 @@ func TestOptAuthorizationCeiling(t *testing.T) {
 	}
 	defer func() { attemptReload = origAttemptReload }()
 
-	t.Run("fcontext_relabel_policy", func(t *testing.T) {
-		if selinuxManagedRootAllowed("/opt") {
-			t.Error("/opt must not be allowed as fcontext relabel boundary")
+	t.Run("fcontext_boundary_policy", func(t *testing.T) {
+		if selinuxFcontextBoundaryAllowed("/opt") {
+			t.Error("/opt must not be allowed as helper-created fcontext boundary")
 		}
-		if !selinuxManagedRootAllowed("/opt/workspaces") {
-			t.Error("/opt/workspaces must be allowed as fcontext relabel boundary")
+		if !selinuxFcontextBoundaryAllowed("/opt/workspaces") {
+			t.Error("/opt/workspaces must be allowed as helper-created fcontext boundary")
 		}
-		if !selinuxManagedRootAllowed("/data") {
-			t.Error("/data must be allowed as fcontext relabel boundary")
+		if !selinuxFcontextBoundaryAllowed("/data") {
+			t.Error("/data must be allowed as helper-created fcontext boundary")
 		}
-		if !selinuxManagedRootAllowed("/home") {
-			t.Error("/home must be allowed as fcontext relabel boundary")
+		if !selinuxFcontextBoundaryAllowed("/home") {
+			t.Error("/home must be allowed as helper-created fcontext boundary")
 		}
 	})
 

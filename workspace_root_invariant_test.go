@@ -288,7 +288,7 @@ func TestInitUserModeStoresCanonicalAllowedRoot(t *testing.T) {
 
 // TestInitSystemModePassesCanonicalToCore verifies the init invariant for
 // system mode: the value the CLI resolves (canonical) is what the system
-// init orchestration hands to core (initCore) and to AppArmor addRoot.
+// init orchestration hands to core (initCore).
 func TestInitSystemModePassesCanonicalToCore(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
