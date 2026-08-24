@@ -170,3 +170,69 @@ func (a *App) getAdminTokenHash() [sha256.Size]byte {
 	defer a.mu.RUnlock()
 	return a.AdminTokenHash
 }
+
+// principalEnabledChangeResult is the explicit result of a principal
+// enabled-state transition. Changed indicates whether the state actually
+// transitioned. RevokedSessionIDs lists session IDs deleted when disabling.
+type principalEnabledChangeResult struct {
+	Changed           bool
+	RevokedSessionIDs []string
+}
+
+// applyPrincipalEnabledChange is the App-level lifecycle operation for
+// transitioning a principal's enabled state. It:
+//   - updates the principal enabled state in the database;
+//   - when disabling, collects and deletes that principal's sessions
+//     in the same DB transaction;
+//   - commits the DB transaction;
+//   - after successful commit, releases every deleted session binding
+//     through the MAC coordinator;
+//   - returns explicit Changed and RevokedSessionIDs.
+//
+// Running operations are NOT terminated. Existing workspace-use leases
+// continue to hold the MAC boundary until the operation releases its lease.
+func (a *App) applyPrincipalEnabledChange(username string, enabled bool) (principalEnabledChangeResult, error) {
+	result, err := persistPrincipalEnabledChange(a.DB, username, enabled)
+	if err != nil {
+		return principalEnabledChangeResult{}, err
+	}
+
+	if result.Changed && len(result.RevokedSessionIDs) > 0 {
+		a.releaseSessionBindings(result.RevokedSessionIDs)
+	}
+
+	return result, nil
+}
+
+// deletePrincipalWithMAC is the App-level lifecycle operation for
+// deleting a principal. It:
+//   - collects session IDs;
+//   - deletes the principal's sessions;
+//   - deletes the principal;
+//   - commits the DB transaction;
+//   - after successful commit, releases every deleted session binding
+//     through the MAC coordinator.
+//
+// Returns the deleted session IDs for best-effort runtime directory cleanup.
+// Running operations are NOT terminated. Existing workspace-use leases
+// continue to hold the MAC boundary until the operation releases its lease.
+func (a *App) deletePrincipalWithMAC(username string) ([]string, error) {
+	sessionIDs, err := deletePrincipal(a.DB, username)
+	if err != nil {
+		return nil, err
+	}
+
+	a.releaseSessionBindings(sessionIDs)
+	return sessionIDs, nil
+}
+
+// releaseSessionBindings releases MAC bindings for the given session IDs
+// through the MAC coordinator. No-op if the coordinator is nil.
+func (a *App) releaseSessionBindings(sessionIDs []string) {
+	if a.MACCoordinator == nil {
+		return
+	}
+	for _, id := range sessionIDs {
+		a.MACCoordinator.ReleaseSessionBinding(id)
+	}
+}

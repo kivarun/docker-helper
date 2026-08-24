@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -211,20 +212,19 @@ var sessionCleanupCommand = &Command{
 	Usage:   "docker-helper session cleanup",
 	Help: `Remove expired sessions from the local state database.
 
+This is an OFFLINE maintenance command. The daemon must not be running.
+The command fails if another docker-helper instance holds the daemon lock.
+
 Only sessions whose expires_at has passed are removed.
 Active sessions are untouched.
 
-This operates directly on the local SQLite database; no running
-daemon or API connection is required. No admin or session token is needed.
-
-Expired sessions are already rejected for authentication and excluded
-from session lists by their expires_at value. This command is useful
-for explicitly reclaiming storage during long daemon uptimes.
+This operates directly on the local SQLite database. No API connection is
+needed. No admin or session token is required.
 
 Stale session runtime directories are also cleaned up. These directories
 may contain session-scoped Docker registry credentials.
 
-The daemon also removes expired sessions automatically at startup.`,
+Daemon startup already removes expired sessions automatically.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -235,6 +235,34 @@ The daemon also removes expired sessions automatically at startup.`,
 }
 
 func runSessionCleanup(stdout, stderr io.Writer) int {
+	// Resolve runtime directory before any database mutation.
+	runtimeDir := getRuntimeDirSafe()
+	if runtimeDir == "" {
+		fmt.Fprintf(stderr, "error: cannot determine runtime directory\n")
+		return 1
+	}
+
+	// Ensure runtime directory exists with mode-appropriate permissions.
+	dirMode := os.FileMode(0700)
+	if resolveDeploymentMode() == ModeSystem {
+		dirMode = 0755
+	}
+	if err := os.MkdirAll(runtimeDir, dirMode); err != nil {
+		fmt.Fprintf(stderr, "error: cannot create runtime directory: %v\n", err)
+		return 1
+	}
+
+	// Acquire the same daemon instance lock used by serve.
+	// If the daemon owns the lock, fail cleanly without mutating anything.
+	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
+	lockFile, err := acquireLock(lockPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: another docker-helper instance is already running; session cleanup must be offline\n")
+		return 1
+	}
+	defer lockFile.Close()
+
+	// Lock acquired: safe to open the database and clean up.
 	dbPath := filepath.Join(getStateDir(), "docker-helper.db")
 
 	db, err := openDatabase(dbPath)
@@ -247,13 +275,6 @@ func runSessionCleanup(stdout, stderr io.Writer) int {
 	n, err := cleanupExpiredSessions(db)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	runtimeDir := getRuntimeDirSafe()
-	if runtimeDir == "" {
-		fmt.Fprintf(stdout, "removed %d expired sessions\n", n)
-		fmt.Fprintf(stderr, "warning: cannot determine runtime directory; stale runtime dirs not cleaned\n")
 		return 1
 	}
 

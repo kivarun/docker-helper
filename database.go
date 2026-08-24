@@ -150,6 +150,13 @@ func initializeDatabase(db *sql.DB) error {
 	return nil
 }
 
+// cleanupExpiredSessions removes expired session rows from the database.
+//
+// Precondition: the caller must ensure no live daemon instance is running.
+// During daemon startup, this is guaranteed because startup holds the daemon
+// instance lock and calls this function before creating the MAC coordinator.
+// For offline cleanup (docker-helper session cleanup), the caller acquires
+// the daemon lock first.
 func cleanupExpiredSessions(db *sql.DB) (int, error) {
 	now := time.Now().Unix()
 

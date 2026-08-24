@@ -254,8 +254,8 @@ func TestPrincipalDisableDeletesSessions(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	if _, err := updatePrincipalEnabled(app.DB, "disuser", false); err != nil {
-		t.Fatalf("updatePrincipalEnabled: %v", err)
+	if _, err := persistPrincipalEnabledChange(app.DB, "disuser", false); err != nil {
+		t.Fatalf("persistPrincipalEnabledChange: %v", err)
 	}
 
 	_, err = app.findSessionByToken(resp.Token)
@@ -285,20 +285,20 @@ func TestPrincipalDisableIdempotent(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	sessionIDs, err := updatePrincipalEnabled(app.DB, "disidempuser", false)
+	result, err := persistPrincipalEnabledChange(app.DB, "disidempuser", false)
 	if err != nil {
 		t.Fatalf("first disable: %v", err)
 	}
-	if sessionIDs == nil {
-		t.Error("first disable should report changed (non-nil sessionIDs)")
+	if !result.Changed {
+		t.Error("first disable should report changed")
 	}
 
-	sessionIDs, err = updatePrincipalEnabled(app.DB, "disidempuser", false)
+	result, err = persistPrincipalEnabledChange(app.DB, "disidempuser", false)
 	if err != nil {
 		t.Fatalf("second disable: %v", err)
 	}
-	if sessionIDs != nil {
-		t.Error("second disable should report unchanged (nil sessionIDs)")
+	if result.Changed {
+		t.Error("second disable should report unchanged")
 	}
 
 	p, err := findPrincipalByUserName(app.DB, "disidempuser")
@@ -352,10 +352,10 @@ func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	if _, err := updatePrincipalEnabled(app.DB, "disenuser", false); err != nil {
+	if _, err := persistPrincipalEnabledChange(app.DB, "disenuser", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if _, err := updatePrincipalEnabled(app.DB, "disenuser", true); err != nil {
+	if _, err := persistPrincipalEnabledChange(app.DB, "disenuser", true); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 
@@ -565,10 +565,10 @@ func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
 		t.Fatalf("createCredential: %v", err)
 	}
 
-	if _, err := updatePrincipalEnabled(app.DB, "discreduser", false); err != nil {
+	if _, err := persistPrincipalEnabledChange(app.DB, "discreduser", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if _, err := updatePrincipalEnabled(app.DB, "discreduser", true); err != nil {
+	if _, err := persistPrincipalEnabledChange(app.DB, "discreduser", true); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 
@@ -637,7 +637,7 @@ func TestPrincipalDisableSessionTokenUnauthorized(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 
-	if _, err := updatePrincipalEnabled(app.DB, "disauthuser", false); err != nil {
+	if _, err := persistPrincipalEnabledChange(app.DB, "disauthuser", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 

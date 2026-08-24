@@ -132,8 +132,8 @@ func TestCredentialAuthDisabledPrincipal(t *testing.T) {
 	}
 
 	// Disable the principal.
-	if _, err := updatePrincipalEnabled(app.DB, "disableduser", false); err != nil {
-		t.Fatalf("updatePrincipalEnabled() error: %v", err)
+	if _, err := persistPrincipalEnabledChange(app.DB, "disableduser", false); err != nil {
+		t.Fatalf("persistPrincipalEnabledChange() error: %v", err)
 	}
 
 	_, err = authenticateCredential(app.DB, token)
@@ -977,8 +977,8 @@ func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
 	sessionToken := resp.Token
 
 	// Disable the principal.
-	if _, err := updatePrincipalEnabled(app.DB, "survivedisuser", false); err != nil {
-		t.Fatalf("updatePrincipalEnabled() error: %v", err)
+	if _, err := persistPrincipalEnabledChange(app.DB, "survivedisuser", false); err != nil {
+		t.Fatalf("persistPrincipalEnabledChange() error: %v", err)
 	}
 
 	// Session token should be invalidated.

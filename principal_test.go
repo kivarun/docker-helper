@@ -1067,7 +1067,7 @@ func TestPrincipalErrorWrapping(t *testing.T) {
 		t.Fatal("expected error for empty username in find")
 	}
 
-	_, err = updatePrincipalEnabled(app.DB, "", true)
+	_, err = persistPrincipalEnabledChange(app.DB, "", true)
 	if err == nil {
 		t.Fatal("expected error for empty username in update")
 	}
@@ -1476,8 +1476,8 @@ func TestPrincipalHTTPListDisabledIncluded(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "dave", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
-	if _, err := updatePrincipalEnabled(app.DB, "dave", false); err != nil {
-		t.Fatalf("updatePrincipalEnabled() error: %v", err)
+	if _, err := persistPrincipalEnabledChange(app.DB, "dave", false); err != nil {
+		t.Fatalf("persistPrincipalEnabledChange() error: %v", err)
 	}
 
 	req := httptest.NewRequest("GET", "/principals", nil)

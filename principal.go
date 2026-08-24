@@ -228,29 +228,47 @@ func findPrincipalByUserName(db *sql.DB, username string) (*PrincipalWithRoots, 
 	}, nil
 }
 
-func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) ([]string, error) {
-	principalID, err := findPrincipalIDByUserName(db, username)
-	if err != nil {
-		return nil, err
-	}
-
-	p, err := findPrincipalByID(db, principalID)
-	if err != nil {
-		return nil, err
-	}
-
-	if p.Enabled == enabled {
-		return nil, nil
+// persistPrincipalEnabledChange performs a transactionally correct enabled-state
+// transition for a principal. It:
+//   - determines Principal existence and current enabled state within the transaction;
+//   - if already in the requested state, returns Changed=false;
+//   - updates enabled state;
+//   - when disabling, collects and deletes the Principal's sessions;
+//   - commits;
+//   - returns explicit Changed and RevokedSessionIDs.
+func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (principalEnabledChangeResult, error) {
+	if username == "" {
+		return principalEnabledChangeResult{}, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("cannot begin transaction: %w", err)
+		return principalEnabledChangeResult{}, fmt.Errorf("cannot begin transaction: %w", err)
+	}
+
+	principalID, err := findPrincipalIDByUserNameInTx(tx, username)
+	if err != nil {
+		tx.Rollback()
+		return principalEnabledChangeResult{}, err
+	}
+
+	// Determine current enabled state within the transaction.
+	var currentEnabled int
+	err = tx.QueryRow(`SELECT enabled FROM principals WHERE id = ?`, principalID).Scan(&currentEnabled)
+	if err != nil {
+		tx.Rollback()
+		return principalEnabledChangeResult{}, fmt.Errorf("cannot read principal enabled state: %w", err)
 	}
 
 	newEnabled := 0
 	if enabled {
 		newEnabled = 1
+	}
+
+	// Already in requested state.
+	if currentEnabled == newEnabled {
+		tx.Rollback()
+		return principalEnabledChangeResult{Changed: false}, nil
 	}
 
 	_, err = tx.Exec(
@@ -259,31 +277,30 @@ func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) ([]string
 	)
 	if err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("cannot update principal enabled: %w", err)
+		return principalEnabledChangeResult{}, fmt.Errorf("cannot update principal enabled: %w", err)
 	}
 
-	// Return empty slice (not nil) to indicate the change was made.
-	sessionIDs := []string{}
+	var sessionIDs []string
 	if !enabled {
 		// Collect session IDs before deletion for runtime cleanup.
 		rows, err := tx.Query(`SELECT id FROM sessions WHERE principal_id = ?`, principalID)
 		if err != nil {
 			tx.Rollback()
-			return nil, fmt.Errorf("cannot query principal sessions: %w", err)
+			return principalEnabledChangeResult{}, fmt.Errorf("cannot query principal sessions: %w", err)
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
 				tx.Rollback()
-				return nil, fmt.Errorf("cannot scan session id: %w", err)
+				return principalEnabledChangeResult{}, fmt.Errorf("cannot scan session id: %w", err)
 			}
 			sessionIDs = append(sessionIDs, id)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			tx.Rollback()
-			return nil, fmt.Errorf("iterate sessions: %w", err)
+			return principalEnabledChangeResult{}, fmt.Errorf("iterate sessions: %w", err)
 		}
 		rows.Close()
 
@@ -293,15 +310,18 @@ func updatePrincipalEnabled(db *sql.DB, username string, enabled bool) ([]string
 		)
 		if err != nil {
 			tx.Rollback()
-			return nil, fmt.Errorf("cannot delete principal sessions: %w", err)
+			return principalEnabledChangeResult{}, fmt.Errorf("cannot delete principal sessions: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("cannot commit enabled change: %w", err)
+		return principalEnabledChangeResult{}, fmt.Errorf("cannot commit enabled change: %w", err)
 	}
 
-	return sessionIDs, nil
+	return principalEnabledChangeResult{
+		Changed:           true,
+		RevokedSessionIDs: sessionIDs,
+	}, nil
 }
 
 // isUnderAnyRoot returns true if path is equal to or under at least one root.

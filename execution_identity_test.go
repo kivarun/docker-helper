@@ -233,8 +233,8 @@ func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 	}
 
 	// Disable the principal.
-	if _, err := updatePrincipalEnabled(app.DB, "disabledexecuser", false); err != nil {
-		t.Fatalf("updatePrincipalEnabled() error: %v", err)
+	if _, err := persistPrincipalEnabledChange(app.DB, "disabledexecuser", false); err != nil {
+		t.Fatalf("persistPrincipalEnabledChange() error: %v", err)
 	}
 
 	// Session should be invalidated after disable.

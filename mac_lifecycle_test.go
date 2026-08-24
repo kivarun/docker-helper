@@ -2226,3 +2226,549 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 		t.Error("child boundary should be removed from driver")
 	}
 }
+
+// =============================================================================
+// Principal disable/delete MAC binding release
+// =============================================================================
+
+func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0]
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a principal.
+	home := filepath.Join(allowedRoot, "home", "macdisuser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1070", "1070", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "macdisuser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	principalID, err := findPrincipalIDByUserName(app.DB, "macdisuser")
+	if err != nil {
+		t.Fatalf("findPrincipalIDByUserName: %v", err)
+	}
+
+	// Create a session with MAC binding.
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
+		_, err := app.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Verify binding exists.
+	mac.mu.Lock()
+	_, hasBinding := mac.sessionBindings["sess-1"]
+	mac.mu.Unlock()
+	if !hasBinding {
+		t.Fatal("session binding should exist")
+	}
+
+	// Disable principal via App-level lifecycle.
+	result, err := app.applyPrincipalEnabledChange("macdisuser", false)
+	if err != nil {
+		t.Fatalf("applyPrincipalEnabledChange: %v", err)
+	}
+	if !result.Changed {
+		t.Fatal("expected Changed=true")
+	}
+	if len(result.RevokedSessionIDs) != 1 {
+		t.Fatalf("expected 1 revoked session, got %d", len(result.RevokedSessionIDs))
+	}
+
+	// Verify binding was released.
+	mac.mu.Lock()
+	_, hasBinding = mac.sessionBindings["sess-1"]
+	count := mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if hasBinding {
+		t.Error("session binding should be released after principal disable")
+	}
+	if count != 0 {
+		t.Errorf("boundaryConsumerCounts should be 0, got %d", count)
+	}
+
+	// Verify boundary was removed from driver.
+	_, err = driver.verifyCoverage(workspace)
+	if err == nil {
+		t.Error("boundary should be removed from driver after binding release")
+	}
+}
+
+func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0]
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a principal.
+	home := filepath.Join(allowedRoot, "home", "macdeluser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1071", "1071", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "macdeluser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	principalID, err := findPrincipalIDByUserName(app.DB, "macdeluser")
+	if err != nil {
+		t.Fatalf("findPrincipalIDByUserName: %v", err)
+	}
+
+	// Create a session with MAC binding.
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
+		_, err := app.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Verify binding exists.
+	mac.mu.Lock()
+	_, hasBinding := mac.sessionBindings["sess-1"]
+	mac.mu.Unlock()
+	if !hasBinding {
+		t.Fatal("session binding should exist")
+	}
+
+	// Delete principal via App-level lifecycle.
+	sessionIDs, err := app.deletePrincipalWithMAC("macdeluser")
+	if err != nil {
+		t.Fatalf("deletePrincipalWithMAC: %v", err)
+	}
+	if len(sessionIDs) != 1 {
+		t.Fatalf("expected 1 session ID, got %d", len(sessionIDs))
+	}
+
+	// Verify binding was released.
+	mac.mu.Lock()
+	_, hasBinding = mac.sessionBindings["sess-1"]
+	count := mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if hasBinding {
+		t.Error("session binding should be released after principal delete")
+	}
+	if count != 0 {
+		t.Errorf("boundaryConsumerCounts should be 0, got %d", count)
+	}
+
+	// Verify boundary was removed from driver.
+	_, err = driver.verifyCoverage(workspace)
+	if err == nil {
+		t.Error("boundary should be removed from driver after binding release")
+	}
+}
+
+func TestPrincipalDisableLeasePreserved(t *testing.T) {
+	// Session has MAC binding, operation acquires workspace-use lease,
+	// principal disable removes session, boundary NOT removed while lease exists,
+	// lease release allows boundary removal.
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0]
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a principal.
+	home := filepath.Join(allowedRoot, "home", "leaseuser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1072", "1072", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "leaseuser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	principalID, err := findPrincipalIDByUserName(app.DB, "leaseuser")
+	if err != nil {
+		t.Fatalf("findPrincipalIDByUserName: %v", err)
+	}
+
+	// Create a session with MAC binding.
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
+		_, err := app.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Operation acquires workspace-use lease.
+	_, leaseRelease, err := mac.AcquireWorkspaceUse("sess-1", workspace)
+	if err != nil {
+		t.Fatalf("AcquireWorkspaceUse: %v", err)
+	}
+
+	// Verify boundary count is 2 (session + operation lease).
+	mac.mu.Lock()
+	count := mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if count != 2 {
+		t.Fatalf("expected boundaryConsumerCounts=2, got %d", count)
+	}
+
+	// Disable principal — removes session binding.
+	result, err := app.applyPrincipalEnabledChange("leaseuser", false)
+	if err != nil {
+		t.Fatalf("applyPrincipalEnabledChange: %v", err)
+	}
+	if !result.Changed {
+		t.Fatal("expected Changed=true")
+	}
+
+	// Boundary count should be 1 (only operation lease remains).
+	mac.mu.Lock()
+	count = mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if count != 1 {
+		t.Errorf("expected boundaryConsumerCounts=1 after session release, got %d", count)
+	}
+
+	// Boundary should NOT be removed from driver (lease still active).
+	_, err = driver.verifyCoverage(workspace)
+	if err != nil {
+		t.Errorf("boundary should still exist while lease is active: %v", err)
+	}
+
+	// Operation completes: release lease.
+	leaseRelease()
+
+	// Boundary should now be removed.
+	mac.mu.Lock()
+	count = mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if count != 0 {
+		t.Errorf("expected boundaryConsumerCounts=0 after lease release, got %d", count)
+	}
+
+	// Verify boundary was removed from driver.
+	_, err = driver.verifyCoverage(workspace)
+	if err == nil {
+		t.Error("boundary should be removed from driver after lease release")
+	}
+}
+
+func TestPrincipalDeleteLeasePreserved(t *testing.T) {
+	// Same as TestPrincipalDisableLeasePreserved but for delete.
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0]
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a principal.
+	home := filepath.Join(allowedRoot, "home", "leasedeluser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1073", "1073", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "leasedeluser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	principalID, err := findPrincipalIDByUserName(app.DB, "leasedeluser")
+	if err != nil {
+		t.Fatalf("findPrincipalIDByUserName: %v", err)
+	}
+
+	// Create a session with MAC binding.
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
+		_, err := app.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding: %v", err)
+	}
+
+	// Operation acquires workspace-use lease.
+	_, leaseRelease, err := mac.AcquireWorkspaceUse("sess-1", workspace)
+	if err != nil {
+		t.Fatalf("AcquireWorkspaceUse: %v", err)
+	}
+
+	// Delete principal — removes session binding.
+	_, err = app.deletePrincipalWithMAC("leasedeluser")
+	if err != nil {
+		t.Fatalf("deletePrincipalWithMAC: %v", err)
+	}
+
+	// Boundary count should be 1 (only operation lease remains).
+	mac.mu.Lock()
+	count := mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if count != 1 {
+		t.Errorf("expected boundaryConsumerCounts=1 after session release, got %d", count)
+	}
+
+	// Boundary should NOT be removed from driver (lease still active).
+	_, err = driver.verifyCoverage(workspace)
+	if err != nil {
+		t.Errorf("boundary should still exist while lease is active: %v", err)
+	}
+
+	// Operation completes: release lease.
+	leaseRelease()
+
+	// Boundary should now be removed.
+	mac.mu.Lock()
+	count = mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if count != 0 {
+		t.Errorf("expected boundaryConsumerCounts=0 after lease release, got %d", count)
+	}
+
+	// Verify boundary was actually removed from driver.
+	_, err = driver.verifyCoverage(workspace)
+	if err == nil {
+		t.Error("boundary should be removed from driver after lease release")
+	}
+}
+
+func TestSharedBoundaryAccounting(t *testing.T) {
+	// Two sessions on the same boundary, principal delete removes both,
+	// boundary accounting remains correct.
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0]
+	workspace, err := os.MkdirTemp(allowedRoot, "workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a principal.
+	home := filepath.Join(allowedRoot, "home", "shareduser")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1074", "1074", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "shareduser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	principalID, err := findPrincipalIDByUserName(app.DB, "shareduser")
+	if err != nil {
+		t.Fatalf("findPrincipalIDByUserName: %v", err)
+	}
+
+	// Create two sessions on the same workspace boundary.
+	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
+		_, err := app.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding sess-1: %v", err)
+	}
+
+	_, err = mac.CreateSessionBinding(workspace, "sess-2", func(cov workspaceMACCoverage) error {
+		_, err := app.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-2", "hash2", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CreateSessionBinding sess-2: %v", err)
+	}
+
+	// Verify boundary count is 2 (two sessions).
+	mac.mu.Lock()
+	count := mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if count != 2 {
+		t.Fatalf("expected boundaryConsumerCounts=2, got %d", count)
+	}
+
+	// Delete principal — removes both sessions.
+	sessionIDs, err := app.deletePrincipalWithMAC("shareduser")
+	if err != nil {
+		t.Fatalf("deletePrincipalWithMAC: %v", err)
+	}
+	if len(sessionIDs) != 2 {
+		t.Fatalf("expected 2 session IDs, got %d", len(sessionIDs))
+	}
+
+	// Boundary count should be 0 (both sessions released).
+	mac.mu.Lock()
+	count = mac.boundaryConsumerCounts[workspace]
+	mac.mu.Unlock()
+	if count != 0 {
+		t.Errorf("expected boundaryConsumerCounts=0, got %d", count)
+	}
+
+	// Verify boundary was removed from driver.
+	_, err = driver.verifyCoverage(workspace)
+	if err == nil {
+		t.Error("boundary should be removed from driver after all bindings released")
+	}
+}
+
+// =============================================================================
+// Stale-auth Session creation race regression
+// =============================================================================
+
+func TestStaleAuthSessionCreationRace(t *testing.T) {
+	// Regression test: Principal credential authenticated while enabled,
+	// Principal disabled, then session creation attempt using stale authority
+	// through the real production path (createSessionWithPolicy).
+	// Session creation MUST fail; no Session row; no MAC binding;
+	// any helper-owned boundary must be rolled back.
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0]
+
+	// Create a principal.
+	home := filepath.Join(allowedRoot, "home", "staleauthuser")
+	projDir := filepath.Join(home, "proj")
+	if err := os.MkdirAll(projDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1080", "1080", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "staleauthuser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+
+	// Create a credential for the principal.
+	_, token, err := createCredential(app.DB, "staleauthuser", "test-cred")
+	if err != nil {
+		t.Fatalf("createCredential: %v", err)
+	}
+
+	// Authenticate the credential while the principal is enabled.
+	auth, err := authenticateCredential(app.DB, token)
+	if err != nil {
+		t.Fatalf("authenticateCredential: %v", err)
+	}
+	stalePrincipalID := auth.PrincipalID
+	staleAllowedRoots := auth.AllowedRoots
+
+	// Disable the principal (simulates concurrent disable).
+	result, err := persistPrincipalEnabledChange(app.DB, "staleauthuser", false)
+	if err != nil {
+		t.Fatalf("persistPrincipalEnabledChange: %v", err)
+	}
+	if !result.Changed {
+		t.Fatal("expected Changed=true")
+	}
+
+	// Record binding count before the failed creation attempt.
+	mac.mu.Lock()
+	bindingsBefore := len(mac.sessionBindings)
+	mac.mu.Unlock()
+
+	// Attempt session creation through the real production path
+	// using the stale authenticated authority.
+	effectiveRoots := intersectRoots(app.getConfig().AllowedRoots, staleAllowedRoots)
+	_, err = app.createSessionWithPolicy(&sessionCreatePolicy{
+		Workspace:    projDir,
+		AllowedRoots: effectiveRoots,
+		PrincipalID:  &stalePrincipalID,
+	})
+
+	// createSessionWithPolicy must fail because the principal is disabled.
+	if err == nil {
+		t.Fatal("expected error from createSessionWithPolicy for stale principal")
+	}
+
+	// Verify no Session row was created.
+	var count int
+	err = app.DB.QueryRow(
+		`SELECT COUNT(*) FROM sessions WHERE principal_id = ?`,
+		stalePrincipalID,
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("query session: %v", err)
+	}
+	if count != 0 {
+		t.Error("no Session row should exist for disabled principal")
+	}
+
+	// Verify no new MAC binding was left behind (rollback occurred).
+	mac.mu.Lock()
+	bindingsAfter := len(mac.sessionBindings)
+	mac.mu.Unlock()
+
+	if bindingsAfter != bindingsBefore {
+		t.Errorf("MAC bindings leaked after failed session creation: before=%d after=%d",
+			bindingsBefore, bindingsAfter)
+	}
+
+	// Verify no boundary was created (rollback occurred).
+	_, err = driver.verifyCoverage(projDir)
+	if err == nil {
+		t.Error("boundary should not exist after failed session creation")
+	}
+}

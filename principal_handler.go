@@ -219,9 +219,9 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionIDs, err := updatePrincipalEnabled(a.DB, username, *req.Enabled)
+	result, err := a.applyPrincipalEnabledChange(username, *req.Enabled)
 	duration := time.Since(started).Round(time.Millisecond).String()
-	changed := sessionIDs != nil && err == nil
+	changed := result.Changed
 
 	if err != nil {
 		writeAuditWithRequestID(ctx, auditRecord{
@@ -243,8 +243,8 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !*req.Enabled && len(sessionIDs) > 0 {
-		for _, sessionID := range sessionIDs {
+	if !*req.Enabled && len(result.RevokedSessionIDs) > 0 {
+		for _, sessionID := range result.RevokedSessionIDs {
 			if err := cleanupSessionRuntimeDir(a.Config.RuntimeDir, sessionID); err != nil {
 				opLog(ctx).Warn("failed to clean up session runtime directory",
 					slog.String("operation", "principal_disable"),
@@ -774,7 +774,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionIDs, err := deletePrincipal(a.DB, username)
+	sessionIDs, err := a.deletePrincipalWithMAC(username)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

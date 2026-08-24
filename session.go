@@ -180,28 +180,63 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 	now := time.Now()
 	expiresAt := now.Add(a.getConfig().SessionTTL)
 
-	var principalID interface{}
-	if p.PrincipalID != nil {
-		principalID = *p.PrincipalID
-	} else {
-		principalID = nil
-	}
-
 	// Acquire coordinator serialization and prepare MAC.
 	// CreateSessionBinding holds the lock through DB insert and rollback.
-	if a.MACCoordinator != nil {
-		_, err := a.MACCoordinator.CreateSessionBinding(absWorkspace, sessionID, func(coverage workspaceMACCoverage) error {
+	insertSession := func() error {
+		if p.PrincipalID != nil {
+			// Conditional insert: only succeeds if the principal exists AND is enabled.
+			// This prevents a stale-auth race where the principal was disabled between
+			// authentication and session creation.
 			_, err := a.DB.Exec(
 				`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
-				 VALUES (?, ?, ?, ?, ?, ?)`,
+				 SELECT ?, ?, ?, ?, ?, ?
+				 FROM principals WHERE id = ? AND enabled = 1`,
 				sessionID,
 				tokenHashHex,
 				absWorkspace,
 				now.Unix(),
 				expiresAt.Unix(),
-				principalID,
+				*p.PrincipalID,
+				*p.PrincipalID,
 			)
-			return err
+			if err != nil {
+				return err
+			}
+			// Verify exactly one row was inserted. If zero, the principal
+			// was disabled or deleted between authentication and this insert.
+			// (RowsAffected is not reliable with INSERT...SELECT in SQLite,
+			// so we verify by checking the session exists.)
+			var count int
+			err = a.DB.QueryRow(
+				`SELECT COUNT(*) FROM sessions WHERE id = ?`,
+				sessionID,
+			).Scan(&count)
+			if err != nil {
+				return err
+			}
+			if count == 0 {
+				return fmt.Errorf("principal is no longer enabled: %w", ErrInvalidWorkspace)
+			}
+			return nil
+		}
+
+		// Admin session: no principal check needed.
+		_, err := a.DB.Exec(
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			sessionID,
+			tokenHashHex,
+			absWorkspace,
+			now.Unix(),
+			expiresAt.Unix(),
+			nil,
+		)
+		return err
+	}
+
+	if a.MACCoordinator != nil {
+		_, err := a.MACCoordinator.CreateSessionBinding(absWorkspace, sessionID, func(coverage workspaceMACCoverage) error {
+			return insertSession()
 		})
 		if err != nil {
 			// Classify: MAC preparation errors vs DB insert errors.
@@ -211,17 +246,7 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
 		}
 	} else {
-		_, err := a.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			sessionID,
-			tokenHashHex,
-			absWorkspace,
-			now.Unix(),
-			expiresAt.Unix(),
-			principalID,
-		)
-		if err != nil {
+		if err := insertSession(); err != nil {
 			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
 		}
 	}
