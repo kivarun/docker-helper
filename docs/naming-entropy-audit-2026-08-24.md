@@ -6,8 +6,8 @@ Reference model: `AGENTS.md` § MAC naming grammar.
 
 **Scope:** This audit covers the MAC lifecycle, AppArmor/SELinux native
 mechanics, MAC boundaries, canonical path containment, init/reload lifecycle,
-and shared workspace-path policy. It is a completed reference-area
-audit/refactoring.
+and shared workspace-path policy. It is the reference area currently
+undergoing final control review.
 
 **This is not a project-wide naming audit.** It makes no claim that naming
 across the whole repository is clean. The next phase is a fresh project-wide
@@ -15,7 +15,8 @@ audit using this area as the quality/reference model.
 
 The identified refactor batches in this reference scope have been applied.
 Independent control review found one remaining actionable naming issue.
-Final acceptance of the reference area is pending final re-review.
+Final acceptance of the reference area is pending correction and re-review
+of the remaining finding.
 
 Rule: one domain concept -> one canonical term. Different concepts must not
 share one word. Different implementations must not invent synonyms for the
@@ -281,6 +282,47 @@ affected.
 
 **Status:** corrected; pending final re-review.
 
+**SELinux fcontext internal "root" vocabulary conflates different path roles**
+
+The `workspaceMACDriver`-facing interface already expresses the intended
+roles:
+
+    verifyActualType(workspace string)
+    restoreconRecursive(workspace string)
+    ensureWorkspaceFcontext(workspace string)
+    removeWorkspaceFcontext(boundary string)
+
+But `selinuxFcontextManager` implementation still uses "root" broadly:
+
+- `ensureWorkspaceFcontext(root string)` — receives the concrete workspace
+  that may become a new fcontext boundary
+- `removeWorkspaceFcontext(root string)` — receives an existing MAC boundary
+- `checkOverlap(root, ...)` — reasons about the candidate fcontext boundary
+- `checkEquivalenceOverlap(root, ...)` — reasons about overlap with that
+  candidate boundary
+- `verifyActualType(root string)` — verifies a concrete workspace/path, not
+  an authorization root
+- `fcontextPattern(root string)` — builds the recursive pattern for an
+  fcontext boundary
+- `TestFcontextPattern` uses a table field named `root` for the same concept
+
+Comments using phrases such as "canonical root", "inside ROOT",
+"ancestor of ROOT", "selected ROOT" carry the same conflation.
+
+The issue is NOT that every occurrence must mechanically become "boundary".
+The required semantic split for the eventual implementation is:
+
+- `workspace` when the value is a concrete workspace
+- `boundary` when the value is a MAC/fcontext coverage boundary
+- `path` when the helper genuinely operates on an arbitrary filesystem path
+- `root` only when it genuinely means a generic containment/tree root or
+  Unix root user / filesystem root
+
+The implementation batch should be designed from actual call semantics,
+not a mechanical rename.
+
+**Status:** pending correction and re-review.
+
 ### Verified invariants (no issues found)
 
 - `backend` is consistently the selected/persisted AppArmor|SELinux identity.
@@ -299,8 +341,8 @@ affected.
 - Truly generic primitives (`pathWithin`, `pathStrictlyWithin`) remain
   separate and correctly named.
 
-Final acceptance of the reference area is pending final re-review
-of the finding above.
+Final acceptance of the reference area is pending correction and re-review
+of the remaining finding.
 
 This is NOT a project-wide cleanliness claim. The next phase is a fresh
 project-wide naming/architecture audit using this area as reference.
