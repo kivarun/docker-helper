@@ -2482,9 +2482,6 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 				Mode:         ModeSystem,
 			}, nil
 		},
-		deploymentMode: func() DeploymentMode {
-			return ModeSystem
-		},
 	}
 
 	recorder := httptest.NewRecorder()

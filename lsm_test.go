@@ -982,3 +982,34 @@ func TestDetectLSMSELinuxReadError(t *testing.T) {
 		t.Errorf("error should wrap os.ErrPermission, got: %v", err)
 	}
 }
+
+func TestServeDetectLSMError(t *testing.T) {
+	// runServe: detectLSM error => startup fails closed.
+	origAA := appArmorLSMActive
+	origSEL := selinuxEnabled
+	appArmorLSMActive = func() (bool, error) { return false, nil }
+	selinuxEnabled = func() (bool, bool, error) {
+		return false, false, os.ErrPermission
+	}
+	defer func() {
+		appArmorLSMActive = origAA
+		selinuxEnabled = origSEL
+	}()
+
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return "/nonexistent/config.json" }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot determine") {
+		t.Errorf("expected detection error in output, got: %s", stderr.String())
+	}
+}

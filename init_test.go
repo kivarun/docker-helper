@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -357,4 +358,53 @@ func TestGetInitDefaultRoot(t *testing.T) {
 			t.Errorf("getInitDefaultRoot() = %q, want %q (home dir)", got, home)
 		}
 	})
+}
+
+func syntheticResolveRoot(path string) (string, error) {
+	return path, nil
+}
+
+func TestInitSystemNoMACPreparation(t *testing.T) {
+	// System init does not prepare MAC state; that happens at session creation.
+	dir := t.TempDir()
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	var coreCalled bool
+	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
+		syntheticResolveRoot,
+		func(ar string, so, se io.Writer) error {
+			coreCalled = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("initSystem failed: %v", err)
+	}
+	if !coreCalled {
+		t.Error("core should be called during system init")
+	}
+}
+
+func TestInitSystemPassesAllowedRootToCore(t *testing.T) {
+	dir := t.TempDir()
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	var coreCalled string
+	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
+		syntheticResolveRoot,
+		func(ar string, so, se io.Writer) error {
+			coreCalled = ar
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("initSystem failed: %v", err)
+	}
+	if coreCalled != "/data" {
+		t.Errorf("core called with %q, want %q", coreCalled, "/data")
+	}
 }

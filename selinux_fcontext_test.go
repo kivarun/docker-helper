@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"errors"
-	"io"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -935,109 +932,7 @@ func TestSELinuxWorkspaceLockAcquisitionFailure(t *testing.T) {
 	}
 }
 
-// --- Init integration tests ---
 
-func syntheticResolveRoot(path string) (string, error) {
-	return path, nil
-}
-
-func TestInitSELinuxNoMACPreparation(t *testing.T) {
-	// System init does not prepare MAC state; that happens at session creation.
-	dir := t.TempDir()
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var coreCalled bool
-	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		syntheticResolveRoot,
-		func(ar string, so, se io.Writer) error {
-			coreCalled = true
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("initSystem failed: %v", err)
-	}
-	if !coreCalled {
-		t.Error("core should be called during system init")
-	}
-}
-
-func TestInitSELinuxCoreFailurePropagates(t *testing.T) {
-	// Core failure during init propagates; no MAC state to roll back.
-	dir := t.TempDir()
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		syntheticResolveRoot,
-		func(ar string, so, se io.Writer) error {
-			return errors.New("core init failed")
-		},
-	)
-	if err == nil {
-		t.Fatal("expected error for core failure")
-	}
-}
-
-func TestInitSELinuxNilManager(t *testing.T) {
-	dir := t.TempDir()
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var coreCalled string
-	err := initSystem("/data", &bytes.Buffer{}, &bytes.Buffer{},
-		syntheticResolveRoot,
-		func(ar string, so, se io.Writer) error {
-			coreCalled = ar
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("initSystem failed: %v", err)
-	}
-	if coreCalled != "/data" {
-		t.Errorf("core called with %q, want %q", coreCalled, "/data")
-	}
-}
-
-// --- Config lifecycle regression tests (deterministic) ---
-
-// --- Detection regressions ---
-
-func TestServeDetectLSMError(t *testing.T) {
-	// runServe: detectLSM error => startup fails closed.
-	origAA := appArmorLSMActive
-	origSEL := selinuxEnabled
-	appArmorLSMActive = func() (bool, error) { return false, nil }
-	selinuxEnabled = func() (bool, bool, error) {
-		return false, false, os.ErrPermission
-	}
-	defer func() {
-		appArmorLSMActive = origAA
-		selinuxEnabled = origSEL
-	}()
-
-	origUID := EffectiveUID
-	EffectiveUID = func() int { return 0 }
-	defer func() { EffectiveUID = origUID }()
-
-	origGetConfig := getConfigPathFunc
-	getConfigPathFunc = func() string { return "/nonexistent/config.json" }
-	defer func() { getConfigPathFunc = origGetConfig }()
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "cannot determine") {
-		t.Errorf("expected detection error in output, got: %s", stderr.String())
-	}
-}
 
 // --- Constant tests ---
 

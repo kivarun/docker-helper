@@ -735,8 +735,9 @@ type initCoreResult struct {
 	adminTokenPath string
 }
 
-// initCore performs the file-based initialization (config and token).
-// It does not perform any AppArmor operations.
+// initCore performs file-based initialization only.
+// It does not prepare MAC state; workspace MAC state is owned by
+// the session lifecycle.
 func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, error) {
 	mode := resolveDeploymentMode()
 	configPath := getConfigPathFunc()

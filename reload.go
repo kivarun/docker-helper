@@ -35,10 +35,9 @@ func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
 }
 
 // reloadDeps are the production dependencies for handleReload.
-// Tests may inject their own to avoid real filesystem or LSM calls.
+// Tests may inject configuration loading for deterministic testing.
 type reloadDeps struct {
-	loadConfig     func() (*Config, error)
-	deploymentMode func() DeploymentMode
+	loadConfig func() (*Config, error)
 }
 
 // handleReload reloads the configuration from disk and updates the daemon's
@@ -49,15 +48,15 @@ type reloadDeps struct {
 // Computed paths (socket, database, etc.) and startup-only fields (http_address)
 // remain unchanged.
 //
-// In system mode, verifies configured allowed_roots are usable under the
-// active MAC backend (SELinux workspace labels or AppArmor managed roots).
+// Global allowed_roots remain authorization policy; reload does not prepare
+// or verify MAC coverage for them. MAC state follows concrete session
+// workspace lifecycle.
 //
 // If the new configuration is invalid, the daemon keeps its current
 // configuration and returns an error.
 func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	a.handleReloadWithDeps(w, r, reloadDeps{
-		loadConfig:     loadConfig,
-		deploymentMode: resolveDeploymentMode,
+		loadConfig: loadConfig,
 	})
 }
 

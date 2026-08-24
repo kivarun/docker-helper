@@ -263,13 +263,6 @@ func TestServeSystemModePreflightEnforce(t *testing.T) {
 	}
 	getConfigPathFunc = func() string { return configPath }
 
-	// Mock managed AppArmor roots to cover the configured root.
-	origManagedRoots := appArmorManagedRoots
-	appArmorManagedRoots = func() ([]string, error) {
-		return []string{allowedRoot}, nil
-	}
-	defer func() { appArmorManagedRoots = origManagedRoots }()
-
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"serve"}, &stdout, &stderr)
 	if code != 1 {
@@ -373,12 +366,11 @@ func TestAppArmorCheckInactive(t *testing.T) {
 	}
 }
 
-// TestServeSystemModeAppArmorManagedRootsMissing verifies that when
-// AppArmor is active and the process is confined, but the configured
-// allowed root is not covered by any managed AppArmor root, startup
-// fails with a clear diagnostic before later initialization (admin token,
-// database, listener) can hide the result.
-func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
+// TestServeSystemModeDoesNotVerifyGlobalRootsAgainstAppArmor verifies that
+// serve startup does not require AppArmor coverage for global allowed roots.
+// Global allowed roots are authorization-only; MAC coverage is prepared from
+// concrete session workspaces.
+func TestServeSystemModeDoesNotVerifyGlobalRootsAgainstAppArmor(t *testing.T) {
 	origActive := appArmorLSMActive
 	appArmorLSMActive = func() (bool, error) { return true, nil }
 	t.Cleanup(func() { appArmorLSMActive = origActive })
@@ -414,16 +406,7 @@ func TestServeSystemModeAppArmorManagedRootsMissing(t *testing.T) {
 	}
 	getConfigPathFunc = func() string { return configPath }
 
-	// Managed roots return an unrelated root, not covering the configured root.
-	// This is now acceptable — global roots are authorization-only.
-	// MAC state follows session workspaces, not global roots.
-	origManaged := appArmorManagedRoots
-	appArmorManagedRoots = func() ([]string, error) {
-		return []string{"/unrelated/managed-root"}, nil
-	}
-	t.Cleanup(func() { appArmorManagedRoots = origManaged })
-
-	// Startup should succeed — global roots do not require MAC coverage.
+	// Startup should succeed past MAC stage — global roots are authorization-only.
 	// (The serve command will fail later due to missing admin token,
 	// but it must NOT fail at the MAC verification step.)
 	var stdout, stderr bytes.Buffer

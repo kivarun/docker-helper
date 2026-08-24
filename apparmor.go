@@ -602,10 +602,3 @@ func (m *appArmorProfileManager) check() error {
 
 	return nil
 }
-
-// appArmorManagedRoots is the package-level seam for listing managed AppArmor
-// boundaries. Production default reads from the managed fragment file.
-// Tests may replace this to control the returned boundaries.
-var appArmorManagedRoots = func() ([]string, error) {
-	return newProductionAppArmorProfileManager().listManagedBoundaries()
-}
