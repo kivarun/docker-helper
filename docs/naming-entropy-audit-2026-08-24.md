@@ -14,7 +14,8 @@ across the whole repository is clean. The next phase is a fresh project-wide
 audit using this area as the quality/reference model.
 
 The identified refactor batches in this reference scope have been applied.
-Final acceptance of the reference area is pending a separate control review.
+Independent control review found one remaining actionable naming issue.
+Final acceptance of the reference area is pending correction and re-review.
 
 Rule: one domain concept -> one canonical term. Different concepts must not
 share one word. Different implementations must not invent synonyms for the
@@ -249,3 +250,57 @@ global roots; MAC state follows session workspace lifecycle).
 
 API DTO file organization (moving shared types to `api_contract.go`) is
 code/file layout, not naming cleanup. No recommended batch.
+
+## Control review
+
+Independent control review completed against the current implementation.
+
+### Control review findings
+
+**workspace_path_policy.go internal comments use "workspace root" instead of "workspace path"**
+
+The policy collections `forbiddenSystemTrees`, `forbiddenWideNamespaces`,
+and `adminWideNamespaceOverrides` define the shared workspace-path
+admissibility policy. Their inputs may be authorization allowed roots,
+concrete workspace-capable paths, or MAC boundaries.
+
+Their internal documentation comments currently say:
+
+- `forbiddenSystemTrees`: "must never be workspace roots or ancestors of
+  workspace roots"
+- `forbiddenWideNamespace`: "too broad to be workspace roots themselves"
+- `adminWideNamespaceOverrides`: "root (uid 0) may use as workspace roots"
+
+These should use "workspace path" / "workspace-path policy" vocabulary,
+not "workspace root", because the policy is shared across multiple domain
+concepts.
+
+User-facing error strings that say "workspace root" are correctly preserved
+as compatibility vocabulary. Only the internal documentation comments are
+affected.
+
+**Status:** pending correction and re-review.
+
+### Verified invariants (no issues found)
+
+- `backend` is consistently the selected/persisted AppArmor|SELinux identity.
+- `driver` is consistently the `workspaceMACDriver` implementation.
+- `boundary` is consistently the MAC coverage boundary in AppArmor internals.
+- `allowed root` is consistently the authorization ceiling.
+- `root` in `pathWithin(root, path)` is the containment root, not an
+  authorization root.
+- Public/persisted `root` vocabulary is correctly isolated to compatibility
+  adapters and never leaks into internal implementation vocabulary.
+- Test names, seams, comments and filenames reflect current architecture.
+- No dead test seams or unused dependencies remain.
+- No duplicate helpers with reversed or inconsistent argument semantics.
+- Shared implementation helpers are named after their semantic policy, not
+  generically.
+- Truly generic primitives (`pathWithin`, `pathStrictlyWithin`) remain
+  separate and correctly named.
+
+Final acceptance of the reference area is pending correction and re-review
+of the finding above.
+
+This is NOT a project-wide cleanliness claim. The next phase is a fresh
+project-wide naming/architecture audit using this area as reference.
