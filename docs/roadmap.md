@@ -306,13 +306,13 @@ Implemented contract:
 Release 2 remains local. Non-loopback listeners, TLS, uploaded build contexts,
 and remote image-only runs are deferred to Release 3.
 
-Outstanding work is release acceptance, not capability expansion: resolve the
-blockers recorded in
-[`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/), complete
-package lifecycle and cross-distribution SELinux UAT, and reconcile the final
-support matrix. The trusted-CA source lifecycle is a release-contract decision:
-use a documented helper-owned path readable under system MAC, or complete the
-previously accepted managed-import workflow.
+Outstanding work is stabilization and release acceptance, not capability
+expansion: finish the naming and abstraction cleanup identified by the
+[project-wide review](project-wide-naming-architecture-review-2026-08-24.md),
+complete the consolidated regression review of the fixes recorded in
+[`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/), finish
+package lifecycle and cross-distribution SELinux/AppArmor UAT, and reconcile
+the final support matrix.
 
 Explicitly outside Release 2:
 
@@ -341,6 +341,14 @@ Release 3 is the earliest stage for non-loopback and remote capabilities:
 - cancellation and recovery across interrupted uploads/connections;
 - durable operation state where demonstrated by use;
 - host port publishing only under explicit server-side policy.
+
+Release 3 planning includes a proposed delegated Launcher model between a
+Principal and its Sessions. Launcher becomes the stable Session/runtime owner;
+credentials remain rotatable authentication keys, and Launcher roots add an
+optional authorization ceiling without owning MAC state. The agreed concept,
+security trade-offs, defaults, and expected CLI/HTTP/database/test changes are
+recorded in
+[`docs/release-3-launcher-delegation.md`](release-3-launcher-delegation.md).
 
 Keep Release 3 use-case driven; do not predesign these APIs during Release 2
 stabilization.

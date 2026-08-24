@@ -6,12 +6,13 @@ Reference model: `AGENTS.md` § MAC naming grammar.
 
 **Scope:** This audit covers the MAC lifecycle, AppArmor/SELinux native
 mechanics, MAC boundaries, canonical path containment, init/reload lifecycle,
-and shared workspace-path policy. It is the completed reference area accepted
-as the naming/architecture model for the upcoming project-wide audit.
+and shared workspace-path policy. It is the completed reference area used by
+the subsequent
+[project-wide naming/architecture review](project-wide-naming-architecture-review-2026-08-24.md).
 
 **This is not a project-wide naming audit.** It makes no claim that naming
-across the whole repository is clean. The next phase is a fresh project-wide
-audit using this area as the quality/reference model.
+across the whole repository is clean. Project-wide findings are recorded in
+the separate review linked above.
 
 The identified refactor batches in this reference scope have been applied.
 Control review found two actionable naming findings; both were corrected.
@@ -348,8 +349,8 @@ defined reference scope.
 - Truly generic primitives (`pathWithin`, `pathStrictlyWithin`) remain
   separate and correctly named.
 
-The reference area is accepted as the reference model for the upcoming
-project-wide naming/architecture audit.
+The reference area is accepted as the reference model used by the separate
+project-wide naming/architecture review.
 
-This is NOT a project-wide cleanliness claim. The next phase is a fresh
-project-wide naming/architecture audit using this area as reference.
+This is NOT a project-wide cleanliness claim. Project-wide findings and
+refactor boundaries are maintained in that separate review.
