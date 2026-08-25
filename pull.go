@@ -45,7 +45,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "pull.start",
 		SessionID:     session.ID,
 		Image:         req.Image,
@@ -115,7 +115,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "pull.finish",
 		SessionID:     session.ID,
 		Image:         req.Image,

@@ -55,7 +55,7 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 
 	started := time.Now()
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "registry.login.start",
 		SessionID:     session.ID,
 		Registry:      req.Registry,
@@ -87,7 +87,7 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		// Generic error — do not return Docker output.
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "registry.login.finish",
 			SessionID:     session.ID,
 			Registry:      req.Registry,
@@ -110,7 +110,7 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "registry.login.finish",
 		SessionID:     session.ID,
 		Registry:      req.Registry,

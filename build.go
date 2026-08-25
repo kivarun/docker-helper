@@ -133,7 +133,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// released by waitBuildCompletion after cmd.Wait().
 	op.macLeaseRelease = leaseRelease
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "build.start",
 		SessionID:     session.ID,
 		OperationID:   op.ID,

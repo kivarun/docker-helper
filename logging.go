@@ -203,9 +203,11 @@ func writeAudit(record auditRecord) {
 	}
 }
 
-// writeAuditWithRequestID is like writeAudit but includes the request_id and
-// session_id from the context.
-func writeAuditWithRequestID(ctx context.Context, record auditRecord) {
+// writeRequestContextAudit enriches an auditRecord from the HTTP request
+// context and writes it via writeAudit: it sets request_id from the context and
+// fills session_id from the context only when the record does not already
+// explicitly set it.
+func writeRequestContextAudit(ctx context.Context, record auditRecord) {
 	record.RequestID = requestIDFromContext(ctx)
 	if record.SessionID == "" {
 		record.SessionID = sessionIDFromContext(ctx)
@@ -229,7 +231,7 @@ func writeDockerActionRejected(
 	message string,
 	principalName string,
 ) {
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         kind + ".rejected",
 		Result:        resultCode,
 		PrincipalName: principalName,

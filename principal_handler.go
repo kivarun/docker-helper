@@ -61,7 +61,7 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 	var req createPrincipalRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "principal.create",
 			Result:   "invalid_json",
 			Duration: duration,
@@ -72,7 +72,7 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 
 	if req.Username == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.create",
 			PrincipalName: req.Username,
 			Result:        "missing_username",
@@ -86,7 +86,7 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.create",
 			PrincipalName: req.Username,
 			Result:        "error",
@@ -110,7 +110,7 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "principal.create",
 		PrincipalName: result.Username,
 		Result:        "success",
@@ -185,7 +185,7 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
 	if username == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "principal.enabled_change",
 			Result:   "missing_username",
 			Duration: duration,
@@ -197,7 +197,7 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 	var req setPrincipalRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.enabled_change",
 			PrincipalName: username,
 			Result:        "invalid_json",
@@ -209,7 +209,7 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 
 	if req.Enabled == nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.enabled_change",
 			PrincipalName: username,
 			Result:        "missing_enabled",
@@ -224,7 +224,7 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 	changed := result.Changed
 
 	if err != nil {
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.enabled_change",
 			PrincipalName: username,
 			Result:        "error",
@@ -256,7 +256,7 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:            "principal.enabled_change",
 		PrincipalName:    username,
 		PrincipalEnabled: req.Enabled,
@@ -290,7 +290,7 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	username := r.PathValue("username")
 	if username == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "principal.allowed_root_add",
 			Result:   "missing_username",
 			Duration: duration,
@@ -302,7 +302,7 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	var req allowedRootRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.allowed_root_add",
 			PrincipalName: username,
 			Result:        "invalid_json",
@@ -314,7 +314,7 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 
 	if req.Path == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.allowed_root_add",
 			PrincipalName: username,
 			Result:        "missing_path",
@@ -328,7 +328,7 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.allowed_root_add",
 			PrincipalName: username,
 			Result:        "error",
@@ -362,12 +362,12 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 		resp.Message = "unchanged"
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
-		Event:         "principal.allowed_root_add",
-		PrincipalName: username,
-		PrincipalPath: canonicalPath,
-		Result:        "success",
-		Duration:      duration,
+	writeRequestContextAudit(ctx, auditRecord{
+		Event:                "principal.allowed_root_add",
+		PrincipalName:        username,
+		PrincipalAllowedRoot: canonicalPath,
+		Result:               "success",
+		Duration:             duration,
 	})
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
@@ -385,7 +385,7 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 	username := r.PathValue("username")
 	if username == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "principal.allowed_root_remove",
 			Result:   "missing_username",
 			Duration: duration,
@@ -397,7 +397,7 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 	var req allowedRootRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.allowed_root_remove",
 			PrincipalName: username,
 			Result:        "invalid_json",
@@ -409,7 +409,7 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 
 	if req.Path == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.allowed_root_remove",
 			PrincipalName: username,
 			Result:        "missing_path",
@@ -423,7 +423,7 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.allowed_root_remove",
 			PrincipalName: username,
 			Result:        "error",
@@ -455,12 +455,12 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 		resp.Message = "unchanged"
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
-		Event:         "principal.allowed_root_remove",
-		PrincipalName: username,
-		PrincipalPath: canonicalPath,
-		Result:        "success",
-		Duration:      duration,
+	writeRequestContextAudit(ctx, auditRecord{
+		Event:                "principal.allowed_root_remove",
+		PrincipalName:        username,
+		PrincipalAllowedRoot: canonicalPath,
+		Result:               "success",
+		Duration:             duration,
 	})
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
@@ -547,7 +547,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
 	if username == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "principal.credential_create",
 			Result:   "missing_username",
 			Duration: duration,
@@ -559,7 +559,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 	var req createCredentialRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.credential_create",
 			PrincipalName: username,
 			Result:        "invalid_json",
@@ -571,7 +571,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.credential_create",
 			PrincipalName: username,
 			Result:        "invalid_credential_name",
@@ -585,7 +585,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:          "principal.credential_create",
 			PrincipalName:  username,
 			CredentialName: req.Name,
@@ -610,7 +610,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:          "principal.credential_create",
 		PrincipalName:  result.PrincipalName,
 		CredentialID:   result.ID,
@@ -676,7 +676,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "principal.credential_revoke",
 			Result:   "missing_id",
 			Duration: duration,
@@ -691,14 +691,14 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 	if preReadErr != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		if isErrCredentialNotFound(preReadErr) {
-			writeAuditWithRequestID(ctx, auditRecord{
+			writeRequestContextAudit(ctx, auditRecord{
 				Event:    "principal.credential_revoke",
 				Result:   "credential_not_found",
 				Duration: duration,
 			})
 			writeError(ctx, w, http.StatusNotFound, "credential_not_found", "credential not found")
 		} else {
-			writeAuditWithRequestID(ctx, auditRecord{
+			writeRequestContextAudit(ctx, auditRecord{
 				Event:    "principal.credential_revoke",
 				Result:   "error",
 				Duration: duration,
@@ -716,7 +716,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:          "principal.credential_revoke",
 			PrincipalName:  cred.PrincipalName,
 			CredentialID:   cred.ID,
@@ -741,7 +741,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 		resp.Message = "unchanged"
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:             "principal.credential_revoke",
 		PrincipalName:     cred.PrincipalName,
 		CredentialID:      cred.ID,
@@ -766,7 +766,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 	username := r.PathValue("username")
 	if username == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "principal.delete",
 			Result:   "missing_username",
 			Duration: duration,
@@ -780,7 +780,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		if isErrPrincipalNotFound(err) {
-			writeAuditWithRequestID(ctx, auditRecord{
+			writeRequestContextAudit(ctx, auditRecord{
 				Event:         "principal.delete",
 				PrincipalName: username,
 				Result:        "not_found",
@@ -788,7 +788,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 			})
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		} else {
-			writeAuditWithRequestID(ctx, auditRecord{
+			writeRequestContextAudit(ctx, auditRecord{
 				Event:         "principal.delete",
 				PrincipalName: username,
 				Result:        "database_error",
@@ -815,7 +815,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:         "principal.delete",
 		PrincipalName: username,
 		Result:        "success",

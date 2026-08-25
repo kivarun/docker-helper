@@ -83,7 +83,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 			slog.String("error", err.Error()),
 			slog.String("diagnostic", diagnostic),
 		)
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "config.reload",
 			Result:   "invalid_config",
 			Duration: duration,
@@ -112,7 +112,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	// before reconfiguring so the record is actually emitted.
 	if oldAuditEnabled && !newCfg.AuditEnabled {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "config.reload",
 			Result:   "success",
 			Duration: duration,
@@ -121,7 +121,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	} else {
 		logging.configure(opW, audW, newCfg.LogLevel, newCfg.AuditEnabled)
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "config.reload",
 			Result:   "success",
 			Duration: duration,

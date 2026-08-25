@@ -652,7 +652,7 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 	if duration != nil {
 		dur = *duration
 	}
-	writeAuditWithRequestID(context.Background(), auditRecord{
+	writeRequestContextAudit(context.Background(), auditRecord{
 		Event:             op.Kind + ".finish",
 		SessionID:         op.SessionID,
 		OperationID:       op.ID,

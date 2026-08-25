@@ -547,7 +547,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// released by waitRunCompletion after cmd.Wait().
 	op.macLeaseRelease = leaseRelease
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:             "run.start",
 		SessionID:         session.ID,
 		OperationID:       op.ID,

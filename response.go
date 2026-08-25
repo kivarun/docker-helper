@@ -123,7 +123,7 @@ func writeUnauthorizedSessionControl(ctx context.Context, w http.ResponseWriter)
 }
 
 func writeAuthFailure(ctx context.Context, r *http.Request, result string) {
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:  "auth.failure",
 		Method: r.Method,
 		Path:   r.URL.Path,

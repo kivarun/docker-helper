@@ -96,7 +96,7 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 	if !errors.Is(err, ErrCredentialNotFound) &&
 		!errors.Is(err, ErrCredentialRevoked) &&
 		!errors.Is(err, ErrPrincipalDisabled) {
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:  "auth.session",
 			Result: "database_error",
 		})
@@ -134,7 +134,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "session.create",
 			Result:   "invalid_json",
 			Duration: duration,
@@ -176,7 +176,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
 			auditRec.CredentialID = authCtx.principalCredential.CredentialID
 		}
-		writeAuditWithRequestID(ctx, auditRec)
+		writeRequestContextAudit(ctx, auditRec)
 
 		if errors.Is(err, ErrInvalidWorkspace) {
 			// Log the internal cause to the operational log.
@@ -209,7 +209,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		// Populate principal name in the session for the response.
 		result.Session.PrincipalName = authCtx.principalCredential.PrincipalName
 	}
-	writeAuditWithRequestID(ctx, auditRec)
+	writeRequestContextAudit(ctx, auditRec)
 
 	writeJSONRaw(ctx, w, http.StatusCreated, createSessionResponse{
 		OK:      true,
@@ -249,7 +249,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
 			auditRec.CredentialID = authCtx.principalCredential.CredentialID
 		}
-		writeAuditWithRequestID(ctx, auditRec)
+		writeRequestContextAudit(ctx, auditRec)
 		opLog(ctx).Error("list sessions error",
 			slog.String("operation", "session_list"),
 			slog.String("error", err.Error()),
@@ -276,7 +276,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
 		auditRec.CredentialID = authCtx.principalCredential.CredentialID
 	}
-	writeAuditWithRequestID(ctx, auditRec)
+	writeRequestContextAudit(ctx, auditRec)
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }
@@ -294,7 +294,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "session.delete",
 			Result:   "invalid_session_id",
 			Duration: duration,
@@ -343,7 +343,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
 			auditRec.CredentialID = authCtx.principalCredential.CredentialID
 		}
-		writeAuditWithRequestID(ctx, auditRec)
+		writeRequestContextAudit(ctx, auditRec)
 
 		if errors.Is(err, ErrSessionNotFound) {
 			writeError(ctx, w, http.StatusNotFound, "session_not_found", "session not found")
@@ -370,7 +370,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
 		auditRec.CredentialID = authCtx.principalCredential.CredentialID
 	}
-	writeAuditWithRequestID(ctx, auditRec)
+	writeRequestContextAudit(ctx, auditRec)
 
 	// Clean up session runtime directory (Docker config, etc.) best-effort.
 	// Cleanup failure must not fail the already-deleted session.

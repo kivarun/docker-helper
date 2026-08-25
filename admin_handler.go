@@ -25,7 +25,7 @@ func (a *App) handleRotateAdminToken(w http.ResponseWriter, r *http.Request) {
 			// The authorizing token was invalidated by a concurrent
 			// rotation before this one committed. The capability is no
 			// longer valid; respond with 401.
-			writeAuditWithRequestID(ctx, auditRecord{
+			writeRequestContextAudit(ctx, auditRecord{
 				Event:    "admin_token.rotate",
 				Result:   "stale_token",
 				Duration: duration,
@@ -34,7 +34,7 @@ func (a *App) handleRotateAdminToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeAuditWithRequestID(ctx, auditRecord{
+		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "admin_token.rotate",
 			Result:   "error",
 			Duration: duration,
@@ -47,7 +47,7 @@ func (a *App) handleRotateAdminToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAuditWithRequestID(ctx, auditRecord{
+	writeRequestContextAudit(ctx, auditRecord{
 		Event:    "admin_token.rotate",
 		Result:   "success",
 		Duration: duration,

@@ -534,31 +534,41 @@ CA validation behavior, and externally visible errors are all unchanged.
 
 ### P2-7. Audit vocabulary hides the changed resource
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-**auditRecord.PrincipalPath** with JSON key principal_path is used only for a
-Principal allowed-root change:
-[audit.go:23-29](../audit.go#L23-L29),
-[principal_handler.go:354-370](../principal_handler.go#L354-L370).
+The internal audit vocabulary now describes the actual resource and context
+enrichment:
 
-**writeAuditWithRequestID** also injects Session ID from context:
-[logging.go:206-213](../logging.go#L206-L213).
+- **auditRecord.PrincipalAllowedRoot** — the internal field name for the
+  canonical Principal allowed root affected by
+  `principal.allowed_root_add` / `principal.allowed_root_remove`. The external
+  JSON key remains **principal_path** for Release 2 compatibility; renaming
+  the serialized field to `principal_allowed_root` is deferred to an explicit
+  schema decision (dual-write/versioning).
+- **writeRequestContextAudit** — the helper that enriches an auditRecord from
+  the HTTP request context and writes it via writeAudit: it sets `request_id`
+  from `requestIDFromContext` and fills `session_id` from
+  `sessionIDFromContext` only when `record.SessionID` is not already
+  explicitly populated.
 
-**Actual responsibility**
+**Canonical vocabulary**
 
-The field is the Principal allowed root affected by the event. The helper
-writes context-enriched audit.
+- `PrincipalAllowedRoot` — internal auditRecord field (JSON: `principal_path`)
+- `writeRequestContextAudit` — request-context audit enrichment
 
-**Preferred vocabulary**
+**Previous names (resolved)**
 
-- internal PrincipalAllowedRoot;
-- writeContextAudit or writeRequestContextAudit;
-- external principal_allowed_root only after an explicit schema decision.
+- ~~PrincipalPath~~ → PrincipalAllowedRoot
+- ~~writeAuditWithRequestID~~ → writeRequestContextAudit
 
-**Compatibility and batch**
+**Compatibility**
 
-The Go field can be renamed while retaining json:"principal_path". Any JSON
-key migration requires dual-write or versioning.
+No external audit-schema or behavior change: the external JSON key
+`principal_path`, the audit event names `principal.allowed_root_add` /
+`principal.allowed_root_remove`, `request_id`, `session_id`, audit record
+contents, and which paths emit audit records are all unchanged. Audit
+locking/output/error handling, `writeAudit`, and request/session correlation
+behavior are unchanged.
 
 ### P2-8. Shipping SELinux comments describe a nonexistent lifecycle
 

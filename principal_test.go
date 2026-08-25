@@ -1015,10 +1015,10 @@ func TestPrincipalAuditEnabledChange(t *testing.T) {
 
 func TestPrincipalAuditPath(t *testing.T) {
 	rec := auditRecord{
-		Event:         "principal.allowed_root_add",
-		PrincipalName: "testuser",
-		PrincipalPath: "/shared",
-		Result:        "success",
+		Event:                "principal.allowed_root_add",
+		PrincipalName:        "testuser",
+		PrincipalAllowedRoot: "/shared",
+		Result:               "success",
 	}
 
 	data, err := json.Marshal(rec)
