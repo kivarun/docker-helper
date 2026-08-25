@@ -35,30 +35,8 @@ func (p *pinnedMount) Cleanup() error {
 	return p.result
 }
 
-// openat2Args records the arguments passed to openat2.
-type openat2Args struct {
-	dirfd        int
-	path         string
-	flags        uint
-	mode         uint32
-	resolveFlags uint64
-}
-
-// openTreeArgs records the arguments passed to open_tree.
-type openTreeArgs struct {
-	dirfd int
-	path  string
-	flags uint
-}
-
-// moveMountArgs records the arguments passed to move_mount.
-type moveMountArgs struct {
-	fromFD   int
-	fromPath string
-	toFD     int
-	toPath   string
-	flags    int
-}
+// openat2Args, openTreeArgs, and moveMountArgs call records live in
+// mount_pin_linux_test.go next to mockMountPinSyscalls.
 
 // mountPinSyscalls abstracts the Linux syscalls used by the workspace mount
 // pinning primitive.

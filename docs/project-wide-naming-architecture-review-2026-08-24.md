@@ -763,13 +763,18 @@ and decoding are exactly as before.
 
 ### P3-2. Test call-record types live in the production mount adapter
 
-openat2Args, openTreeArgs, and moveMountArgs are described as records of calls
-and exist for mock assertions, but are declared in production
-mount_pin_seam.go:
-[mount_pin_seam.go:38-61](../mount_pin_seam.go#L38-L61).
+**Status: RESOLVED**
 
-Move call-record types to a test file. Keep only the production resource and
-syscall adapter in production code. No compatibility surface.
+openat2Args, openTreeArgs, and moveMountArgs are test-only call-record
+declarations colocated with the mount syscall mock in mount_pin_linux_test.go,
+immediately before `mockMountPinSyscalls`. Their fields and names are
+unchanged.
+
+Production mount_pin_seam.go now contains only the production resource and
+syscall seam: `pinnedMount` and its `Cleanup`, the `mountPinSyscalls`
+interface, and `unixStat` with its methods. No production behavior or
+compatibility surface changed; mount pinning, syscall invocation, flags, fd
+allocation, and cleanup are exactly as before.
 
 ### P3-3. Shared test helpers are hidden in feature-specific files
 
