@@ -120,7 +120,7 @@ func TestCAPrepareIdempotent(t *testing.T) {
 		}
 	}
 	if dirCount != 1 {
-		t.Errorf("expected 1 fingerprint dir, got %d", dirCount)
+		t.Errorf("expected 1 snapshot dir, got %d", dirCount)
 	}
 }
 
@@ -141,17 +141,17 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fpDir := cfgObj.TrustedCAPreparedDir
+	snapshotDir := cfgObj.TrustedCAPreparedDir
 
-	dirInfo, err := os.Stat(fpDir)
+	dirInfo, err := os.Stat(snapshotDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dirInfo.Mode().Perm() != 0755 {
-		t.Errorf("fingerprint dir mode = %o, want 0755", dirInfo.Mode().Perm())
+		t.Errorf("snapshot dir mode = %o, want 0755", dirInfo.Mode().Perm())
 	}
 
-	caFile := filepath.Join(fpDir, "ca.pem")
+	caFile := filepath.Join(snapshotDir, "ca.pem")
 	caInfo, err := os.Stat(caFile)
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 		t.Errorf("ca.pem mode = %o, want 0644", caInfo.Mode().Perm())
 	}
 
-	if err := os.Chmod(fpDir, 0700); err != nil {
+	if err := os.Chmod(snapshotDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 
@@ -168,20 +168,20 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfgObj2.TrustedCAPreparedDir != fpDir {
+	if cfgObj2.TrustedCAPreparedDir != snapshotDir {
 		t.Error("expected same prepared dir for same CA")
 	}
 
-	dirInfo2, err := os.Stat(fpDir)
+	dirInfo2, err := os.Stat(snapshotDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dirInfo2.Mode().Perm() != 0755 {
-		t.Errorf("fingerprint dir mode after idempotent reload = %o, want 0755", dirInfo2.Mode().Perm())
+		t.Errorf("snapshot dir mode after idempotent reload = %o, want 0755", dirInfo2.Mode().Perm())
 	}
 }
 
-func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
+func TestCAPrepareNewSnapshotOnCAChange(t *testing.T) {
 	configPath, caPath, _ := setupCAConfigTest(t)
 
 	writeCAConfig(t, configPath, map[string]any{
@@ -216,7 +216,7 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 	}
 
 	if _, err := os.Stat(firstDir); os.IsNotExist(err) {
-		t.Error("old fingerprint dir should still exist")
+		t.Error("old snapshot dir should still exist")
 	}
 }
 
@@ -498,7 +498,7 @@ func TestCAPrepareSnapshotConsistency(t *testing.T) {
 	}
 }
 
-func TestOpenSSLHashGolden(t *testing.T) {
+func TestOpenSSLSubjectHashGolden(t *testing.T) {
 	tests := []struct {
 		name     string
 		subject  pkix.Name
@@ -544,9 +544,9 @@ func TestOpenSSLHashGolden(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cert := createTestCertWithSubject(t, tt.subject)
-			hash, err := computeOpenSSLHash(cert)
+			hash, err := computeOpenSSLSubjectHash(cert)
 			if err != nil {
-				t.Fatalf("computeOpenSSLHash failed: %v", err)
+				t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 			}
 			if hash != tt.expected {
 				t.Errorf("hash = %s, want %s", hash, tt.expected)
@@ -555,14 +555,14 @@ func TestOpenSSLHashGolden(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashNotMD5RawSubject verifies that the implementation does NOT
+// TestOpenSSLSubjectHashNotMD5RawSubject verifies that the implementation does NOT
 // degenerate to MD5(RawSubject) or SHA1(RawSubject), which were incorrect
 // algorithms that produced wrong hashes.
-func TestOpenSSLHashNotMD5RawSubject(t *testing.T) {
+func TestOpenSSLSubjectHashNotMD5RawSubject(t *testing.T) {
 	cert := createTestCertWithSubject(t, pkix.Name{CommonName: "Test CA"})
-	hash, err := computeOpenSSLHash(cert)
+	hash, err := computeOpenSSLSubjectHash(cert)
 	if err != nil {
-		t.Fatalf("computeOpenSSLHash failed: %v", err)
+		t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 	}
 
 	// These are the hashes that would be produced by the wrong algorithms.
@@ -613,7 +613,7 @@ func createTestCertWithSubject(t *testing.T, subject pkix.Name) *x509.Certificat
 var oidCommonName = []byte{0x55, 0x04, 0x03} // 2.5.4.3
 
 // makeCertWithRawSubject creates a certificate whose RawSubject is set to
-// the provided DER bytes. computeOpenSSLHash only reads RawSubject, so the
+// the provided DER bytes. computeOpenSSLSubjectHash only reads RawSubject, so the
 // rest of the certificate is irrelevant.
 func makeCertWithRawSubject(t *testing.T, rawSubject []byte) *x509.Certificate {
 	t.Helper()
@@ -689,7 +689,7 @@ func canonRDN(attrs ...[]byte) []byte {
 	return derSet(bytes.Join(attrs, nil))
 }
 
-func TestOpenSSLHashRawSubject(t *testing.T) {
+func TestOpenSSLSubjectHashRawSubject(t *testing.T) {
 	// Pre-compute values that can't be expressed inline in a composite literal.
 	longVal := make([]byte, 130)
 	for i := range longVal {
@@ -757,9 +757,9 @@ func TestOpenSSLHashRawSubject(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cert := makeCertWithRawSubject(t, tt.rawSubject)
-			hash, err := computeOpenSSLHash(cert)
+			hash, err := computeOpenSSLSubjectHash(cert)
 			if err != nil {
-				t.Fatalf("computeOpenSSLHash failed: %v", err)
+				t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 			}
 			want := expectedHashFromCanonDER(t, tt.canonDER)
 			if hash != want {
@@ -769,7 +769,7 @@ func TestOpenSSLHashRawSubject(t *testing.T) {
 	}
 }
 
-func TestOpenSSLHashSameValueDifferentEncodings(t *testing.T) {
+func TestOpenSSLSubjectHashSameValueDifferentEncodings(t *testing.T) {
 	// Same logical value "Test" encoded with different ASN.1 string types
 	// must produce identical hashes after canonicalization.
 	encodings := [][]byte{
@@ -782,9 +782,9 @@ func TestOpenSSLHashSameValueDifferentEncodings(t *testing.T) {
 	var firstHash string
 	for i, raw := range encodings {
 		cert := makeCertWithRawSubject(t, raw)
-		hash, err := computeOpenSSLHash(cert)
+		hash, err := computeOpenSSLSubjectHash(cert)
 		if err != nil {
-			t.Fatalf("encoding %d: computeOpenSSLHash failed: %v", i, err)
+			t.Fatalf("encoding %d: computeOpenSSLSubjectHash failed: %v", i, err)
 		}
 		if firstHash == "" {
 			firstHash = hash
@@ -795,9 +795,9 @@ func TestOpenSSLHashSameValueDifferentEncodings(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashSurrogateRejection verifies that BMPString and UniversalString
+// TestOpenSSLSubjectHashSurrogateRejection verifies that BMPString and UniversalString
 // with surrogate code points are rejected, matching OpenSSL behavior.
-func TestOpenSSLHashSurrogateRejection(t *testing.T) {
+func TestOpenSSLSubjectHashSurrogateRejection(t *testing.T) {
 	tests := []struct {
 		name       string
 		rawSubject []byte
@@ -831,7 +831,7 @@ func TestOpenSSLHashSurrogateRejection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cert := makeCertWithRawSubject(t, tt.rawSubject)
-			_, err := computeOpenSSLHash(cert)
+			_, err := computeOpenSSLSubjectHash(cert)
 			if err == nil {
 				t.Fatal("expected error for invalid code point, got nil")
 			}
@@ -839,9 +839,9 @@ func TestOpenSSLHashSurrogateRejection(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashMalformedLength verifies that malformed BMPString and
+// TestOpenSSLSubjectHashMalformedLength verifies that malformed BMPString and
 // UniversalString lengths are rejected.
-func TestOpenSSLHashMalformedLength(t *testing.T) {
+func TestOpenSSLSubjectHashMalformedLength(t *testing.T) {
 	tests := []struct {
 		name       string
 		rawSubject []byte
@@ -863,7 +863,7 @@ func TestOpenSSLHashMalformedLength(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cert := makeCertWithRawSubject(t, tt.rawSubject)
-			_, err := computeOpenSSLHash(cert)
+			_, err := computeOpenSSLSubjectHash(cert)
 			if err == nil {
 				t.Fatal("expected error for malformed length, got nil")
 			}
@@ -876,9 +876,9 @@ func derTagLength(tag byte, data []byte) []byte {
 	return append(append([]byte{tag}, encodeDERLength(len(data))...), data...)
 }
 
-// TestOpenSSLHashNumericStringNotCanonicalized verifies that NumericString
+// TestOpenSSLSubjectHashNumericStringNotCanonicalized verifies that NumericString
 // is NOT canonicalized (not in ASN1_MASK_CANON) and retains its original tag.
-func TestOpenSSLHashNumericStringNotCanonicalized(t *testing.T) {
+func TestOpenSSLSubjectHashNumericStringNotCanonicalized(t *testing.T) {
 	// CN = NumericString("12345")
 	rawSubject := derSeq(derSet(derAttr(oidCommonName,
 		derTagLength(0x12, []byte("12345")))))
@@ -886,9 +886,9 @@ func TestOpenSSLHashNumericStringNotCanonicalized(t *testing.T) {
 		derTagLength(0x12, []byte("12345"))...)))
 
 	cert := makeCertWithRawSubject(t, rawSubject)
-	hash, err := computeOpenSSLHash(cert)
+	hash, err := computeOpenSSLSubjectHash(cert)
 	if err != nil {
-		t.Fatalf("computeOpenSSLHash failed: %v", err)
+		t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 	}
 	want := expectedHashFromCanonDER(t, canonDER)
 	if hash != want {
@@ -896,9 +896,9 @@ func TestOpenSSLHashNumericStringNotCanonicalized(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashNonASCIIUntouched verifies that non-ASCII UTF-8 bytes
+// TestOpenSSLSubjectHashNonASCIIUntouched verifies that non-ASCII UTF-8 bytes
 // are not modified by the ASCII-only lowercase/whitespace logic.
-func TestOpenSSLHashNonASCIIUntouched(t *testing.T) {
+func TestOpenSSLSubjectHashNonASCIIUntouched(t *testing.T) {
 	// CN = UTF8String("Tëst CÄ") — non-ASCII bytes should pass through unchanged
 	rawSubject := derSeq(derSet(derAttr(oidCommonName,
 		derUTF8String([]byte("T\xc3\xa9st C\xc3\x84")))))
@@ -908,9 +908,9 @@ func TestOpenSSLHashNonASCIIUntouched(t *testing.T) {
 	canonDER := canonRDN(canonAttr(oidCommonName, []byte("t\xc3\xa9st c\xc3\x84")))
 
 	cert := makeCertWithRawSubject(t, rawSubject)
-	hash, err := computeOpenSSLHash(cert)
+	hash, err := computeOpenSSLSubjectHash(cert)
 	if err != nil {
-		t.Fatalf("computeOpenSSLHash failed: %v", err)
+		t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 	}
 	want := expectedHashFromCanonDER(t, canonDER)
 	if hash != want {
@@ -918,9 +918,9 @@ func TestOpenSSLHashNonASCIIUntouched(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashWhitespaceFull verifies all 6 whitespace characters
+// TestOpenSSLSubjectHashWhitespaceFull verifies all 6 whitespace characters
 // (TAB, LF, VT, FF, CR, SPACE) are normalized.
-func TestOpenSSLHashWhitespaceFull(t *testing.T) {
+func TestOpenSSLSubjectHashWhitespaceFull(t *testing.T) {
 	// CN = UTF8String("\t\x0a\x0b\x0c\x0d  Test   CA  \t\x0a")
 	// All whitespace types at leading, internal, and trailing positions
 	rawSubject := derSeq(derSet(derAttr(oidCommonName,
@@ -929,9 +929,9 @@ func TestOpenSSLHashWhitespaceFull(t *testing.T) {
 	canonDER := canonRDN(canonAttr(oidCommonName, []byte("test ca")))
 
 	cert := makeCertWithRawSubject(t, rawSubject)
-	hash, err := computeOpenSSLHash(cert)
+	hash, err := computeOpenSSLSubjectHash(cert)
 	if err != nil {
-		t.Fatalf("computeOpenSSLHash failed: %v", err)
+		t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 	}
 	want := expectedHashFromCanonDER(t, canonDER)
 	if hash != want {
@@ -939,9 +939,9 @@ func TestOpenSSLHashWhitespaceFull(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashIA5AndVisible verifies IA5String and VisibleString
+// TestOpenSSLSubjectHashIA5AndVisible verifies IA5String and VisibleString
 // are canonicalized (in ASN1_MASK_CANON).
-func TestOpenSSLHashIA5AndVisible(t *testing.T) {
+func TestOpenSSLSubjectHashIA5AndVisible(t *testing.T) {
 	tests := []struct {
 		name string
 		tag  byte
@@ -960,9 +960,9 @@ func TestOpenSSLHashIA5AndVisible(t *testing.T) {
 			rawSubject := derSeq(derSet(derAttr(oidCommonName,
 				derTagLength(tt.tag, tt.data))))
 			cert := makeCertWithRawSubject(t, rawSubject)
-			hash, err := computeOpenSSLHash(cert)
+			hash, err := computeOpenSSLSubjectHash(cert)
 			if err != nil {
-				t.Fatalf("computeOpenSSLHash failed: %v", err)
+				t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 			}
 			if hash != want {
 				t.Errorf("hash = %s, want %s", hash, want)
@@ -971,17 +971,17 @@ func TestOpenSSLHashIA5AndVisible(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashPrintableString verifies PrintableString is canonicalized.
-func TestOpenSSLHashPrintableString(t *testing.T) {
+// TestOpenSSLSubjectHashPrintableString verifies PrintableString is canonicalized.
+func TestOpenSSLSubjectHashPrintableString(t *testing.T) {
 	// CN = PrintableString("Test CA")
 	rawSubject := derSeq(derSet(derAttr(oidCommonName,
 		derTagLength(0x13, []byte("Test CA")))))
 	canonDER := canonRDN(canonAttr(oidCommonName, []byte("test ca")))
 
 	cert := makeCertWithRawSubject(t, rawSubject)
-	hash, err := computeOpenSSLHash(cert)
+	hash, err := computeOpenSSLSubjectHash(cert)
 	if err != nil {
-		t.Fatalf("computeOpenSSLHash failed: %v", err)
+		t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 	}
 	want := expectedHashFromCanonDER(t, canonDER)
 	if hash != want {
@@ -989,8 +989,8 @@ func TestOpenSSLHashPrintableString(t *testing.T) {
 	}
 }
 
-// TestOpenSSLHashMultiAttributeRDN verifies multi-attribute RDNs.
-func TestOpenSSLHashMultiAttributeRDN(t *testing.T) {
+// TestOpenSSLSubjectHashMultiAttributeRDN verifies multi-attribute RDNs.
+func TestOpenSSLSubjectHashMultiAttributeRDN(t *testing.T) {
 	oidOrg := []byte{0x55, 0x04, 0x0a} // 2.5.4.10 (organization)
 
 	// SET { O="Org", CN="CN" }
@@ -1011,9 +1011,9 @@ func TestOpenSSLHashMultiAttributeRDN(t *testing.T) {
 	canonDER := canonRDN(canonAttrs...)
 
 	cert := makeCertWithRawSubject(t, rawSubject)
-	hash, err := computeOpenSSLHash(cert)
+	hash, err := computeOpenSSLSubjectHash(cert)
 	if err != nil {
-		t.Fatalf("computeOpenSSLHash failed: %v", err)
+		t.Fatalf("computeOpenSSLSubjectHash failed: %v", err)
 	}
 	want := expectedHashFromCanonDER(t, canonDER)
 	if hash != want {

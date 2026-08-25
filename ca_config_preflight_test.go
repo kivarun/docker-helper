@@ -14,7 +14,7 @@ import (
 
 func TestValidateCAConfigPropagatesHashError(t *testing.T) {
 	// Regression: validateCAConfig must propagate the error from
-	// computeOpenSSLHash, not discard it.
+	// computeOpenSSLSubjectHash, not discard it.
 	//
 	// We inject a hasher that returns a sentinel error to prove the error
 	// path is exercised and the error context is preserved.

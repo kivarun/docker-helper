@@ -47,7 +47,7 @@ func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
 	app, token := setupRunTestApp(t)
 
 	// Set up CA injection config directly.
-	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-fingerprint")
+	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-snapshot")
 	if err := os.MkdirAll(preparedDir, 0755); err != nil {
 		t.Fatalf("cannot create prepared dir: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestRunCAAutoAddsMountAndEnv(t *testing.T) {
 func TestRunCAExplicitEnvWins(t *testing.T) {
 	app, token := setupRunTestApp(t)
 
-	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-fingerprint")
+	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-snapshot")
 	if err := os.MkdirAll(preparedDir, 0755); err != nil {
 		t.Fatalf("cannot create prepared dir: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestRunCADisabledNoMountOrEnv(t *testing.T) {
 func TestRunCAOverlappingMountRejected(t *testing.T) {
 	app, token := setupRunTestApp(t)
 
-	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-fingerprint")
+	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-snapshot")
 	if err := os.MkdirAll(preparedDir, 0755); err != nil {
 		t.Fatalf("cannot create prepared dir: %v", err)
 	}

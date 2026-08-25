@@ -133,21 +133,21 @@ func TestValidateCAPEMNonCertificateBlockRejected(t *testing.T) {
 	}
 }
 
-// --- fingerprintDir tests ---
+// --- trustedCASnapshotDir tests ---
 
-func TestFingerprintDirDeterministic(t *testing.T) {
+func TestTrustedCASnapshotDirDeterministic(t *testing.T) {
 	runtimeDir := "/tmp/runtime"
 	data := []byte("test CA data")
 
-	dir1 := fingerprintDir(runtimeDir, data)
-	dir2 := fingerprintDir(runtimeDir, data)
+	dir1 := trustedCASnapshotDir(runtimeDir, data)
+	dir2 := trustedCASnapshotDir(runtimeDir, data)
 
 	if dir1 != dir2 {
-		t.Error("fingerprintDir should be deterministic")
+		t.Error("trustedCASnapshotDir should be deterministic")
 	}
 
-	dir3 := fingerprintDir(runtimeDir, []byte("different data"))
+	dir3 := trustedCASnapshotDir(runtimeDir, []byte("different data"))
 	if dir1 == dir3 {
-		t.Error("different data should produce different fingerprint")
+		t.Error("different data should produce a different snapshot directory")
 	}
 }

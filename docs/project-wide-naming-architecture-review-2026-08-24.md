@@ -496,30 +496,41 @@ preparation side effects rather than merely loading configuration.
 
 ### P2-6. Trusted-CA cryptographic terms are imprecise
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-- **computeOpenSSLHash** computes the OpenSSL subject-name hash.
-- **fingerprintDir** hashes raw source bytes rather than a certificate
-  fingerprint.
+The trusted-CA vocabulary now distinguishes the two distinct cryptographic
+values precisely:
 
-Evidence:
-[ca.go:468-503](../ca.go#L468-L503).
+- **computeOpenSSLSubjectHash** — computes the OpenSSL-compatible X.509
+  subject-name hash used for the `<subject-hash>.0` certificate-directory
+  symlink. It is the OpenSSL subject hash (`openssl x509 -hash -noout`), not
+  a generic hash.
+- **trustedCASnapshotDir** — returns the content-addressed prepared CA
+  snapshot directory `$runtime_dir/trusted-ca/<sha256-of-source-bytes>/`. The
+  directory is selected by SHA-256 of the raw validated CA source bytes; it is
+  a prepared CA snapshot, not a certificate fingerprint.
+- **snapshotDir** — the local name for the trusted CA snapshot directory
+  (replaces `fpDir`).
 
-**Actual responsibility**
+**Canonical vocabulary**
 
-The first value indexes an OpenSSL certificate directory by canonical subject.
-The second selects a content-addressed prepared CA snapshot.
+- `computeOpenSSLSubjectHash` — OpenSSL subject-hash computation
+- `trustedCASnapshotDir` — content-addressed trusted CA snapshot directory
+- `snapshotDir` — local name for the trusted CA snapshot directory
 
-**Preferred vocabulary**
+**Previous names (resolved)**
 
-- computeOpenSSLSubjectHash;
-- trustedCASnapshotDir or caContentDigestDir;
-- snapshotDir rather than fpDir.
+- ~~computeOpenSSLHash~~ → computeOpenSSLSubjectHash
+- ~~fingerprintDir~~ → trustedCASnapshotDir
+- ~~fpDir~~ → snapshotDir
 
-**Compatibility and batch**
+**Compatibility**
 
-Internal only. Keep the current directory layout; rename symbols, locals, and
-tests.
+Internal naming refactor only. The OpenSSL subject-hash algorithm (including
+its SHA-1 use), the SHA-256 of raw CA source bytes used for snapshot-directory
+naming, the `$runtime_dir/trusted-ca/<sha256>/` layout, the `ca.pem` name, the
+`<subject-hash>.0 -> ca.pem` symlink, idempotency behavior, modes/permissions,
+CA validation behavior, and externally visible errors are all unchanged.
 
 ### P2-7. Audit vocabulary hides the changed resource
 

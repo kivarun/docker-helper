@@ -1283,11 +1283,11 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 // It validates the CA file without requiring
 // XDG_RUNTIME_DIR, creating directories, or materializing artifacts.
 func validateCAConfig(raw map[string]json.RawMessage) error {
-	return validateCAConfigWithHasher(raw, computeOpenSSLHash)
+	return validateCAConfigWithHasher(raw, computeOpenSSLSubjectHash)
 }
 
 // validateCAConfigWithHasher is like validateCAConfig but allows injecting a
-// custom hasher for testing. Production always uses computeOpenSSLHash.
+// custom hasher for testing. Production always uses computeOpenSSLSubjectHash.
 func validateCAConfigWithHasher(
 	raw map[string]json.RawMessage,
 	hasher func(*x509.Certificate) (string, error),

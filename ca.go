@@ -465,7 +465,7 @@ func buildCanonicalX509NameDER(rdns []x509NameRDN) ([]byte, error) {
 	return buf, nil
 }
 
-// computeOpenSSLHash computes the OpenSSL-compatible subject-name hash for
+// computeOpenSSLSubjectHash computes the OpenSSL-compatible subject-name hash for
 // the given certificate. The algorithm matches `openssl x509 -hash -noout`
 // (OpenSSL 3.x subject_hash):
 //
@@ -480,7 +480,7 @@ func buildCanonicalX509NameDER(rdns []x509NameRDN) ([]byte, error) {
 // 4. First 4 bytes as little-endian 8-character lowercase hex
 //
 // Returns an error on parse/canonicalization failure.
-func computeOpenSSLHash(cert *x509.Certificate) (string, error) {
+func computeOpenSSLSubjectHash(cert *x509.Certificate) (string, error) {
 	rdns, err := parseX509RawSubject(cert.RawSubject)
 	if err != nil {
 		return "", err
@@ -495,20 +495,20 @@ func computeOpenSSLHash(cert *x509.Certificate) (string, error) {
 	return fmt.Sprintf("%08x", uint32(h[3])<<24|uint32(h[2])<<16|uint32(h[1])<<8|uint32(h[0])), nil
 }
 
-// fingerprintDir returns the path to the fingerprint directory for a given
-// CA source file: $runtime_dir/trusted-ca/<sha256-of-source-bytes>/
-func fingerprintDir(runtimeDir string, caData []byte) string {
+// trustedCASnapshotDir returns the path to the trusted CA snapshot directory
+// for a given CA source file: $runtime_dir/trusted-ca/<sha256-of-source-bytes>/
+func trustedCASnapshotDir(runtimeDir string, caData []byte) string {
 	h := sha256.Sum256(caData)
 	hexHash := hex.EncodeToString(h[:])
 	return filepath.Join(runtimeDir, "trusted-ca", hexHash)
 }
 
-// prepareCAInjection validates the CA file, computes the openssl hash, and
-// materializes the CA in the helper-owned runtime directory:
+// prepareCAInjection validates the CA file, computes the OpenSSL subject hash,
+// and materializes the CA in the helper-owned runtime directory:
 //
 //	$RUNTIME_DIR/trusted-ca/<sha256-of-source-bytes>/
 //	    ├── ca.pem
-//	    └── <openssl-hash>.0 -> ca.pem
+//	    └── <subject-hash>.0 -> ca.pem
 //
 // Returns the prepared directory path, or an error if preparation fails.
 // Idempotent: re-preparing the same CA is a no-op.
@@ -522,57 +522,57 @@ func prepareCAInjection(runtimeDir, caPath string) (preparedDir string, err erro
 	return prepareCAFromData(runtimeDir, caData)
 }
 
-// prepareCAFromData computes the openssl hash and materializes the CA in the
-// helper-owned runtime directory using pre-read CA bytes. This function is the
-// authoritative path for CA preparation and is also exposed for tests that need
-// to verify snapshot consistency without filesystem races.
+// prepareCAFromData computes the OpenSSL subject hash and materializes the CA in
+// the helper-owned runtime directory using pre-read CA bytes. This function is
+// the authoritative path for CA preparation and is also exposed for tests that
+// need to verify snapshot consistency without filesystem races.
 func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, err error) {
 	cert, err := validateCAPEM(caData)
 	if err != nil {
 		return "", err
 	}
 
-	// Compute openssl hash from the parsed certificate.
-	hash, err := computeOpenSSLHash(cert)
+	// Compute the OpenSSL subject hash from the parsed certificate.
+	subjectHash, err := computeOpenSSLSubjectHash(cert)
 	if err != nil {
 		return "", fmt.Errorf("cannot compute CA hash: %w", err)
 	}
 
-	// Determine fingerprint directory.
-	fpDir := fingerprintDir(runtimeDir, caData)
-	caFile := filepath.Join(fpDir, "ca.pem")
-	symlinkPath := filepath.Join(fpDir, hash+".0")
+	// Determine the trusted CA snapshot directory.
+	snapshotDir := trustedCASnapshotDir(runtimeDir, caData)
+	caFile := filepath.Join(snapshotDir, "ca.pem")
+	symlinkPath := filepath.Join(snapshotDir, subjectHash+".0")
 
 	// If the directory already exists with the correct content, skip.
-	if info, err := os.Stat(fpDir); err == nil && info.IsDir() {
+	if info, err := os.Stat(snapshotDir); err == nil && info.IsDir() {
 		caInfo, statErr := os.Lstat(caFile)
 		if statErr == nil && caInfo.Mode().IsRegular() {
 			if existing, err := os.ReadFile(caFile); err == nil && bytes.Equal(existing, caData) {
 				if target, err := os.Readlink(symlinkPath); err == nil && target == "ca.pem" {
 					// Ensure modes are correct regardless of umask or external chmod.
-					if err := os.Chmod(fpDir, 0755); err != nil {
+					if err := os.Chmod(snapshotDir, 0755); err != nil {
 						return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
 					}
 					if err := os.Chmod(caFile, 0644); err != nil {
 						return "", fmt.Errorf("cannot set trusted CA file permissions: %w", err)
 					}
-					return fpDir, nil
+					return snapshotDir, nil
 				}
 			}
 		}
 	}
 
-	// Create the fingerprint directory with mode 0755.
-	if err := os.MkdirAll(fpDir, 0755); err != nil {
+	// Create the snapshot directory with mode 0755.
+	if err := os.MkdirAll(snapshotDir, 0755); err != nil {
 		return "", fmt.Errorf("cannot create trusted CA directory: %w", err)
 	}
 	// Explicitly set mode to guarantee 0755 regardless of process umask.
-	if err := os.Chmod(fpDir, 0755); err != nil {
+	if err := os.Chmod(snapshotDir, 0755); err != nil {
 		return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
 	}
 
 	// Write ca.pem atomically with mode 0644.
-	tmp, err := os.CreateTemp(fpDir, "ca-*.pem.tmp")
+	tmp, err := os.CreateTemp(snapshotDir, "ca-*.pem.tmp")
 	if err != nil {
 		return "", fmt.Errorf("cannot create temp CA file: %w", err)
 	}
@@ -597,8 +597,8 @@ func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, er
 		return cleanupTemp(fmt.Errorf("cannot install CA file: %w", err))
 	}
 
-	// Create the openssl hash symlink.
-	// Remove existing entry if present (different hash or stale).
+	// Create the OpenSSL subject hash symlink.
+	// Remove existing entry if present (different subject hash or stale).
 	if err := os.Remove(symlinkPath); err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("cannot remove existing CA hash entry: %w", err)
 	}
@@ -606,7 +606,7 @@ func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, er
 		return "", fmt.Errorf("cannot create CA hash symlink: %w", err)
 	}
 
-	return fpDir, nil
+	return snapshotDir, nil
 }
 
 // isTrustedCAMountOverlap returns true if the agent mount target overlaps

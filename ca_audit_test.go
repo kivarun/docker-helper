@@ -22,7 +22,7 @@ func TestRunAuditCAInjectedAuto(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-fingerprint")
+	preparedDir := filepath.Join(app.Config.RuntimeDir, "trusted-ca", "test-snapshot")
 	if err := os.MkdirAll(preparedDir, 0755); err != nil {
 		t.Fatalf("cannot create prepared dir: %v", err)
 	}
