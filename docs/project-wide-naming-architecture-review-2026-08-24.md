@@ -797,17 +797,20 @@ test-only organizational cleanup.
 
 ### P3-4. Historical filenames and planning documents no longer describe scope
 
-multi_root_regression_test.go includes config transactions, rollback, reload,
-and authorization-ceiling behavior rather than only multi-root regression:
-[multi_root_regression_test.go:15-29](../multi_root_regression_test.go#L15-L29).
+**Status: RESOLVED**
 
-test-cleanup-plan.md references the nonexistent workspace_root_test.go and
-mixes unresolved work with completed phases:
-[test-cleanup-plan.md:21-34](test-cleanup-plan.md#L21-L34).
-
-Rename the test file to allowed_root_policy_integration_test.go without
-splitting it in this batch. Mark the cleanup plan as a historical snapshot or
-reduce it to the remaining verified work.
+- **multi_root_regression_test.go** was renamed to
+  **allowed_root_policy_integration_test.go** (via `git mv`) without
+  splitting, reorganizing, or changing test behavior. The filename now
+  describes the file's actual scope: structured allowed-root CLI behavior,
+  config persistence/transactions, rollback, daemon reload interaction, and
+  global/Principal authorization ceilings. No test function was renamed.
+- **docs/test-cleanup-plan.md** is now explicitly an archived historical
+  snapshot: it declares itself non-authoritative for the current repository
+  state and points to the project-wide review for current verified cleanup
+  work. Stale file names, line numbers, and symbols inside that archived body
+  (e.g., `workspace_root_test.go`) are intentionally not maintained.
+- No production behavior or compatibility surface changed.
 
 ### P3-5. Legacy allowed_root appears in current-architecture comments
 

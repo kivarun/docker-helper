@@ -1,5 +1,14 @@
 # Test Cleanup Plan
 
+> **Historical snapshot**
+>
+> This document records test-cleanup observations from an earlier repository
+> state. It is not the current work plan. File names, line numbers, symbols,
+> and completion state below may be obsolete.
+>
+> Current verified cleanup work is tracked in
+> `project-wide-naming-architecture-review-2026-08-24.md`.
+
 ## Objective
 
 Remove dead code, fix broken tests, consolidate duplicates, and improve test
