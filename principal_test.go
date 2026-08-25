@@ -172,9 +172,9 @@ func TestShowPrincipal(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	result, err := findPrincipalByUserName(app.DB, "showuser")
+	result, err := findPrincipalByUsername(app.DB, "showuser")
 	if err != nil {
-		t.Fatalf("findPrincipalByUserName() error: %v", err)
+		t.Fatalf("findPrincipalByUsername() error: %v", err)
 	}
 
 	if result.Username != "showuser" {
@@ -188,7 +188,7 @@ func TestShowPrincipal(t *testing.T) {
 func TestShowPrincipalNotFound(t *testing.T) {
 	app := newTestApp(t)
 
-	_, err := findPrincipalByUserName(app.DB, "nonexistent")
+	_, err := findPrincipalByUsername(app.DB, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent principal")
 	}
@@ -286,9 +286,9 @@ func TestRemoveAllowedRoot(t *testing.T) {
 		t.Error("expected changed to be true")
 	}
 
-	result, err := findPrincipalByUserName(app.DB, "remuser")
+	result, err := findPrincipalByUsername(app.DB, "remuser")
 	if err != nil {
-		t.Fatalf("findPrincipalByUserName() error: %v", err)
+		t.Fatalf("findPrincipalByUsername() error: %v", err)
 	}
 	if len(result.AllowedRoots) != 1 {
 		t.Fatalf("expected 1 allowed root after removal, got %d", len(result.AllowedRoots))
@@ -336,9 +336,9 @@ func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 		t.Error("expected changed to be true")
 	}
 
-	result, err := findPrincipalByUserName(app.DB, "deluser")
+	result, err := findPrincipalByUsername(app.DB, "deluser")
 	if err != nil {
-		t.Fatalf("findPrincipalByUserName() error: %v", err)
+		t.Fatalf("findPrincipalByUsername() error: %v", err)
 	}
 	if len(result.AllowedRoots) != 1 {
 		t.Fatalf("expected 1 allowed root after removal, got %d", len(result.AllowedRoots))
@@ -428,7 +428,7 @@ func TestPrincipalCaseSensitive(t *testing.T) {
 	}
 
 	// Different case should NOT find the principal (case-sensitive).
-	_, err := findPrincipalByUserName(app.DB, "CASEUSER")
+	_, err := findPrincipalByUsername(app.DB, "CASEUSER")
 	if err == nil {
 		t.Fatal("expected error for different case username")
 	}
@@ -1062,7 +1062,7 @@ func TestPrincipalErrorWrapping(t *testing.T) {
 		t.Fatal("expected error for empty username")
 	}
 
-	_, err = findPrincipalByUserName(app.DB, "")
+	_, err = findPrincipalByUsername(app.DB, "")
 	if err == nil {
 		t.Fatal("expected error for empty username in find")
 	}
@@ -1309,9 +1309,9 @@ func TestPrincipalAllowedRootPathResolution(t *testing.T) {
 		t.Error("expected changed to be true")
 	}
 
-	result, err := findPrincipalByUserName(app.DB, "pathresuser")
+	result, err := findPrincipalByUsername(app.DB, "pathresuser")
 	if err != nil {
-		t.Fatalf("findPrincipalByUserName() error: %v", err)
+		t.Fatalf("findPrincipalByUsername() error: %v", err)
 	}
 
 	found := false

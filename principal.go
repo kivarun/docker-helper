@@ -182,10 +182,10 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (
 		return nil, fmt.Errorf("cannot commit principal creation: %w", err)
 	}
 
-	return findPrincipalByUserName(db, username)
+	return findPrincipalByUsername(db, username)
 }
 
-func findPrincipalByUserName(db *sql.DB, username string) (*PrincipalWithRoots, error) {
+func findPrincipalByUsername(db *sql.DB, username string) (*PrincipalWithRoots, error) {
 	if username == "" {
 		return nil, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -426,7 +426,7 @@ func isSQLiteUniqueError(err error) bool {
 
 // listPrincipalSummaries returns all principals ordered by username,
 // with only the fields exposed by GET /principals. Allowed roots are
-// intentionally not loaded; use findPrincipalByUserName for full details.
+// intentionally not loaded; use findPrincipalByUsername for full details.
 func listPrincipalSummaries(db *sql.DB) ([]principalSummary, error) {
 	rows, err := db.Query(
 		`SELECT username, uid, gid, home, enabled FROM principals ORDER BY username`,

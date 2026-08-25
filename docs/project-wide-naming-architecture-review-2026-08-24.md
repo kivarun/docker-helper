@@ -747,6 +747,9 @@ Internal identifiers were renamed mechanically to the canonical spelling:
 - **findPrincipalIDByUsername** — canonical `Username` spelling (was
   findPrincipalIDByUserName); the `...InTx` variant is
   findPrincipalIDByUsernameInTx.
+- **findPrincipalByUsername** — final control pass found and removed the
+  remaining sibling of the already-corrected findPrincipalIDByUsername family
+  (was findPrincipalByUserName).
 - **parseAPIError** — normal Go acronym casing for API (was parseApiError).
 - **operationStatus** — the `Ctx` suffix is historical; this is now the only
   variant and takes `context.Context` as part of its normal contract (was
@@ -772,7 +775,10 @@ unchanged.
 
 Production mount_pin_seam.go now contains only the production resource and
 syscall seam: `pinnedMount` and its `Cleanup`, the `mountPinSyscalls`
-interface, and `unixStat` with its methods. No production behavior or
+interface, and `unixStat` with its methods. The final control pass also
+removed the stale test-navigation comment pointing into
+mount_pin_linux_test.go; the seam file now describes only its actual
+production resource/syscall seam. No production behavior or
 compatibility surface changed; mount pinning, syscall invocation, flags, fd
 allocation, and cleanup are exactly as before.
 
@@ -853,7 +859,7 @@ test-only organizational cleanup.
   “reload after rollback”; tests were updated to match. No new result type or
   abstraction was introduced.
 
-### P3-7. TestCleanupConcurrency overstates its assertion
+### P3-7. Pruning concurrency test originally overstated its assertion
 
 **Status: RESOLVED**
 
@@ -892,6 +898,12 @@ operationSupervisor behavior was not changed.
 - `cancelOperationTimeout` (12s), signal handling, HTTP behavior, and operation
   cancellation lifecycle are unchanged. Comment-only cleanup; no executable
   statement changed.
+
+> Final control pass: after all original P3 findings were closed, three
+> post-resolution residue corrections were applied — the findPrincipalByUsername
+> sibling rename (P3-1), removal of the stale test-navigation comment in
+> mount_pin_seam.go (P3-2), and the P3-7 heading correction. These were residue
+> corrections and did not reopen any findings.
 
 ## 5. Keep-as-is decisions
 

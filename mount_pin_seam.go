@@ -35,9 +35,6 @@ func (p *pinnedMount) Cleanup() error {
 	return p.result
 }
 
-// openat2Args, openTreeArgs, and moveMountArgs call records live in
-// mount_pin_linux_test.go next to mockMountPinSyscalls.
-
 // mountPinSyscalls abstracts the Linux syscalls used by the workspace mount
 // pinning primitive.
 type mountPinSyscalls interface {

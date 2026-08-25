@@ -301,7 +301,7 @@ func TestPrincipalDisableIdempotent(t *testing.T) {
 		t.Error("second disable should report unchanged")
 	}
 
-	p, err := findPrincipalByUserName(app.DB, "disidempuser")
+	p, err := findPrincipalByUsername(app.DB, "disidempuser")
 	if err != nil {
 		t.Fatalf("findPrincipal: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
 		t.Errorf("expected ErrSessionNotFound, got: %v", err)
 	}
 
-	p, err := findPrincipalByUserName(app.DB, "disenuser")
+	p, err := findPrincipalByUsername(app.DB, "disenuser")
 	if err != nil {
 		t.Fatalf("findPrincipal: %v", err)
 	}

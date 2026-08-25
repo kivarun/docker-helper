@@ -133,7 +133,7 @@ func (a *App) handleShowPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := findPrincipalByUserName(a.DB, username)
+	result, err := findPrincipalByUsername(a.DB, username)
 	if err != nil {
 		if isErrPrincipalNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
