@@ -528,7 +528,7 @@ func credentialToJSON(c CredentialWithPrincipal) credentialJSON {
 	}
 	return credentialJSON{
 		ID:        c.ID,
-		Principal: c.Principal,
+		Principal: c.PrincipalName,
 		Name:      c.Name,
 		CreatedAt: c.CreatedAt.Format(time.RFC3339),
 		RevokedAt: revokedAt,
@@ -612,7 +612,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:          "principal.credential_create",
-		PrincipalName:  result.Principal,
+		PrincipalName:  result.PrincipalName,
 		CredentialID:   result.ID,
 		CredentialName: result.Name,
 		Result:         "success",
@@ -718,7 +718,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:          "principal.credential_revoke",
-			PrincipalName:  cred.Principal,
+			PrincipalName:  cred.PrincipalName,
 			CredentialID:   cred.ID,
 			CredentialName: cred.Name,
 			Result:         "error",
@@ -743,7 +743,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 
 	writeAuditWithRequestID(ctx, auditRecord{
 		Event:             "principal.credential_revoke",
-		PrincipalName:     cred.Principal,
+		PrincipalName:     cred.PrincipalName,
 		CredentialID:      cred.ID,
 		CredentialName:    cred.Name,
 		CredentialChanged: &changed,

@@ -41,8 +41,8 @@ func TestCreateCredential(t *testing.T) {
 	if cred.Name != "oc" {
 		t.Errorf("name = %q, want %q", cred.Name, "oc")
 	}
-	if cred.Principal != "creduser" {
-		t.Errorf("principal = %q, want %q", cred.Principal, "creduser")
+	if cred.PrincipalName != "creduser" {
+		t.Errorf("principal = %q, want %q", cred.PrincipalName, "creduser")
 	}
 	if !strings.HasPrefix(token, "dhc_") {
 		t.Errorf("token should have prefix dhc_, got %q", token)

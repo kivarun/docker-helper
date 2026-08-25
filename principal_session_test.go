@@ -108,7 +108,7 @@ func TestCredentialAuthRevoked(t *testing.T) {
 	}
 }
 
-func TestCredentialAuthDisabledPrincipal(t *testing.T) {
+func TestCredentialAuthPrincipalDisabled(t *testing.T) {
 	app := newTestAppWithAuth(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disableduser")
@@ -140,8 +140,8 @@ func TestCredentialAuthDisabledPrincipal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for disabled principal")
 	}
-	if !errors.Is(err, ErrCredentialDisabled) {
-		t.Errorf("expected ErrCredentialDisabled, got: %v", err)
+	if !errors.Is(err, ErrPrincipalDisabled) {
+		t.Errorf("expected ErrPrincipalDisabled, got: %v", err)
 	}
 }
 
@@ -156,7 +156,7 @@ func TestCredentialAuthDBError(t *testing.T) {
 		t.Fatal("expected error for DB failure")
 	}
 	// Should be a generic error, not credential-specific.
-	if errors.Is(err, ErrCredentialNotFound) || errors.Is(err, ErrCredentialRevoked) || errors.Is(err, ErrCredentialDisabled) {
+	if errors.Is(err, ErrCredentialNotFound) || errors.Is(err, ErrCredentialRevoked) || errors.Is(err, ErrPrincipalDisabled) {
 		t.Errorf("expected generic DB error, got: %v", err)
 	}
 }

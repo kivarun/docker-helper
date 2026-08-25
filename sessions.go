@@ -50,7 +50,7 @@ func sessionToJSON(s Session) sessionJSON {
 // control operations: create, list, and delete sessions.
 type sessionControlAuthority struct {
 	isAdmin             bool
-	principalCredential *CredentialAuthResult
+	principalCredential *PrincipalCredentialAuth
 }
 
 // authenticateSessionControlRequest tries admin token first, then Principal
@@ -95,7 +95,7 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 	// Credential auth failed. Check if it's a database error.
 	if !errors.Is(err, ErrCredentialNotFound) &&
 		!errors.Is(err, ErrCredentialRevoked) &&
-		!errors.Is(err, ErrCredentialDisabled) {
+		!errors.Is(err, ErrPrincipalDisabled) {
 		writeAuditWithRequestID(ctx, auditRecord{
 			Event:  "auth.session",
 			Result: "database_error",
@@ -112,8 +112,8 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 	resultCode := "credential.not_found"
 	if errors.Is(err, ErrCredentialRevoked) {
 		resultCode = "credential.revoked"
-	} else if errors.Is(err, ErrCredentialDisabled) {
-		resultCode = "credential.disabled"
+	} else if errors.Is(err, ErrPrincipalDisabled) {
+		resultCode = "principal.disabled"
 	}
 	writeAuthFailure(ctx, r, resultCode)
 	writeUnauthorizedSessionControl(ctx, w)

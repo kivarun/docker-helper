@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -269,6 +271,126 @@ func TestAuthAuditCredentialNotFound_CreateSession(t *testing.T) {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
 	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "credential.not_found", token, "", authHeader, headerMarker, bodyMarker)
+}
+
+// ========================
+// credential.revoked (valid credential, then revoked)
+// ========================
+
+func TestAuthAuditPrincipalCredentialRevoked_CreateSession(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuthAndStaging(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditrevoked")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "2001", "2001", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "auditrevoked", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	cred, token, err := createCredential(app.DB, "auditrevoked", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
+		t.Fatalf("revokeCredential() error: %v", err)
+	}
+
+	authHeader := "Bearer " + token
+	const headerMarker = "hdr_principal_revoked_secret_h1x2"
+	const bodyMarker = "body_principal_revoked_secret_d9p5"
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{"workspace":"`+bodyMarker+`"}`)))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Test-Secret", headerMarker)
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+
+	lines := findAuthFailureRawLines(auditBuf)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "credential.revoked", token, "", authHeader, headerMarker, bodyMarker)
+}
+
+// ========================
+// principal.disabled (active credential, owning Principal disabled)
+// ========================
+
+func TestAuthAuditPrincipalDisabled_CreateSession(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAuthAndStaging(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditdisabled")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "2002", "2002", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "auditdisabled", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	_, token, err := createCredential(app.DB, "auditdisabled", "oc")
+	if err != nil {
+		t.Fatalf("createCredential() error: %v", err)
+	}
+
+	if _, err := persistPrincipalEnabledChange(app.DB, "auditdisabled", false); err != nil {
+		t.Fatalf("persistPrincipalEnabledChange() error: %v", err)
+	}
+
+	authHeader := "Bearer " + token
+	const headerMarker = "hdr_principal_disabled_secret_k7y3"
+	const bodyMarker = "body_principal_disabled_secret_z1q8"
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{"workspace":"`+bodyMarker+`"}`)))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Test-Secret", headerMarker)
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+
+	lines := findAuthFailureRawLines(auditBuf)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "principal.disabled", token, "", authHeader, headerMarker, bodyMarker)
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if w.Header().Get("WWW-Authenticate") != "Bearer" {
+		t.Errorf("expected WWW-Authenticate: Bearer, got %q", w.Header().Get("WWW-Authenticate"))
+	}
+	if resp.Code != "unauthorized" {
+		t.Errorf("expected code 'unauthorized', got %q", resp.Code)
+	}
+	if resp.Message != "Authentication required for session management." {
+		t.Errorf("expected session-management message, got %q", resp.Message)
+	}
 }
 
 // ========================

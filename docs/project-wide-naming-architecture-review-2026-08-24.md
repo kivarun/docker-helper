@@ -326,34 +326,34 @@ unchanged.
 
 ### P2-1. Principal disabled is reported as credential disabled
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-**ErrCredentialDisabled** is returned when p.enabled is zero; there is no
-credential-disabled state:
-[credential.go:214-260](../credential.go#L214-L260).
+**ErrCredentialDisabled** was renamed to **ErrPrincipalDisabled** with message
+"principal disabled". A disabled Principal is not a disabled credential.
 
-Session-control audit then emits credential.disabled:
-[sessions.go:109-116](../sessions.go#L109-L116).
+**CredentialAuthResult** was renamed to **PrincipalCredentialAuth**.
 
-**CredentialWithPrincipal.Principal** actually contains the Principal name:
-[credential.go:26-30](../credential.go#L26-L30).
+**CredentialWithPrincipal.Principal** was renamed to
+**CredentialWithPrincipal.PrincipalName** (the field contains the Principal
+username, not a Principal object).
 
-**Actual responsibility**
+**Audit result correction:**
 
-A Principal credential may be unknown or revoked. Its owning Principal may be
-disabled independently of the credential lifecycle.
+The auth-failure result `credential.disabled` was corrected to
+`principal.disabled`. This is an intentional Release 2 audit-schema correction.
+`credential.not_found` and `credential.revoked` remain credential lifecycle
+results. `principal.disabled` represents owner state.
 
-**Preferred vocabulary**
+**Authentication path preserved:**
 
-- ErrPrincipalDisabled;
-- principal.disabled in audit;
-- CredentialWithPrincipal.PrincipalName;
-- PrincipalCredentialAuth for the internal authenticated-authority result.
+- unknown token → `ErrCredentialNotFound`
+- revoked Principal credential → `ErrCredentialRevoked`
+- valid credential whose Principal is disabled → `ErrPrincipalDisabled`
 
-**Compatibility and batch**
+**Compatibility**
 
-Rename internal errors and fields first. Treat audit result changes as an
-external schema migration. Preserve JSON field principal.
+HTTP routes, request/response JSON schema, SQLite schema, credential token
+format, credential IDs, and the JSON field `principal` are unchanged.
 
 ### P2-2. generateToken collapses admin-token and Session-token semantics
 

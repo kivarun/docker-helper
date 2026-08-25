@@ -26,7 +26,7 @@ type Credential struct {
 // CredentialWithPrincipal is a Credential with its principal username.
 type CredentialWithPrincipal struct {
 	Credential
-	Principal string
+	PrincipalName string
 }
 
 // generateCredentialToken returns a random 32-byte hex token prefixed with "dhc_".
@@ -92,7 +92,7 @@ func createCredential(db *sql.DB, username string, name string) (*CredentialWith
 			Name:      name,
 			CreatedAt: time.Unix(now, 0),
 		},
-		Principal: username,
+		PrincipalName: username,
 	}, token, nil
 }
 
@@ -128,8 +128,8 @@ func listCredentials(db *sql.DB, username string) ([]CredentialWithPrincipal, er
 			c.RevokedAt = &t
 		}
 		creds = append(creds, CredentialWithPrincipal{
-			Credential: c,
-			Principal:  username,
+			Credential:    c,
+			PrincipalName: username,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -169,8 +169,8 @@ func findCredentialByID(db *sql.DB, id string) (*CredentialWithPrincipal, error)
 	}
 
 	return &CredentialWithPrincipal{
-		Credential: c,
-		Principal:  username,
+		Credential:    c,
+		PrincipalName: username,
 	}, nil
 }
 
@@ -211,14 +211,14 @@ func revokeCredential(db *sql.DB, id string) (bool, error) {
 	return true, nil
 }
 
-// ErrCredentialDisabled is returned when the credential's principal is disabled.
-var ErrCredentialDisabled = errors.New("credential disabled")
+// ErrPrincipalDisabled is returned when the credential's owning Principal is disabled.
+var ErrPrincipalDisabled = errors.New("principal disabled")
 
 // ErrCredentialRevoked is returned when the credential has been revoked.
 var ErrCredentialRevoked = errors.New("credential revoked")
 
-// CredentialAuthResult contains the information needed to authorize a principal request.
-type CredentialAuthResult struct {
+// PrincipalCredentialAuth contains the information needed to authorize a principal request.
+type PrincipalCredentialAuth struct {
 	PrincipalID           int64
 	PrincipalName         string
 	CredentialID          string
@@ -229,8 +229,8 @@ type CredentialAuthResult struct {
 // Returns the authenticated Principal and Principal allowed roots on success.
 // Returns ErrCredentialNotFound for unknown token.
 // Returns ErrCredentialRevoked for revoked credentials.
-// Returns ErrCredentialDisabled for disabled principals.
-func authenticateCredential(db *sql.DB, token string) (*CredentialAuthResult, error) {
+// Returns ErrPrincipalDisabled for disabled principals.
+func authenticateCredential(db *sql.DB, token string) (*PrincipalCredentialAuth, error) {
 	tokenHash := hashCredentialToken(token)
 
 	var credID, principalName string
@@ -257,7 +257,7 @@ func authenticateCredential(db *sql.DB, token string) (*CredentialAuthResult, er
 	}
 
 	if enabled == 0 {
-		return nil, fmt.Errorf("principal disabled: %w", ErrCredentialDisabled)
+		return nil, ErrPrincipalDisabled
 	}
 
 	// Fetch allowed roots for the principal.
@@ -284,7 +284,7 @@ func authenticateCredential(db *sql.DB, token string) (*CredentialAuthResult, er
 		return nil, fmt.Errorf("iterate allowed roots: %w", err)
 	}
 
-	return &CredentialAuthResult{
+	return &PrincipalCredentialAuth{
 		PrincipalID:           principalID,
 		PrincipalName:         principalName,
 		CredentialID:          credID,

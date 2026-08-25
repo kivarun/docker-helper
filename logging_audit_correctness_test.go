@@ -305,7 +305,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	if rec == nil || rec.Result != "success" {
 		t.Fatal("credential_revoke success audit not found")
 	}
-	if rec.CredentialID != cred.ID || rec.CredentialName != cred.Name || rec.PrincipalName != cred.Principal {
+	if rec.CredentialID != cred.ID || rec.CredentialName != cred.Name || rec.PrincipalName != cred.PrincipalName {
 		t.Fatalf("audit missing metadata: id=%q name=%q principal=%q", rec.CredentialID, rec.CredentialName, rec.PrincipalName)
 	}
 }
