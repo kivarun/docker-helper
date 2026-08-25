@@ -93,8 +93,8 @@ func (a *App) setConfig(newCfg *Config) {
 // The function verifies that the authorizing token is still current before
 // committing the rotation, preventing stale concurrent rotations.
 func (a *App) rotateAdminToken(authorizingHash [sha256.Size]byte) (string, error) {
-	// Generate new token using the standard generator.
-	newToken, err := generateToken()
+	// Generate a new admin token.
+	newToken, err := generateAdminToken()
 	if err != nil {
 		return "", err
 	}

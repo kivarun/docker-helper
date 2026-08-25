@@ -174,7 +174,7 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 	}
 	sessionID := "dhs_" + hex.EncodeToString(idBytes)
 
-	token, err := generateToken()
+	token, err := generateSessionToken()
 	if err != nil {
 		return nil, fmt.Errorf("cannot generate session token: %w: %w", err, ErrSystem)
 	}

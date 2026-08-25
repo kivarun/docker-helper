@@ -357,39 +357,43 @@ format, credential IDs, and the JSON field `principal` are unchanged.
 
 ### P2-2. generateToken collapses admin-token and Session-token semantics
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-One **generateToken** with the dht_ format creates:
+**generateToken** was split into domain wrappers:
 
-- admin tokens during init:
+- **generateAdminToken** — admin-token domain, used during init and rotation;
+- **generateSessionToken** — Session-token domain, used during Session
+  creation.
+
+Both independently represent a distinct authority and lifecycle at their call
+sites.
+
+**Shared mechanic preserved:**
+
+Both wrappers delegate to the single low-level **generateOpaqueToken**, which
+owns the existing dht_ encoding:
+[token.go:9-29](../token.go#L9-L29).
+
+**Domain call sites:**
+
+- admin token during init:
   [config.go:789-805](../config.go#L789-L805);
-- admin tokens during rotation:
+- admin token during rotation:
   [app.go:87-100](../app.go#L87-L100);
-- Session tokens:
+- Session token:
   [session.go:166-177](../session.go#L166-L177).
 
-The shared generator is defined at
-[token.go:9-18](../token.go#L9-L18).
+**Compatibility**
 
-**Actual responsibility**
+- Existing `dht_ <64 lowercase hex>` external format unchanged.
+- Admin init behavior, admin rotation behavior, and Session creation
+  behavior unchanged.
+- Token hashing, persisted values, and schema unchanged; no migration.
+- Principal credential tokens (`dhc_`), Session IDs (`dhs_`), and credential
+  IDs (`dhcr_`) are a separate domain and unchanged.
 
-Admin and Session tokens use the same current encoding but have different
-authority and lifecycle.
-
-**Why misleading**
-
-Shared implementation does not make them one domain concept. A generic
-call-site hides which capability is being created.
-
-**Preferred vocabulary**
-
-Use generateAdminToken and generateSessionToken wrappers over a shared
-generateOpaqueToken mechanic.
-
-**Compatibility and batch**
-
-Keep the dht_ external format for Release 2. Add wrappers, change call-sites,
-and split generator tests; no token migration is required.
+No token interfaces/classes, configurable prefix framework, or migration
+layer were introduced.
 
 ### P2-3. Daemon lifecycle is named as HTTP serving
 

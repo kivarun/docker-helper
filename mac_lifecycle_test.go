@@ -1116,7 +1116,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	// Generate auth token for the session.
-	token, err := generateToken()
+	token, err := generateSessionToken()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1245,7 +1245,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	// Generate auth token for the session.
-	token, err := generateToken()
+	token, err := generateSessionToken()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1363,7 +1363,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	// Generate auth token for the session.
-	token, err := generateToken()
+	token, err := generateSessionToken()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1496,7 +1496,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	// Generate auth token for the session.
-	token, err := generateToken()
+	token, err := generateSessionToken()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1626,7 +1626,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 
 	// Generate auth token for the session.
-	token, err := generateToken()
+	token, err := generateSessionToken()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1737,7 +1737,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 
 	// Generate auth token for the session.
-	token, err := generateToken()
+	token, err := generateSessionToken()
 	if err != nil {
 		t.Fatal(err)
 	}

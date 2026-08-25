@@ -17,9 +17,10 @@ import (
 	"testing"
 )
 
-// assertAdminTokenFormat verifies the unified bearer token contract:
-// dht_ followed by 64 lowercase hex characters. The same invariant applies
-// to init/session/credential tokens.
+// assertAdminTokenFormat verifies the admin-token domain contract: dht_
+// followed by 64 lowercase hex characters. The dht_ encoding is the shared
+// opaque-token mechanic, used by admin (init and rotation) and Session
+// tokens. Credential tokens (dhc_) are a separate domain.
 func assertAdminTokenFormat(t *testing.T, token string) {
 	t.Helper()
 	if !strings.HasPrefix(token, "dht_") {

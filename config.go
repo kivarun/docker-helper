@@ -796,7 +796,7 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 		return nil, errors.New("admin.token already exists")
 	}
 
-	token, err := generateToken()
+	token, err := generateAdminToken()
 	if err != nil {
 		return nil, err
 	}
