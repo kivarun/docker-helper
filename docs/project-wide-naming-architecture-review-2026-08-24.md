@@ -835,13 +835,23 @@ test-only organizational cleanup.
 
 ### P3-6. re-reload describes history rather than responsibility
 
-formatReReloadError and the output phrase “re-reload” mean a compensating
-reload after restoring the previous config:
-[config_cli.go:1030-1043](../config_cli.go#L1030-L1043),
-[config_cli.go:1193-1208](../config_cli.go#L1193-L1208).
+**Status: RESOLVED**
 
-Use formatRollbackReloadError and “reload after rollback”. This affects only
-internal names and error wording.
+- **formatReReloadError** was renamed to **formatRollbackReloadError**
+  (config_cli.go); its comment now describes a reload after rollback.
+- The compensating-reload comment now reads “Reload after rollback to
+  synchronize runtime with the restored file.”
+- The operator diagnostic now reads `error: config rolled back; reload after
+  rollback <suffix>` (e.g. `rejected: ...`, `transport error: ...`,
+  `daemon not running`, `failed`). The initial reload error line is unchanged.
+- Transaction ordering and failure semantics are unchanged: write new config,
+  reload, on failure restore original bytes, reload again to match the
+  restored file, and report the compensating-reload failure if it fails. Exit
+  codes, rollback write behavior, reload attempt count, reloadResult /
+  reloadOutcome values, and transport/rejection classification are unchanged.
+- Current production comments, test names, and expected diagnostics use
+  “reload after rollback”; tests were updated to match. No new result type or
+  abstraction was introduced.
 
 ### P3-7. TestCleanupConcurrency overstates its assertion
 

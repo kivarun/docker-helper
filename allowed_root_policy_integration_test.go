@@ -1154,14 +1154,14 @@ func setupConfigAllowedRootTestEnv(t *testing.T, data []byte) string {
 }
 
 // =============================================================================
-// Transaction regression: shared rollback/re-reload path
+// Transaction regression: shared rollback/reload-after-rollback path
 // =============================================================================
 
-// TestAllowedRootAddRollbackRereload verifies that the shared
-// rollback/re-reload path is authoritative for allowed-root ADD:
-// when the first reload fails but the re-reload after restoration succeeds,
+// TestAllowedRootAddRollbackReload verifies that the shared
+// rollback/reload-after-rollback path is authoritative for allowed-root ADD:
+// when the first reload fails but the reload after rollback succeeds,
 // the config is rolled back and the daemon is synchronized.
-func TestAllowedRootAddRollbackRereload(t *testing.T) {
+func TestAllowedRootAddRollbackReload(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
@@ -1226,9 +1226,9 @@ func TestAllowedRootAddRollbackRereload(t *testing.T) {
 	}
 }
 
-// TestAllowedRootRemoveRollbackRereload verifies that the shared
-// rollback/re-reload path is authoritative for allowed-root REMOVE.
-func TestAllowedRootRemoveRollbackRereload(t *testing.T) {
+// TestAllowedRootRemoveRollbackReload verifies that the shared
+// rollback/reload-after-rollback path is authoritative for allowed-root REMOVE.
+func TestAllowedRootRemoveRollbackReload(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 

@@ -1771,10 +1771,10 @@ func TestConfigSetConcurrent(t *testing.T) {
 	}
 }
 
-// TestConfigSetRollbackRereloadSuccess verifies that when the first reload
+// TestConfigSetRollbackReloadSuccess verifies that when the first reload
 // returns 400 but the second (after restoration) returns 200, the config
 // is rolled back and the daemon is synchronized.
-func TestConfigSetRollbackRereloadSuccess(t *testing.T) {
+func TestConfigSetRollbackReloadSuccess(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
@@ -1842,9 +1842,10 @@ func TestConfigSetRollbackRereloadSuccess(t *testing.T) {
 	}
 }
 
-// TestConfigSetRollbackRereloadFail verifies that when both reloads fail,
-// the error message includes both the initial reload error and the re-reload error.
-func TestConfigSetRollbackRereloadFail(t *testing.T) {
+// TestConfigSetRollbackReloadFail verifies that when both reloads fail,
+// the error message includes both the initial reload error and the
+// reload-after-rollback error.
+func TestConfigSetRollbackReloadFail(t *testing.T) {
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
@@ -1878,8 +1879,8 @@ func TestConfigSetRollbackRereloadFail(t *testing.T) {
 	if !strings.Contains(stderr.String(), "rolled back") {
 		t.Errorf("expected 'rolled back' in stderr, got: %s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "re-reload rejected") {
-		t.Errorf("expected 're-reload rejected' in stderr, got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "reload after rollback rejected") {
+		t.Errorf("expected 'reload after rollback rejected' in stderr, got: %s", stderr.String())
 	}
 }
 

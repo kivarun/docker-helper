@@ -1027,10 +1027,10 @@ func formatReloadError(r reloadOutcome) string {
 	}
 }
 
-// formatReReloadError returns a human-readable description of a re-reload
-// failure. Unlike formatReloadError, it does not include the "reload" prefix
-// to avoid "re-reload reload rejected" redundancy.
-func formatReReloadError(r reloadOutcome) string {
+// formatRollbackReloadError returns a human-readable description of a reload
+// after rollback failure. Unlike formatReloadError, it does not include the
+// "reload" prefix to avoid "reload after rollback reload rejected" redundancy.
+func formatRollbackReloadError(r reloadOutcome) string {
 	switch r.result {
 	case reloadRejected:
 		return fmt.Sprintf("rejected: %v", r.err)
@@ -1200,11 +1200,11 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 			return 1
 		}
 
-		// Re-reload to synchronize runtime with restored file.
+		// Reload after rollback to synchronize runtime with the restored file.
 		reOutcome := attemptReload()
 		if reOutcome.result != reloadSuccess {
 			fmt.Fprintf(stderr, "error: %s\n", reloadErrStr)
-			fmt.Fprintf(stderr, "error: config rolled back; re-reload %s\n", formatReReloadError(reOutcome))
+			fmt.Fprintf(stderr, "error: config rolled back; reload after rollback %s\n", formatRollbackReloadError(reOutcome))
 			return 1
 		}
 
