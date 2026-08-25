@@ -606,29 +606,43 @@ all allow/type/attribute statements are unchanged.
 
 ### P2-9. Credential lifecycle is hidden in Principal files
 
-**Current organization and evidence**
+**Status: RESOLVED**
 
-principal_handler.go contains all credential DTOs and handlers, including the
-top-level credential revoke endpoint:
-[principal_handler.go:492-537](../principal_handler.go#L492-L537).
+Principal-credential HTTP/CLI declarations have moved out of Principal-owned
+source files into dedicated Credential source files. This was declaration
+movement only, with no behavior change:
 
-principal_cli.go contains the independent top-level credential command:
-[principal_cli.go:14-36](../principal_cli.go#L14-L36).
+- **credential_handler.go** now owns the Principal-credential HTTP
+  declarations: `isErrCredentialNotFound`, `isErrCredentialExists`,
+  `createCredentialRequest`, `credentialJSON`, `createCredentialResponse`,
+  `listCredentialsResponse`, `revokeCredentialResponse`, `credentialToJSON`,
+  and the `handleCreateCredential` / `handleListCredentials` /
+  `handleRevokeCredential` handlers.
+- **credential_cli.go** now owns the top-level Principal-credential CLI
+  declarations: `credentialCommand` and its `create` / `list` / `revoke` /
+  `install` subcommands.
+- Principal lifecycle declarations remain in principal_handler.go and
+  principal_cli.go.
 
-**Actual responsibility**
+**Compatibility**
 
-Credential is a distinct revocable authentication-key lifecycle nested under a
-Principal for creation/listing but independently addressed for revocation and
-installation.
+Declaration/file-organization refactor only. No route, command, DTO schema,
+auth, or persistence behavior changed:
 
-**Preferred vocabulary**
+- HTTP routes (`POST /principals/{username}/credentials`,
+  `GET /principals/{username}/credentials`,
+  `POST /credentials/{id}/revoke`) and handler names are unchanged.
+- Public CLI (`docker-helper credential create|list|revoke|install`) is
+  unchanged and remains a top-level command (not nested under principal).
+- Request/response JSON fields, HTTP status codes, error codes/messages,
+  audit events, admin authorization, credential pre-read before revoke,
+  idempotent revoke, logging, command summaries, Usage strings, positional
+  argument rules, flags/defaults, stdout/stderr text, exit codes,
+  operator-client resolution, install behavior, hidden terminal input, and
+  credential.token location/permissions are all unchanged.
 
-Move the existing declarations to credential_handler.go and credential_cli.go.
-
-**Compatibility and batch**
-
-Do not consolidate DTOs or alter routes/commands. Perform only declaration
-moves and filename updates.
+No rename of Credential domain symbols, no Principal credential semantic
+change, no change to credential DB/storage, and no N4 token-format resolution.
 
 ### P2-10. Generic test auth fixtures always select the admin-token branch
 
