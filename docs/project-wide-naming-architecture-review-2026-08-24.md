@@ -572,29 +572,37 @@ behavior are unchanged.
 
 ### P2-8. Shipping SELinux comments describe a nonexistent lifecycle
 
-**Current comment and evidence**
+**Status: RESOLVED**
 
-The policy says non-home boundaries are prepared by
-docker-helper workspace-root add or docker-helper init:
-[packaging/selinux/docker-helper.te:3-16](../packaging/selinux/docker-helper.te#L3-L16),
-[packaging/selinux/docker-helper.te:106-114](../packaging/selinux/docker-helper.te#L106-L114).
+The stale comment areas in
+[packaging/selinux/docker-helper.te](../packaging/selinux/docker-helper.te)
+have been corrected to the accepted Session workspace MAC lifecycle. The
+shipping SELinux source now matches the accepted lifecycle model:
 
-**Actual responsibility**
+- Global and Principal allowed roots are authorization policy only; neither
+  adding nor removing an allowed root prepares or mutates SELinux MAC state.
+  The retained `docker-helper config allowed-root add /opt` example is
+  explicitly documented as authorization-only (no MAC state change).
+- The concrete Session workspace is the MAC lifecycle unit.
+  `sessionMACCoordinator` owns acquisition and release of workspace MAC
+  bindings; the SELinux workspace MAC driver and its native fcontext
+  machinery (`selinuxFcontextManager`, semanage fcontext + restorecon)
+  provide the concrete SELinux coverage required for non-home Session
+  workspaces.
+- `/home` workspaces retain the normal supported `user_home_type` label path
+  and are not described as prepared by init or an allowed-root command.
 
-Concrete Session workspace coverage is created and released through
-sessionMACCoordinator. Global and Principal allowed roots are authorization
-ceilings and do not own MAC state. There is no public workspace-root command.
+References to the nonexistent `docker-helper workspace-root add` command and
+to init preparing a managed relabel boundary were removed from both the
+header/model workflow comments and the comment above
+`docker_helper_workspace_t`.
 
-**Why included despite MAC scope exclusion**
+**Compatibility**
 
-This shipping security source directly contradicts the accepted MAC reference
-model and can misdirect policy maintenance.
-
-**Preferred vocabulary and batch**
-
-Replace the stale lifecycle comments with Session binding/coordinator
-vocabulary. This is a comment-only, compatibility-free batch and should be
-completed before release.
+Comment-only, compatibility-free batch. No SELinux policy semantics, rules,
+types, attributes, permissions, packaging behavior, CLI behavior, MAC
+implementation, or tests changed. The type `docker_helper_workspace_t` and
+all allow/type/attribute statements are unchanged.
 
 ### P2-9. Credential lifecycle is hidden in Principal files
 

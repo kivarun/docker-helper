@@ -1,19 +1,24 @@
 # docker-helper SELinux policy
 #
 # Model: docker-helper validates and accesses workspaces that retain their
-# normal host labels (user_home_type) for /home paths. Non-home system
-# workspace roots are persistently managed under docker_helper_workspace_t
-# via semanage fcontext + restorecon when explicitly prepared by
-# docker-helper workspace-root add or docker-helper init.
+# normal host labels (user_home_type) for /home paths. Non-home Session
+# workspaces receive concrete SELinux MAC coverage under
+# docker_helper_workspace_t via persistent semanage fcontext + restorecon,
+# managed through the Session MAC binding lifecycle.
 #
-# allowed_roots is an authorization ceiling only. It does not implicitly
-# become a managed relabel boundary. The common workflow:
+# Global and Principal allowed roots are authorization policy only. Neither
+# adding nor removing an allowed root prepares or mutates SELinux MAC state.
+# The common workflow:
 #
 #   docker-helper config allowed-root add /opt
 #       authorization-only (no MAC state change)
 #
-#   docker-helper workspace-root add /opt/workspaces
-#       authorization + explicit managed relabel for that subtree
+# The concrete Session workspace is the MAC lifecycle unit. The
+# sessionMACCoordinator owns acquisition and release of workspace MAC
+# bindings; the SELinux workspace MAC driver and its native fcontext
+# machinery provide the durable docker_helper_workspace_t coverage required
+# for non-home Session workspaces. /home workspaces retain the normal
+# supported user_home_type label path.
 #
 # Integration mechanism: raw checkmodule policy with container-selinux
 # attributes. docker_helper_container_t carries both container_domain and
@@ -30,7 +35,7 @@
 #   - container_file_t rootfs access (full create/write/rename/unlink,
 #     directory management, ELF mmap/execute, Unix sockets)
 #   - user_home_type workspace access (for /home paths)
-#   - docker_helper_workspace_t workspace access (for managed non-home roots)
+#   - docker_helper_workspace_t workspace access (for non-home Session workspaces)
 #
 # Why raw checkmodule (not m4/refpolicy):
 #   - The module is a small addition to the existing container-selinux policy.
@@ -108,9 +113,10 @@ type docker_helper_config_t, file_type;
 type docker_helper_state_t, file_type;
 type docker_helper_runtime_t, file_type;
 
-# Dedicated workspace type for explicitly managed non-home system roots.
-# Applied via semanage fcontext + restorecon by docker-helper workspace-root add
-# and docker-helper init. /home paths use user_home_type and are NOT relabelled.
+# Dedicated type for concrete non-home Session workspace MAC coverage.
+# Applied via semanage fcontext + restorecon by the SELinux workspace MAC
+# driver through the Session MAC binding lifecycle (sessionMACCoordinator).
+# /home paths use user_home_type and are NOT relabelled.
 type docker_helper_workspace_t, file_type;
 
 # Custom container domain for docker-helper containers.
@@ -202,9 +208,11 @@ allow docker_helper_t user_home_type:lnk_file { read };
 # Home directory traversal (proven in enforcing UAT)
 allow docker_helper_t user_home_dir_t:dir { getattr search };
 
-# Non-home system workspace access (docker_helper_workspace_t).
+# Non-home Session workspace access (docker_helper_workspace_t).
 # Same read/traversal permissions as user_home_type for the daemon.
-# Applied persistently via semanage fcontext + restorecon for managed non-home roots.
+# Persistent SELinux coverage for concrete non-home Session workspaces,
+# managed through the Session MAC binding lifecycle via semanage fcontext
+# + restorecon.
 
 # docker_helper_workspace_t:dir — workspace directory traversal and access
 allow docker_helper_t docker_helper_workspace_t:dir { getattr search read open };
@@ -272,7 +280,7 @@ allow docker_helper_container_t container_file_t:fifo_file { create getattr read
 # --- Container workspace access ---
 #
 # Both user_home_type (for /home paths) and docker_helper_workspace_t
-# (for explicitly managed non-home roots) receive equivalent container-side
+# (for non-home Session workspaces) receive equivalent container-side
 # development-tree semantics: regular file management, directory management,
 # symlink lifecycle, chmod/setattr, executable build/run, mmap/ELF loading,
 # Unix sockets, and FIFOs.
