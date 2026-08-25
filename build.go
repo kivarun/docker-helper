@@ -24,7 +24,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	var req buildRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_json", "invalid JSON request", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_json", "invalid JSON request", session.PrincipalName)
 		return
 	}
 
@@ -39,7 +39,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "build"),
 				slog.String("error", leaseErr.Error()),
 			)
-			writeOperationRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 	}
@@ -49,7 +49,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
 		return
 	}
 
@@ -59,7 +59,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_context", "invalid build context", session.PrincipalName)
 		return
 	}
 
@@ -69,7 +69,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		if leaseRelease != nil {
 			leaseRelease()
 		}
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_args", "invalid build args", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "build", "invalid_build_args", "invalid build args", session.PrincipalName)
 		return
 	}
 
@@ -87,7 +87,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
 		)
-		writeOperationRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -105,7 +105,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "build"),
 			slog.String("error", err.Error()),
 		)
-		writeOperationRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "build", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -123,7 +123,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			if cleanupErr == nil && leaseRelease != nil {
 				leaseRelease()
 			}
-			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
 		}
 		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
@@ -163,7 +163,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	cmdCtx, cancel := context.WithCancel(context.Background())
 
-	cmd := a.newOperationCmd(cmdCtx, "docker", args...)
+	cmd := a.newDockerCommand(cmdCtx, "docker", args...)
 
 	result := startOperationProcess(cmd, op)
 
@@ -405,11 +405,11 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 
 	// Initiate cancellation and wait for completion.
 	if err := a.OperationSupervisor.cancel(opID, a.killContainerBestEffort); err != nil {
-		if err.Error() == "not_found" {
+		if errors.Is(err, ErrOperationNotFound) {
 			writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
 			return
 		}
-		if err.Error() == "already_terminal" {
+		if errors.Is(err, ErrOperationAlreadyTerminal) {
 			resp := operationCancelResponse{
 				OK:          true,
 				OperationID: op.ID,

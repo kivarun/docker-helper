@@ -82,7 +82,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	if !supervisor.admit(op1) {
 		t.Fatal("admit op1 failed")
 	}
-	cmd1 := app.newOperationCmd(context.Background(), "sh", "-c",
+	cmd1 := app.newDockerCommand(context.Background(), "sh", "-c",
 		"trap ':' TERM; touch "+readyFile1+"; while :; do :; done")
 	res1 := startOperationProcess(cmd1, op1)
 	if res1.Terminated || res1.Err != nil {
@@ -100,7 +100,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	if !supervisor.admit(op2) {
 		t.Fatal("admit op2 failed")
 	}
-	cmd2 := app.newOperationCmd(context.Background(), "sh", "-c",
+	cmd2 := app.newDockerCommand(context.Background(), "sh", "-c",
 		"trap ':' TERM; touch "+readyFile2+"; while :; do :; done")
 	res2 := startOperationProcess(cmd2, op2)
 	if res2.Terminated || res2.Err != nil {

@@ -213,14 +213,14 @@ func writeAuditWithRequestID(ctx context.Context, record auditRecord) {
 	writeAudit(record)
 }
 
-// writeOperationRejected emits a <kind>.rejected audit event and writes the
-// corresponding HTTP error response. It is used for Docker-operation requests
+// writeDockerActionRejected emits a <kind>.rejected audit event and writes the
+// corresponding HTTP error response. It is used for Docker-action requests
 // (pull, build, run) that are rejected after successful session authentication
 // but before the corresponding *.start event.
 //
 // The rejected event contains only: event, result, principal_name, session_id,
 // request_id. No request payload metadata (image, mounts, env, etc.) is included.
-func writeOperationRejected(
+func writeDockerActionRejected(
 	ctx context.Context,
 	w http.ResponseWriter,
 	status int,

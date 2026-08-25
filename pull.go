@@ -18,17 +18,17 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	var req pullRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_json", "invalid JSON request", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_json", "invalid JSON request", session.PrincipalName)
 		return
 	}
 
 	if req.Image == "" {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_image", "image is required", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_image", "image is required", session.PrincipalName)
 		return
 	}
 
 	if strings.HasPrefix(req.Image, "-") {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_image", "image must not start with '-'", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "pull", "invalid_image", "image must not start with '-'", session.PrincipalName)
 		return
 	}
 
@@ -41,7 +41,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "pull"),
 			slog.String("error", err.Error()),
 		)
-		writeOperationRejected(ctx, w, http.StatusInternalServerError, "pull", "internal_error", "internal server error", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "pull", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -56,7 +56,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	args := []string{"--config", dockerDir, "pull", req.Image}
 
-	cmd := a.newOperationCmd(ctx, "docker", args...)
+	cmd := a.newDockerCommand(ctx, "docker", args...)
 	buf := newBoundedBuffer(cfg.OperationLogMaxBytes)
 	cmd.Stdout = buf
 	cmd.Stderr = buf

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -40,6 +41,14 @@ const (
 	terminationShutdown
 	terminationCancelled
 )
+
+// ErrOperationNotFound is returned by operationSupervisor.cancel when no
+// operation with the given ID is registered.
+var ErrOperationNotFound = errors.New("operation not found")
+
+// ErrOperationAlreadyTerminal is returned by operationSupervisor.cancel when
+// the operation has already reached a terminal state.
+var ErrOperationAlreadyTerminal = errors.New("operation already terminal")
 
 type operation struct {
 	mu            sync.Mutex
@@ -250,20 +259,20 @@ func (s *operationSupervisor) terminateForShutdown(ctx context.Context, killCont
 
 // cancel cancels a single operation by ID.
 // Returns nil if the operation was found and cancellation initiated.
-// Returns "not_found" if the operation does not exist.
-// Returns "already_terminal" if the operation is already completed.
+// Returns ErrOperationNotFound if the operation does not exist.
+// Returns ErrOperationAlreadyTerminal if the operation is already completed.
 func (s *operationSupervisor) cancel(id string, killContainer func(context.Context, string)) error {
 	s.mu.RLock()
 	op, ok := s.ops[id]
 	s.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("not_found")
+		return ErrOperationNotFound
 	}
 
 	op.mu.Lock()
 	if op.CompletedAt != nil {
 		op.mu.Unlock()
-		return fmt.Errorf("already_terminal")
+		return ErrOperationAlreadyTerminal
 	}
 	op.mu.Unlock()
 

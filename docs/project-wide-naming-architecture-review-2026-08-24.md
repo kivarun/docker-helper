@@ -433,34 +433,35 @@ lock are separate lock domains and were not renamed.
 
 ### P2-4. operation is overloaded between an async resource and a Docker action
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-The public Operation resource exists for asynchronous build/run. However
-**newOperationCmd** is used by pull, registry login, Docker kill, build, and
-run:
-[run.go:679-687](../run.go#L679-L687),
-[registry.go:65-85](../registry.go#L65-L85).
+**Operation** is reserved for the asynchronous build/run resource:
 
-**writeOperationRejected** covers pull/build/run, although pull creates no
-Operation resource:
-[logging.go:216-237](../logging.go#L216-L237).
+- `operation`, `operationSupervisor`, `operationStartResult`,
+  `startOperationProcess`, operation state/result, `OperationLog...`,
+  `/operations`, `operation_id`.
 
-**Actual responsibility**
+Docker actions/commands are not Operation resources:
 
-There are two concepts:
+- **newDockerCommand** — the generic Docker command factory (formerly
+  `newOperationCmd`). Used by pull, registry login, daemon-side docker kill,
+  build, and run. It constructs an `exec.Cmd`; it does not create an Operation
+  resource. Pull, registry login, and docker kill create no Operation.
+- **writeDockerActionRejected** — the pre-start rejection helper (formerly
+  `writeOperationRejected`). Emits `<kind>.rejected` audit and the HTTP error
+  response for rejected Docker-action requests (pull/build/run).
 
-- a Docker action or Docker command;
-- an asynchronous build/run Operation entity.
+**Compatibility**
 
-**Preferred vocabulary**
-
-Reserve Operation for the asynchronous resource. Use Docker action for the
-umbrella and newDockerCommand for process creation.
-
-**Compatibility and batch**
-
-Keep /operations, operation_id, and existing external audit event names.
-Rename internal umbrella helpers and comments only.
+- `/operations`, `operation_id`, Operation JSON, and build/run/ pull/registry
+  HTTP behavior are unchanged.
+- Audit event names (`pull.rejected`, `build.rejected`, `run.rejected`,
+  `pull.start/finish`, `registry.login.start/finish`, build/run created/finish)
+  and operational log field names/values are unchanged.
+- Docker argv, process lifecycle, and output/log retention are unchanged.
+- Genuine asynchronous-Operation vocabulary (operationSupervisor, operation
+  state, startOperationProcess, writeOperationCreated) is preserved where it
+  belongs to the build/run resource.
 
 ### P2-5. loadConfig is a runtime-preparation pipeline
 
@@ -874,11 +875,24 @@ external token format.
 
 ### N5. Operation cancellation branches on error strings
 
-terminateOne returns newly formatted not_found and already_terminal strings:
-[operation.go:251-270](../operation.go#L251-L270).
+**Status: RESOLVED**
 
-The handler branches on err.Error():
-[build.go:406-423](../build.go#L406-L423).
+Cancellation classification now uses typed sentinel errors instead of
+formatted error strings:
 
-Use sentinel errors or a typed cancellation result. The HTTP contract does not
-need to change.
+- **ErrOperationNotFound** — returned by operationSupervisor.cancel for an
+  unknown operation ID.
+- **ErrOperationAlreadyTerminal** — returned by operationSupervisor.cancel
+  when the operation is already terminal.
+
+The HTTP handler classifies with `errors.Is`
+[build.go:407-423](../build.go#L407-L423); the legacy `"not_found"` /
+`"already_terminal"` string coupling was removed.
+
+**Compatibility**
+
+- Missing operation: 404, code `operation_not_found`, message "operation not
+  found".
+- Already-terminal race: unchanged idempotent success response.
+- Successful cancellation and unexpected internal errors (500): unchanged.
+- Cancellation synchronization and shutdown termination behavior unchanged.

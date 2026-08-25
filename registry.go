@@ -64,7 +64,7 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Execute docker login with password via stdin.
 	// Password must never appear in argv, environment, logs, or audit.
-	cmd := a.newOperationCmd(r.Context(), "docker",
+	cmd := a.newDockerCommand(r.Context(), "docker",
 		"--config", dockerDir,
 		"login",
 		"--username", req.Username,

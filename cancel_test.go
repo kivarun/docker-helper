@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -309,6 +310,37 @@ func TestCancelNoSupervisor(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected %d, got %d", http.StatusNotFound, w.Code)
+	}
+}
+
+// TestCancelClassificationUsesSentinels proves that cancellation
+// classification is typed via sentinel errors rather than error-string text.
+// The handler classifies with errors.Is; the legacy "not_found" and
+// "already_terminal" strings must no longer be relied upon.
+func TestCancelClassificationUsesSentinels(t *testing.T) {
+	sup := newOperationSupervisor()
+
+	// Missing operation -> ErrOperationNotFound.
+	err := sup.cancel("op_missing", nil)
+	if !errors.Is(err, ErrOperationNotFound) {
+		t.Fatalf("cancel(missing) = %v, want ErrOperationNotFound", err)
+	}
+	if err.Error() == "not_found" {
+		t.Error("classification must not depend on the legacy 'not_found' error string")
+	}
+
+	// Terminal operation -> ErrOperationAlreadyTerminal.
+	op := newRunOperation("sess", "img", 4*1024*1024, "")
+	if !sup.admit(op) {
+		t.Fatal("admit failed")
+	}
+	op.succeed(nil)
+	err = sup.cancel(op.ID, nil)
+	if !errors.Is(err, ErrOperationAlreadyTerminal) {
+		t.Fatalf("cancel(terminal) = %v, want ErrOperationAlreadyTerminal", err)
+	}
+	if err.Error() == "already_terminal" {
+		t.Error("classification must not depend on the legacy 'already_terminal' error string")
 	}
 }
 

@@ -144,7 +144,7 @@ func waitForContainerID(ctx context.Context, op *operation) string {
 // If the container is already gone or the command fails, the error is
 // logged but not propagated — "container already gone" is a success.
 func (a *App) killContainerBestEffort(ctx context.Context, containerID string) {
-	cmd := a.newOperationCmd(ctx, "docker", "kill", containerID)
+	cmd := a.newDockerCommand(ctx, "docker", "kill", containerID)
 	if err := cmd.Run(); err != nil {
 		// Container already gone or docker not available — acceptable.
 		// Do not log the container ID to avoid unnecessary traceability.
@@ -244,37 +244,37 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req runRequest
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_json", "invalid JSON request", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_json", "invalid JSON request", session.PrincipalName)
 		return
 	}
 
 	if req.Image == "" {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_image", "image is required", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_image", "image is required", session.PrincipalName)
 		return
 	}
 
 	if strings.HasPrefix(req.Image, "-") {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_image", "image must not start with '-'", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_image", "image must not start with '-'", session.PrincipalName)
 		return
 	}
 
 	if req.Workdir != "" {
 		if !filepath.IsAbs(req.Workdir) {
-			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_workdir", "workdir must be an absolute path", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_workdir", "workdir must be an absolute path", session.PrincipalName)
 			return
 		}
 	}
 
 	for name := range req.Environment {
 		if !envNamePattern.MatchString(name) {
-			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_environment", "invalid environment variable name", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_environment", "invalid environment variable name", session.PrincipalName)
 			return
 		}
 	}
 
 	shmSizeBytes, err := validateShmSize(req.ShmSize)
 	if err != nil {
-		writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_shm_size", "invalid shm size", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_shm_size", "invalid shm size", session.PrincipalName)
 		return
 	}
 
@@ -298,7 +298,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "run"),
 				slog.String("error", leaseErr.Error()),
 			)
-			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 	}
@@ -312,7 +312,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			if leaseRelease != nil {
 				leaseRelease()
 			}
-			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 
@@ -320,7 +320,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			if leaseRelease != nil {
 				leaseRelease()
 			}
-			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 
@@ -328,7 +328,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			if leaseRelease != nil {
 				leaseRelease()
 			}
-			writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 			return
 		}
 		targetSeen[resolved.Target] = true
@@ -343,7 +343,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				if leaseRelease != nil {
 					leaseRelease()
 				}
-				writeOperationRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
+				writeDockerActionRejected(ctx, w, http.StatusBadRequest, "run", "invalid_mount", "invalid mount", session.PrincipalName)
 				return
 			}
 		}
@@ -401,7 +401,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
 		)
-		writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -416,7 +416,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			slog.String("operation", "run"),
 			slog.String("error", err.Error()),
 		)
-		writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+		writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 		return
 	}
 
@@ -434,7 +434,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "run"),
 				slog.String("error", err.Error()),
 			)
-			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 		switch backend {
@@ -451,7 +451,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 				slog.String("operation", "run"),
 				slog.String("backend", string(backend)),
 			)
-			writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 			return
 		}
 	} else {
@@ -506,7 +506,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 					slog.String("operation", "run"),
 					slog.String("error", err.Error()),
 				)
-				writeOperationRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
+				writeDockerActionRejected(ctx, w, http.StatusInternalServerError, "run", "internal_error", "internal server error", session.PrincipalName)
 				return
 			}
 			pinnedMounts = append(pinnedMounts, pm)
@@ -537,7 +537,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 					slog.String("operation", "run"),
 				)
 			}
-			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
+			writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
 		}
 		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
@@ -615,7 +615,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	cmdCtx, cancel := context.WithCancel(context.Background())
 
-	cmd := a.newOperationCmd(cmdCtx, "docker", args...)
+	cmd := a.newDockerCommand(cmdCtx, "docker", args...)
 
 	result := startOperationProcess(cmd, op)
 
@@ -676,9 +676,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	writeOperationCreated(ctx, w, op.ID, operationRunning)
 }
 
-// newOperationCmd creates a new exec.Cmd for operation processes.
+// newDockerCommand creates a new exec.Cmd for a Docker command.
 // It uses ExecCommandContext if set (test seam), otherwise default.
-func (a *App) newOperationCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+func (a *App) newDockerCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	if a.ExecCommandContext != nil {
 		return a.ExecCommandContext(ctx, name, args...)
 	}
