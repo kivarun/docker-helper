@@ -394,6 +394,59 @@ func TestAuthAuditPrincipalDisabled_CreateSession(t *testing.T) {
 }
 
 // ========================
+// credential.database_error (session control)
+// ========================
+
+func TestAuthAuditSessionControlCredentialDatabaseError_CreateSession(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
+
+	// Replace DB with one that fails QueryContext so the Principal-credential
+	// lookup returns a database error instead of not_found/revoked/disabled.
+	dbPath := app.Config.DatabasePath
+	app.DB.Close()
+	app.DB = newFailQueryDB(t, dbPath, errMockQueryFail)
+	defer app.DB.Close()
+
+	// A non-admin bearer value reaches the Principal-credential lookup.
+	const token = "dht_unknown_credential_token_q2w4"
+	const authHeader = "Bearer " + token
+	const headerMarker = "hdr_cred_dberr_secret_r5t7"
+	const bodyMarker = "auth_test_body_cred_dberr:v1"
+
+	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{"workspace":"`+bodyMarker+`"}`)))
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("X-Test-Secret", headerMarker)
+	w := httptest.NewRecorder()
+	app.handleCreateSession(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+
+	lines := findAuthFailureRawLines(auditBuf)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
+	}
+	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "credential.database_error", token, "mock_query_injection_error_for_testing", authHeader, headerMarker, bodyMarker)
+
+	if raw := findAuditLine(auditBuf, "auth.session"); raw != "" {
+		t.Errorf("legacy auth.session audit event must not be emitted, got: %s", raw)
+	}
+
+	var resp response
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if resp.Code != "internal_error" {
+		t.Errorf("expected code 'internal_error', got %q", resp.Code)
+	}
+	if resp.Message != "internal server error" {
+		t.Errorf("expected message 'internal server error', got %q", resp.Message)
+	}
+}
+
+// ========================
 // session.parse_failed (session capability)
 // ========================
 

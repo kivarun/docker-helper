@@ -942,13 +942,28 @@ reload with Principal disable/delete.
 
 ### N3. Session-control database auth failure loses request correlation
 
-The database-error path writes auth.session directly without method and path:
-[sessions.go:93-105](../sessions.go#L93-L105).
+**Status: RESOLVED**
 
-The normal auth-failure owner includes those fields:
-[response.go:116-122](../response.go#L116-L122).
+The Session-control credential database-error path now routes through the
+common auth-failure owner instead of writing an `auth.session` event directly:
 
-Route the database failure through the common auth audit owner.
+- **sessions.go** — `authenticateSessionControlRequest` writes
+  `writeAuthFailure(ctx, r, "credential.database_error")`, producing an
+  `auth.failure` audit record that retains `method` and `path` request
+  correlation.
+- The audit result is `credential.database_error`, consistent with the other
+  Principal-credential auth results (`credential.not_found`,
+  `credential.revoked`, `principal.disabled`) and with the Session-capability
+  `session.database_error` owner.
+- HTTP 500 with `code = "internal_error"` / `message = "internal server error"`
+  is unchanged; the operational log line “session control auth database error”
+  with `operation = "session_auth"` remains, and the internal error appears
+  only in the operational log, never in the audit record.
+
+**Compatibility**
+
+No API route, auth success semantics, token format, operational logging
+semantics, or unrelated audit event/result changed.
 
 ### N4. Principal-credential token format has two owners
 

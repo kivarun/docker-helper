@@ -96,10 +96,7 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 	if !errors.Is(err, ErrCredentialNotFound) &&
 		!errors.Is(err, ErrCredentialRevoked) &&
 		!errors.Is(err, ErrPrincipalDisabled) {
-		writeRequestContextAudit(ctx, auditRecord{
-			Event:  "auth.session",
-			Result: "database_error",
-		})
+		writeAuthFailure(ctx, r, "credential.database_error")
 		opLog(ctx).Error("session control auth database error",
 			slog.String("operation", "session_auth"),
 			slog.String("error", err.Error()),
