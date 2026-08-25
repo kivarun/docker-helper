@@ -126,7 +126,8 @@ func signalExitCode(sig os.Signal) int {
 }
 
 // waitForOperationWithSignal polls an operation while watching for SIGINT/SIGTERM.
-// On signal, it fires a best-effort cancel (at most once) and returns a
+// On signal, it stops polling, performs an at-most-once bounded synchronous
+// best-effort cancel, waits for the polling goroutine to exit, and returns a
 // signalExitError so the caller can exit with the correct code.
 // On normal completion, it returns the operation status as usual.
 func waitForOperationWithSignal(c *apiClient, opID string, stdout, stderr io.Writer) (*operationStatusResponse, error) {
@@ -168,7 +169,7 @@ func waitForOperationWithSignalCh(c *apiClient, opID string, stdout, stderr io.W
 	select {
 	case sig := <-sigCh:
 		cancelCtx() // stop poll goroutine immediately
-		tryCancel() // best-effort daemon cancel
+		tryCancel() // bounded synchronous best-effort daemon cancel
 		<-resultCh  // wait for goroutine to exit (no orphan)
 		return nil, &signalExitError{Signal: sig}
 	case res := <-resultCh:

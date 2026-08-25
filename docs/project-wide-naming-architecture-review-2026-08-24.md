@@ -878,15 +878,20 @@ operationSupervisor behavior was not changed.
 
 ### P3-8. Best-effort cancel comment contradicts synchronous behavior
 
-cancelOperation says the caller should not block, but performs a synchronous
-request with a timeout of up to twelve seconds:
-[client.go:313-350](../client.go#L313-L350).
+**Status: RESOLVED**
 
-The signal path invokes it synchronously before returning:
-[agent_cli.go:128-173](../agent_cli.go#L128-L173).
-
-The current semantic name is bounded synchronous cancel. Correct the comment;
-making cancellation asynchronous would be a separate behavioral decision.
+- `cancelOperation` is now explicitly documented as a bounded synchronous
+  request: it sends `POST /operations/{id}/cancel` and waits for the daemon
+  response or `cancelOperationTimeout`.
+- "best-effort" now describes the cancellation guarantee/failure semantics
+  (failure is reported to the caller; no unconditional guarantee the remote
+  operation was cancelled), not asynchronous execution.
+- The signal path is documented as stopping polling, performing an at-most-once
+  bounded synchronous best-effort cancel, waiting for the polling goroutine to
+  exit, then returning the signal exit.
+- `cancelOperationTimeout` (12s), signal handling, HTTP behavior, and operation
+  cancellation lifecycle are unchanged. Comment-only cleanup; no executable
+  statement changed.
 
 ## 5. Keep-as-is decisions
 

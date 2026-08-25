@@ -316,8 +316,9 @@ func (c *apiClient) operationStatus(ctx context.Context, opID string) (*operatio
 // The client timeout covers the daemon worst case with a small margin.
 const cancelOperationTimeout = 12 * time.Second
 
-// cancelOperation sends POST /operations/{id}/cancel with a bounded timeout.
-// It is best-effort: the caller should not block on the result.
+// cancelOperation sends POST /operations/{id}/cancel synchronously with a
+// bounded timeout. Cancellation is best-effort: the call waits for the daemon
+// response or timeout, and reports any failure to the caller.
 func (c *apiClient) cancelOperation(opID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cancelOperationTimeout)
 	defer cancel()
