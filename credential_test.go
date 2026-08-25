@@ -44,11 +44,14 @@ func TestCreateCredential(t *testing.T) {
 	if cred.PrincipalName != "creduser" {
 		t.Errorf("principal = %q, want %q", cred.PrincipalName, "creduser")
 	}
-	if !strings.HasPrefix(token, "dhc_") {
-		t.Errorf("token should have prefix dhc_, got %q", token)
+	if !strings.HasPrefix(token, credentialTokenPrefix) {
+		t.Errorf("token should have prefix %q, got %q", credentialTokenPrefix, token)
 	}
-	if len(token) < 10 {
-		t.Errorf("token too short: %d", len(token))
+	if len(token) != credentialTokenTotalLen {
+		t.Errorf("token length = %d, want %d", len(token), credentialTokenTotalLen)
+	}
+	if err := validateCredentialToken(token); err != nil {
+		t.Errorf("generated token must be accepted by validateCredentialToken: %v", err)
 	}
 }
 
@@ -414,8 +417,8 @@ func TestCredentialHTTPCreate(t *testing.T) {
 	if resp.Token == "" {
 		t.Error("token should not be empty")
 	}
-	if !strings.HasPrefix(resp.Token, "dhc_") {
-		t.Errorf("token should have prefix dhc_, got %q", resp.Token)
+	if !strings.HasPrefix(resp.Token, credentialTokenPrefix) {
+		t.Errorf("token should have prefix %q, got %q", credentialTokenPrefix, resp.Token)
 	}
 }
 
@@ -866,12 +869,18 @@ func TestCredentialTokenFormat(t *testing.T) {
 		t.Fatalf("generateCredentialToken() error: %v", err)
 	}
 
-	if !strings.HasPrefix(token, "dhc_") {
-		t.Errorf("token should have prefix dhc_, got %q", token)
+	if !strings.HasPrefix(token, credentialTokenPrefix) {
+		t.Errorf("token should have prefix %q, got %q", credentialTokenPrefix, token)
 	}
-	// 32 bytes = 64 hex chars + 4 prefix = 68 total.
-	if len(token) != 68 {
-		t.Errorf("token length = %d, want 68", len(token))
+	if len(token) != credentialTokenTotalLen {
+		t.Errorf("token length = %d, want %d", len(token), credentialTokenTotalLen)
+	}
+	suffix := token[len(credentialTokenPrefix):]
+	if len(suffix) != credentialTokenHexLen {
+		t.Errorf("encoded suffix length = %d, want %d", len(suffix), credentialTokenHexLen)
+	}
+	if err := validateCredentialToken(token); err != nil {
+		t.Errorf("generated token must be accepted by validateCredentialToken: %v", err)
 	}
 }
 

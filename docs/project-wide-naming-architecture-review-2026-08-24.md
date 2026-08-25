@@ -967,14 +967,31 @@ semantics, or unrelated audit event/result changed.
 
 ### N4. Principal-credential token format has two owners
 
-generateCredentialToken contains a literal dhc_ prefix and a 32-byte length:
-[credential.go:32-39](../credential.go#L32-L39).
+**Status: RESOLVED**
 
-credential_install.go separately owns prefix and encoded-length constants:
-[credential_install.go:15-17](../credential_install.go#L15-L17).
+credential.go is now the single internal owner of the Principal-credential
+token format. The canonical constants live in
+[credential.go:36-41](../credential.go#L36-L41):
 
-Use one internal credential-token format definition without changing the
-external token format.
+    credentialTokenPrefix       = "dhc_"
+    credentialTokenEntropyBytes = 32
+    credentialTokenHexLen       = credentialTokenEntropyBytes * 2
+    credentialTokenTotalLen     = len(credentialTokenPrefix) + credentialTokenHexLen
+
+- **generateCredentialToken** allocates `credentialTokenEntropyBytes`, reads
+  cryptographic randomness exactly as before, and returns
+  `credentialTokenPrefix + lowercase hex encoding`.
+- **validateCredentialToken** in credential_install.go now consumes the same
+  canonical constants (exact total length, exact prefix, lowercase hex only);
+  the duplicate `credential_install.go` format constants were removed.
+- Generator and install validator therefore share one
+  prefix/entropy/derived-length definition. Tests assert the generated token
+  has the canonical prefix, total length, encoded suffix length, and is
+  accepted by the validator.
+
+The external Principal-credential token format is unchanged:
+`dhc_` + 64 lowercase hex characters, 68 total, 32 random bytes / 256 bits
+entropy. Error behavior and diagnostics are unchanged.
 
 ### N5. Operation cancellation branches on error strings
 

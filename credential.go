@@ -29,13 +29,24 @@ type CredentialWithPrincipal struct {
 	PrincipalName string
 }
 
+// credentialToken* define the single internal Principal-credential token
+// format: a random 32-byte (256-bit) entropy value, lowercase-hex encoded and
+// prefixed with "dhc_". The generator and the install-time validator both
+// consume this definition.
+const (
+	credentialTokenPrefix       = "dhc_"
+	credentialTokenEntropyBytes = 32
+	credentialTokenHexLen       = credentialTokenEntropyBytes * 2
+	credentialTokenTotalLen     = len(credentialTokenPrefix) + credentialTokenHexLen
+)
+
 // generateCredentialToken returns a random 32-byte hex token prefixed with "dhc_".
 func generateCredentialToken() (string, error) {
-	b := make([]byte, 32)
+	b := make([]byte, credentialTokenEntropyBytes)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("cannot generate random bytes: %w", err)
 	}
-	return "dhc_" + hex.EncodeToString(b), nil
+	return credentialTokenPrefix + hex.EncodeToString(b), nil
 }
 
 // hashCredentialToken returns the SHA-256 hex digest of the token.

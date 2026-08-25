@@ -12,10 +12,6 @@ import (
 	"golang.org/x/term"
 )
 
-const credentialTokenPrefix = "dhc_"
-const credentialTokenHexLen = 64
-const credentialTokenTotalLen = len(credentialTokenPrefix) + credentialTokenHexLen
-
 var (
 	ErrCredentialTokenInvalid     = errors.New("invalid credential token format")
 	ErrCredentialAlreadyExists    = errors.New("credential already installed")
@@ -54,7 +50,8 @@ func credentialPath() (string, error) {
 	return filepath.Join(dir, "credential.token"), nil
 }
 
-// validateCredentialToken checks the token format: dhc_ + 64 lowercase hex chars.
+// validateCredentialToken checks the Principal-credential token format defined
+// by the canonical credential.go constants: dhc_ + 64 lowercase hex chars.
 func validateCredentialToken(token string) error {
 	if len(token) != credentialTokenTotalLen {
 		return fmt.Errorf("invalid token length: got %d, want %d: %w", len(token), credentialTokenTotalLen, ErrCredentialTokenInvalid)
