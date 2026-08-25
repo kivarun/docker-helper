@@ -64,16 +64,16 @@ func (c *apiClient) readResponseBody(resp *http.Response) ([]byte, error) {
 		return nil, fmt.Errorf("cannot read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, parseApiError(resp.StatusCode, body)
+		return nil, parseAPIError(resp.StatusCode, body)
 	}
 	return body, nil
 }
 
-// parseApiError returns an apiError for the given non-2xx status and body.
+// parseAPIError returns an apiError for the given non-2xx status and body.
 // It attempts to extract the daemon's structured code and message; on
 // malformed or empty bodies it falls back to a stable error that retains
 // the HTTP status.
-func parseApiError(status int, body []byte) *apiError {
+func parseAPIError(status int, body []byte) *apiError {
 	var envelope struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
@@ -234,7 +234,7 @@ func (c *apiClient) pull(req pullRequest) (*pullResponse, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &result, parseApiError(resp.StatusCode, respBody)
+		return &result, parseAPIError(resp.StatusCode, respBody)
 	}
 
 	return &result, nil
@@ -290,8 +290,8 @@ func (c *apiClient) startRun(req runRequest) (*operationCreatedResponse, error) 
 	return &result, nil
 }
 
-// operationStatusCtx is the context-aware variant of operationStatus.
-func (c *apiClient) operationStatusCtx(ctx context.Context, opID string) (*operationStatusResponse, error) {
+// operationStatus returns the current status of the operation, honoring ctx.
+func (c *apiClient) operationStatus(ctx context.Context, opID string) (*operationStatusResponse, error) {
 	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "GET", "/operations/"+opID, nil)
 	if err != nil {
 		return nil, err
@@ -350,8 +350,8 @@ func (c *apiClient) cancelOperation(opID string) error {
 	return err
 }
 
-// operationLogsCtx is the context-aware variant of operationLogs.
-func (c *apiClient) operationLogsCtx(ctx context.Context, opID string, offset int64) (*operationLogsResponse, error) {
+// operationLogs returns the operation logs from the given offset, honoring ctx.
+func (c *apiClient) operationLogs(ctx context.Context, opID string, offset int64) (*operationLogsResponse, error) {
 	path := "/operations/" + opID + "/logs?offset=" + strconv.FormatInt(offset, 10)
 	resp, err := c.doAuthenticatedRequestWithCtx(ctx, "GET", path, nil)
 	if err != nil {
@@ -595,7 +595,7 @@ func (c *apiClient) deletePrincipal(username string) error {
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
-		return parseApiError(resp.StatusCode, body)
+		return parseAPIError(resp.StatusCode, body)
 	}
 	return nil
 }

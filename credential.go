@@ -69,7 +69,7 @@ func createCredential(db *sql.DB, username string, name string) (*CredentialWith
 		return nil, "", fmt.Errorf("credential name is required: %w", ErrInvalidCredentialName)
 	}
 
-	principalID, err := findPrincipalIDByUserName(db, username)
+	principalID, err := findPrincipalIDByUsername(db, username)
 	if err != nil {
 		return nil, "", err
 	}
@@ -108,7 +108,7 @@ func createCredential(db *sql.DB, username string, name string) (*CredentialWith
 }
 
 func listCredentials(db *sql.DB, username string) ([]CredentialWithPrincipal, error) {
-	principalID, err := findPrincipalIDByUserName(db, username)
+	principalID, err := findPrincipalIDByUsername(db, username)
 	if err != nil {
 		return nil, err
 	}

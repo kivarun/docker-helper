@@ -740,19 +740,26 @@ persistence, or behavior change; no Go files changed.
 
 ### P3-1. Historical spelling and suffixes remain in internal symbols
 
-Evidence:
+**Status: RESOLVED**
 
-- findPrincipalIDByUserName versus the canonical Username spelling:
-  [principal.go:101-102](../principal.go#L101-L102);
-- parseApiError versus API acronym casing:
-  [client.go:72-76](../client.go#L72-L76);
-- operationStatusCtx and operationLogsCtx are described as context-aware
-  variants although no non-context variants remain:
-  [client.go:293-310](../client.go#L293-L310),
-  [client.go:353-370](../client.go#L353-L370).
+Internal identifiers were renamed mechanically to the canonical spelling:
 
-Preferred vocabulary: ...Username, parseAPIError, operationStatus, and
-operationLogs. Internal mechanical batch only.
+- **findPrincipalIDByUsername** — canonical `Username` spelling (was
+  findPrincipalIDByUserName); the `...InTx` variant is
+  findPrincipalIDByUsernameInTx.
+- **parseAPIError** — normal Go acronym casing for API (was parseApiError).
+- **operationStatus** — the `Ctx` suffix is historical; this is now the only
+  variant and takes `context.Context` as part of its normal contract (was
+  operationStatusCtx).
+- **operationLogs** — same, the only variant taking `context.Context` (was
+  operationLogsCtx).
+
+All production and test call sites, comments, and test diagnostics were
+updated consistently. This was an internal mechanical rename with no
+compatibility or behavior change: no API/CLI behavior, HTTP routes, JSON,
+error strings, audit events, persistence, or token behavior changed, and the
+context parameters, request cancellation, HTTP paths, polling, log offsets,
+and decoding are exactly as before.
 
 ### P3-2. Test call-record types live in the production mount adapter
 

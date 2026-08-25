@@ -61,7 +61,7 @@ func waitForOperationContext(ctx context.Context, c *apiClient, opID string, std
 
 	for {
 		// Fetch and print any new logs.
-		logs, err := c.operationLogsCtx(ctx, opID, offset)
+		logs, err := c.operationLogs(ctx, opID, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -75,14 +75,14 @@ func waitForOperationContext(ctx context.Context, c *apiClient, opID string, std
 		offset = logs.NextOffset
 
 		// Check operation status.
-		status, err := c.operationStatusCtx(ctx, opID)
+		status, err := c.operationStatus(ctx, opID)
 		if err != nil {
 			return nil, err
 		}
 
 		if status.Status == operationSucceeded || status.Status == operationFailed {
 			// Read remaining logs one final time (always, even if offset == 0).
-			finalLogs, err := c.operationLogsCtx(ctx, opID, offset)
+			finalLogs, err := c.operationLogs(ctx, opID, offset)
 			if err != nil {
 				return nil, err
 			}

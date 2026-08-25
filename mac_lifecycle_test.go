@@ -2256,9 +2256,9 @@ func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	principalID, err := findPrincipalIDByUserName(app.DB, "macdisuser")
+	principalID, err := findPrincipalIDByUsername(app.DB, "macdisuser")
 	if err != nil {
-		t.Fatalf("findPrincipalIDByUserName: %v", err)
+		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
 
 	// Create a session with MAC binding.
@@ -2338,9 +2338,9 @@ func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	principalID, err := findPrincipalIDByUserName(app.DB, "macdeluser")
+	principalID, err := findPrincipalIDByUsername(app.DB, "macdeluser")
 	if err != nil {
-		t.Fatalf("findPrincipalIDByUserName: %v", err)
+		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
 
 	// Create a session with MAC binding.
@@ -2420,9 +2420,9 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	principalID, err := findPrincipalIDByUserName(app.DB, "leaseuser")
+	principalID, err := findPrincipalIDByUsername(app.DB, "leaseuser")
 	if err != nil {
-		t.Fatalf("findPrincipalIDByUserName: %v", err)
+		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
 
 	// Create a session with MAC binding.
@@ -2519,9 +2519,9 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	principalID, err := findPrincipalIDByUserName(app.DB, "leasedeluser")
+	principalID, err := findPrincipalIDByUsername(app.DB, "leasedeluser")
 	if err != nil {
-		t.Fatalf("findPrincipalIDByUserName: %v", err)
+		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
 
 	// Create a session with MAC binding.
@@ -2608,9 +2608,9 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	principalID, err := findPrincipalIDByUserName(app.DB, "shareduser")
+	principalID, err := findPrincipalIDByUsername(app.DB, "shareduser")
 	if err != nil {
-		t.Fatalf("findPrincipalIDByUserName: %v", err)
+		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
 
 	// Create two sessions on the same workspace boundary.

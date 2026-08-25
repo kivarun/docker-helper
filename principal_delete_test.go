@@ -65,7 +65,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
-	_, err = findPrincipalIDByUserName(app.DB, "deluser")
+	_, err = findPrincipalIDByUsername(app.DB, "deluser")
 	if !errors.Is(err, ErrPrincipalNotFound) {
 		t.Error("principal should be deleted")
 	}
@@ -892,7 +892,7 @@ func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
 		t.Fatalf("deletePrincipal: %v", err)
 	}
 
-	_, err = findPrincipalIDByUserName(app.DB, "delexpuser")
+	_, err = findPrincipalIDByUsername(app.DB, "delexpuser")
 	if !errors.Is(err, ErrPrincipalNotFound) {
 		t.Error("principal should be deleted")
 	}
@@ -983,7 +983,7 @@ func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
 
 	// Verify the principal is disabled.
 	p, err := findPrincipalByID(app.DB, func() int {
-		id, _ := findPrincipalIDByUserName(app.DB, "configraceuser")
+		id, _ := findPrincipalIDByUsername(app.DB, "configraceuser")
 		return id
 	}())
 	if err != nil {
@@ -1065,7 +1065,7 @@ func TestPrincipalDeleteConcurrentConfigReload(t *testing.T) {
 	}
 
 	// Verify the principal is deleted.
-	_, err = findPrincipalIDByUserName(app.DB, "delconfigraceuser")
+	_, err = findPrincipalIDByUsername(app.DB, "delconfigraceuser")
 	if !errors.Is(err, ErrPrincipalNotFound) {
 		t.Error("principal should be deleted")
 	}

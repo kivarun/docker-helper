@@ -99,8 +99,8 @@ func findPrincipalByID(db *sql.DB, id int) (*Principal, error) {
 	return &p, nil
 }
 
-// findPrincipalIDByUserName resolves a username to its principal ID.
-func findPrincipalIDByUserName(db *sql.DB, username string) (int, error) {
+// findPrincipalIDByUsername resolves a username to its principal ID.
+func findPrincipalIDByUsername(db *sql.DB, username string) (int, error) {
 	if username == "" {
 		return 0, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -190,7 +190,7 @@ func findPrincipalByUserName(db *sql.DB, username string) (*PrincipalWithRoots, 
 		return nil, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
 
-	principalID, err := findPrincipalIDByUserName(db, username)
+	principalID, err := findPrincipalIDByUsername(db, username)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +247,7 @@ func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (p
 		return principalEnabledChangeResult{}, fmt.Errorf("cannot begin transaction: %w", err)
 	}
 
-	principalID, err := findPrincipalIDByUserNameInTx(tx, username)
+	principalID, err := findPrincipalIDByUsernameInTx(tx, username)
 	if err != nil {
 		tx.Rollback()
 		return principalEnabledChangeResult{}, err
@@ -352,7 +352,7 @@ func addPrincipalAllowedRoot(db *sql.DB, username string, rootPath string, globa
 		return false, "", fmt.Errorf("path %q is not under any global allowed root: %w", resolved, ErrPrincipalRootOutsideGlobal)
 	}
 
-	principalID, err := findPrincipalIDByUserName(db, username)
+	principalID, err := findPrincipalIDByUsername(db, username)
 	if err != nil {
 		return false, "", err
 	}
@@ -396,7 +396,7 @@ func removePrincipalAllowedRoot(db *sql.DB, username string, rootPath string) (c
 		resolved = canonical
 	}
 
-	principalID, err := findPrincipalIDByUserName(db, username)
+	principalID, err := findPrincipalIDByUsername(db, username)
 	if err != nil {
 		return false, "", err
 	}
@@ -462,7 +462,7 @@ func deletePrincipal(db *sql.DB, username string) ([]string, error) {
 		return nil, fmt.Errorf("cannot begin transaction: %w", err)
 	}
 
-	principalID, err := findPrincipalIDByUserNameInTx(tx, username)
+	principalID, err := findPrincipalIDByUsernameInTx(tx, username)
 	if err != nil {
 		tx.Rollback()
 		return nil, err
@@ -513,7 +513,7 @@ func deletePrincipal(db *sql.DB, username string) ([]string, error) {
 	return sessionIDs, nil
 }
 
-func findPrincipalIDByUserNameInTx(tx *sql.Tx, username string) (int, error) {
+func findPrincipalIDByUsernameInTx(tx *sql.Tx, username string) (int, error) {
 	var id int
 	err := tx.QueryRow(
 		`SELECT id FROM principals WHERE username = ?`,
