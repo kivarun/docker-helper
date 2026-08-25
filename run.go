@@ -164,9 +164,9 @@ func cleanupCidfile(op *operation) {
 }
 
 type resolvedMount struct {
-	HostPath string
-	Target   string
-	ReadOnly bool
+	SourcePath string
+	Target     string
+	ReadOnly   bool
 }
 
 func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) {
@@ -227,9 +227,9 @@ func resolveMount(mount mountRequest, workspace string) (*resolvedMount, error) 
 	}
 
 	return &resolvedMount{
-		HostPath: sourcePath,
-		Target:   cleaned,
-		ReadOnly: mount.ReadOnly,
+		SourcePath: sourcePath,
+		Target:     cleaned,
+		ReadOnly:   mount.ReadOnly,
 	}, nil
 }
 
@@ -316,7 +316,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if cfg.Mode == ModeUser && resolved.HostPath != session.Workspace {
+		if cfg.Mode == ModeUser && resolved.SourcePath != session.Workspace {
 			if leaseRelease != nil {
 				leaseRelease()
 			}
@@ -482,7 +482,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	pinnedMounts := make([]*pinnedMount, 0, len(resolvedMounts))
 	if cfg.Mode == ModeSystem {
 		for i, m := range resolvedMounts {
-			pm, err := a.pinMount(session.Workspace, m.HostPath, cfg.RuntimeDir, op.ID, i)
+			pm, err := a.pinWorkspaceMountSource(session.Workspace, m.SourcePath, cfg.RuntimeDir, op.ID, i)
 			if err != nil {
 				// Cleanup pins before releasing lease.
 				pinCleanupErr := false
@@ -595,11 +595,11 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Add user mounts: pinned paths in system mode, resolved paths in user mode.
 	for i, m := range resolvedMounts {
-		hostPath := m.HostPath
+		dockerBindSource := m.SourcePath
 		if cfg.Mode == ModeSystem {
-			hostPath = pinnedMounts[i].HostPath
+			dockerBindSource = pinnedMounts[i].PinnedPath
 		}
-		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", hostPath, m.Target)
+		mountSpec := fmt.Sprintf("type=bind,source=%s,target=%s", dockerBindSource, m.Target)
 		if m.ReadOnly {
 			mountSpec += ",readonly"
 		}

@@ -163,11 +163,11 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
-	// Mock PinMount to return a fake pinnedMount.
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	// Mock PinWorkspaceMountSourceFn to return a fake pinned mount.
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: sourcePath,
-			cleanup:  func() error { return nil },
+			PinnedPath: sourcePath,
+			cleanup:    func() error { return nil },
 		}, nil
 	}
 
@@ -242,13 +242,13 @@ func TestRunSecondPinError(t *testing.T) {
 
 	cleanupOrder := []string{}
 	callCount := 0
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		callCount++
 		if mountIndex == 1 {
 			return nil, errors.New("second pin failed")
 		}
 		return &pinnedMount{
-			HostPath: fmt.Sprintf("/pinned/%d", mountIndex),
+			PinnedPath: fmt.Sprintf("/pinned/%d", mountIndex),
 			cleanup: func() error {
 				cleanupOrder = append(cleanupOrder, fmt.Sprintf("pin-%d", mountIndex))
 				return nil
@@ -312,9 +312,9 @@ func TestRunRegistryShuttingDown(t *testing.T) {
 	}
 
 	cleanupCalled := false
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: "/pinned/0",
+			PinnedPath: "/pinned/0",
 			cleanup: func() error {
 				cleanupCalled = true
 				return nil
@@ -373,11 +373,11 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// PinMountFn should be called (fail-closed), and should fail
+	// PinWorkspaceMountSourceFn should be called (fail-closed), and should fail
 	// because RuntimeDir is empty.
-	pinMountCalled := false
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-		pinMountCalled = true
+	pinCalled := false
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinCalled = true
 		return nil, fmt.Errorf("runtimeDir must be absolute: %q", runtimeDir)
 	}
 
@@ -399,9 +399,9 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
 
-	// PinMount must have been called (no RuntimeDir shortcut).
-	if !pinMountCalled {
-		t.Error("PinMountFn should be called regardless of RuntimeDir")
+	// PinWorkspaceMountSourceFn must have been called (no RuntimeDir shortcut).
+	if !pinCalled {
+		t.Error("PinWorkspaceMountSourceFn should be called regardless of RuntimeDir")
 	}
 
 	// Docker should not be called.
@@ -436,10 +436,10 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	}
 
 	stablePaths := []string{"/runtime/pinned/0", "/runtime/pinned/1"}
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: stablePaths[mountIndex],
-			cleanup:  func() error { return nil },
+			PinnedPath: stablePaths[mountIndex],
+			cleanup:    func() error { return nil },
 		}, nil
 	}
 
@@ -483,8 +483,9 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	}
 }
 
-// TestRunUserModeDoesNotCallPinMount verifies user mode skips pinning.
-func TestRunUserModeDoesNotCallPinMount(t *testing.T) {
+// TestRunUserModeUsesResolvedMountSourceWithoutPinning verifies user mode skips
+// workspace mount source pinning and uses the resolved source path directly.
+func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
 	app.OperationRegistry = newOperationRegistry()
@@ -494,13 +495,15 @@ func TestRunUserModeDoesNotCallPinMount(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	pinMountCalled := false
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-		pinMountCalled = true
+	pinCalled := false
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		pinCalled = true
 		return nil, errors.New("should not be called")
 	}
 
+	var dockerArgs []string
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		dockerArgs = args
 		return exec.CommandContext(ctx, "/bin/true")
 	}
 
@@ -516,8 +519,16 @@ func TestRunUserModeDoesNotCallPinMount(t *testing.T) {
 		t.Fatalf("expected 201, got %d", w.Code)
 	}
 
-	if pinMountCalled {
-		t.Error("PinMountFn should not be called in user mode")
+	// A: PinWorkspaceMountSourceFn must not be called in user mode.
+	if pinCalled {
+		t.Error("PinWorkspaceMountSourceFn should not be called in user mode")
+	}
+
+	// B: Docker argv must use the resolved workspace path, not a pinned path.
+	argsStr := strings.Join(dockerArgs, " ")
+	expectedMount := fmt.Sprintf("type=bind,source=%s,target=/data", result.Session.Workspace)
+	if !strings.Contains(argsStr, expectedMount) {
+		t.Errorf("argv should contain resolved mount spec %q, got args: %v", expectedMount, dockerArgs)
 	}
 }
 
@@ -538,9 +549,9 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	}
 
 	cleanupCount := int32(0)
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: fmt.Sprintf("/pinned/%d", mountIndex),
+			PinnedPath: fmt.Sprintf("/pinned/%d", mountIndex),
 			cleanup: func() error {
 				atomic.AddInt32(&cleanupCount, 1)
 				return nil
@@ -594,9 +605,9 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	}
 
 	cleanupCount := int32(0)
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: fmt.Sprintf("/pinned/%d", mountIndex),
+			PinnedPath: fmt.Sprintf("/pinned/%d", mountIndex),
 			cleanup: func() error {
 				atomic.AddInt32(&cleanupCount, 1)
 				return nil
@@ -653,10 +664,10 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 	}
 
 	cleanupOrder := []int{}
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		mi := mountIndex
 		return &pinnedMount{
-			HostPath: fmt.Sprintf("/pinned/%d", mountIndex),
+			PinnedPath: fmt.Sprintf("/pinned/%d", mountIndex),
 			cleanup: func() error {
 				cleanupOrder = append(cleanupOrder, mi)
 				return nil
@@ -720,10 +731,10 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: "/pinned/0",
-			cleanup:  func() error { return errors.New("cleanup failed") },
+			PinnedPath: "/pinned/0",
+			cleanup:    func() error { return errors.New("cleanup failed") },
 		}, nil
 	}
 
@@ -781,10 +792,10 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: "/runtime/pinned/0",
-			cleanup:  func() error { return nil },
+			PinnedPath: "/runtime/pinned/0",
+			cleanup:    func() error { return nil },
 		}, nil
 	}
 

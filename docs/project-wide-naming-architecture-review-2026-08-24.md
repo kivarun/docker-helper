@@ -207,40 +207,42 @@ tests without changing the termination algorithm.
 
 ### P1-4. Original and pinned mount paths share HostPath
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-- **resolvedMount.HostPath** is the canonical original source within the
-  workspace:
-  [run.go:166-233](../run.go#L166-L233).
-- **pinnedMount.HostPath** is the helper-owned stable destination Docker must
-  bind:
-  [mount_pin_seam.go:12-19](../mount_pin_seam.go#L12-L19).
-- Docker argv construction switches between those same-named fields:
-  [run.go:596-606](../run.go#L596-L606).
+The three distinct path concepts are now named differently:
 
-**Actual semantic responsibility**
+- **resolvedMount.SourcePath** — the canonical validated original source
+  pathname inside the workspace.
+- **pinnedMount.PinnedPath** — the helper-owned stable inode-pinned path that
+  Docker must bind in system mode.
+- **dockerBindSource** — the local variable in Docker argv construction that
+  selects between SourcePath (user mode) and PinnedPath (system mode).
 
-The first value is a validated source pathname. The second is an
-inode-preserving bind source that protects system mode against pathname
-replacement.
+Pinning function vocabulary:
 
-**Why the vocabulary is dangerous**
+- **pinWorkspaceMountSource** — production entry point.
+- **pinWorkspaceMountSourceWithSyscalls** — implementation accepting the
+  syscall seam.
+- **mountPinSyscalls** — syscall interface (was mountSeam).
+- **linuxMountPinSyscalls** — real Linux implementation (was linuxMountSeam).
+- **defaultMountPinSyscalls** — returns the real seam (was defaultSeam).
 
-Selecting the original HostPath where the pinned path is required bypasses a
-security property while remaining type-correct and visually plausible.
+**Previous names (resolved)**
 
-**Preferred canonical vocabulary**
+- ~~resolvedMount.HostPath~~ → SourcePath
+- ~~pinnedMount.HostPath~~ → PinnedPath
+- ~~hostPath~~ (local) → dockerBindSource
+- ~~PinMount~~ → pinWorkspaceMountSource
+- ~~pinMount~~ → pinWorkspaceMountSourceWithSyscalls
+- ~~mountSeam~~ → mountPinSyscalls
+- ~~linuxMountSeam~~ → linuxMountPinSyscalls
+- ~~defaultSeam~~ → defaultMountPinSyscalls
+- ~~PinMountFn~~ → PinWorkspaceMountSourceFn
 
-- resolvedMount.SourcePath;
-- pinnedMount.PinnedPath or BindSourcePath;
-- dockerBindSource for the final local value;
-- pinWorkspaceMountSource;
-- mountPinSyscalls instead of mountSeam.
+**Compatibility**
 
-**Compatibility and narrow batch**
-
-Internal only. Use a mechanical field/function rename and update the existing
-mount-policy tests; do not change mount behavior.
+Mount request JSON (source/target/read_only), workspace containment, Docker
+argv construction, and system-mode pinning behavior are all unchanged.
 
 ### P1-5. updatePrincipalEnabled hides Session capability revocation
 

@@ -1133,9 +1133,9 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 
 	// Inject a pinned mount with a failing Cleanup.
 	sentinelErr := errors.New("injected pinned mount cleanup error")
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: "/tmp/test-mount",
+			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
 				return sentinelErr
 			},
@@ -1261,9 +1261,9 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	// Inject a pinned mount with a successful Cleanup.
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: "/tmp/test-mount",
+			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
 				return nil
 			},
@@ -1642,9 +1642,9 @@ func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 
 	var cleanupOrder []string
-	app.PinMountFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 		return &pinnedMount{
-			HostPath: "/tmp/test-mount",
+			PinnedPath: "/tmp/test-mount",
 			cleanup: func() error {
 				cleanupOrder = append(cleanupOrder, "pin_cleanup")
 				return nil

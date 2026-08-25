@@ -13,8 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// mockSeam implements mountSeam for unit tests without root/CAP_SYS_ADMIN.
-type mockSeam struct {
+// mockMountPinSyscalls implements mountPinSyscalls for unit tests without root/CAP_SYS_ADMIN.
+type mockMountPinSyscalls struct {
 	openat2Fn   func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error)
 	openTreeFn  func(dirfd int, path string, flags uint) (int, error)
 	moveMountFn func(fromFD int, fromPath string, toFD int, toPath string, flags int) error
@@ -33,13 +33,13 @@ type mockSeam struct {
 	nextFD int
 }
 
-func (m *mockSeam) nextFd() int {
+func (m *mockMountPinSyscalls) nextFd() int {
 	fd := m.nextFD
 	m.nextFD++
 	return fd
 }
 
-func (m *mockSeam) openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
+func (m *mockMountPinSyscalls) openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 	if m.openat2Fn != nil {
 		return m.openat2Fn(dirfd, path, flags, mode, resolveFlags)
 	}
@@ -48,7 +48,7 @@ func (m *mockSeam) openat2(dirfd int, path string, flags uint, mode uint32, reso
 	return fd, nil
 }
 
-func (m *mockSeam) openTree(dirfd int, path string, flags uint) (int, error) {
+func (m *mockMountPinSyscalls) openTree(dirfd int, path string, flags uint) (int, error) {
 	if m.openTreeFn != nil {
 		return m.openTreeFn(dirfd, path, flags)
 	}
@@ -57,7 +57,7 @@ func (m *mockSeam) openTree(dirfd int, path string, flags uint) (int, error) {
 	return fd, nil
 }
 
-func (m *mockSeam) moveMount(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
+func (m *mockMountPinSyscalls) moveMount(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
 	if m.moveMountFn != nil {
 		return m.moveMountFn(fromFD, fromPath, toFD, toPath, flags)
 	}
@@ -65,14 +65,14 @@ func (m *mockSeam) moveMount(fromFD int, fromPath string, toFD int, toPath strin
 	return nil
 }
 
-func (m *mockSeam) fstat(fd int) (*unixStat, error) {
+func (m *mockMountPinSyscalls) fstat(fd int) (*unixStat, error) {
 	if m.fstatFn != nil {
 		return m.fstatFn(fd)
 	}
 	return nil, fmt.Errorf("fstat not implemented")
 }
 
-func (m *mockSeam) close(fd int) error {
+func (m *mockMountPinSyscalls) close(fd int) error {
 	if m.closeFn != nil {
 		return m.closeFn(fd)
 	}
@@ -80,7 +80,7 @@ func (m *mockSeam) close(fd int) error {
 	return nil
 }
 
-func (m *mockSeam) umountDetach(path string) error {
+func (m *mockMountPinSyscalls) umountDetach(path string) error {
 	if m.umountFn != nil {
 		return m.umountFn(path)
 	}
@@ -88,7 +88,7 @@ func (m *mockSeam) umountDetach(path string) error {
 	return nil
 }
 
-func TestPinMountDirectory(t *testing.T) {
+func TestPinWorkspaceMountSourceDirectory(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -98,20 +98,20 @@ func TestPinMountDirectory(t *testing.T) {
 	sourceDir := filepath.Join(workspace, "src")
 	os.MkdirAll(sourceDir, 0755)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
 	}
 
-	pm, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	pm, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err != nil {
-		t.Fatalf("pinMount: %v", err)
+		t.Fatalf("pinWorkspaceMountSource: %v", err)
 	}
 
-	if !strings.HasPrefix(pm.HostPath, runtimeDir) {
-		t.Errorf("HostPath should be under runtimeDir, got %s", pm.HostPath)
+	if !strings.HasPrefix(pm.PinnedPath, runtimeDir) {
+		t.Errorf("PinnedPath should be under runtimeDir, got %s", pm.PinnedPath)
 	}
 
 	// Verify openat2 was called with root FD for source.
@@ -188,7 +188,7 @@ func TestPinMountDirectory(t *testing.T) {
 	}
 }
 
-func TestPinMountRegularFile(t *testing.T) {
+func TestPinWorkspaceMountSourceRegularFile(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -198,16 +198,16 @@ func TestPinMountRegularFile(t *testing.T) {
 	sourceFile := filepath.Join(workspace, "src.txt")
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFREG}, nil
 		},
 	}
 
-	pm, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
+	pm, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
 	if err != nil {
-		t.Fatalf("pinMount: %v", err)
+		t.Fatalf("pinWorkspaceMountSource: %v", err)
 	}
 
 	// Verify move_mount was called.
@@ -232,7 +232,7 @@ func TestPinMountRegularFile(t *testing.T) {
 	}
 }
 
-func TestPinMountSourceEscapesWorkspace(t *testing.T) {
+func TestPinWorkspaceMountSourceSourceEscapesWorkspace(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -243,8 +243,8 @@ func TestPinMountSourceEscapesWorkspace(t *testing.T) {
 	sourcePath := filepath.Join(work, "outside")
 	os.WriteFile(sourcePath, []byte("data"), 0644)
 
-	seam := &mockSeam{}
-	_, err := pinMount(seam, workspace, sourcePath, runtimeDir, "op_abc", 0)
+	seam := &mockMountPinSyscalls{}
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourcePath, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject source outside workspace")
 	}
@@ -258,7 +258,7 @@ func TestPinMountSourceEscapesWorkspace(t *testing.T) {
 	}
 }
 
-func TestPinMountInvalidOperationID(t *testing.T) {
+func TestPinWorkspaceMountSourceInvalidOperationID(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -268,28 +268,28 @@ func TestPinMountInvalidOperationID(t *testing.T) {
 	sourceFile := filepath.Join(workspace, "src.txt")
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
-	seam := &mockSeam{}
+	seam := &mockMountPinSyscalls{}
 
 	// Empty operation ID.
-	_, err := pinMount(seam, workspace, sourceFile, runtimeDir, "", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "", 0)
 	if err == nil {
 		t.Fatal("should reject empty operation ID")
 	}
 
 	// Operation ID with path traversal.
-	_, err = pinMount(seam, workspace, sourceFile, runtimeDir, "../etc", 0)
+	_, err = pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "../etc", 0)
 	if err == nil {
 		t.Fatal("should reject operation ID with path traversal")
 	}
 
 	// Operation ID with slash.
-	_, err = pinMount(seam, workspace, sourceFile, runtimeDir, "op/abc", 0)
+	_, err = pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "op/abc", 0)
 	if err == nil {
 		t.Fatal("should reject operation ID with slash")
 	}
 }
 
-func TestPinMountNegativeIndex(t *testing.T) {
+func TestPinWorkspaceMountSourceNegativeIndex(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -299,8 +299,8 @@ func TestPinMountNegativeIndex(t *testing.T) {
 	sourceFile := filepath.Join(workspace, "src.txt")
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
-	seam := &mockSeam{}
-	_, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", -1)
+	seam := &mockMountPinSyscalls{}
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "op_abc", -1)
 	if err == nil {
 		t.Fatal("should reject negative mount index")
 	}
@@ -309,7 +309,7 @@ func TestPinMountNegativeIndex(t *testing.T) {
 	}
 }
 
-func TestPinMountUnsupportedInode(t *testing.T) {
+func TestPinWorkspaceMountSourceUnsupportedInode(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -319,13 +319,13 @@ func TestPinMountUnsupportedInode(t *testing.T) {
 	sourceFile := filepath.Join(workspace, "src.txt")
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFSOCK}, nil
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject unsupported inode type")
 	}
@@ -334,15 +334,15 @@ func TestPinMountUnsupportedInode(t *testing.T) {
 	}
 }
 
-func TestPinMountRelativePathsRejected(t *testing.T) {
+func TestPinWorkspaceMountSourceRelativePathsRejected(t *testing.T) {
 	work := t.TempDir()
 	sourceFile := filepath.Join(work, "src.txt")
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
-	seam := &mockSeam{}
+	seam := &mockMountPinSyscalls{}
 
 	// Relative workspace.
-	_, err := pinMount(seam, "relative/workspace", sourceFile, work, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, "relative/workspace", sourceFile, work, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject relative workspace")
 	}
@@ -351,7 +351,7 @@ func TestPinMountRelativePathsRejected(t *testing.T) {
 	}
 
 	// Relative sourcePath.
-	_, err = pinMount(seam, work, "relative/src.txt", work, "op_abc", 0)
+	_, err = pinWorkspaceMountSourceWithSyscalls(seam, work, "relative/src.txt", work, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject relative sourcePath")
 	}
@@ -360,7 +360,7 @@ func TestPinMountRelativePathsRejected(t *testing.T) {
 	}
 
 	// Relative runtimeDir.
-	_, err = pinMount(seam, work, sourceFile, "relative/runtime", "op_abc", 0)
+	_, err = pinWorkspaceMountSourceWithSyscalls(seam, work, sourceFile, "relative/runtime", "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject relative runtimeDir")
 	}
@@ -369,26 +369,26 @@ func TestPinMountRelativePathsRejected(t *testing.T) {
 	}
 }
 
-func TestPinMountEmptyPaths(t *testing.T) {
-	seam := &mockSeam{}
+func TestPinWorkspaceMountSourceEmptyPaths(t *testing.T) {
+	seam := &mockMountPinSyscalls{}
 
-	_, err := pinMount(seam, "", "/tmp/src", "/tmp/runtime", "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, "", "/tmp/src", "/tmp/runtime", "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject empty workspace")
 	}
 
-	_, err = pinMount(seam, "/tmp/ws", "", "/tmp/runtime", "op_abc", 0)
+	_, err = pinWorkspaceMountSourceWithSyscalls(seam, "/tmp/ws", "", "/tmp/runtime", "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject empty sourcePath")
 	}
 
-	_, err = pinMount(seam, "/tmp/ws", "/tmp/src", "", "op_abc", 0)
+	_, err = pinWorkspaceMountSourceWithSyscalls(seam, "/tmp/ws", "/tmp/src", "", "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject empty runtimeDir")
 	}
 }
 
-func TestPinMountExistingFilePreserved(t *testing.T) {
+func TestPinWorkspaceMountSourceExistingFilePreserved(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -405,7 +405,7 @@ func TestPinMountExistingFilePreserved(t *testing.T) {
 	os.WriteFile(destPath, []byte("EXISTING"), 0644)
 
 	callCount := 0
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 			callCount++
 			if callCount == 1 {
@@ -424,7 +424,7 @@ func TestPinMountExistingFilePreserved(t *testing.T) {
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject existing destination")
 	}
@@ -442,7 +442,7 @@ func TestPinMountExistingFilePreserved(t *testing.T) {
 	}
 }
 
-func TestPinMountExistingDirectoryPreserved(t *testing.T) {
+func TestPinWorkspaceMountSourceExistingDirectoryPreserved(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -458,14 +458,14 @@ func TestPinMountExistingDirectoryPreserved(t *testing.T) {
 	destPath := filepath.Join(mountsDir, "0")
 	os.MkdirAll(destPath, 0700)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject existing destination")
 	}
@@ -483,7 +483,7 @@ func TestPinMountExistingDirectoryPreserved(t *testing.T) {
 	}
 }
 
-func TestPinMountExistingSymlinkPreserved(t *testing.T) {
+func TestPinWorkspaceMountSourceExistingSymlinkPreserved(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -500,14 +500,14 @@ func TestPinMountExistingSymlinkPreserved(t *testing.T) {
 	target := filepath.Join(work, "target")
 	os.Symlink(target, destPath)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should reject existing destination (symlink)")
 	}
@@ -522,7 +522,7 @@ func TestPinMountExistingSymlinkPreserved(t *testing.T) {
 	}
 }
 
-func TestPinMountOpenat2FailureCleansUp(t *testing.T) {
+func TestPinWorkspaceMountSourceOpenat2FailureCleansUp(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -533,7 +533,7 @@ func TestPinMountOpenat2FailureCleansUp(t *testing.T) {
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
 	callCount := 0
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 			callCount++
 			if callCount == 1 {
@@ -543,13 +543,13 @@ func TestPinMountOpenat2FailureCleansUp(t *testing.T) {
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should fail with openat2 error")
 	}
 }
 
-func TestPinMountOpenTreeFailureCleansUp(t *testing.T) {
+func TestPinWorkspaceMountSourceOpenTreeFailureCleansUp(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -559,7 +559,7 @@ func TestPinMountOpenTreeFailureCleansUp(t *testing.T) {
 	sourceDir := filepath.Join(workspace, "src")
 	os.MkdirAll(sourceDir, 0755)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
@@ -569,7 +569,7 @@ func TestPinMountOpenTreeFailureCleansUp(t *testing.T) {
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should fail with open_tree error")
 	}
@@ -578,7 +578,7 @@ func TestPinMountOpenTreeFailureCleansUp(t *testing.T) {
 	}
 }
 
-func TestPinMountMoveMountFailureCleansUp(t *testing.T) {
+func TestPinWorkspaceMountSourceMoveMountFailureCleansUp(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -588,7 +588,7 @@ func TestPinMountMoveMountFailureCleansUp(t *testing.T) {
 	sourceDir := filepath.Join(workspace, "src")
 	os.MkdirAll(sourceDir, 0755)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
@@ -598,13 +598,13 @@ func TestPinMountMoveMountFailureCleansUp(t *testing.T) {
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should fail with move_mount error")
 	}
 }
 
-func TestPinMountFstatFailureCleansUp(t *testing.T) {
+func TestPinWorkspaceMountSourceFstatFailureCleansUp(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -614,14 +614,14 @@ func TestPinMountFstatFailureCleansUp(t *testing.T) {
 	sourceDir := filepath.Join(workspace, "src")
 	os.MkdirAll(sourceDir, 0755)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return nil, unix.EBADF
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should fail with fstat error")
 	}
@@ -630,7 +630,7 @@ func TestPinMountFstatFailureCleansUp(t *testing.T) {
 	}
 }
 
-func TestPinMountDestDirOpenFailureCleansUp(t *testing.T) {
+func TestPinWorkspaceMountSourceDestDirOpenFailureCleansUp(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -641,7 +641,7 @@ func TestPinMountDestDirOpenFailureCleansUp(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	callCount := 0
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		openat2Fn: func(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 			callCount++
 			if callCount == 1 {
@@ -658,13 +658,13 @@ func TestPinMountDestDirOpenFailureCleansUp(t *testing.T) {
 		},
 	}
 
-	_, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	_, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err == nil {
 		t.Fatal("should fail with dest dir open error")
 	}
 }
 
-func TestPinMountCleanupIdempotent(t *testing.T) {
+func TestPinWorkspaceMountSourceCleanupIdempotent(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -675,7 +675,7 @@ func TestPinMountCleanupIdempotent(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	umountCount := 0
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
@@ -686,9 +686,9 @@ func TestPinMountCleanupIdempotent(t *testing.T) {
 		},
 	}
 
-	pm, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	pm, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err != nil {
-		t.Fatalf("pinMount: %v", err)
+		t.Fatalf("pinWorkspaceMountSource: %v", err)
 	}
 
 	// First cleanup.
@@ -712,7 +712,7 @@ func TestPinMountCleanupIdempotent(t *testing.T) {
 	}
 }
 
-func TestPinMountCleanupConcurrent(t *testing.T) {
+func TestPinWorkspaceMountSourceCleanupConcurrent(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -723,7 +723,7 @@ func TestPinMountCleanupConcurrent(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	umountCount := 0
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
@@ -734,9 +734,9 @@ func TestPinMountCleanupConcurrent(t *testing.T) {
 		},
 	}
 
-	pm, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	pm, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err != nil {
-		t.Fatalf("pinMount: %v", err)
+		t.Fatalf("pinWorkspaceMountSource: %v", err)
 	}
 
 	var wg sync.WaitGroup
@@ -763,7 +763,7 @@ func TestPinMountCleanupConcurrent(t *testing.T) {
 	}
 }
 
-func TestPinMountCleanupReturnsError(t *testing.T) {
+func TestPinWorkspaceMountSourceCleanupReturnsError(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -773,7 +773,7 @@ func TestPinMountCleanupReturnsError(t *testing.T) {
 	sourceDir := filepath.Join(workspace, "src")
 	os.MkdirAll(sourceDir, 0755)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
@@ -783,9 +783,9 @@ func TestPinMountCleanupReturnsError(t *testing.T) {
 		},
 	}
 
-	pm, err := pinMount(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	pm, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err != nil {
-		t.Fatalf("pinMount: %v", err)
+		t.Fatalf("pinWorkspaceMountSource: %v", err)
 	}
 
 	err = pm.Cleanup()
@@ -800,7 +800,7 @@ func TestPinMountCleanupReturnsError(t *testing.T) {
 	}
 }
 
-func TestPinMountSiblingSurvivesError(t *testing.T) {
+func TestPinWorkspaceMountSourceSiblingSurvivesError(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -811,19 +811,19 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 	os.MkdirAll(sourceDir, 0755)
 
 	// First mount succeeds.
-	seam1 := &mockSeam{
+	seam1 := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
 		},
 	}
-	pm1, err := pinMount(seam1, workspace, sourceDir, runtimeDir, "op_abc", 0)
+	pm1, err := pinWorkspaceMountSourceWithSyscalls(seam1, workspace, sourceDir, runtimeDir, "op_abc", 0)
 	if err != nil {
-		t.Fatalf("first pinMount: %v", err)
+		t.Fatalf("first pinWorkspaceMountSource: %v", err)
 	}
 
 	// Second mount fails on move_mount.
-	seam2 := &mockSeam{
+	seam2 := &mockMountPinSyscalls{
 		nextFD: 100,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFDIR}, nil
@@ -832,18 +832,18 @@ func TestPinMountSiblingSurvivesError(t *testing.T) {
 			return unix.EPERM
 		},
 	}
-	_, err = pinMount(seam2, workspace, sourceDir, runtimeDir, "op_abc", 1)
+	_, err = pinWorkspaceMountSourceWithSyscalls(seam2, workspace, sourceDir, runtimeDir, "op_abc", 1)
 	if err == nil {
 		t.Fatal("second pinMount should fail")
 	}
 
 	// First mount should still exist on filesystem.
-	if _, err := os.Stat(pm1.HostPath); err != nil {
+	if _, err := os.Stat(pm1.PinnedPath); err != nil {
 		t.Errorf("first mount mountpoint should still exist: %v", err)
 	}
 }
 
-func TestPinMountFileCloseSet(t *testing.T) {
+func TestPinWorkspaceMountSourceFileCloseSet(t *testing.T) {
 	work := t.TempDir()
 	workspace := filepath.Join(work, "workspace")
 	runtimeDir := filepath.Join(work, "runtime")
@@ -853,16 +853,16 @@ func TestPinMountFileCloseSet(t *testing.T) {
 	sourceFile := filepath.Join(workspace, "src.txt")
 	os.WriteFile(sourceFile, []byte("data"), 0644)
 
-	seam := &mockSeam{
+	seam := &mockMountPinSyscalls{
 		nextFD: 3,
 		fstatFn: func(fd int) (*unixStat, error) {
 			return &unixStat{mode: unix.S_IFREG}, nil
 		},
 	}
 
-	pm, err := pinMount(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
+	pm, err := pinWorkspaceMountSourceWithSyscalls(seam, workspace, sourceFile, runtimeDir, "op_abc", 0)
 	if err != nil {
-		t.Fatalf("pinMount: %v", err)
+		t.Fatalf("pinWorkspaceMountSource: %v", err)
 	}
 
 	// File: 3,4,5,6,7 — each exactly once
@@ -911,7 +911,7 @@ func TestIsOperationIDSafe(t *testing.T) {
 }
 
 func TestPinnedMountNilCleanup(t *testing.T) {
-	pm := &pinnedMount{HostPath: "/tmp/test"}
+	pm := &pinnedMount{PinnedPath: "/tmp/test"}
 	if err := pm.Cleanup(); err != nil {
 		t.Errorf("Cleanup with nil cleanup func: %v", err)
 	}

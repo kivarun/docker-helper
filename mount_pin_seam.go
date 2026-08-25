@@ -10,12 +10,12 @@ import (
 )
 
 // pinnedMount represents a successfully inode-pinned mount.
-// HostPath is the stable helper-owned destination that Docker should bind-mount.
+// PinnedPath is the stable helper-owned destination that Docker should bind-mount.
 type pinnedMount struct {
-	HostPath string
-	cleanup  func() error
-	once     sync.Once
-	result   error
+	PinnedPath string
+	cleanup    func() error
+	once       sync.Once
+	result     error
 }
 
 // Cleanup detaches and removes the mount. Idempotent and concurrency-safe:
@@ -60,8 +60,9 @@ type moveMountArgs struct {
 	flags    int
 }
 
-// mountSeam abstracts the Linux syscalls used by the inode-pinning primitive.
-type mountSeam interface {
+// mountPinSyscalls abstracts the Linux syscalls used by the workspace mount
+// pinning primitive.
+type mountPinSyscalls interface {
 	// openat2 opens path relative to dirfd with the given flags, mode, and
 	// resolve flags, returning the fd.
 	openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error)

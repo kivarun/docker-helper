@@ -12,10 +12,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// linuxMountSeam implements mountSeam using real Linux syscalls.
-type linuxMountSeam struct{}
+// linuxMountPinSyscalls implements mountPinSyscalls using real Linux syscalls.
+type linuxMountPinSyscalls struct{}
 
-func (s *linuxMountSeam) openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
+func (s *linuxMountPinSyscalls) openat2(dirfd int, path string, flags uint, mode uint32, resolveFlags uint64) (int, error) {
 	how := &unix.OpenHow{
 		Flags:   uint64(flags),
 		Mode:    uint64(mode),
@@ -24,15 +24,15 @@ func (s *linuxMountSeam) openat2(dirfd int, path string, flags uint, mode uint32
 	return unix.Openat2(dirfd, path, how)
 }
 
-func (s *linuxMountSeam) openTree(dirfd int, path string, flags uint) (int, error) {
+func (s *linuxMountPinSyscalls) openTree(dirfd int, path string, flags uint) (int, error) {
 	return unix.OpenTree(dirfd, path, flags)
 }
 
-func (s *linuxMountSeam) moveMount(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
+func (s *linuxMountPinSyscalls) moveMount(fromFD int, fromPath string, toFD int, toPath string, flags int) error {
 	return unix.MoveMount(fromFD, fromPath, toFD, toPath, flags)
 }
 
-func (s *linuxMountSeam) fstat(fd int) (*unixStat, error) {
+func (s *linuxMountPinSyscalls) fstat(fd int) (*unixStat, error) {
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return nil, err
@@ -40,17 +40,17 @@ func (s *linuxMountSeam) fstat(fd int) (*unixStat, error) {
 	return &unixStat{mode: uint32(stat.Mode)}, nil
 }
 
-func (s *linuxMountSeam) close(fd int) error {
+func (s *linuxMountPinSyscalls) close(fd int) error {
 	return unix.Close(fd)
 }
 
-func (s *linuxMountSeam) umountDetach(path string) error {
+func (s *linuxMountPinSyscalls) umountDetach(path string) error {
 	return unix.Unmount(path, unix.MNT_DETACH)
 }
 
-// defaultSeam returns the real Linux syscall seam.
-func defaultSeam() mountSeam {
-	return &linuxMountSeam{}
+// defaultMountPinSyscalls returns the real Linux syscall seam.
+func defaultMountPinSyscalls() mountPinSyscalls {
+	return &linuxMountPinSyscalls{}
 }
 
 // relToRoot returns the path relative to "/" or an error if not absolute.
@@ -62,9 +62,9 @@ func relToRoot(path string) (string, error) {
 	return rel, nil
 }
 
-// PinMount opens the source path with openat2, verifies it is a directory or
-// regular file, creates a helper-owned destination, and pins the inode via
-// open_tree + move_mount.
+// pinWorkspaceMountSource opens the source path with openat2, verifies it is a
+// directory or regular file, creates a helper-owned destination, and pins the
+// inode via open_tree + move_mount.
 //
 // Parameters:
 //   - workspace: canonical workspace root (for containment check)
@@ -73,13 +73,13 @@ func relToRoot(path string) (string, error) {
 //   - operationID: operation identifier (must be safe, no path traversal)
 //   - mountIndex: numeric index for this mount within the operation
 //
-// Returns a pinnedMount with the stable HostPath and Cleanup, or an error
+// Returns a pinnedMount with the stable PinnedPath and Cleanup, or an error
 // with all resources cleaned up. No fallback to the original pathname.
-func PinMount(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
-	return pinMount(defaultSeam(), workspace, sourcePath, runtimeDir, operationID, mountIndex)
+func pinWorkspaceMountSource(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+	return pinWorkspaceMountSourceWithSyscalls(defaultMountPinSyscalls(), workspace, sourcePath, runtimeDir, operationID, mountIndex)
 }
 
-func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+func pinWorkspaceMountSourceWithSyscalls(seam mountPinSyscalls, workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
 	// Validate operationID: must not allow path traversal.
 	if !isOperationIDSafe(operationID) {
 		return nil, fmt.Errorf("invalid operation ID: %q", operationID)
@@ -141,10 +141,10 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 		return nil, fmt.Errorf("source is not a directory or regular file: %s", sourcePath)
 	}
 
-	// Build destination path: <runtime-dir>/mounts/<operation-id>/<index>
+	// Build pinned path: <runtime-dir>/mounts/<operation-id>/<index>
 	mountsDir := filepath.Join(runtimeDir, "mounts", operationID)
 	index := fmt.Sprintf("%d", mountIndex)
-	destPath := filepath.Join(mountsDir, index)
+	pinnedPath := filepath.Join(mountsDir, index)
 
 	// Create parent directories with mode 0700.
 	if err := os.MkdirAll(mountsDir, 0700); err != nil {
@@ -156,16 +156,16 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 	createdDest := false
 
 	if isDir {
-		if err := os.Mkdir(destPath, 0700); err != nil {
+		if err := os.Mkdir(pinnedPath, 0700); err != nil {
 			if errors.Is(err, os.ErrExist) {
-				return nil, fmt.Errorf("destination already exists: %s", destPath)
+				return nil, fmt.Errorf("destination already exists: %s", pinnedPath)
 			}
 			return nil, fmt.Errorf("create directory mountpoint: %w", err)
 		}
 		createdDest = true
 	} else {
 		// Get relative path for file destination.
-		relDest, err := relToRoot(destPath)
+		relDest, err := relToRoot(pinnedPath)
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +174,7 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 			uint(unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_WRONLY), 0600, 0)
 		if err != nil {
 			if errors.Is(err, os.ErrExist) {
-				return nil, fmt.Errorf("destination already exists: %s", destPath)
+				return nil, fmt.Errorf("destination already exists: %s", pinnedPath)
 			}
 			return nil, fmt.Errorf("create file mountpoint: %w", err)
 		}
@@ -182,16 +182,16 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 		createdDest = true
 	}
 
-	// Open the parent directory of destPath for move_mount.
+	// Open the parent directory of pinnedPath for move_mount.
 	relMountsDir, err := relToRoot(mountsDir)
 	if err != nil {
-		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
+		cleanupErr := rollbackDest(createdDest, pinnedPath, mountsDir)
 		return nil, errors.Join(err, cleanupErr)
 	}
 
 	destDirFD, err := seam.openat2(rootFD, relMountsDir, openFlags, 0, resolveFlags)
 	if err != nil {
-		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
+		cleanupErr := rollbackDest(createdDest, pinnedPath, mountsDir)
 		return nil, errors.Join(fmt.Errorf("openat2(mountsDir): %w", err), cleanupErr)
 	}
 	defer seam.close(destDirFD)
@@ -199,7 +199,7 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 	// Create detached cloned mount via open_tree.
 	treeFD, err := seam.openTree(sourceFD, "", uint(unix.AT_EMPTY_PATH|unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC))
 	if err != nil {
-		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
+		cleanupErr := rollbackDest(createdDest, pinnedPath, mountsDir)
 		if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
 			return nil, errors.Join(fmt.Errorf("open_tree not supported: %w", err), cleanupErr)
 		}
@@ -209,32 +209,32 @@ func pinMount(seam mountSeam, workspace, sourcePath, runtimeDir, operationID str
 	// Move mount to destination.
 	if err := seam.moveMount(treeFD, "", destDirFD, index, unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
 		seam.close(treeFD)
-		cleanupErr := rollbackDest(createdDest, destPath, mountsDir)
+		cleanupErr := rollbackDest(createdDest, pinnedPath, mountsDir)
 		if e, ok := err.(unix.Errno); ok && (e == unix.ENOSYS || e == unix.EPERM || e == unix.EINVAL) {
 			return nil, errors.Join(fmt.Errorf("move_mount not supported: %w", err), cleanupErr)
 		}
 		return nil, errors.Join(fmt.Errorf("move_mount: %w", err), cleanupErr)
 	}
 
-	// Close treeFD — the mount is now at destPath.
+	// Close treeFD — the mount is now at pinnedPath.
 	seam.close(treeFD)
 
 	// Return pinned mount with cleanup.
 	return &pinnedMount{
-		HostPath: destPath,
+		PinnedPath: pinnedPath,
 		cleanup: func() error {
-			return cleanupPinnedMount(seam, destPath, mountsDir)
+			return cleanupPinnedMount(seam, pinnedPath, mountsDir)
 		},
 	}, nil
 }
 
 // rollbackDest removes the destination if it was created by the current call
 // and removes the operation directory if empty. Returns any cleanup errors.
-func rollbackDest(createdDest bool, destPath, mountsDir string) error {
+func rollbackDest(createdDest bool, pinnedPath, mountsDir string) error {
 	var errs []error
 
 	if createdDest {
-		if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(pinnedPath); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("remove dest: %w", err))
 		}
 	}
@@ -256,13 +256,13 @@ func rollbackDest(createdDest bool, destPath, mountsDir string) error {
 }
 
 // cleanupPinnedMount detaches the mount and removes the destination.
-func cleanupPinnedMount(seam mountSeam, destPath, mountsDir string) error {
-	if err := seam.umountDetach(destPath); err != nil && err != unix.EINVAL {
-		return fmt.Errorf("umount2(%s): %w", destPath, err)
+func cleanupPinnedMount(seam mountPinSyscalls, pinnedPath, mountsDir string) error {
+	if err := seam.umountDetach(pinnedPath); err != nil && err != unix.EINVAL {
+		return fmt.Errorf("umount2(%s): %w", pinnedPath, err)
 	}
 
-	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove(%s): %w", destPath, err)
+	if err := os.Remove(pinnedPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove(%s): %w", pinnedPath, err)
 	}
 
 	// Remove operation directory if empty.
@@ -293,5 +293,5 @@ func isOperationIDSafe(id string) bool {
 	return true
 }
 
-// Ensure linuxMountSeam implements mountSeam at compile time.
-var _ mountSeam = (*linuxMountSeam)(nil)
+// Ensure linuxMountPinSyscalls implements mountPinSyscalls at compile time.
+var _ mountPinSyscalls = (*linuxMountPinSyscalls)(nil)
