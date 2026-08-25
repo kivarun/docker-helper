@@ -252,37 +252,75 @@ argv construction, and system-mode pinning behavior are all unchanged.
 
 ### P1-5. updatePrincipalEnabled hides Session capability revocation
 
-**Current names and evidence**
+**Status: RESOLVED BY N1**
 
-**updatePrincipalEnabled** appears to update a boolean, but disabling a
-Principal transactionally queries and deletes all of its Sessions. Nil and an
-empty slice implicitly encode the Changed state:
-[principal.go:231-304](../principal.go#L231-L304).
+The original problem was that **updatePrincipalEnabled** appeared to update a
+boolean but actually performed a transactional Principal enabled-state
+transition with Session deletion, encoding the Changed state through
+nil/empty-slice signaling.
 
-The handler treats the returned IDs as a runtime-cleanup plan:
-[principal_handler.go:220-277](../principal_handler.go#L220-L277).
+The fix split DB persistence, App lifecycle ownership, explicit result, and
+MAC release into their real responsibilities.
 
-**Actual semantic responsibility**
+**Final canonical implementation**
 
-It performs a Principal enabled-state transition that also revokes and deletes
-Session capabilities.
+- **`principalEnabledChangeResult`** — explicit result containing:
+  - `Changed bool` — whether the enabled state actually transitioned;
+  - `RevokedSessionIDs []string` — session IDs deleted when disabling.
 
-**Why the vocabulary is dangerous**
+- **`persistPrincipalEnabledChange`** — DB-level transactional primitive:
+  - reads current enabled state within the transaction;
+  - returns `Changed=false` for an already-matching state;
+  - when disabling: updates enabled state, collects affected Session IDs,
+    deletes those Sessions;
+  - commits the transaction before returning success.
 
-A caller can reasonably treat it as a simple field mutation and omit the
-Session, runtime, audit, or MAC lifecycle consequences.
+- **`App.applyPrincipalEnabledChange`** — App-level lifecycle operation:
+  - invokes the DB transition;
+  - only after successful DB commit releases deleted Session MAC bindings
+    through `releaseSessionBindings`.
 
-**Preferred canonical vocabulary**
+- **`deletePrincipalWithMAC`** — App-level Principal deletion lifecycle:
+  - performs DB deletion first;
+  - after successful DB commit releases deleted Session MAC bindings.
 
-Use **applyPrincipalEnabledChange** with an explicit result containing:
+- **`releaseSessionBindings`** — releases Session bindings through
+  `MACCoordinator`; does not terminate running operations.
 
-- Changed;
-- RevokedSessionIDs.
+**Lifecycle ownership**
 
-**Compatibility and narrow batch**
+1. The DB transaction owns the authoritative Principal enabled-state
+   transition and Session deletion.
 
-Internal only. Rename the function and replace nil/empty-slice signaling with
-an explicit result type without changing the HTTP or database contract.
+2. MAC lifecycle release occurs only after successful DB commit through the
+   App-level lifecycle owner.
+
+3. Principal HTTP handlers perform runtime-directory cleanup only after the
+   lifecycle transition.
+
+4. Runtime-directory cleanup is best-effort and does NOT own MAC lifecycle.
+
+5. `RuntimeDir` is taken from a synchronized `getConfig()` snapshot.
+
+**Operation invariant**
+
+Disabling or deleting a Principal deletes/revokes its Sessions. It does NOT
+terminate already-running operations. Existing workspace-use leases remain
+authoritative. MAC coverage remains held until those operation leases are
+released.
+
+**Historical vocabulary (resolved)**
+
+~~updatePrincipalEnabled~~ was replaced by the explicit lifecycle vocabulary
+above. The solution did not perform a simple rename: it split DB persistence,
+App lifecycle ownership, explicit result semantics, and MAC release into
+separate responsibilities.
+
+**Compatibility**
+
+HTTP routes, request/response JSON schema, SQLite schema, audit event/result
+names, Session token semantics, and operation cancellation semantics are
+unchanged.
 
 ## 3. P2 findings
 
