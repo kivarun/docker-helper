@@ -219,14 +219,14 @@ var ErrCredentialRevoked = errors.New("credential revoked")
 
 // CredentialAuthResult contains the information needed to authorize a principal request.
 type CredentialAuthResult struct {
-	PrincipalID   int64
-	PrincipalName string
-	CredentialID  string
-	AllowedRoots  []string
+	PrincipalID           int64
+	PrincipalName         string
+	CredentialID          string
+	PrincipalAllowedRoots []string
 }
 
-// authenticateCredential looks up a bearer token as a launcher credential.
-// Returns the authenticated principal and allowed roots on success.
+// authenticateCredential looks up a bearer token as a Principal credential.
+// Returns the authenticated Principal and Principal allowed roots on success.
 // Returns ErrCredentialNotFound for unknown token.
 // Returns ErrCredentialRevoked for revoked credentials.
 // Returns ErrCredentialDisabled for disabled principals.
@@ -272,22 +272,22 @@ func authenticateCredential(db *sql.DB, token string) (*CredentialAuthResult, er
 	}
 	defer rows.Close()
 
-	roots := []string{}
+	principalAllowedRoots := []string{}
 	for rows.Next() {
 		var rootPath string
 		if err := rows.Scan(&rootPath); err != nil {
 			return nil, fmt.Errorf("cannot scan allowed root: %w", err)
 		}
-		roots = append(roots, rootPath)
+		principalAllowedRoots = append(principalAllowedRoots, rootPath)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate allowed roots: %w", err)
 	}
 
 	return &CredentialAuthResult{
-		PrincipalID:   principalID,
-		PrincipalName: principalName,
-		CredentialID:  credID,
-		AllowedRoots:  roots,
+		PrincipalID:           principalID,
+		PrincipalName:         principalName,
+		CredentialID:          credID,
+		PrincipalAllowedRoots: principalAllowedRoots,
 	}, nil
 }

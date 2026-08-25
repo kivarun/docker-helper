@@ -278,7 +278,7 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if !a.requireAdmin(w, r) {
@@ -324,7 +324,7 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, canonicalPath, err := addAllowedRoot(a.DB, username, req.Path, a.getConfig().AllowedRoots)
+	changed, canonicalPath, err := addPrincipalAllowedRoot(a.DB, username, req.Path, a.getConfig().AllowedRoots)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -373,7 +373,7 @@ func (a *App) handleAddAllowedRoot(w http.ResponseWriter, r *http.Request) {
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }
 
-func (a *App) handleRemoveAllowedRoot(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if !a.requireAdmin(w, r) {
@@ -419,7 +419,7 @@ func (a *App) handleRemoveAllowedRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, canonicalPath, err := removeAllowedRoot(a.DB, username, req.Path)
+	changed, canonicalPath, err := removePrincipalAllowedRoot(a.DB, username, req.Path)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

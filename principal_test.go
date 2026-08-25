@@ -215,9 +215,9 @@ func TestAddAllowedRootDuplicate(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	changed, _, err := addAllowedRoot(app.DB, "duprootuser", home, app.Config.AllowedRoots)
+	changed, _, err := addPrincipalAllowedRoot(app.DB, "duprootuser", home, app.Config.AllowedRoots)
 	if err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 	if changed {
 		t.Error("expected changed to be false (idempotent)")
@@ -242,7 +242,7 @@ func TestAddAllowedRootTildeRejected(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	_, _, err := addAllowedRoot(app.DB, "tildeuser", "~/some/path", app.Config.AllowedRoots)
+	_, _, err := addPrincipalAllowedRoot(app.DB, "tildeuser", "~/some/path", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for tilde path")
 	}
@@ -274,13 +274,13 @@ func TestRemoveAllowedRoot(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "remuser", extraRoot, app.Config.AllowedRoots); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "remuser", extraRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
-	changed, _, err := removeAllowedRoot(app.DB, "remuser", extraRoot)
+	changed, _, err := removePrincipalAllowedRoot(app.DB, "remuser", extraRoot)
 	if err != nil {
-		t.Fatalf("removeAllowedRoot() error: %v", err)
+		t.Fatalf("removePrincipalAllowedRoot() error: %v", err)
 	}
 	if !changed {
 		t.Error("expected changed to be true")
@@ -318,8 +318,8 @@ func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "deluser", extraRoot, app.Config.AllowedRoots); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", extraRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
 	// Delete the directory from filesystem
@@ -328,9 +328,9 @@ func TestRemoveAllowedRootDeletedDirectory(t *testing.T) {
 	}
 
 	// Remove should still work even though directory no longer exists
-	changed, _, err := removeAllowedRoot(app.DB, "deluser", extraRoot)
+	changed, _, err := removePrincipalAllowedRoot(app.DB, "deluser", extraRoot)
 	if err != nil {
-		t.Fatalf("removeAllowedRoot() error: %v", err)
+		t.Fatalf("removePrincipalAllowedRoot() error: %v", err)
 	}
 	if !changed {
 		t.Error("expected changed to be true")
@@ -364,9 +364,9 @@ func TestRemoveAllowedRootAbsent(t *testing.T) {
 	}
 
 	nonRoot := filepath.Join(app.Config.AllowedRoots[0], "never-added")
-	changed, _, err := removeAllowedRoot(app.DB, "absuser", nonRoot)
+	changed, _, err := removePrincipalAllowedRoot(app.DB, "absuser", nonRoot)
 	if err != nil {
-		t.Fatalf("removeAllowedRoot() error: %v", err)
+		t.Fatalf("removePrincipalAllowedRoot() error: %v", err)
 	}
 	if changed {
 		t.Error("expected changed to be false (idempotent)")
@@ -643,7 +643,7 @@ func TestPrincipalHTTPAddAllowedRoot(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddPrincipalAllowedRoot)
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: extraRoot})
 
@@ -685,7 +685,7 @@ func TestPrincipalHTTPAddAllowedRootRelativeRejected(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddPrincipalAllowedRoot)
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: "relative/path"})
 
@@ -723,8 +723,8 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "delhttpuser", extraRoot, app.Config.AllowedRoots); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "delhttpuser", extraRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
 	// Delete directory from filesystem
@@ -733,7 +733,7 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
+	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemovePrincipalAllowedRoot)
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: extraRoot})
 
@@ -775,7 +775,7 @@ func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddPrincipalAllowedRoot)
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: "/no/such/path/that/exists"})
 
@@ -826,7 +826,7 @@ func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddPrincipalAllowedRoot)
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: regFile})
 
@@ -872,7 +872,7 @@ func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemoveAllowedRoot)
+	mux.HandleFunc("DELETE /principals/{username}/allowed-roots", app.handleRemovePrincipalAllowedRoot)
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: "relative/path"})
 
@@ -1072,22 +1072,22 @@ func TestPrincipalErrorWrapping(t *testing.T) {
 		t.Fatal("expected error for empty username in update")
 	}
 
-	_, _, err = addAllowedRoot(app.DB, "", "/tmp", app.Config.AllowedRoots)
+	_, _, err = addPrincipalAllowedRoot(app.DB, "", "/tmp", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for empty username in addAllowedRoot")
 	}
 
-	_, _, err = addAllowedRoot(app.DB, "user", "", app.Config.AllowedRoots)
+	_, _, err = addPrincipalAllowedRoot(app.DB, "user", "", app.Config.AllowedRoots)
 	if err == nil {
 		t.Fatal("expected error for empty path in addAllowedRoot")
 	}
 
-	_, _, err = removeAllowedRoot(app.DB, "", "/tmp")
+	_, _, err = removePrincipalAllowedRoot(app.DB, "", "/tmp")
 	if err == nil {
 		t.Fatal("expected error for empty username in removeAllowedRoot")
 	}
 
-	_, _, err = removeAllowedRoot(app.DB, "user", "")
+	_, _, err = removePrincipalAllowedRoot(app.DB, "user", "")
 	if err == nil {
 		t.Fatal("expected error for empty path in removeAllowedRoot")
 	}
@@ -1180,8 +1180,8 @@ func TestPrincipalCascadeDelete(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "cascadeuser", extraRoot, app.Config.AllowedRoots); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "cascadeuser", extraRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
 	// Delete the principal directly to test cascade
@@ -1301,9 +1301,9 @@ func TestPrincipalAllowedRootPathResolution(t *testing.T) {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
 
-	changed, _, err := addAllowedRoot(app.DB, "pathresuser", extraRoot+"/", app.Config.AllowedRoots)
+	changed, _, err := addPrincipalAllowedRoot(app.DB, "pathresuser", extraRoot+"/", app.Config.AllowedRoots)
 	if err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 	if !changed {
 		t.Error("expected changed to be true")
@@ -1590,7 +1590,7 @@ func TestPrincipalHTTPAddAllowedRootOutsideGlobal(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddAllowedRoot)
+	mux.HandleFunc("POST /principals/{username}/allowed-roots", app.handleAddPrincipalAllowedRoot)
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: outsidePath})
 	req := httptest.NewRequest(http.MethodPost, "/principals/outsideglobaluser/allowed-roots", bytes.NewReader(reqBody))

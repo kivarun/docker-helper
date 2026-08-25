@@ -254,7 +254,7 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 	}
 	sessionToken := result.Token
 
-	// Actual launcher credential token.
+	// Actual Principal credential token.
 	orig := OSUserLookup
 	defer func() { OSUserLookup = orig }()
 	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {

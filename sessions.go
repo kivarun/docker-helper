@@ -149,11 +149,16 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		result, err = a.createSession(req.Workspace)
 	} else {
 		auth := authCtx.principalCredential
-		globalRoots := a.getConfig().AllowedRoots
+		globalAllowedRoots := a.getConfig().AllowedRoots
+		principalAllowedRoots := auth.PrincipalAllowedRoots
+		effectiveAllowedRoots := intersectAllowedRootScopes(
+			globalAllowedRoots,
+			principalAllowedRoots,
+		)
 		result, err = a.createSessionWithPolicy(&sessionCreatePolicy{
-			Workspace:    req.Workspace,
-			AllowedRoots: intersectRoots(globalRoots, auth.AllowedRoots),
-			PrincipalID:  &auth.PrincipalID,
+			Workspace:             req.Workspace,
+			EffectiveAllowedRoots: effectiveAllowedRoots,
+			PrincipalID:           &auth.PrincipalID,
 		})
 	}
 

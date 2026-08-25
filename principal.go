@@ -56,11 +56,12 @@ func resolveOSUser(username string) (uid int, gid int, home string, err error) {
 	return int(uid64), int(gid64), homeDir, nil
 }
 
-// validateAllowedRootForAdd validates a path for ADD operations.
+// validatePrincipalAllowedRootForAdd validates a path for adding to a
+// Principal's allowed-root scope.
 // Requires: absolute, no tilde, exists, is directory.
 // Applies the workspace-path policy.
 // Returns the canonical path.
-func validateAllowedRootForAdd(path string) (string, error) {
+func validatePrincipalAllowedRootForAdd(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("path is required: %w", ErrInvalidAllowedRoot)
 	}
@@ -121,7 +122,7 @@ func findPrincipalIDByUserName(db *sql.DB, username string) (int, error) {
 // ErrPrincipalRootOutsideGlobal is returned when a principal root is outside global roots.
 var ErrPrincipalRootOutsideGlobal = errors.New("principal root outside global allowed roots")
 
-func createPrincipal(db *sql.DB, username string, globalRoots []string) (*PrincipalWithRoots, error) {
+func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (*PrincipalWithRoots, error) {
 	if username == "" {
 		return nil, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -142,7 +143,7 @@ func createPrincipal(db *sql.DB, username string, globalRoots []string) (*Princi
 	}
 
 	// Validate the home directory is under at least one global allowed root.
-	if !isUnderAnyRoot(canonicalHome, globalRoots) {
+	if !isWithinAnyAllowedRoot(canonicalHome, globalAllowedRoots) {
 		return nil, fmt.Errorf("OS user %q home directory %q is not under any global allowed root: %w", username, canonicalHome, ErrPrincipalRootOutsideGlobal)
 	}
 
@@ -324,9 +325,9 @@ func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (p
 	}, nil
 }
 
-// isUnderAnyRoot returns true if path is equal to or under at least one root.
-func isUnderAnyRoot(path string, roots []string) bool {
-	for _, r := range roots {
+// isWithinAnyAllowedRoot returns true if path is equal to or under at least one allowed root.
+func isWithinAnyAllowedRoot(path string, allowedRoots []string) bool {
+	for _, r := range allowedRoots {
 		if path == r || pathWithin(r, path) {
 			return true
 		}
@@ -334,18 +335,20 @@ func isUnderAnyRoot(path string, roots []string) bool {
 	return false
 }
 
-func addAllowedRoot(db *sql.DB, username string, rootPath string, globalRoots []string) (changed bool, canonicalPath string, err error) {
+// addPrincipalAllowedRoot adds an allowed root to a Principal's scope.
+// The root must be contained within the global allowed-root ceiling.
+func addPrincipalAllowedRoot(db *sql.DB, username string, rootPath string, globalAllowedRoots []string) (changed bool, canonicalPath string, err error) {
 	if username == "" {
 		return false, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
 
-	resolved, err := validateAllowedRootForAdd(rootPath)
+	resolved, err := validatePrincipalAllowedRootForAdd(rootPath)
 	if err != nil {
 		return false, "", err
 	}
 
 	// Validate the root is under at least one global allowed root.
-	if !isUnderAnyRoot(resolved, globalRoots) {
+	if !isWithinAnyAllowedRoot(resolved, globalAllowedRoots) {
 		return false, "", fmt.Errorf("path %q is not under any global allowed root: %w", resolved, ErrPrincipalRootOutsideGlobal)
 	}
 
@@ -371,7 +374,8 @@ func addAllowedRoot(db *sql.DB, username string, rootPath string, globalRoots []
 	return affected > 0, resolved, nil
 }
 
-func removeAllowedRoot(db *sql.DB, username string, rootPath string) (changed bool, canonicalPath string, err error) {
+// removePrincipalAllowedRoot removes an allowed root from a Principal's scope.
+func removePrincipalAllowedRoot(db *sql.DB, username string, rootPath string) (changed bool, canonicalPath string, err error) {
 	if username == "" {
 		return false, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}

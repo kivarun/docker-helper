@@ -2713,7 +2713,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 		t.Fatalf("authenticateCredential: %v", err)
 	}
 	stalePrincipalID := auth.PrincipalID
-	staleAllowedRoots := auth.AllowedRoots
+	staleAllowedRoots := auth.PrincipalAllowedRoots
 
 	// Disable the principal (simulates concurrent disable).
 	result, err := persistPrincipalEnabledChange(app.DB, "staleauthuser", false)
@@ -2731,11 +2731,11 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 
 	// Attempt session creation through the real production path
 	// using the stale authenticated authority.
-	effectiveRoots := intersectRoots(app.getConfig().AllowedRoots, staleAllowedRoots)
+	effectiveRoots := intersectAllowedRootScopes(app.getConfig().AllowedRoots, staleAllowedRoots)
 	_, err = app.createSessionWithPolicy(&sessionCreatePolicy{
-		Workspace:    projDir,
-		AllowedRoots: effectiveRoots,
-		PrincipalID:  &stalePrincipalID,
+		Workspace:             projDir,
+		EffectiveAllowedRoots: effectiveRoots,
+		PrincipalID:           &stalePrincipalID,
 	})
 
 	// createSessionWithPolicy must fail because the principal is disabled.

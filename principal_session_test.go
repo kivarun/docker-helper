@@ -50,7 +50,7 @@ func TestCredentialAuthValid(t *testing.T) {
 	if auth.CredentialID != cred.ID {
 		t.Errorf("credential ID = %q, want %q", auth.CredentialID, cred.ID)
 	}
-	if len(auth.AllowedRoots) == 0 {
+	if len(auth.PrincipalAllowedRoots) == 0 {
 		t.Error("expected at least one allowed root")
 	}
 }
@@ -322,8 +322,8 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 	}
 
 	// Add second allowed root.
-	if _, _, err := addAllowedRoot(app.DB, "wsuser2", secondRoot, app.Config.AllowedRoots); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "wsuser2", secondRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
 	_, token, err := createCredential(app.DB, "wsuser2", "oc")
@@ -1313,8 +1313,8 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 	}
 
 	// Add the broad root to the principal.
-	if _, _, err := addAllowedRoot(app.DB, "narrowuser", broadRoot, app.Config.AllowedRoots); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "narrowuser", broadRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
 	_, token, err := createCredential(app.DB, "narrowuser", "oc")
@@ -1388,8 +1388,8 @@ func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 	}
 
 	// Add a root that will become stale.
-	if _, _, err := addAllowedRoot(app.DB, "staleuser", staleRoot, app.Config.AllowedRoots); err != nil {
-		t.Fatalf("addAllowedRoot() error: %v", err)
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "staleuser", staleRoot, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("addPrincipalAllowedRoot() error: %v", err)
 	}
 
 	_, token, err := createCredential(app.DB, "staleuser", "oc")

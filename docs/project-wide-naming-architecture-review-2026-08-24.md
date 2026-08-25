@@ -114,49 +114,53 @@ semantically wrong wording.
 
 ### P1-2. Allowed-root names lose the policy-scope level
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-- **intersectRoots(globalRoots, principalRoots)** computes the effective
-  authorization scope:
-  [session.go:55-89](../session.go#L55-L89).
-- The result is stored in the unqualified
-  **sessionCreatePolicy.AllowedRoots**:
-  [session.go:116-123](../session.go#L116-L123),
-  [sessions.go:146-155](../sessions.go#L146-L155).
-- **isUnderAnyRoot**, **addAllowedRoot**, **removeAllowedRoot**, and
-  **validateAllowedRootForAdd** are Principal-policy operations constrained by
-  the global ceiling, but their names do not identify either scope:
-  [principal.go:59-79](../principal.go#L59-L79),
-  [principal.go:307-395](../principal.go#L307-L395).
+Internal symbols now make the authorization hierarchy explicit:
 
-**Actual semantic responsibility**
+- **intersectAllowedRootScopes(globalAllowedRoots, principalAllowedRoots)**
+  returns **effectiveAllowedRoots**.
+- **sessionCreatePolicy.EffectiveAllowedRoots** is the already-computed
+  effective session-creation scope.
+- **CredentialAuthResult.PrincipalAllowedRoots** carries the Principal's
+  allowed-root scope from credential authentication.
+- **isWithinAnyAllowedRoot** checks containment against any allowed root.
+- **validatePrincipalAllowedRootForAdd**, **addPrincipalAllowedRoot**,
+  **removePrincipalAllowedRoot** are the Principal-policy operations.
+- **handleAddPrincipalAllowedRoot**, **handleRemovePrincipalAllowedRoot**
+  are the HTTP handlers.
 
-The authorization hierarchy is:
+handleCreateSession now reads:
 
-global allowed-root scope → Principal allowed-root scope → effective
-Session-creation scope → concrete workspace.
+```
+globalAllowedRoots := ...
+principalAllowedRoots := auth.PrincipalAllowedRoots
+effectiveAllowedRoots := intersectAllowedRootScopes(
+    globalAllowedRoots,
+    principalAllowedRoots,
+)
+```
 
-**Why the vocabulary is dangerous**
+The "launcher credential" comment in credential.go was corrected to
+"Principal credential" terminology.
 
-The unqualified names make it plausible to pass raw Principal roots to Session
-creation instead of their intersection with the global ceiling. That is the
-same class of failure as the previously discovered global-ceiling bypass.
+**Previous names (resolved)**
 
-**Preferred canonical vocabulary**
+- ~~intersectRoots~~ → intersectAllowedRootScopes
+- ~~sessionCreatePolicy.AllowedRoots~~ → EffectiveAllowedRoots
+- ~~CredentialAuthResult.AllowedRoots~~ → PrincipalAllowedRoots
+- ~~isUnderAnyRoot~~ → isWithinAnyAllowedRoot
+- ~~validateAllowedRootForAdd~~ → validatePrincipalAllowedRootForAdd
+- ~~addAllowedRoot~~ → addPrincipalAllowedRoot
+- ~~removeAllowedRoot~~ → removePrincipalAllowedRoot
+- ~~handleAddAllowedRoot~~ → handleAddPrincipalAllowedRoot
+- ~~handleRemoveAllowedRoot~~ → handleRemovePrincipalAllowedRoot
 
-- intersectAllowedRootScopes;
-- sessionCreationScope.EffectiveAllowedRoots;
-- isWithinAnyAllowedRoot;
-- addPrincipalAllowedRoot;
-- removePrincipalAllowedRoot;
-- globalAllowedRoots for the global input.
+**Compatibility**
 
-**Compatibility and narrow batch**
-
-Keep public allowed_roots JSON, allowed-root CLI vocabulary, and
-principal_allowed_roots persistence. Rename only internal symbols and tests,
-and make every policy test name identify both input scopes and the effective
-result.
+Config.AllowedRoots and Principal.AllowedRoots were preserved (owner-qualified).
+Public allowed_roots JSON, allowed-root CLI vocabulary, and
+principal_allowed_roots persistence are unchanged.
 
 ### P1-3. operationRegistry is the operation lifecycle supervisor
 

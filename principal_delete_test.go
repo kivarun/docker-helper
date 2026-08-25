@@ -33,7 +33,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 		t.Fatalf("createPrincipal: %v", err)
 	}
 
-	if _, _, err := addAllowedRoot(app.DB, "deluser", home, app.Config.AllowedRoots); err != nil {
+	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", home, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("addAllowedRoot: %v", err)
 	}
 

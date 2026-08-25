@@ -52,40 +52,41 @@ type CreatedSession struct {
 	Token   string
 }
 
-// intersectRoots returns the effective root set: the mathematical intersection
-// of global and principal allowed roots. For each overlapping pair:
+// intersectAllowedRootScopes returns the effective allowed-root scope: the
+// mathematical intersection of the global and principal allowed-root scopes.
+// For each overlapping pair:
 //   - equal roots contribute that root;
 //   - principal inside global contributes the principal root;
 //   - global inside principal contributes the global root;
 //   - disjoint roots contribute nothing.
 //
 // Results are deduplicated and deterministic.
-func intersectRoots(globalRoots, principalRoots []string) []string {
+func intersectAllowedRootScopes(globalAllowedRoots, principalAllowedRoots []string) []string {
 	seen := make(map[string]bool)
-	var result []string
-	for _, pRoot := range principalRoots {
-		for _, gRoot := range globalRoots {
+	var effectiveAllowedRoots []string
+	for _, pRoot := range principalAllowedRoots {
+		for _, gRoot := range globalAllowedRoots {
 			if pRoot == gRoot {
 				if !seen[pRoot] {
 					seen[pRoot] = true
-					result = append(result, pRoot)
+					effectiveAllowedRoots = append(effectiveAllowedRoots, pRoot)
 				}
 			} else if pathWithin(gRoot, pRoot) {
 				// principal root inside global root -> principal root is effective
 				if !seen[pRoot] {
 					seen[pRoot] = true
-					result = append(result, pRoot)
+					effectiveAllowedRoots = append(effectiveAllowedRoots, pRoot)
 				}
 			} else if pathWithin(pRoot, gRoot) {
 				// global root inside principal root -> global root is effective
 				if !seen[gRoot] {
 					seen[gRoot] = true
-					result = append(result, gRoot)
+					effectiveAllowedRoots = append(effectiveAllowedRoots, gRoot)
 				}
 			}
 		}
 	}
-	return result
+	return effectiveAllowedRoots
 }
 
 // scanSessionWithPrincipal scans session columns joined with principal username.
@@ -114,10 +115,13 @@ func scanSessionWithPrincipal(s sqlScanner) (Session, error) {
 }
 
 // sessionCreatePolicy contains the context needed to create a session.
+// EffectiveAllowedRoots is the already-computed effective session-creation
+// allowed-root scope (intersection of global and principal scopes, or the
+// canonicalized global scope for admin creation).
 type sessionCreatePolicy struct {
-	Workspace    string
-	AllowedRoots []string
-	PrincipalID  *int64
+	Workspace             string
+	EffectiveAllowedRoots []string
+	PrincipalID           *int64
 }
 
 func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, error) {
@@ -143,14 +147,14 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 		return nil, fmt.Errorf("workspace is not a directory: %w", ErrInvalidWorkspace)
 	}
 
-	if len(p.AllowedRoots) == 0 {
+	if len(p.EffectiveAllowedRoots) == 0 {
 		return nil, fmt.Errorf("no allowed roots configured: %w", ErrInvalidWorkspace)
 	}
 
 	// Check workspace is inside at least one allowed root and is a proper
 	// subdirectory (not the root itself).
 	inside := false
-	for _, root := range p.AllowedRoots {
+	for _, root := range p.EffectiveAllowedRoots {
 		if absWorkspace == root {
 			continue
 		}
@@ -266,18 +270,18 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 // createSession is the admin-only session creation using global allowed roots.
 func (a *App) createSession(workspace string) (*CreatedSession, error) {
 	cfg := a.getConfig()
-	roots := make([]string, 0, len(cfg.AllowedRoots))
+	globalAllowedRoots := make([]string, 0, len(cfg.AllowedRoots))
 	for _, r := range cfg.AllowedRoots {
 		resolved, err := filepath.EvalSymlinks(r)
 		if err != nil {
 			return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
 		}
-		roots = append(roots, resolved)
+		globalAllowedRoots = append(globalAllowedRoots, resolved)
 	}
 	return a.createSessionWithPolicy(&sessionCreatePolicy{
-		Workspace:    workspace,
-		AllowedRoots: roots,
-		PrincipalID:  nil,
+		Workspace:             workspace,
+		EffectiveAllowedRoots: globalAllowedRoots,
+		PrincipalID:           nil,
 	})
 }
 
