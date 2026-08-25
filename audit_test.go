@@ -70,7 +70,7 @@ func TestRunStartAndFinish(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -100,9 +100,9 @@ func TestRunStartAndFinish(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -138,7 +138,7 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -173,9 +173,9 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -222,7 +222,7 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -256,9 +256,9 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -283,7 +283,7 @@ func TestAuditNonZeroExit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -313,9 +313,9 @@ func TestAuditNonZeroExit(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -340,7 +340,7 @@ func TestAuditDockerError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -369,9 +369,9 @@ func TestAuditDockerError(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -389,7 +389,7 @@ func TestAuditMountsRelativeSource(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -421,9 +421,9 @@ func TestAuditMountsRelativeSource(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -453,7 +453,7 @@ func TestAuditNoContainerOutput(t *testing.T) {
 	const containerOutput = "this-is-container-stdout-and-stderr"
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -482,9 +482,9 @@ func TestAuditNoContainerOutput(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -501,7 +501,7 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -530,9 +530,9 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -552,7 +552,7 @@ func TestAuditCommandArgCount(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -582,9 +582,9 @@ func TestAuditCommandArgCount(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -609,7 +609,7 @@ func TestAuditNoCommandInRecord(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -641,9 +641,9 @@ func TestAuditNoCommandInRecord(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -660,7 +660,7 @@ func TestRunShutdownGateNoStartAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -668,7 +668,7 @@ func TestRunShutdownGateNoStartAudit(t *testing.T) {
 	}
 
 	// Close the admission gate before the request.
-	app.OperationRegistry.setShuttingDown()
+	app.OperationSupervisor.beginShutdown()
 
 	called := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -951,8 +951,8 @@ func TestRejectedInvalidJSON(t *testing.T) {
 func TestRejectedShuttingDown(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
-	app.OperationRegistry.shutting = true
+	app.OperationSupervisor = newOperationSupervisor()
+	app.OperationSupervisor.beginShutdown()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -1090,7 +1090,7 @@ func TestAcceptedOperationNoRejectedEvent(t *testing.T) {
 func TestBuildRejectedInternalError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

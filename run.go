@@ -516,9 +516,9 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	// Store pins in operation before registering so the operation owns them.
 	op.pinnedMounts = pinnedMounts
 
-	// Register the operation. Single tryCreate after all pins are created.
-	if a.OperationRegistry != nil {
-		if !a.OperationRegistry.tryCreate(op) {
+	// Register the operation. Single admit after all pins are created.
+	if a.OperationSupervisor != nil {
+		if !a.OperationSupervisor.admit(op) {
 			// Cleanup pins before releasing lease.
 			pinCleanupErr := false
 			for j := len(pinnedMounts) - 1; j >= 0; j-- {
@@ -540,7 +540,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
 		}
-		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
 
 	// Lease is now associated with the registered operation; it will be

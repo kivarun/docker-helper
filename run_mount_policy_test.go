@@ -19,7 +19,7 @@ import (
 func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -43,7 +43,7 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -147,7 +147,7 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -184,7 +184,7 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -205,26 +205,26 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 
-	if len(app.OperationRegistry.ops) != 0 {
+	if len(app.OperationSupervisor.ops) != 0 {
 		t.Error("operation should not be created after user-mode mount rejection")
 	}
 }
 
-// getLastOp returns the first operation from the registry (there should be exactly one).
-func getLastOp(reg *operationRegistry) *operation {
-	reg.mu.RLock()
-	defer reg.mu.RUnlock()
-	for _, op := range reg.ops {
+// getLastOp returns the first operation from the supervisor (there should be exactly one).
+func getLastOp(sup *operationSupervisor) *operation {
+	sup.mu.RLock()
+	defer sup.mu.RUnlock()
+	for _, op := range sup.ops {
 		return op
 	}
 	return nil
 }
 
-// TestRunSecondPinError cleans first pin, registry empty, Docker not called.
+// TestRunSecondPinError cleans first pin, supervisor contains no operation, Docker not called.
 func TestRunSecondPinError(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -283,8 +283,8 @@ func TestRunSecondPinError(t *testing.T) {
 	}
 
 	// Registry should be empty — operation never registered.
-	if len(app.OperationRegistry.ops) != 0 {
-		t.Error("registry should be empty after pin error")
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("supervisor should be empty after pin error")
 	}
 
 	// Docker should not be called.
@@ -293,13 +293,13 @@ func TestRunSecondPinError(t *testing.T) {
 	}
 }
 
-// TestRunRegistryShuttingDown cleans pins, registry does not receive operation.
-func TestRunRegistryShuttingDown(t *testing.T) {
+// TestRunRegistryShuttingDown cleans pins, supervisor does not receive operation.
+func TestRunSupervisorShuttingDown(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	reg := newOperationRegistry()
-	reg.setShuttingDown()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	supervisor.beginShutdown()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -342,17 +342,17 @@ func TestRunRegistryShuttingDown(t *testing.T) {
 
 	// Pins should be cleaned up.
 	if !cleanupCalled {
-		t.Error("pins should be cleaned up when registry is shutting down")
+		t.Error("pins should be cleaned up when supervisor is shutting down")
 	}
 
-	// Registry should not contain the operation.
-	if len(reg.ops) != 0 {
-		t.Error("registry should not receive operation when shutting down")
+	// Supervisor should not contain the operation.
+	if len(supervisor.ops) != 0 {
+		t.Error("supervisor should not receive operation when shutting down")
 	}
 
 	// Docker should not be called.
 	if dockerCalled {
-		t.Error("docker should not be called when registry is shutting down")
+		t.Error("docker should not be called when supervisor is shutting down")
 	}
 }
 
@@ -361,7 +361,7 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
 	app.Config.RuntimeDir = ""
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -410,8 +410,8 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	}
 
 	// Registry should be empty.
-	if len(app.OperationRegistry.ops) != 0 {
-		t.Error("registry should be empty after pin error")
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("supervisor should be empty after pin error")
 	}
 }
 
@@ -419,7 +419,7 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -488,7 +488,7 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeUser
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -536,7 +536,7 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -577,7 +577,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	}
 
 	// Wait for the operation to complete.
-	op := getLastOp(app.OperationRegistry)
+	op := getLastOp(app.OperationSupervisor)
 	if op != nil {
 		op.Wait()
 	}
@@ -592,7 +592,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -632,7 +632,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	}
 
 	// Wait for the operation to complete.
-	op := getLastOp(app.OperationRegistry)
+	op := getLastOp(app.OperationSupervisor)
 	if op != nil {
 		op.Wait()
 	}
@@ -647,7 +647,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 func TestRunCleanupReverseOrder(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -696,7 +696,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 	}
 
 	// Wait for the operation to complete.
-	op := getLastOp(app.OperationRegistry)
+	op := getLastOp(app.OperationSupervisor)
 	if op != nil {
 		op.Wait()
 	}
@@ -719,7 +719,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -755,7 +755,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	}
 
 	// Wait for the operation to complete.
-	op := getLastOp(app.OperationRegistry)
+	op := getLastOp(app.OperationSupervisor)
 	if op != nil {
 		op.Wait()
 		op.mu.Lock()
@@ -780,7 +780,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	app := newTestAppWithAuth(t)
 	app.Config.Mode = ModeSystem
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -817,13 +817,13 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	}
 
 	// Wait for the operation to complete.
-	op := getLastOp(app.OperationRegistry)
+	op := getLastOp(app.OperationSupervisor)
 	if op != nil {
 		op.Wait()
 	}
 
 	if op == nil {
-		t.Fatal("no operation found in registry")
+		t.Fatal("no operation found in supervisor")
 	}
 	op.mu.Lock()
 	defer op.mu.Unlock()

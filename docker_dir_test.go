@@ -57,10 +57,10 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 
 	hash := sha256.Sum256([]byte(testAdminToken))
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		AdminTokenHash:    hash,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		AdminTokenHash:      hash,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
 	// Create a session.
@@ -119,8 +119,8 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	// Verify no operation was registered.
-	if len(app.OperationRegistry.ops) != 0 {
-		t.Error("registry should be empty after ensureSessionDockerDir failure")
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("supervisor should be empty after ensureSessionDockerDir failure")
 	}
 
 	// Verify Docker command was not invoked.
@@ -180,10 +180,10 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 
 	hash := sha256.Sum256([]byte(testAdminToken))
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		AdminTokenHash:    hash,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		AdminTokenHash:      hash,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
 	// Create a session.
@@ -230,8 +230,8 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	}
 
 	// Verify no operation was registered.
-	if len(app.OperationRegistry.ops) != 0 {
-		t.Error("registry should be empty after ensureSessionDockerDir failure")
+	if len(app.OperationSupervisor.ops) != 0 {
+		t.Error("supervisor should be empty after ensureSessionDockerDir failure")
 	}
 
 	// Verify Docker command was not invoked.

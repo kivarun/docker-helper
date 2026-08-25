@@ -23,9 +23,9 @@ func waitRun(t *testing.T, app *App, w *httptest.ResponseRecorder) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatalf("operation %s not found in registry", opID)
+		t.Fatalf("operation %s not found in supervisor", opID)
 	}
 	op.Wait()
 }
@@ -33,7 +33,7 @@ func waitRun(t *testing.T, app *App, w *httptest.ResponseRecorder) {
 func setupRunTestApp(t *testing.T) (*App, string) {
 	t.Helper()
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

@@ -14,12 +14,12 @@ import (
 )
 
 // TestShutdownGateClosesOnSignal verifies that after the shutdown signal
-// is received (simulated by setShuttingDown), new operations are rejected
+// is received (simulated by beginShutdown), new operations are rejected
 // while existing operations remain under shutdown lifecycle.
 func TestShutdownGateClosesOnSignal(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -53,13 +53,13 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	existingOp := reg.get(opID)
+	existingOp := supervisor.lookup(opID)
 	if existingOp == nil {
-		t.Fatal("existing operation should be in registry")
+		t.Fatal("existing operation should be in supervisor")
 	}
 
 	// Simulate signal received — close the gate.
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 
 	// New operation should be rejected.
 	req2 := newBuildRequest(map[string]any{
@@ -74,13 +74,13 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 		t.Errorf("expected %d after signal, got %d", http.StatusServiceUnavailable, w2.Code)
 	}
 
-	// Existing operation should still be in registry and managed by shutdown.
-	if reg.get(opID) == nil {
-		t.Fatal("existing operation should remain in registry")
+	// Existing operation should still be in supervisor and managed by shutdown.
+	if supervisor.lookup(opID) == nil {
+		t.Fatal("existing operation should remain in supervisor")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	reg.terminateAll(shutdownCtx, nil)
+	supervisor.terminateForShutdown(shutdownCtx, nil)
 	cancel()
 
 	select {
@@ -92,11 +92,11 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 
 // TestShutdownGateConcurrentBuildAndSignal verifies that a build request
 // in flight when the signal arrives is handled correctly: either accepted
-// (if tryCreate completed before gate close) or rejected (if gate closed first).
+// (if admit completed before gate close) or rejected (if gate closed first).
 func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -133,11 +133,11 @@ func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
 		app.handleBuild(w, req)
 	}()
 
-	// Wait for tryCreate to complete (cmd creation blocked).
+	// Wait for admit to complete (cmd creation blocked).
 	cmdWg.Wait()
 
 	// Close the gate concurrently.
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 
 	// Unblock cmd creation.
 	close(cmdBlocked)
@@ -153,13 +153,13 @@ func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
 			t.Fatalf("decode: %v", err)
 		}
 		opID, _ := resp["operation_id"].(string)
-		op := reg.get(opID)
+		op := supervisor.lookup(opID)
 		if op == nil {
-			t.Fatal("accepted operation should be in registry")
+			t.Fatal("accepted operation should be in supervisor")
 		}
 		// Clean up.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		reg.terminateAll(shutdownCtx, nil)
+		supervisor.terminateForShutdown(shutdownCtx, nil)
 		cancel()
 		<-op.done
 	} else if w.Code == http.StatusServiceUnavailable {

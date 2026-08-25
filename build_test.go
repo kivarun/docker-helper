@@ -30,7 +30,7 @@ func testBuildCmd(output string, exitCode int) func(context.Context, string, ...
 
 func TestBuildSessionAuthValidToken(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -138,7 +138,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 
 func TestBuildContextDotUsesWorkspace(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -184,7 +184,7 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 
 func TestBuildContextRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -232,7 +232,7 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 
 func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -396,7 +396,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 
 func TestBuildWorkspaceIsSymlink(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	realDir := filepath.Join(app.Config.AllowedRoots[0], "real-dir")
 	if err := os.MkdirAll(realDir, 0755); err != nil {
@@ -444,7 +444,7 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 
 func TestBuildDockerfileInsideContext(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -530,7 +530,7 @@ func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
 
 func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -644,7 +644,7 @@ func TestParseOffset(t *testing.T) {
 
 func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -683,9 +683,9 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatalf("operation %s not found in registry", opID)
+		t.Fatalf("operation %s not found in supervisor", opID)
 	}
 	op.Wait()
 
@@ -713,19 +713,19 @@ func TestHandleOperationLogsInvalidOffset(t *testing.T) {
 }
 
 // TestOperationForSessionNilRegistry verifies that operationForSession
-// returns nil when the operation registry is not set.
+// returns nil when the supervisor is not set.
 func TestOperationForSessionNilRegistry(t *testing.T) {
 	app := &App{}
 	op := app.operationForSession("session-1", "op-1")
 	if op != nil {
-		t.Error("expected nil for nil registry")
+		t.Error("expected nil for nil supervisor")
 	}
 }
 
 // TestOperationForSessionUnknownID verifies that operationForSession
 // returns nil for an unknown operation ID.
 func TestOperationForSessionUnknownID(t *testing.T) {
-	app := &App{OperationRegistry: newOperationRegistry()}
+	app := &App{OperationSupervisor: newOperationSupervisor()}
 	op := app.operationForSession("session-1", "nonexistent")
 	if op != nil {
 		t.Error("expected nil for unknown operation ID")
@@ -735,11 +735,11 @@ func TestOperationForSessionUnknownID(t *testing.T) {
 // TestOperationForSessionForeignSession verifies that operationForSession
 // returns nil when the operation belongs to a different session.
 func TestOperationForSessionForeignSession(t *testing.T) {
-	reg := newOperationRegistry()
+	supervisor := newOperationSupervisor()
 	op := newRunOperation("other-session", "alpine:latest", 1024, "")
-	reg.tryCreate(op)
+	supervisor.admit(op)
 
-	app := &App{OperationRegistry: reg}
+	app := &App{OperationSupervisor: supervisor}
 	result := app.operationForSession("session-1", op.ID)
 	if result != nil {
 		t.Error("expected nil for foreign session")
@@ -749,11 +749,11 @@ func TestOperationForSessionForeignSession(t *testing.T) {
 // TestOperationForSessionOwner verifies that operationForSession
 // returns the operation when the session matches.
 func TestOperationForSessionOwner(t *testing.T) {
-	reg := newOperationRegistry()
+	supervisor := newOperationSupervisor()
 	op := newRunOperation("session-1", "alpine:latest", 1024, "")
-	reg.tryCreate(op)
+	supervisor.admit(op)
 
-	app := &App{OperationRegistry: reg}
+	app := &App{OperationSupervisor: supervisor}
 	result := app.operationForSession("session-1", op.ID)
 	if result == nil {
 		t.Fatal("expected operation for owner session")

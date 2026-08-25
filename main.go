@@ -292,11 +292,11 @@ func runServe(stdout, stderr io.Writer) error {
 		}
 
 		app := &App{
-			Config:            cfg,
-			DB:                db,
-			AdminTokenHash:    adminHash,
-			OperationRegistry: newOperationRegistry(),
-			MACCoordinator:    macCoordinator,
+			Config:              cfg,
+			DB:                  db,
+			AdminTokenHash:      adminHash,
+			OperationSupervisor: newOperationSupervisor(),
+			MACCoordinator:      macCoordinator,
 		}
 
 		mux := http.NewServeMux()
@@ -333,16 +333,16 @@ func runServe(stdout, stderr io.Writer) error {
 		shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdownMulti(ctx, server, unixListener, tcpListener, cfg.ShutdownTimeout, func() {
 			// Shutdown triggered (signal or Serve error) — close the operation
 			// gate so no new operations are accepted.
-			if app.OperationRegistry != nil {
-				app.OperationRegistry.setShuttingDown()
+			if app.OperationSupervisor != nil {
+				app.OperationSupervisor.beginShutdown()
 			}
 		})
 
 		// Terminate running operations with the same absolute deadline used
 		// by HTTP drain. HTTP drain and operation termination proceed
 		// concurrently under the one wall-clock shutdown budget.
-		if app.OperationRegistry != nil {
-			app.OperationRegistry.terminateAll(shutdownCtx, app.killContainerBestEffort)
+		if app.OperationSupervisor != nil {
+			app.OperationSupervisor.terminateForShutdown(shutdownCtx, app.killContainerBestEffort)
 		}
 
 		// Wait for HTTP drain to complete before cancelling the shutdown

@@ -25,7 +25,7 @@ const resultCancelled = "cancelled"
 
 // defaultTerminationTimeout is the graceful termination budget applied
 // when the caller does not supply a context deadline. Used by both
-// explicit cancel (terminateOne) and daemon shutdown (terminateAll).
+// explicit cancel (cancel) and daemon shutdown (terminateForShutdown).
 const defaultTerminationTimeout = 5 * time.Second
 
 // defaultForceCleanupTimeout is the shared force-cleanup budget for
@@ -60,7 +60,7 @@ type operation struct {
 	cmd           *exec.Cmd
 	done          chan struct{}
 	doneOnce      sync.Once // ensures op.done is closed exactly once
-	terminated    bool      // set by terminateAll/terminateOne when process not yet started
+	terminated    bool      // set by terminateForShutdown/cancel when process not yet started
 	reason        terminationReason
 	started       bool          // set to true only after cmd.Start() succeeds
 	forceOwned    bool          // true when force cleanup has been claimed for this operation
@@ -135,45 +135,45 @@ func generateOperationID() string {
 	return "op_" + hex.EncodeToString(b)
 }
 
-type operationRegistry struct {
+type operationSupervisor struct {
 	mu       sync.RWMutex
 	ops      map[string]*operation
 	shutting bool
 }
 
-func newOperationRegistry() *operationRegistry {
-	return &operationRegistry{
+func newOperationSupervisor() *operationSupervisor {
+	return &operationSupervisor{
 		ops: make(map[string]*operation),
 	}
 }
 
-// tryCreate atomically checks the shutting-down gate and registers the operation.
-// Returns true if the operation was registered, false if the registry is shutting down.
-// The caller must not start the operation process if tryCreate returns false.
-func (r *operationRegistry) tryCreate(op *operation) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.shutting {
+// admit atomically checks the shutdown gate and registers the operation.
+// Returns true if the operation was admitted, false if the supervisor is shutting down.
+// The caller must not start the operation process if admit returns false.
+func (s *operationSupervisor) admit(op *operation) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shutting {
 		return false
 	}
-	r.ops[op.ID] = op
+	s.ops[op.ID] = op
 	return true
 }
 
-func (r *operationRegistry) get(id string) *operation {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.ops[id]
+func (s *operationSupervisor) lookup(id string) *operation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ops[id]
 }
 
-func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int) {
+func (s *operationSupervisor) pruneCompleted(retentionTTL time.Duration, maxCompleted int) {
 	// Step 1: Copy operation pointers under short RLock.
-	r.mu.RLock()
-	ops := make([]*operation, 0, len(r.ops))
-	for _, op := range r.ops {
+	s.mu.RLock()
+	ops := make([]*operation, 0, len(s.ops))
+	for _, op := range s.ops {
 		ops = append(ops, op)
 	}
-	r.mu.RUnlock()
+	s.mu.RUnlock()
 
 	// Step 2: Snapshot each operation's state under op.mu once.
 	type completedOp struct {
@@ -219,23 +219,23 @@ func (r *operationRegistry) cleanup(retentionTTL time.Duration, maxCompleted int
 
 	// Step 4: Remove under single Lock with TOCTOU check.
 	if len(toRemove) > 0 {
-		r.mu.Lock()
+		s.mu.Lock()
 		for _, rem := range toRemove {
-			if r.ops[rem.id] == rem.op {
-				delete(r.ops, rem.id)
+			if s.ops[rem.id] == rem.op {
+				delete(s.ops, rem.id)
 			}
 		}
-		r.mu.Unlock()
+		s.mu.Unlock()
 	}
 }
 
-func (r *operationRegistry) setShuttingDown() {
-	r.mu.Lock()
-	r.shutting = true
-	r.mu.Unlock()
+func (s *operationSupervisor) beginShutdown() {
+	s.mu.Lock()
+	s.shutting = true
+	s.mu.Unlock()
 }
 
-// terminateAll sends SIGTERM to all running operations, waits for them
+// terminateForShutdown sends SIGTERM to all running operations, waits for them
 // to complete until the shared deadline, then force-kills any that remain.
 // The killContainer callback (may be nil) is called for run operations
 // that have a cidfile, to perform daemon-side container cleanup before
@@ -244,18 +244,18 @@ func (r *operationRegistry) setShuttingDown() {
 // For daemon shutdown, the caller's context deadline is the authoritative
 // absolute deadline. All operations share this deadline. Force cleanup
 // runs concurrently for all remaining operations.
-func (r *operationRegistry) terminateAll(ctx context.Context, killContainer func(context.Context, string)) {
-	r.terminateAllOps(ctx, nil, killContainer, terminationShutdown, true)
+func (s *operationSupervisor) terminateForShutdown(ctx context.Context, killContainer func(context.Context, string)) {
+	s.terminateOperations(ctx, nil, killContainer, terminationShutdown, true)
 }
 
-// terminateOne cancels a single operation by ID.
+// cancel cancels a single operation by ID.
 // Returns nil if the operation was found and cancellation initiated.
 // Returns "not_found" if the operation does not exist.
 // Returns "already_terminal" if the operation is already completed.
-func (r *operationRegistry) terminateOne(id string, killContainer func(context.Context, string)) error {
-	r.mu.RLock()
-	op, ok := r.ops[id]
-	r.mu.RUnlock()
+func (s *operationSupervisor) cancel(id string, killContainer func(context.Context, string)) error {
+	s.mu.RLock()
+	op, ok := s.ops[id]
+	s.mu.RUnlock()
 	if !ok {
 		return fmt.Errorf("not_found")
 	}
@@ -267,12 +267,12 @@ func (r *operationRegistry) terminateOne(id string, killContainer func(context.C
 	}
 	op.mu.Unlock()
 
-	r.terminateAllOps(context.Background(), op, killContainer, terminationCancelled, false)
+	s.terminateOperations(context.Background(), op, killContainer, terminationCancelled, false)
 	return nil
 }
 
-// terminateAllOps is the shared termination primitive used by both
-// terminateAll (shutdown) and terminateOne (explicit cancel).
+// terminateOperations is the shared termination primitive used by both
+// terminateForShutdown (shutdown) and cancel (explicit cancel).
 // If targetOp is nil, all operations are terminated (shutdown).
 // If targetOp is non-nil, only that operation is terminated (cancel).
 // reason distinguishes shutdown from explicit cancel for result semantics.
@@ -282,10 +282,10 @@ func (r *operationRegistry) terminateOne(id string, killContainer func(context.C
 //	  graceful SIGTERM starts immediately. Force cleanup runs concurrently
 //	  for all remaining operations under the same deadline.
 //	cancel: per-operation bounded cleanup with a fresh force-cleanup budget.
-func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *operation, killContainer func(context.Context, string), reason terminationReason, isShutdown bool) {
+func (s *operationSupervisor) terminateOperations(ctx context.Context, targetOp *operation, killContainer func(context.Context, string), reason terminationReason, isShutdown bool) {
 	// Normalize context: if the caller did not supply a deadline, create
 	// a bounded termination context so that all wait paths are guaranteed
-	// to be bounded. This prevents unbounded waits when terminateOne
+	// to be bounded. This prevents unbounded waits when cancel
 	// passes context.Background().
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
@@ -293,16 +293,16 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 		defer cancel()
 	}
 
-	r.mu.RLock()
+	s.mu.RLock()
 	var ops []*operation
 	if targetOp != nil {
 		ops = []*operation{targetOp}
 	} else {
-		for _, op := range r.ops {
+		for _, op := range s.ops {
 			ops = append(ops, op)
 		}
 	}
-	r.mu.RUnlock()
+	s.mu.RUnlock()
 
 	// Determine force deadline and graceful wait end.
 	// For shutdown: the root deadline is authoritative.
@@ -380,7 +380,7 @@ func (r *operationRegistry) terminateAllOps(ctx context.Context, targetOp *opera
 				completed = append(completed, op)
 			case <-ctx.Done():
 				// Deadline exceeded: legacy sequential force cleanup.
-				r.forceCleanupSequential(op, killContainer)
+				s.forceCleanupSequential(op, killContainer)
 			}
 		}
 	}
@@ -416,7 +416,7 @@ forceCleanup:
 
 // forceCleanupSequential performs sequential force cleanup for a single
 // operation using a per-operation force-cleanup deadline. Used by cancel mode.
-func (r *operationRegistry) forceCleanupSequential(op *operation, killContainer func(context.Context, string)) {
+func (s *operationSupervisor) forceCleanupSequential(op *operation, killContainer func(context.Context, string)) {
 	op.mu.Lock()
 	if op.forceOwned {
 		forceDone := op.forceDone
@@ -686,8 +686,8 @@ func startOperationProcess(cmd *exec.Cmd, op *operation) operationStartResult {
 	cmd.Stdout = op.LogBuffer
 	cmd.Stderr = op.LogBuffer
 
-	// Start the process under op.mu so terminateAll can synchronize:
-	// either we start the process (started=true), or terminateAll marks
+	// Start the process under op.mu so terminateForShutdown can synchronize:
+	// either we start the process (started=true), or terminateForShutdown marks
 	// it as terminated. There is no intermediate state.
 	op.mu.Lock()
 	if op.terminated {
@@ -698,7 +698,7 @@ func startOperationProcess(cmd *exec.Cmd, op *operation) operationStartResult {
 	op.StartedAt = &startTime
 	op.cmd = cmd
 
-	// cmd.Start() is called while holding op.mu so terminateAll cannot
+	// cmd.Start() is called while holding op.mu so terminateForShutdown cannot
 	// race between checking started and setting terminated.
 	err := cmd.Start()
 	op.started = err == nil

@@ -428,7 +428,7 @@ func TestErrorContractRequireSessionNotFoundStill401(t *testing.T) {
 
 func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -457,9 +457,9 @@ func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -618,7 +618,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -658,9 +658,9 @@ func TestDockerErrorLogBuild(t *testing.T) {
 		t.Fatalf("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatalf("operation %s not found in registry", opID)
+		t.Fatalf("operation %s not found in supervisor", opID)
 	}
 	op.Wait()
 
@@ -784,7 +784,7 @@ func TestDockerErrorLogRun(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -818,9 +818,9 @@ func TestDockerErrorLogRun(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 

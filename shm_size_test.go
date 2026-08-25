@@ -177,7 +177,7 @@ func TestValidateShmSizeOverflow(t *testing.T) {
 
 func TestRunShmSizeOmitted(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -213,7 +213,7 @@ func TestRunShmSizeOmitted(t *testing.T) {
 
 func TestRunShmSizeEmpty(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -252,7 +252,7 @@ func TestRunShmSizeEmpty(t *testing.T) {
 
 func TestRunShmSizeValid(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -296,7 +296,7 @@ func TestRunShmSizeValid(t *testing.T) {
 
 func TestRunShmSizePlacementBeforeImage(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -395,7 +395,7 @@ func TestRunShmSizeAuditIncluded(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -430,9 +430,9 @@ func TestRunShmSizeAuditIncluded(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -466,7 +466,7 @@ func TestRunShmSizeAuditOmitted(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -498,9 +498,9 @@ func TestRunShmSizeAuditOmitted(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 

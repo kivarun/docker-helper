@@ -42,7 +42,7 @@ func TestReadContainerIDFromCidfile(t *testing.T) {
 
 func TestCidfileCreatedAndCleanedUpOnNormalCompletion(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -82,7 +82,7 @@ func TestCidfileCreatedAndCleanedUpOnNormalCompletion(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -96,7 +96,7 @@ func TestCidfileCreatedAndCleanedUpOnNormalCompletion(t *testing.T) {
 
 func TestCidfileRemovedOnFailedStart(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -127,7 +127,7 @@ func TestCidfileRemovedOnFailedStart(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -160,7 +160,7 @@ func TestKillContainerBestEffortDoesNotPanicOnMissingDocker(t *testing.T) {
 
 func TestCidfileNotExposedInHTTPResponse(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -188,8 +188,8 @@ func TestCidfileNotExposedInHTTPResponse(t *testing.T) {
 // within a bounded context, and performs daemon-side kill when it appears.
 func TestCidfileRaceDelayedPublication(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -201,7 +201,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	var killContainerID string
 	var mu sync.Mutex
 
-	// Fake kill callback passed directly to terminateAll.
+	// Fake kill callback passed directly to terminateForShutdown.
 	fakeKill := func(ctx context.Context, id string) {
 		mu.Lock()
 		killCalled++
@@ -248,7 +248,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := reg.get(opID)
+	op := supervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -265,7 +265,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	}
 
 	// Start shutdown with short deadline to trigger force cleanup.
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 
 	// In a separate goroutine, publish the cidfile after a short delay.
 	// This simulates Docker daemon publishing the container ID after cmd.Start().
@@ -276,7 +276,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 	}()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	reg.terminateAll(shutdownCtx, fakeKill)
+	supervisor.terminateForShutdown(shutdownCtx, fakeKill)
 	cancel()
 
 	// Wait for operation to complete.
@@ -306,8 +306,8 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 // CLI kill and doesn't hang.
 func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -330,22 +330,22 @@ func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := reg.get(opID)
+	op := supervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
 
 	// Start shutdown with very short deadline.
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	startTime := time.Now()
-	reg.terminateAll(shutdownCtx, nil)
+	supervisor.terminateForShutdown(shutdownCtx, nil)
 	cancel()
 	elapsed := time.Since(startTime)
 
-	// terminateAll should not hang — it should complete within the cleanup budget.
+	// terminateForShutdown should not hang — it should complete within the cleanup budget.
 	if elapsed > 5*time.Second {
-		t.Errorf("terminateAll took too long: %v (should be bounded)", elapsed)
+		t.Errorf("terminateForShutdown took too long: %v (should be bounded)", elapsed)
 	}
 
 	// Wait for operation to complete.

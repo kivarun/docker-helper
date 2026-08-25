@@ -661,15 +661,15 @@ func TestAdminTokenRotateInternalErrorDiagnostic(t *testing.T) {
 func TestBuildCleanupCorrelationFields(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Force tryCreate rejection so the cleanup path runs.
-	app.OperationRegistry.shutting = true
+	// Force admit rejection so the cleanup path runs.
+	app.OperationSupervisor.shutting = true
 
 	// Use a staging seam that forces Cleanup() to fail.
 	sentinelErr := errors.New("injected staging cleanup error")
@@ -713,7 +713,7 @@ func TestBuildCleanupCorrelationFields(t *testing.T) {
 			continue
 		}
 		msg, _ := rec["msg"].(string)
-		if !strings.HasPrefix(msg, "staging cleanup failed after tryCreate rejection") {
+		if !strings.HasPrefix(msg, "staging cleanup failed after admit rejection") {
 			continue
 		}
 		foundCleanup = true
@@ -1122,7 +1122,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 	app.Config.Mode = ModeSystem
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -1161,7 +1161,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -1275,7 +1275,7 @@ func TestBuildStagingCleanupCorrelation(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}

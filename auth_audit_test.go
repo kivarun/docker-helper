@@ -457,7 +457,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -485,9 +485,9 @@ func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 

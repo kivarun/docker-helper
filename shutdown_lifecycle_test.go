@@ -15,7 +15,7 @@ import (
 // the operation's forceDeadline is non-zero and equal to the root shutdown deadline.
 // Old code failed this because it used time.Now().Add(defaultForceCleanupTimeout).
 func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
-	app, reg, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupBuildTest(t)
 
 	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".lifecycle_ready")
 	defer os.Remove(readyFile)
@@ -24,13 +24,13 @@ func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 	op := startBuild(t, app, token)
 	waitProcessReady(t, readyFile)
 
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 
 	// Short root deadline (200ms).
 	shutdownDeadline := time.Now().Add(200 * time.Millisecond)
 	shutdownCtx, cancel := context.WithDeadline(context.Background(), shutdownDeadline)
 
-	reg.terminateAll(shutdownCtx, nil)
+	supervisor.terminateForShutdown(shutdownCtx, nil)
 	cancel()
 
 	// Verify: forceDeadline is non-zero and equals the root shutdown deadline.
@@ -55,8 +55,8 @@ func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 // are terminated within one wall-clock shutdown budget, not sequentially.
 func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -79,8 +79,8 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	// Start first operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile1)
 	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "")
-	if !reg.tryCreate(op1) {
-		t.Fatal("tryCreate op1 failed")
+	if !supervisor.admit(op1) {
+		t.Fatal("admit op1 failed")
 	}
 	cmd1 := app.newOperationCmd(context.Background(), "sh", "-c",
 		"trap ':' TERM; touch "+readyFile1+"; while :; do :; done")
@@ -97,8 +97,8 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 	// Start second operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile2)
 	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "")
-	if !reg.tryCreate(op2) {
-		t.Fatal("tryCreate op2 failed")
+	if !supervisor.admit(op2) {
+		t.Fatal("admit op2 failed")
 	}
 	cmd2 := app.newOperationCmd(context.Background(), "sh", "-c",
 		"trap ':' TERM; touch "+readyFile2+"; while :; do :; done")
@@ -128,13 +128,13 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 		t.Fatal("op2 did not become ready")
 	}
 
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 
 	// Short shutdown deadline (300ms).
 	shutdownBudget := 300 * time.Millisecond
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 	start := time.Now()
-	reg.terminateAll(shutdownCtx, nil)
+	supervisor.terminateForShutdown(shutdownCtx, nil)
 	cancel()
 	elapsed := time.Since(start)
 
@@ -169,8 +169,8 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 // gets a fresh deadline.
 func TestShutdownRunContainerCleanup(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -210,9 +210,9 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 		t.Fatalf("start cmd1: %v", err)
 	}
 	op1.cmd = cmd1
-	reg.mu.Lock()
-	reg.ops[op1.ID] = op1
-	reg.mu.Unlock()
+	supervisor.mu.Lock()
+	supervisor.ops[op1.ID] = op1
+	supervisor.mu.Unlock()
 
 	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "")
 	op2.cidfile = cidfile2
@@ -223,9 +223,9 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 		t.Fatalf("start cmd2: %v", err)
 	}
 	op2.cmd = cmd2
-	reg.mu.Lock()
-	reg.ops[op2.ID] = op2
-	reg.mu.Unlock()
+	supervisor.mu.Lock()
+	supervisor.ops[op2.ID] = op2
+	supervisor.mu.Unlock()
 
 	// Wait for both processes to install their SIGTERM trap, so the
 	// graceful phase reliably finds them alive and force cleanup runs.
@@ -244,13 +244,13 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 		op2.fail("docker_run_failed", "docker run failed", &exitCode, nil)
 	}()
 
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 
 	// Short shutdown deadline.
 	shutdownBudget := 300 * time.Millisecond
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 	start := time.Now()
-	reg.terminateAll(shutdownCtx, fakeKill)
+	supervisor.terminateForShutdown(shutdownCtx, fakeKill)
 	cancel()
 	elapsed := time.Since(start)
 

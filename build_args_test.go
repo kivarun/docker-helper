@@ -16,7 +16,7 @@ import (
 
 func TestBuildArgsProducesExpectedArgv(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -78,7 +78,7 @@ func TestBuildArgsProducesExpectedArgv(t *testing.T) {
 
 func TestBuildArgsDeterministicOrder(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -141,7 +141,7 @@ func TestBuildArgsDeterministicOrder(t *testing.T) {
 
 func TestBuildArgsEmptyValue(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -191,7 +191,7 @@ func TestBuildArgsEmptyValue(t *testing.T) {
 
 func TestBuildArgsInvalidKeyRejected(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -238,7 +238,7 @@ func TestBuildArgsInvalidKeyRejected(t *testing.T) {
 
 func TestBuildArgsOmittedPreservesBehavior(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -286,7 +286,7 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -328,7 +328,7 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}

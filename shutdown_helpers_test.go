@@ -12,12 +12,12 @@ import (
 	"time"
 )
 
-// setupBuildTest creates an app, registry, session and Dockerfile for build tests.
-func setupBuildTest(t *testing.T) (*App, *operationRegistry, *CreatedSession, string) {
+// setupBuildTest creates an app, supervisor, session and Dockerfile for build tests.
+func setupBuildTest(t *testing.T) (*App, *operationSupervisor, *CreatedSession, string) {
 	t.Helper()
 	app := newTestAppWithAuth(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -32,7 +32,7 @@ func setupBuildTest(t *testing.T) (*App, *operationRegistry, *CreatedSession, st
 	// Default staging seam: create a minimal staging directory with the Dockerfile.
 	setupStagingSeam(t, app)
 
-	return app, reg, result, result.Token
+	return app, supervisor, result, result.Token
 }
 
 // startBuild starts a build request and returns the operation.
@@ -57,9 +57,9 @@ func startBuild(t *testing.T, app *App, token string) *operation {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	return op
 }
@@ -81,7 +81,7 @@ func startBuildConcurrent(t *testing.T, app *App, token string) (*httptest.Respo
 		var resp map[string]any
 		if err := json.NewDecoder(w.Body).Decode(&resp); err == nil {
 			if opID, ok := resp["operation_id"].(string); ok {
-				opCh <- app.OperationRegistry.get(opID)
+				opCh <- app.OperationSupervisor.lookup(opID)
 			}
 		}
 	}()

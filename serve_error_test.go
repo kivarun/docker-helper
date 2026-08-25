@@ -13,14 +13,14 @@ import (
 
 // TestServeErrorPathDrainsAndClosesGate verifies that when server.Serve()
 // returns an error without a shutdown signal, the daemon:
-//  1. closes the operation gate automatically (no manual setShuttingDown);
+//  1. closes the operation gate automatically (no manual beginShutdown);
 //  2. drains in-flight HTTP connections;
 //  3. returns the original Serve error.
 func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := dir + "/test.sock"
 
-	reg := newOperationRegistry()
+	supervisor := newOperationSupervisor()
 
 	// Track whether the shutdown callback was invoked.
 	var callbackCalled atomic.Bool
@@ -64,7 +64,7 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	go func() {
 		sc, scancel, dd, e := serveWithShutdownMulti(signalCtx, server, listener, nil, 3*time.Second, func() {
 			callbackCalled.Store(true)
-			reg.setShuttingDown()
+			supervisor.beginShutdown()
 		})
 		resultCh <- result{sc, scancel, dd, e}
 	}()
@@ -106,8 +106,8 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 
 	// Verify that the operation gate is now closed.
 	op := newBuildOperation("test_session", "example:test", ".", "Dockerfile", 1024, "")
-	if reg.tryCreate(op) {
-		t.Error("tryCreate should fail after shutdown callback closes gate")
+	if supervisor.admit(op) {
+		t.Error("admit should fail after shutdown callback closes gate")
 	}
 
 	// Verify that drain is still in progress (handler hasn't finished yet).

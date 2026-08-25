@@ -109,12 +109,12 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.OperationRegistry != nil {
-		if !a.OperationRegistry.tryCreate(op) {
+	if a.OperationSupervisor != nil {
+		if !a.OperationSupervisor.admit(op) {
 			// Cleanup staging before releasing lease.
 			cleanupErr := staged.Cleanup()
 			if cleanupErr != nil {
-				opLog(ctx).Error("staging cleanup failed after tryCreate rejection — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
+				opLog(ctx).Error("staging cleanup failed after admit rejection — MAC lease intentionally retained because workspace-dependent cleanup did not complete",
 					slog.String("operation", "build"),
 					slog.String("operation_id", op.ID),
 					slog.String("error", cleanupErr.Error()),
@@ -126,7 +126,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			writeOperationRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
 			return
 		}
-		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
 
 	// Lease is now associated with the registered operation; it will be
@@ -271,13 +271,13 @@ func (a *App) waitBuildCompletion(op *operation, started time.Time) {
 }
 
 // operationForSession looks up an operation by ID and verifies it belongs
-// to the given session. Returns nil if the registry is nil, the operation
+// to the given session. Returns nil if the supervisor is nil, the operation
 // does not exist, or it belongs to a different session.
 func (a *App) operationForSession(sessionID, operationID string) *operation {
-	if a.OperationRegistry == nil {
+	if a.OperationSupervisor == nil {
 		return nil
 	}
-	op := a.OperationRegistry.get(operationID)
+	op := a.OperationSupervisor.lookup(operationID)
 	if op == nil {
 		return nil
 	}
@@ -303,8 +303,8 @@ func (a *App) handleOperationStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := a.getConfig()
-	if a.OperationRegistry != nil {
-		a.OperationRegistry.cleanup(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
+	if a.OperationSupervisor != nil {
+		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
 	}
 
 	op.mu.Lock()
@@ -404,7 +404,7 @@ func (a *App) handleOperationCancel(w http.ResponseWriter, r *http.Request) {
 	op.mu.Unlock()
 
 	// Initiate cancellation and wait for completion.
-	if err := a.OperationRegistry.terminateOne(opID, a.killContainerBestEffort); err != nil {
+	if err := a.OperationSupervisor.cancel(opID, a.killContainerBestEffort); err != nil {
 		if err.Error() == "not_found" {
 			writeError(ctx, w, http.StatusNotFound, "operation_not_found", "operation not found")
 			return

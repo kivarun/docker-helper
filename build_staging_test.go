@@ -95,10 +95,10 @@ func TestBuildStagingErrorDoesNotRunDocker(t *testing.T) {
 	}
 }
 
-// TestBuildTryCreateRejectCleansStaging verifies that when tryCreate
+// TestBuildAdmitRejectCleansStaging verifies that when admit
 // rejects the operation, the staging directory is cleaned up.
-func TestBuildTryCreateRejectCleansStaging(t *testing.T) {
-	app, reg, _, token := setupBuildTest(t)
+func TestBuildAdmitRejectCleansStaging(t *testing.T) {
+	app, supervisor, _, token := setupBuildTest(t)
 
 	var cleanupPath string
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
@@ -127,7 +127,7 @@ func TestBuildTryCreateRejectCleansStaging(t *testing.T) {
 		}, nil
 	}
 
-	reg.setShuttingDown()
+	supervisor.beginShutdown()
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -144,7 +144,7 @@ func TestBuildTryCreateRejectCleansStaging(t *testing.T) {
 	// Verify staging directory was cleaned up.
 	if cleanupPath != "" {
 		if _, err := os.Stat(cleanupPath); err == nil {
-			t.Error("staging directory should be cleaned up after tryCreate rejection")
+			t.Error("staging directory should be cleaned up after admit rejection")
 		}
 	}
 }
@@ -202,7 +202,7 @@ func TestBuildStartErrorCleansStaging(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -387,7 +387,7 @@ func TestBuildShutdownCleansStaging(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -396,8 +396,8 @@ func TestBuildShutdownCleansStaging(t *testing.T) {
 	waitProcessReady(t, readyFile)
 
 	// Cancel the operation.
-	if err := app.OperationRegistry.terminateOne(opID, app.killContainerBestEffort); err != nil {
-		t.Fatalf("terminateOne: %v", err)
+	if err := app.OperationSupervisor.cancel(opID, app.killContainerBestEffort); err != nil {
+		t.Fatalf("cancel: %v", err)
 	}
 
 	// Release the process so it can exit.
@@ -516,7 +516,7 @@ func TestBuildLifecycleWithStaging(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -590,19 +590,19 @@ func TestBuildAuditWithStaging(t *testing.T) {
 }
 
 // TestBuildStagingErrorNoOperationRegistered verifies that when staging
-// fails, no operation is registered in the registry.
+// fails, no operation is registered in the supervisor.
 func TestBuildStagingErrorNoOperationRegistered(t *testing.T) {
-	app, reg, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupBuildTest(t)
 	app.StageBuildContextFn = func(ctx context.Context, ws, cpath, dfrel, rdir, opID string) (*stagedBuildContext, error) {
 		return nil, os.ErrInvalid
 	}
 
 	initialCount := 0
-	reg.mu.RLock()
-	for range reg.ops {
+	supervisor.mu.RLock()
+	for range supervisor.ops {
 		initialCount++
 	}
-	reg.mu.RUnlock()
+	supervisor.mu.RUnlock()
 
 	req := newBuildRequest(map[string]any{
 		"context":    ".",
@@ -616,9 +616,9 @@ func TestBuildStagingErrorNoOperationRegistered(t *testing.T) {
 		t.Errorf("expected %d, got %d", http.StatusInternalServerError, w.Code)
 	}
 
-	reg.mu.RLock()
-	finalCount := len(reg.ops)
-	reg.mu.RUnlock()
+	supervisor.mu.RLock()
+	finalCount := len(supervisor.ops)
+	supervisor.mu.RUnlock()
 
 	if finalCount != initialCount {
 		t.Errorf("no operation should be registered after staging error: had %d, now %d", initialCount, finalCount)
@@ -846,7 +846,7 @@ func TestStagedCleanupErrorLogged(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -891,7 +891,7 @@ func TestBuildCleanupOnErrorPreservesSemantics(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -949,7 +949,7 @@ func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -957,8 +957,8 @@ func TestBuildCancelCleanupErrorPreservesResult(t *testing.T) {
 	waitProcessReady(t, readyFile)
 
 	// Cancel the operation.
-	if err := app.OperationRegistry.terminateOne(opID, app.killContainerBestEffort); err != nil {
-		t.Fatalf("terminateOne: %v", err)
+	if err := app.OperationSupervisor.cancel(opID, app.killContainerBestEffort); err != nil {
+		t.Fatalf("cancel: %v", err)
 	}
 
 	if err := os.WriteFile(releaseFile, nil, 0o644); err != nil {
@@ -1020,7 +1020,7 @@ func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -1030,7 +1030,7 @@ func TestBuildShutdownCleanupErrorPreservesResult(t *testing.T) {
 	// Simulate daemon shutdown.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+	app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 
 	if err := os.WriteFile(releaseFile, nil, 0o644); err != nil {
 		t.Fatalf("create release file: %v", err)

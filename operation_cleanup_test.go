@@ -27,83 +27,83 @@ func newTestOperation(t *testing.T, state operationState, completedAt time.Time)
 	return op
 }
 
-func TestCleanupRemovesExpired(t *testing.T) {
-	reg := newOperationRegistry()
+func TestPruneCompletedRemovesExpired(t *testing.T) {
+	supervisor := newOperationSupervisor()
 
 	now := time.Now()
 	expired := newTestOperation(t, operationSucceeded, now.Add(-11*time.Minute))
 	fresh := newTestOperation(t, operationSucceeded, now.Add(-1*time.Minute))
 	running := newTestOperation(t, operationRunning, time.Time{})
 
-	reg.tryCreate(expired)
-	reg.tryCreate(fresh)
-	reg.tryCreate(running)
+	supervisor.admit(expired)
+	supervisor.admit(fresh)
+	supervisor.admit(running)
 
-	reg.cleanup(10*time.Minute, 200)
+	supervisor.pruneCompleted(10*time.Minute, 200)
 
-	if reg.get(expired.ID) != nil {
+	if supervisor.lookup(expired.ID) != nil {
 		t.Error("expired operation should be removed")
 	}
-	if reg.get(fresh.ID) == nil {
+	if supervisor.lookup(fresh.ID) == nil {
 		t.Error("fresh operation should remain")
 	}
-	if reg.get(running.ID) == nil {
+	if supervisor.lookup(running.ID) == nil {
 		t.Error("running operation should remain")
 	}
 }
 
-func TestCleanupCapsCompleted(t *testing.T) {
-	reg := newOperationRegistry()
+func TestPruneCompletedCapsCompleted(t *testing.T) {
+	supervisor := newOperationSupervisor()
 
 	now := time.Now()
 	ops := make([]*operation, 5)
 	for i := range ops {
 		ops[i] = newTestOperation(t, operationSucceeded, now.Add(time.Duration(i)*time.Minute))
-		reg.tryCreate(ops[i])
+		supervisor.admit(ops[i])
 	}
 
-	reg.cleanup(10*time.Minute, 3)
+	supervisor.pruneCompleted(10*time.Minute, 3)
 
 	// Oldest 2 should be removed, newest 3 remain.
 	for i := 0; i < 2; i++ {
-		if reg.get(ops[i].ID) != nil {
+		if supervisor.lookup(ops[i].ID) != nil {
 			t.Errorf("operation %d should be removed by cap", i)
 		}
 	}
 	for i := 2; i < 5; i++ {
-		if reg.get(ops[i].ID) == nil {
+		if supervisor.lookup(ops[i].ID) == nil {
 			t.Errorf("operation %d should remain", i)
 		}
 	}
 }
 
-func TestCleanupMaxCompletedZero(t *testing.T) {
-	reg := newOperationRegistry()
+func TestPruneCompletedMaxCompletedZero(t *testing.T) {
+	supervisor := newOperationSupervisor()
 
 	now := time.Now()
 	op1 := newTestOperation(t, operationSucceeded, now.Add(-1*time.Minute))
 	op2 := newTestOperation(t, operationSucceeded, now.Add(-2*time.Minute))
 	running := newTestOperation(t, operationRunning, time.Time{})
 
-	reg.tryCreate(op1)
-	reg.tryCreate(op2)
-	reg.tryCreate(running)
+	supervisor.admit(op1)
+	supervisor.admit(op2)
+	supervisor.admit(running)
 
-	reg.cleanup(10*time.Minute, 0)
+	supervisor.pruneCompleted(10*time.Minute, 0)
 
-	if reg.get(op1.ID) != nil {
+	if supervisor.lookup(op1.ID) != nil {
 		t.Error("completed operation should be removed when maxCompleted=0")
 	}
-	if reg.get(op2.ID) != nil {
+	if supervisor.lookup(op2.ID) != nil {
 		t.Error("completed operation should be removed when maxCompleted=0")
 	}
-	if reg.get(running.ID) == nil {
+	if supervisor.lookup(running.ID) == nil {
 		t.Error("running operation should remain when maxCompleted=0")
 	}
 }
 
-func TestCleanupConcurrency(t *testing.T) {
-	reg := newOperationRegistry()
+func TestPruneCompletedConcurrency(t *testing.T) {
+	supervisor := newOperationSupervisor()
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -120,7 +120,7 @@ func TestCleanupConcurrency(t *testing.T) {
 			default:
 			}
 			op := newTestOperation(t, operationRunning, time.Time{})
-			if reg.tryCreate(op) {
+			if supervisor.admit(op) {
 				// Complete the operation.
 				op.mu.Lock()
 				now := time.Now()
@@ -134,7 +134,7 @@ func TestCleanupConcurrency(t *testing.T) {
 		}
 	}()
 
-	// Cleaner: continuously run cleanup.
+	// Pruner: continuously run retention pruning.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -144,7 +144,7 @@ func TestCleanupConcurrency(t *testing.T) {
 				return
 			default:
 			}
-			reg.cleanup(50*time.Millisecond, 50)
+			supervisor.pruneCompleted(50*time.Millisecond, 50)
 			atomic.AddInt64(&cleanerCount, 1)
 		}
 	}()

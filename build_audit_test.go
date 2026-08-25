@@ -24,9 +24,9 @@ func waitBuild(t *testing.T, app *App, w *httptest.ResponseRecorder) {
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatalf("operation %s not found in registry", opID)
+		t.Fatalf("operation %s not found in supervisor", opID)
 	}
 	op.Wait()
 }
@@ -35,7 +35,7 @@ func TestBuildStartContainsFields(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -92,7 +92,7 @@ func TestBuildFinishSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -143,7 +143,7 @@ func TestBuildFinishErrorWithExitCode(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -196,7 +196,7 @@ func TestBuildAuditNoSuccessOutput(t *testing.T) {
 	const buildOutput = "Step 1/1 : FROM alpine\n ---> somehash\nSuccessfully built abc123\n"
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -248,7 +248,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 	const buildOutput = "ERROR: failed to solve: something went wrong\n"
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -296,7 +296,7 @@ func TestBuildAuditNoErrorOutput(t *testing.T) {
 
 func TestBuildDockerArgsUnchanged(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

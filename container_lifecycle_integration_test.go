@@ -123,7 +123,7 @@ func TestShmSizeIntegration(t *testing.T) {
 	dockerAvailable(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -220,9 +220,9 @@ func startRunOperation(t *testing.T, app *App, token string, body map[string]any
 	if !ok || opID == "" {
 		t.Fatal("expected operation_id in response")
 	}
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	return op
 }
@@ -236,7 +236,7 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 	dockerAvailable(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -269,9 +269,9 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 	t.Logf("container is running: %s", containerID)
 
 	// Trigger graceful shutdown with generous timeout.
-	app.OperationRegistry.setShuttingDown()
+	app.OperationSupervisor.beginShutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	app.OperationRegistry.terminateAll(shutdownCtx, app.killContainerBestEffort)
+	app.OperationSupervisor.terminateForShutdown(shutdownCtx, app.killContainerBestEffort)
 	cancel()
 
 	// Wait for the operation to complete.
@@ -302,7 +302,7 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 	dockerAvailable(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -358,9 +358,9 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 	t.Log("container SIGTERM trap confirmed via readiness marker")
 
 	// Trigger shutdown with a short deadline so the force-kill path is exercised.
-	app.OperationRegistry.setShuttingDown()
+	app.OperationSupervisor.beginShutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	app.OperationRegistry.terminateAll(shutdownCtx, app.killContainerBestEffort)
+	app.OperationSupervisor.terminateForShutdown(shutdownCtx, app.killContainerBestEffort)
 	cancel()
 
 	// Wait for the operation to complete.
@@ -373,7 +373,7 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 	t.Logf("operation state: %s, result_code: %v, exit_code: %v", op.State, op.ResultCode, op.ExitCode)
 
 	// KEY CHECK: container should NOT be running after daemon-side cleanup.
-	// The fix ensures that terminateAll reads the container ID from the cidfile
+	// The fix ensures that terminateForShutdown reads the container ID from the cidfile
 	// and executes "docker kill" before force-killing the docker run CLI.
 	//
 	// Wait for the container to be gone (bounded polling, no arbitrary sleep).
@@ -395,7 +395,7 @@ func TestContainerLifecycleGracefulCancel(t *testing.T) {
 	dockerAvailable(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -476,7 +476,7 @@ func TestContainerLifecycleForcedCancel(t *testing.T) {
 	dockerAvailable(t)
 
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

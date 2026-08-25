@@ -19,12 +19,12 @@ import (
 var ErrStaleRotation = errors.New("stale admin token rotation")
 
 type App struct {
-	mu                 sync.RWMutex
-	Config             *Config
-	DB                 *sql.DB
-	AdminTokenHash     [sha256.Size]byte
-	ExecCommandContext func(context.Context, string, ...string) *exec.Cmd
-	OperationRegistry  *operationRegistry
+	mu                  sync.RWMutex
+	Config              *Config
+	DB                  *sql.DB
+	AdminTokenHash      [sha256.Size]byte
+	ExecCommandContext  func(context.Context, string, ...string) *exec.Cmd
+	OperationSupervisor *operationSupervisor
 	// PinWorkspaceMountSourceFn is a test seam for the inode-pinning primitive.
 	// Production default calls the real pinWorkspaceMountSource; tests can return
 	// a fake pinnedMount with controlled Cleanup behavior.

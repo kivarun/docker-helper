@@ -22,7 +22,7 @@ func (e *mockExitError) Unwrap() error { return nil }
 
 func TestRunNonZeroExit(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -58,9 +58,9 @@ func TestRunNonZeroExit(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -102,7 +102,7 @@ func TestRunNonZeroExit(t *testing.T) {
 
 func TestRunNonZeroExitCodeZero(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -137,9 +137,9 @@ func TestRunNonZeroExitCodeZero(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -150,7 +150,7 @@ func TestRunNonZeroExitCodeZero(t *testing.T) {
 
 func TestRunDockerErrorStill500(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -185,9 +185,9 @@ func TestRunDockerErrorStill500(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -205,7 +205,7 @@ func TestRunDockerErrorStill500(t *testing.T) {
 
 func TestRunSuccessNoExitCode(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -240,9 +240,9 @@ func TestRunSuccessNoExitCode(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -275,7 +275,7 @@ func TestExtractExitCodeNil(t *testing.T) {
 
 func TestRunNonZeroExitCode125(t *testing.T) {
 	app := newTestAppWithAuth(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -310,9 +310,9 @@ func TestRunNonZeroExitCode125(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 

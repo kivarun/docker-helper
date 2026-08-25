@@ -164,46 +164,52 @@ principal_allowed_roots persistence are unchanged.
 
 ### P1-3. operationRegistry is the operation lifecycle supervisor
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-The type owns more than lookup/storage:
+The type has been renamed to **operationSupervisor** to reflect its actual
+responsibility as the in-memory lifecycle owner for asynchronous build/run
+operations. The supervisor owns:
 
-- admission and the shutdown gate through **tryCreate**;
-- retention pruning through **cleanup**;
-- shutdown transition through **setShuttingDown**;
-- cancellation and process/container cleanup through **terminateOne**,
-  **terminateAll**, and **terminateAllOps**.
+- operation admission through **admit**;
+- lookup of live/retained operations through **lookup**;
+- completed-operation retention pruning through **pruneCompleted**;
+- the daemon shutdown admission gate through **beginShutdown**;
+- explicit operation cancellation through **cancel**;
+- daemon-shutdown termination orchestration through **terminateForShutdown**
+  and the shared primitive **terminateOperations**.
 
-Evidence:
-[operation.go:138-230](../operation.go#L138-L230),
-[operation.go:232-415](../operation.go#L232-L415),
-[main.go:333-346](../main.go#L333-L346).
+**Canonical vocabulary**
 
-**Actual semantic responsibility**
+- `operationSupervisor` — the lifecycle supervisor type
+- `newOperationSupervisor` — constructor
+- `App.OperationSupervisor` — App field
+- `admit` — atomic admission gate
+- `lookup` — read-only operation lookup
+- `pruneCompleted` — retention pruning
+- `beginShutdown` — close admission for future operations
+- `cancel` — explicit user/API cancellation
+- `terminateForShutdown` — daemon-shutdown termination
+- `terminateOperations` — shared termination primitive
 
-It is the in-memory supervisor and lifecycle owner for asynchronous build/run
-operations.
+**Previous names (resolved)**
 
-**Why the vocabulary is dangerous**
+- ~~operationRegistry~~ → operationSupervisor
+- ~~newOperationRegistry~~ → newOperationSupervisor
+- ~~OperationRegistry~~ → OperationSupervisor
+- ~~tryCreate~~ → admit
+- ~~get~~ → lookup
+- ~~cleanup~~ → pruneCompleted
+- ~~setShuttingDown~~ → beginShutdown
+- ~~terminateOne~~ → cancel
+- ~~terminateAll~~ → terminateForShutdown
+- ~~terminateAllOps~~ → terminateOperations
 
-Registry suggests a passive map and encourages lifecycle changes to be
-implemented beside it. The current type owns admission, retention, shutdown,
-cancellation, and force cleanup.
+**Compatibility**
 
-**Preferred canonical vocabulary**
-
-- operationSupervisor;
-- admit;
-- lookup;
-- pruneCompleted;
-- beginShutdown;
-- cancel;
-- terminateForShutdown.
-
-**Compatibility and narrow batch**
-
-All affected names are internal. Perform one mechanical rename across code and
-tests without changing the termination algorithm.
+Public /operations API vocabulary, Operation JSON schema, operation IDs,
+cancellation HTTP status/result behavior, retention semantics, shutdown
+timeout semantics, signal ordering, process/container cleanup, MAC leases,
+mount pin cleanup, and audit schema are all unchanged.
 
 ### P1-4. Original and pinned mount paths share HostPath
 

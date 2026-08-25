@@ -16,7 +16,7 @@ import (
 // cmd.Start() fails, POST /build returns 201 with a failed operation.
 func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -54,9 +54,9 @@ func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
 		t.Fatal("expected operation_id in response")
 	}
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 
 	op.Wait()
@@ -73,7 +73,7 @@ func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
 // while the command is still running.
 func TestBuildLiveOutput(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -117,9 +117,9 @@ func TestBuildLiveOutput(t *testing.T) {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatalf("operation %s not found in registry", opID)
+		t.Fatalf("operation %s not found in supervisor", opID)
 	}
 
 	// Wait for the process to signal that it has produced output.
@@ -168,7 +168,7 @@ func TestBuildLiveOutput(t *testing.T) {
 // TestBuildSuccessTransition proves running -> succeeded transition.
 func TestBuildSuccessTransition(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -202,7 +202,7 @@ func TestBuildSuccessTransition(t *testing.T) {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	op.Wait()
 
 	if op.State != operationSucceeded {
@@ -222,7 +222,7 @@ func TestBuildSuccessTransition(t *testing.T) {
 // TestBuildNonZeroExitTransition proves running -> failed with exit code.
 func TestBuildNonZeroExitTransition(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -256,7 +256,7 @@ func TestBuildNonZeroExitTransition(t *testing.T) {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	op.Wait()
 
 	if op.State != operationFailed {
@@ -276,7 +276,7 @@ func TestAuditFinishEmittedOnce(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -325,7 +325,7 @@ func TestAuditFinishEmittedOnce(t *testing.T) {
 // io.MultiReader(stdout, stderr) approach which could block.
 func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -361,7 +361,7 @@ func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	op.Wait()
 
 	if op.State != operationSucceeded {

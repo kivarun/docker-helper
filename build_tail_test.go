@@ -19,8 +19,8 @@ import (
 // could close StdoutPipe/StderrPipe before io.Copy goroutines finished reading.
 func TestBuildTailOutputNotLost(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	reg := newOperationRegistry()
-	app.OperationRegistry = reg
+	supervisor := newOperationSupervisor()
+	app.OperationSupervisor = supervisor
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -57,7 +57,7 @@ func TestBuildTailOutputNotLost(t *testing.T) {
 	}
 	opID, _ := resp["operation_id"].(string)
 
-	op := reg.get(opID)
+	op := supervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}

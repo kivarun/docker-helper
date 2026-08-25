@@ -33,7 +33,7 @@ func TestRunImageOptionInjectionRejected(t *testing.T) {
 			auditBuf, _ := setupTestLogging(t)
 
 			app := newTestAppWithAuth(t)
-			app.OperationRegistry = newOperationRegistry()
+			app.OperationSupervisor = newOperationSupervisor()
 
 			result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 			if err != nil {
@@ -69,7 +69,7 @@ func TestRunImageOptionInjectionRejected(t *testing.T) {
 				t.Error("Docker must not be invoked for rejected image")
 			}
 
-			if len(app.OperationRegistry.ops) != 0 {
+			if len(app.OperationSupervisor.ops) != 0 {
 				t.Error("no operation should be registered for rejected image")
 			}
 

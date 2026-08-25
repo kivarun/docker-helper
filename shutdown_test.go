@@ -12,17 +12,17 @@ import (
 // SIGTERM to a running build process, and if the process exits after
 // the signal, force kill is not needed.
 func TestShutdownGracefulSignalsBuild(t *testing.T) {
-	app, reg, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupBuildTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
 	op := startBuild(t, app, token)
 
-	// Mark registry as shutting down and terminate with generous timeout.
-	reg.setShuttingDown()
+	// Mark supervisor as shutting down and terminate with generous timeout.
+	supervisor.beginShutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	startShutdown := time.Now()
-	reg.terminateAll(shutdownCtx, nil)
+	supervisor.terminateForShutdown(shutdownCtx, nil)
 	shutdownDuration := time.Since(startShutdown)
 	cancel()
 
@@ -41,7 +41,7 @@ func TestShutdownGracefulSignalsBuild(t *testing.T) {
 // TestShutdownForceKillsIgnoringSignal tests that a process ignoring
 // graceful SIGTERM is force-killed within the shutdown deadline.
 func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
-	app, reg, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupBuildTest(t)
 
 	// Use a readiness marker so we know the trap is installed.
 	readyFile := filepath.Join(app.Config.AllowedRoots[0], ".process_ready")
@@ -53,19 +53,19 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 	// Wait for the process to signal readiness (installed SIGTERM ignore).
 	waitProcessReady(t, readyFile)
 
-	// Mark registry as shutting down and terminate with short deadline.
-	reg.setShuttingDown()
+	// Mark supervisor as shutting down and terminate with short deadline.
+	supervisor.beginShutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	startShutdown := time.Now()
-	reg.terminateAll(shutdownCtx, nil)
+	supervisor.terminateForShutdown(shutdownCtx, nil)
 	shutdownDuration := time.Since(startShutdown)
 	cancel()
 
-	// With the bounded lifecycle, terminateAll must complete within
+	// With the bounded lifecycle, terminateForShutdown must complete within
 	// the shutdown deadline (no additional fixed wait beyond deadline).
 	if shutdownDuration > 750*time.Millisecond {
-		t.Errorf("terminateAll exceeded shutdown budget: took %v (deadline 500ms)", shutdownDuration)
+		t.Errorf("terminateForShutdown exceeded shutdown budget: took %v (deadline 500ms)", shutdownDuration)
 	}
 
 	// The operation should have been force-killed.
@@ -79,16 +79,16 @@ func TestShutdownForceKillsIgnoringSignal(t *testing.T) {
 // completion goroutine properly reaps the process and closes op.done
 // even after force kill.
 func TestShutdownOperationCompletionGoroutineReaps(t *testing.T) {
-	app, reg, _, token := setupBuildTest(t)
+	app, supervisor, _, token := setupBuildTest(t)
 	app.ExecCommandContext = makeSleepCmd()
 
 	op := startBuild(t, app, token)
 
-	// Mark registry as shutting down and terminate with very short deadline.
-	reg.setShuttingDown()
+	// Mark supervisor as shutting down and terminate with very short deadline.
+	supervisor.beginShutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	reg.terminateAll(shutdownCtx, nil)
+	supervisor.terminateForShutdown(shutdownCtx, nil)
 	cancel()
 
 	// op.done should be closed by the completion goroutine.

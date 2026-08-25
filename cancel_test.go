@@ -19,7 +19,7 @@ import (
 // terminates the process and returns result_code=cancelled.
 func TestCancelRunningBuild(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -52,10 +52,10 @@ func TestCancelRunningBuild(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&buildResp)
 	opID := buildResp["operation_id"].(string)
 
-	// Verify the operation is in the registry.
-	op := app.OperationRegistry.get(opID)
+	// Verify the operation is in the supervisor.
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatalf("operation %s not found in registry after build", opID)
+		t.Fatalf("operation %s not found in supervisor after build", opID)
 	}
 	if op.SessionID != result.Session.ID {
 		t.Fatalf("operation session ID %s != result session ID %s", op.SessionID, result.Session.ID)
@@ -79,10 +79,10 @@ func TestCancelRunningBuild(t *testing.T) {
 	// Cancel the operation.
 	t.Logf("cancelling operation %s (session %s)", opID, result.Session.ID)
 
-	// Verify the operation is still in the registry.
-	opBeforeCancel := app.OperationRegistry.get(opID)
+	// Verify the operation is still in the supervisor.
+	opBeforeCancel := app.OperationSupervisor.lookup(opID)
 	if opBeforeCancel == nil {
-		t.Fatalf("operation %s not found in registry before cancel", opID)
+		t.Fatalf("operation %s not found in supervisor before cancel", opID)
 	}
 	t.Logf("operation session ID: %s", opBeforeCancel.SessionID)
 
@@ -110,7 +110,7 @@ func TestCancelRunningBuild(t *testing.T) {
 // TestCancelUnknownOperation returns 404 for unknown operation ID.
 func TestCancelUnknownOperation(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -130,7 +130,7 @@ func TestCancelUnknownOperation(t *testing.T) {
 // TestCancelOtherSessionOperation returns 404 for operation belonging to another session.
 func TestCancelOtherSessionOperation(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	session1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -177,7 +177,7 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 // TestCancelPreservesLogs proves that operation logs remain accessible after cancel.
 func TestCancelPreservesLogs(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -205,7 +205,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&buildResp)
 	opID := buildResp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -251,7 +251,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 // audit event with result=cancelled.
 func TestCancelAuditEvent(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -286,16 +286,16 @@ func TestCancelAuditEvent(t *testing.T) {
 	mux.ServeHTTP(cancelW, cancelReq)
 
 	// Verify the operation has result_code=cancelled.
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op.ResultCode == nil || *op.ResultCode != resultCancelled {
 		t.Errorf("expected result_code 'cancelled', got %v", op.ResultCode)
 	}
 }
 
-// TestCancelNoRegistry proves that cancel returns 404 when registry is nil.
-func TestCancelNoRegistry(t *testing.T) {
+// TestCancelNoRegistry proves that cancel returns 404 when supervisor is nil.
+func TestCancelNoSupervisor(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = nil
+	app.OperationSupervisor = nil
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -316,7 +316,7 @@ func TestCancelNoRegistry(t *testing.T) {
 // returns the terminal state without error.
 func TestCancelIdempotent(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -375,7 +375,7 @@ func TestCancelIdempotent(t *testing.T) {
 // cleans up the cidfile.
 func TestCancelRunCidfileCleanup(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -396,7 +396,7 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&runResp)
 	opID := runResp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	cidfile := op.cidfile
 
 	cancelReq := httptest.NewRequest("POST", "/operations/"+opID+"/cancel", nil)
@@ -431,7 +431,7 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 // does not produce result_code=cancelled for build operations.
 func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -459,7 +459,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&buildResp)
 	opID := buildResp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -475,10 +475,10 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Simulate daemon shutdown by calling terminateAll directly.
+	// Simulate daemon shutdown by calling terminateForShutdown directly.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+	app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 
 	// Wait for the operation to complete.
 	op.Wait()
@@ -500,7 +500,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 // does not produce result_code=cancelled for run operations.
 func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -521,7 +521,7 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&runResp)
 	opID := runResp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -537,10 +537,10 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Simulate daemon shutdown by calling terminateAll directly.
+	// Simulate daemon shutdown by calling terminateForShutdown directly.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+	app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 
 	// Wait for the operation to complete.
 	op.Wait()
@@ -561,10 +561,10 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 // TestTerminationReasonOwnershipCancelFirst proves that when explicit cancel
 // sets the reason first, a subsequent shutdown attempt cannot overwrite it.
 // Uses a synchronization channel to deterministically control ordering:
-// terminateOne acquires op.mu and sets reason, then terminateAll runs.
+// cancel acquires op.mu and sets reason, then terminateForShutdown runs.
 func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -572,11 +572,11 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	}
 
 	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
-	app.OperationRegistry.mu.Lock()
-	app.OperationRegistry.ops[op.ID] = op
-	app.OperationRegistry.mu.Unlock()
+	app.OperationSupervisor.mu.Lock()
+	app.OperationSupervisor.ops[op.ID] = op
+	app.OperationSupervisor.mu.Unlock()
 
-	// Barrier: terminateAll waits until terminateOne has completed.
+	// Barrier: terminateForShutdown waits until cancel has completed.
 	cancelDone := make(chan struct{})
 
 	var wg sync.WaitGroup
@@ -585,7 +585,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 	// Goroutine 1: explicit cancel (runs first).
 	go func() {
 		defer wg.Done()
-		_ = app.OperationRegistry.terminateOne(op.ID, app.killContainerBestEffort)
+		_ = app.OperationSupervisor.cancel(op.ID, app.killContainerBestEffort)
 		close(cancelDone)
 	}()
 
@@ -595,7 +595,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 		<-cancelDone
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+		app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 	}()
 
 	wg.Wait()
@@ -613,10 +613,10 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 // TestTerminationReasonOwnershipShutdownFirst proves that when shutdown
 // sets the reason first, a subsequent explicit cancel cannot overwrite it.
 // Uses a synchronization channel to deterministically control ordering:
-// terminateAll acquires op.mu and sets reason, then terminateOne runs.
+// terminateForShutdown acquires op.mu and sets reason, then cancel runs.
 func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -624,11 +624,11 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	}
 
 	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
-	app.OperationRegistry.mu.Lock()
-	app.OperationRegistry.ops[op.ID] = op
-	app.OperationRegistry.mu.Unlock()
+	app.OperationSupervisor.mu.Lock()
+	app.OperationSupervisor.ops[op.ID] = op
+	app.OperationSupervisor.mu.Unlock()
 
-	// Barrier: terminateOne waits until terminateAll has completed.
+	// Barrier: cancel waits until terminateForShutdown has completed.
 	shutdownDone := make(chan struct{})
 
 	var wg sync.WaitGroup
@@ -639,7 +639,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 		defer wg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		app.OperationRegistry.terminateAll(ctx, app.killContainerBestEffort)
+		app.OperationSupervisor.terminateForShutdown(ctx, app.killContainerBestEffort)
 		close(shutdownDone)
 	}()
 
@@ -647,7 +647,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-shutdownDone
-		_ = app.OperationRegistry.terminateOne(op.ID, app.killContainerBestEffort)
+		_ = app.OperationSupervisor.cancel(op.ID, app.killContainerBestEffort)
 	}()
 
 	wg.Wait()
@@ -670,7 +670,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -760,7 +760,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -847,7 +847,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 // result is preserved (sequential idempotency).
 func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -876,7 +876,7 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&buildResp)
 	opID := buildResp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -917,7 +917,7 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 // overwrite the result to "cancelled".
 func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -927,9 +927,9 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 	// Register an already-terminal build operation with a natural failure.
 	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
 	op.fail("docker_build_failed", "build failed", nil)
-	app.OperationRegistry.mu.Lock()
-	app.OperationRegistry.ops[op.ID] = op
-	app.OperationRegistry.mu.Unlock()
+	app.OperationSupervisor.mu.Lock()
+	app.OperationSupervisor.ops[op.ID] = op
+	app.OperationSupervisor.mu.Unlock()
 
 	// Cancel the already-terminal operation.
 	cancelReq := httptest.NewRequest("POST", "/operations/"+op.ID+"/cancel", nil)
@@ -967,7 +967,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -995,7 +995,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&buildResp)
 	opID := buildResp["operation_id"].(string)
 
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -1105,7 +1105,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -1123,9 +1123,9 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "")
 	op.cidfile = cidfile
 	op.started = true // simulate already-started process
-	app.OperationRegistry.mu.Lock()
-	app.OperationRegistry.ops[op.ID] = op
-	app.OperationRegistry.mu.Unlock()
+	app.OperationSupervisor.mu.Lock()
+	app.OperationSupervisor.ops[op.ID] = op
+	app.OperationSupervisor.mu.Unlock()
 
 	// Count daemon-side cleanup callback invocations.
 	var killCount int32
@@ -1177,7 +1177,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		app.OperationRegistry.terminateOne(op.ID, fakeKillContainer)
+		app.OperationSupervisor.cancel(op.ID, fakeKillContainer)
 	}()
 
 	go func() {
@@ -1185,7 +1185,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 		<-start
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		app.OperationRegistry.terminateAll(ctx, fakeKillContainer)
+		app.OperationSupervisor.terminateForShutdown(ctx, fakeKillContainer)
 	}()
 
 	close(start)
@@ -1254,7 +1254,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 // defaultForceCleanupTimeout.
 func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -1267,9 +1267,9 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	op.forceOwned = true
 	op.forceDone = make(chan struct{})
 	op.forceDeadline = time.Now().Add(200 * time.Millisecond)
-	app.OperationRegistry.mu.Lock()
-	app.OperationRegistry.ops[op.ID] = op
-	app.OperationRegistry.mu.Unlock()
+	app.OperationSupervisor.mu.Lock()
+	app.OperationSupervisor.ops[op.ID] = op
+	app.OperationSupervisor.mu.Unlock()
 
 	// Start a long-running process that survives SIGTERM so the follower
 	// reaches the force phase. The owner is simulated (already claimed).
@@ -1290,13 +1290,13 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 		op.fail("docker_run_failed", "docker run failed", &exitCode, nil)
 	}()
 
-	// Launch the follower via terminateAll with a short context deadline.
+	// Launch the follower via terminateForShutdown with a short context deadline.
 	// With the bounded shutdown model, the force deadline is the context
 	// deadline (50ms), not a fresh defaultForceCleanupTimeout.
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	app.OperationRegistry.terminateAll(ctx, func(context.Context, string) {})
+	app.OperationSupervisor.terminateForShutdown(ctx, func(context.Context, string) {})
 	elapsed := time.Since(start)
 
 	// Clean up.
@@ -1315,7 +1315,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 // does not contain timestamp fields (created_at, started_at, completed_at, duration).
 func TestCancelResponseNoTimestampFields(t *testing.T) {
 	app := newTestAppWithAuthAndStaging(t)
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -1343,7 +1343,7 @@ func TestCancelResponseNoTimestampFields(t *testing.T) {
 	opID := runResp["operation_id"].(string)
 
 	// Wait for the operation to complete.
-	if op := app.OperationRegistry.get(opID); op != nil {
+	if op := app.OperationSupervisor.lookup(opID); op != nil {
 		op.Wait()
 	}
 

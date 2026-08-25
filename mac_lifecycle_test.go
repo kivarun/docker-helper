@@ -1103,10 +1103,10 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		MACCoordinator:    mac,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		MACCoordinator:      mac,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
 	// Create workspace and session.
@@ -1170,9 +1170,9 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
-		t.Fatal("operation not found in registry")
+		t.Fatal("operation not found in supervisor")
 	}
 	op.Wait()
 
@@ -1233,10 +1233,10 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		MACCoordinator:    mac,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		MACCoordinator:      mac,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
 	workspace := filepath.Join(dir, "workspace")
@@ -1294,7 +1294,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -1348,10 +1348,10 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		MACCoordinator:    mac,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		MACCoordinator:      mac,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
 	workspace := filepath.Join(dir, "workspace")
@@ -1427,7 +1427,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -1481,10 +1481,10 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		MACCoordinator:    mac,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		MACCoordinator:      mac,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
 	workspace := filepath.Join(dir, "workspace")
@@ -1556,7 +1556,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	opID, _ := resp["operation_id"].(string)
-	op := app.OperationRegistry.get(opID)
+	op := app.OperationSupervisor.lookup(opID)
 	if op == nil {
 		t.Fatal("operation not found")
 	}
@@ -1572,9 +1572,9 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 }
 
-// TestTryCreateRejectionRunPinsBeforeLease drives handleRun with tryCreate
+// TestAdmitRejectionRunPinsBeforeLease drives handleRun with admit
 // rejection and verifies pins are cleaned up before the lease is released.
-func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
+func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -1611,14 +1611,14 @@ func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		MACCoordinator:    mac,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		MACCoordinator:      mac,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
-	// Force tryCreate rejection.
-	app.OperationRegistry.setShuttingDown()
+	// Force admit rejection.
+	app.OperationSupervisor.beginShutdown()
 
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
@@ -1677,13 +1677,13 @@ func TestTryCreateRejectionRunPinsBeforeLease(t *testing.T) {
 	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 	if leaseCount != 0 {
-		t.Errorf("expected 0 leases after tryCreate rejection, got %d", leaseCount)
+		t.Errorf("expected 0 leases after admit rejection, got %d", leaseCount)
 	}
 }
 
-// TestTryCreateRejectionBuildStagingBeforeLease drives handleBuild with
-// tryCreate rejection and verifies staging is cleaned up before the lease is released.
-func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
+// TestAdmitRejectionBuildStagingBeforeLease drives handleBuild with
+// admit rejection and verifies staging is cleaned up before the lease is released.
+func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -1719,14 +1719,14 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 
 	app := &App{
-		Config:            cfg,
-		DB:                db,
-		MACCoordinator:    mac,
-		OperationRegistry: newOperationRegistry(),
+		Config:              cfg,
+		DB:                  db,
+		MACCoordinator:      mac,
+		OperationSupervisor: newOperationSupervisor(),
 	}
 
-	// Force tryCreate rejection.
-	app.OperationRegistry.setShuttingDown()
+	// Force admit rejection.
+	app.OperationSupervisor.beginShutdown()
 
 	workspace := filepath.Join(dir, "workspace")
 	if err := os.MkdirAll(workspace, 0755); err != nil {
@@ -1794,7 +1794,7 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 
 	// Verify: staging cleanup was called.
 	if !cleanupCalled {
-		t.Error("staging cleanup must be called on tryCreate rejection")
+		t.Error("staging cleanup must be called on admit rejection")
 	}
 
 	// Verify: lease was released after staging cleanup.
@@ -1802,7 +1802,7 @@ func TestTryCreateRejectionBuildStagingBeforeLease(t *testing.T) {
 	leaseCount := len(mac.workspaceUseLeases)
 	mac.mu.Unlock()
 	if leaseCount != 0 {
-		t.Errorf("expected 0 leases after tryCreate rejection, got %d", leaseCount)
+		t.Errorf("expected 0 leases after admit rejection, got %d", leaseCount)
 	}
 }
 

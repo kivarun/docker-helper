@@ -635,9 +635,9 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	// Set up operation registry to prove it remains unchanged.
-	app.OperationRegistry = newOperationRegistry()
-	initialOps := 0 // registry starts empty
+	// Set up supervisor to prove it remains unchanged.
+	app.OperationSupervisor = newOperationSupervisor()
+	initialOps := 0 // supervisor starts empty
 
 	dockerInvoked := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -672,13 +672,13 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 		t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
 	}
 
-	// Verify operation registry was not modified.
+	// Verify supervisor was not modified.
 	// LSM detection must happen before operation registration.
-	app.OperationRegistry.mu.RLock()
-	currentOps := len(app.OperationRegistry.ops)
-	app.OperationRegistry.mu.RUnlock()
+	app.OperationSupervisor.mu.RLock()
+	currentOps := len(app.OperationSupervisor.ops)
+	app.OperationSupervisor.mu.RUnlock()
 	if currentOps != initialOps {
-		t.Errorf("operation registry modified by LSM detection failure: expected %d ops, got %d", initialOps, currentOps)
+		t.Errorf("supervisor modified by LSM detection failure: expected %d ops, got %d", initialOps, currentOps)
 	}
 }
 
@@ -691,7 +691,7 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 		t.Fatalf("createSession() error: %v", err)
 	}
 
-	app.OperationRegistry = newOperationRegistry()
+	app.OperationSupervisor = newOperationSupervisor()
 
 	dockerInvoked := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -726,12 +726,12 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 		t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
 	}
 
-	// Verify operation registry was not modified.
-	app.OperationRegistry.mu.RLock()
-	currentOps := len(app.OperationRegistry.ops)
-	app.OperationRegistry.mu.RUnlock()
+	// Verify supervisor was not modified.
+	app.OperationSupervisor.mu.RLock()
+	currentOps := len(app.OperationSupervisor.ops)
+	app.OperationSupervisor.mu.RUnlock()
 	if currentOps != 0 {
-		t.Errorf("operation registry must not be modified when LSMNone: got %d ops", currentOps)
+		t.Errorf("supervisor must not be modified when LSMNone: got %d ops", currentOps)
 	}
 }
 
