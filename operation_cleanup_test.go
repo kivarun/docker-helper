@@ -2,7 +2,6 @@ package main
 
 import (
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -105,20 +104,22 @@ func TestPruneCompletedMaxCompletedZero(t *testing.T) {
 func TestPruneCompletedConcurrency(t *testing.T) {
 	supervisor := newOperationSupervisor()
 
-	var wg sync.WaitGroup
-	stop := make(chan struct{})
-	var cleanerCount int64
+	// Pre-seed known operations before any concurrent work.
+	expired := newTestOperation(t, operationSucceeded, time.Now().Add(-time.Hour))
+	running := newTestOperation(t, operationRunning, time.Time{})
+	supervisor.admit(expired)
+	supervisor.admit(running)
 
-	// Spawner: continuously create and complete operations.
+	const iterations = 100
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Spawner: create and complete operations concurrently.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
+		<-start
+		for i := 0; i < iterations; i++ {
 			op := newTestOperation(t, operationRunning, time.Time{})
 			if supervisor.admit(op) {
 				// Complete the operation.
@@ -134,26 +135,23 @@ func TestPruneCompletedConcurrency(t *testing.T) {
 		}
 	}()
 
-	// Pruner: continuously run retention pruning.
+	// Pruner: run retention pruning concurrently.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
+		<-start
+		for i := 0; i < iterations; i++ {
 			supervisor.pruneCompleted(50*time.Millisecond, 50)
-			atomic.AddInt64(&cleanerCount, 1)
 		}
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-	close(stop)
+	close(start)
 	wg.Wait()
 
-	if cleanerCount == 0 {
-		t.Error("cleaner goroutine did not execute")
+	if supervisor.lookup(expired.ID) != nil {
+		t.Error("eligible completed operation was not pruned under concurrent access")
+	}
+	if supervisor.lookup(running.ID) == nil {
+		t.Error("running operation was removed by concurrent pruning")
 	}
 }

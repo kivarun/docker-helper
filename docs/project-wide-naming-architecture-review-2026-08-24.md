@@ -855,12 +855,26 @@ test-only organizational cleanup.
 
 ### P3-7. TestCleanupConcurrency overstates its assertion
 
-The test creates and prunes operations concurrently, but its only final proof
-is that the cleaner goroutine executed:
-[operation_cleanup_test.go:105-158](../operation_cleanup_test.go#L105-L158).
+**Status: RESOLVED**
 
-Either rename it to TestOperationRegistryCleanupNoRace for the current
-assertion or prove that cleanup actually removed eligible operations.
+The current test is **TestPruneCompletedConcurrency**. The arbitrary
+sleep/open-ended loops and the `cleanerCount` proof were replaced with bounded
+concurrent work synchronized by a start barrier:
+
+- one known eligible completed operation (completed an hour ago) and one known
+  running operation are admitted **before** the goroutines start;
+- a spawner goroutine admits and completes a fixed number of operations while
+  a pruner goroutine runs `pruneCompleted` the same fixed number of times,
+  both started together on a shared barrier;
+- after both finish, the test asserts the eligible completed operation was
+  actually removed (`lookup(expired.ID) == nil`) and the running operation
+  remains (`lookup(running.ID) != nil`);
+- it does not assert incidental final supervisor counts, which legitimately
+  vary with pruning/admission timing.
+
+`go test -race` still exercises concurrent admit/completion/prune access, and
+the test would now fail if `pruneCompleted` became a no-op. Production
+operationSupervisor behavior was not changed.
 
 ### P3-8. Best-effort cancel comment contradicts synchronous behavior
 
