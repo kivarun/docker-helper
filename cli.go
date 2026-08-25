@@ -368,12 +368,12 @@ var rootCommand = &Command{
 
 var serveCommand = &Command{
 	Name:    "serve",
-	Summary: "Start the HTTP server",
+	Summary: "Start the docker-helper daemon",
 	Usage:   "docker-helper serve",
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				if err := runServe(stdout, stderr); err != nil {
+				if err := runDaemon(stdout, stderr); err != nil {
 					return 1
 				}
 				return 0

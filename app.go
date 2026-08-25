@@ -77,7 +77,7 @@ func (a *App) setConfig(newCfg *Config) {
 	defer a.mu.Unlock()
 	merged := *newCfg
 	merged.SocketPath = a.Config.SocketPath
-	merged.LockPath = a.Config.LockPath
+	merged.InstanceLockPath = a.Config.InstanceLockPath
 	merged.StateDir = a.Config.StateDir
 	merged.RuntimeDir = a.Config.RuntimeDir
 	merged.DatabasePath = a.Config.DatabasePath

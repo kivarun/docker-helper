@@ -22,12 +22,12 @@ func TestLockSecondCannotAcquire(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, "test.lock")
 
-	f1, err := acquireLock(lockPath)
+	f1, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("first acquireLock() error: %v", err)
+		t.Fatalf("first acquireDaemonInstanceLock() error: %v", err)
 	}
 
-	_, err = acquireLock(lockPath)
+	_, err = acquireDaemonInstanceLock(lockPath)
 	if err == nil {
 		f1.Close()
 		t.Fatal("expected error when acquiring second lock")
@@ -46,9 +46,9 @@ func TestSecondLaunchDoesNotDeleteSocket(t *testing.T) {
 	lockPath := filepath.Join(dir, "test.lock")
 	socketPath := filepath.Join(dir, "test.sock")
 
-	f1, err := acquireLock(lockPath)
+	f1, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("acquireLock() error: %v", err)
+		t.Fatalf("acquireDaemonInstanceLock() error: %v", err)
 	}
 
 	listener, err := net.Listen("unix", socketPath)
@@ -64,7 +64,7 @@ func TestSecondLaunchDoesNotDeleteSocket(t *testing.T) {
 		t.Fatal("socket should exist after Listen")
 	}
 
-	_, err = acquireLock(lockPath)
+	_, err = acquireDaemonInstanceLock(lockPath)
 	if err == nil {
 		listener.Close()
 		f1.Close()
@@ -87,16 +87,16 @@ func TestLockReacquireAfterRelease(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, "test.lock")
 
-	f1, err := acquireLock(lockPath)
+	f1, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("first acquireLock() error: %v", err)
+		t.Fatalf("first acquireDaemonInstanceLock() error: %v", err)
 	}
 
 	f1.Close()
 
-	f2, err := acquireLock(lockPath)
+	f2, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("re-acquireLock() error: %v", err)
+		t.Fatalf("re-acquireDaemonInstanceLock() error: %v", err)
 	}
 
 	f2.Close()
@@ -232,9 +232,9 @@ func TestLockFileNotDeletedOnRelease(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, "test.lock")
 
-	f, err := acquireLock(lockPath)
+	f, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("acquireLock() error: %v", err)
+		t.Fatalf("acquireDaemonInstanceLock() error: %v", err)
 	}
 
 	f.Close()
@@ -406,7 +406,7 @@ func TestSocketDisappearsDuringCheck(t *testing.T) {
 	}
 }
 
-// --- Lifecycle tests using runWithLock ---
+// --- Lifecycle tests using withDaemonInstanceLock ---
 
 // Callback error: lock released, socket removed, lock file remains.
 func TestStartupErrorReleasesLock(t *testing.T) {
@@ -414,15 +414,15 @@ func TestStartupErrorReleasesLock(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	err := runWithLock(lockPath, func() error {
+	err := withDaemonInstanceLock(lockPath, func() error {
 		return errors.New("simulated startup error")
 	})
 	if err == nil {
-		t.Fatal("expected error from runWithLock")
+		t.Fatal("expected error from withDaemonInstanceLock")
 	}
 
 	// Lock must be released.
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
 		t.Fatalf("lock not released after error: %v", err)
 	}
@@ -445,11 +445,11 @@ func TestCallbackReturnCleansSocket(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	err := runWithLock(lockPath, func() error {
+	err := withDaemonInstanceLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("runWithLock: %v", err)
+		t.Fatalf("withDaemonInstanceLock: %v", err)
 	}
 
 	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
@@ -460,14 +460,14 @@ func TestCallbackReturnCleansSocket(t *testing.T) {
 		t.Error("lock file should remain")
 	}
 
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
 		t.Fatalf("flock not released: %v", err)
 	}
 	lockFile.Close()
 }
 
-// Listener creation error inside runWithLock: callback called, lock released,
+// Listener creation error inside withDaemonInstanceLock: callback called, lock released,
 // regular file untouched (content, size, mode), lock file remains.
 func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 	dir := t.TempDir()
@@ -483,13 +483,13 @@ func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 
 	// Callback that tries to create a listener where a regular file exists.
 	called := false
-	err := runWithLock(lockPath, func() error {
+	err := withDaemonInstanceLock(lockPath, func() error {
 		called = true
 		_, err := net.Listen("unix", socketPath)
 		return err
 	})
 	if err == nil {
-		t.Fatal("expected error from runWithLock")
+		t.Fatal("expected error from withDaemonInstanceLock")
 	}
 	if !called {
 		t.Error("callback must be called; listener creation error should propagate")
@@ -509,7 +509,7 @@ func TestPrepareListenerErrorReleasesLock(t *testing.T) {
 	}
 
 	// Lock must be released.
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
 		t.Fatalf("lock not released: %v", err)
 	}
@@ -527,18 +527,18 @@ func TestSubsequentStartupAfterShutdown(t *testing.T) {
 	socketPath := filepath.Join(dir, "test.sock")
 	lockPath := socketPath + ".lock"
 
-	err := runWithLock(lockPath, func() error {
+	err := withDaemonInstanceLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("first runWithLock: %v", err)
+		t.Fatalf("first withDaemonInstanceLock: %v", err)
 	}
 
-	err = runWithLock(lockPath, func() error {
+	err = withDaemonInstanceLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("second runWithLock: %v", err)
+		t.Fatalf("second withDaemonInstanceLock: %v", err)
 	}
 }
 
@@ -559,7 +559,7 @@ func TestParallelStartupRace(t *testing.T) {
 
 	go func() {
 		defer close(holderDone)
-		holderResult <- runWithLock(lockPath, func() error {
+		holderResult <- withDaemonInstanceLock(lockPath, func() error {
 			// Create a listener so the socket exists.
 			listener, err := net.Listen("unix", socketPath)
 			if err != nil {
@@ -585,7 +585,7 @@ func TestParallelStartupRace(t *testing.T) {
 	case <-holderStarted:
 		// Holder is in the callback, holding the lock.
 	case err := <-holderResult:
-		t.Fatalf("holder runWithLock returned before callback: %v", err)
+		t.Fatalf("holder withDaemonInstanceLock returned before callback: %v", err)
 	}
 
 	// Socket must exist while the holder is active.
@@ -604,7 +604,7 @@ func TestParallelStartupRace(t *testing.T) {
 			compReady <- struct{}{}
 			<-compGo
 
-			err := runWithLock(lockPath, func() error {
+			err := withDaemonInstanceLock(lockPath, func() error {
 				compCallbackCalled <- true
 				return nil
 			})
@@ -646,7 +646,7 @@ func TestParallelStartupRace(t *testing.T) {
 	// Read holder result exactly once (buffered channel).
 	holderErr := <-holderResult
 	if holderErr != nil {
-		t.Fatalf("holder runWithLock returned error: %v", holderErr)
+		t.Fatalf("holder withDaemonInstanceLock returned error: %v", holderErr)
 	}
 
 	// Holder must have cleaned up the socket.
@@ -655,11 +655,11 @@ func TestParallelStartupRace(t *testing.T) {
 	}
 
 	// --- Phase 4: subsequent startup must work ---
-	err := runWithLock(lockPath, func() error {
+	err := withDaemonInstanceLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("subsequent runWithLock: %v", err)
+		t.Fatalf("subsequent withDaemonInstanceLock: %v", err)
 	}
 }
 
@@ -691,7 +691,7 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainCh, serveDoneErr := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
+		_, shutdownCancel, drainCh, serveDoneErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
 		<-drainCh
 		shutdownCancel()
 		serveDone <- serveDoneErr
@@ -702,7 +702,7 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	err = <-serveDone
 	if err != nil {
-		t.Fatalf("serveWithShutdownMulti: %v", err)
+		t.Fatalf("serveHTTPUntilShutdown: %v", err)
 	}
 
 	// New connection must fail.
@@ -723,14 +723,14 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- runWithLock(lockPath, func() error {
+		serveDone <- withDaemonInstanceLock(lockPath, func() error {
 			listener, err := net.Listen("unix", socketPath)
 			if err != nil {
 				return err
 			}
 			defer listener.Close()
 			defer os.Remove(socketPath)
-			_, shutdownCancel, drainCh, err := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
+			_, shutdownCancel, drainCh, err := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
 			<-drainCh
 			shutdownCancel()
 			return err
@@ -742,15 +742,15 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 
 	err := <-serveDone
 	if err != nil {
-		t.Fatalf("first serveWithShutdownMulti: %v", err)
+		t.Fatalf("first serveHTTPUntilShutdown: %v", err)
 	}
 
 	// Subsequent startup must work.
-	err = runWithLock(lockPath, func() error {
+	err = withDaemonInstanceLock(lockPath, func() error {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("subsequent runWithLock: %v", err)
+		t.Fatalf("subsequent withDaemonInstanceLock: %v", err)
 	}
 }
 
@@ -772,7 +772,7 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainCh, serveDoneErr := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
+		_, shutdownCancel, drainCh, serveDoneErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
 		<-drainCh
 		shutdownCancel()
 		serveDone <- serveDoneErr
@@ -783,7 +783,7 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	err = <-serveDone
 	if err == nil {
-		t.Fatal("expected error from serveWithShutdownMulti when listener is closed")
+		t.Fatal("expected error from serveHTTPUntilShutdown when listener is closed")
 	}
 }
 
@@ -815,10 +815,10 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Start server in a goroutine via runWithLock.
+	// Start server in a goroutine via withDaemonInstanceLock.
 	go func() {
 		defer close(serverDone)
-		serverErr = runWithLock(lockPath, func() error {
+		serverErr = withDaemonInstanceLock(lockPath, func() error {
 			listener, err := net.Listen("unix", socketPath)
 			if err != nil {
 				return err
@@ -826,7 +826,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 			defer listener.Close()
 			defer os.Remove(socketPath)
 			close(listenerReady)
-			_, shutdownCancel, drainCh, err := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
+			_, shutdownCancel, drainCh, err := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
 			<-drainCh
 			shutdownCancel()
 			return err
@@ -926,14 +926,14 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 	default:
 	}
 
-	// Attempt second runWithLock — must fail because lock is held.
+	// Attempt second withDaemonInstanceLock — must fail because lock is held.
 	secondCalled := false
-	secondLockErr := runWithLock(lockPath, func() error {
+	secondLockErr := withDaemonInstanceLock(lockPath, func() error {
 		secondCalled = true
 		return nil
 	})
 	if secondLockErr == nil {
-		t.Fatal("second runWithLock should fail while server drains")
+		t.Fatal("second withDaemonInstanceLock should fail while server drains")
 	}
 	if secondCalled {
 		t.Fatal("second callback must not be called while lock is held")
@@ -953,16 +953,16 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 		t.Fatalf("server returned error: %v", serverErr)
 	}
 
-	// Subsequent runWithLock must succeed.
-	subErr = runWithLock(lockPath, func() error {
+	// Subsequent withDaemonInstanceLock must succeed.
+	subErr = withDaemonInstanceLock(lockPath, func() error {
 		return nil
 	})
 	if subErr != nil {
-		t.Fatalf("subsequent runWithLock: %v", subErr)
+		t.Fatalf("subsequent withDaemonInstanceLock: %v", subErr)
 	}
 }
 
-// When the shutdown deadline expires, serveWithShutdownMulti forces server.Close()
+// When the shutdown deadline expires, serveHTTPUntilShutdown forces server.Close()
 // and the drain goroutine completes.
 func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	dir := t.TempDir()
@@ -996,7 +996,7 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 
 	go func() {
 		defer close(serverDone)
-		_, shutdownCancel, drainCh, _ := serveWithShutdownMulti(signalCtx, server, listener, nil, shutdownTimeout, nil)
+		_, shutdownCancel, drainCh, _ := serveHTTPUntilShutdown(signalCtx, server, listener, nil, shutdownTimeout, nil)
 		drainErr = <-drainCh
 		shutdownCancel()
 	}()
@@ -1059,11 +1059,11 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	// Initiate shutdown — Shutdown will hit its deadline, then server.Close().
 	signalCancel()
 
-	// Wait for serveWithShutdownMulti + drain to return.
+	// Wait for serveHTTPUntilShutdown + drain to return.
 	select {
 	case <-serverDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveWithShutdownMulti did not return")
+		t.Fatal("serveHTTPUntilShutdown did not return")
 	}
 
 	// Force-close may not cancel in-flight request contexts reliably.
@@ -1133,10 +1133,10 @@ func TestServerErrorLogGoesToOperational(t *testing.T) {
 	}
 }
 
-// --- serveWithShutdownMulti deadlock regression tests ---
+// --- serveHTTPUntilShutdown deadlock regression tests ---
 
 // User mode / single listener: unexpected Serve error -> function completes drain, no hang.
-func TestServeWithShutdownMultiUserModeServeError(t *testing.T) {
+func TestServeHTTPUntilShutdownUserModeServeError(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -1153,7 +1153,7 @@ func TestServeWithShutdownMultiUserModeServeError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainDone, serveErr := serveWithShutdownMulti(signalCtx, server, listener, nil, 30*time.Second, nil)
+		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
 		if shutdownCancel != nil {
 			<-drainDone
 			shutdownCancel()
@@ -1166,15 +1166,15 @@ func TestServeWithShutdownMultiUserModeServeError(t *testing.T) {
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("expected error from serveWithShutdownMulti")
+			t.Fatal("expected error from serveHTTPUntilShutdown")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveWithShutdownMulti did not return (possible deadlock)")
+		t.Fatal("serveHTTPUntilShutdown did not return (possible deadlock)")
 	}
 }
 
 // System mode: Unix Serve error -> TCP also closed, drain completes.
-func TestServeWithShutdownMultiUnixServeError(t *testing.T) {
+func TestServeHTTPUntilShutdownUnixServeError(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -1196,7 +1196,7 @@ func TestServeWithShutdownMultiUnixServeError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainDone, serveErr := serveWithShutdownMulti(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
+		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
 		if shutdownCancel != nil {
 			<-drainDone
 			shutdownCancel()
@@ -1209,18 +1209,18 @@ func TestServeWithShutdownMultiUnixServeError(t *testing.T) {
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("expected error from serveWithShutdownMulti")
+			t.Fatal("expected error from serveHTTPUntilShutdown")
 		}
 		if _, dialErr := net.Dial("tcp", tcpListener.Addr().String()); dialErr == nil {
 			t.Error("TCP listener should be closed after Unix serve error")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveWithShutdownMulti did not return (possible deadlock)")
+		t.Fatal("serveHTTPUntilShutdown did not return (possible deadlock)")
 	}
 }
 
 // System mode: TCP Serve error -> Unix also closed, drain completes.
-func TestServeWithShutdownMultiTCPServeError(t *testing.T) {
+func TestServeHTTPUntilShutdownTCPServeError(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 
@@ -1242,7 +1242,7 @@ func TestServeWithShutdownMultiTCPServeError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainDone, serveErr := serveWithShutdownMulti(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
+		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
 		if shutdownCancel != nil {
 			<-drainDone
 			shutdownCancel()
@@ -1255,13 +1255,13 @@ func TestServeWithShutdownMultiTCPServeError(t *testing.T) {
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("expected error from serveWithShutdownMulti")
+			t.Fatal("expected error from serveHTTPUntilShutdown")
 		}
 		if _, dialErr := net.Dial("unix", socketPath); dialErr == nil {
 			t.Error("Unix listener should be closed after TCP serve error")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveWithShutdownMulti did not return (possible deadlock)")
+		t.Fatal("serveHTTPUntilShutdown did not return (possible deadlock)")
 	}
 }
 

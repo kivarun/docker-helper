@@ -255,7 +255,7 @@ func runSessionCleanup(stdout, stderr io.Writer) int {
 	// Acquire the same daemon instance lock used by serve.
 	// If the daemon owns the lock, fail cleanly without mutating anything.
 	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: another docker-helper instance is already running; session cleanup must be offline\n")
 		return 1

@@ -56,7 +56,7 @@ type Config struct {
 	LogLevel              slog.Level
 	AuditEnabled          bool
 	SocketPath            string
-	LockPath              string
+	InstanceLockPath      string
 	StateDir              string
 	RuntimeDir            string
 	DatabasePath          string
@@ -410,7 +410,7 @@ func loadConfig() (*Config, error) {
 		LogLevel:              level,
 		AuditEnabled:          ec.AuditEnabled,
 		SocketPath:            socketPath,
-		LockPath:              socketPath + ".lock",
+		InstanceLockPath:      socketPath + ".lock",
 		StateDir:              stateDir,
 		RuntimeDir:            runtimeDir,
 		DatabasePath:          filepath.Join(stateDir, "docker-helper.db"),

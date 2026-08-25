@@ -37,9 +37,10 @@ func loadAdminToken(path string) ([sha256.Size]byte, error) {
 	return hash, nil
 }
 
-// acquireLock opens the lock file and acquires an exclusive non-blocking flock.
-// Returns the open file that must stay open for the lock to remain held.
-func acquireLock(path string) (*os.File, error) {
+// acquireDaemonInstanceLock opens the daemon instance lock file and acquires
+// an exclusive non-blocking flock. Returns the open file that must stay open
+// for the lock to remain held.
+func acquireDaemonInstanceLock(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open lock file %s: %w", path, err)
@@ -80,11 +81,11 @@ func checkSocket(socketPath string) (bool, error) {
 	return true, nil
 }
 
-// runWithLock acquires the daemon lock and runs the callback with the lock held.
-// The callback is responsible for creating and managing listeners.
-// The lock is released when the callback returns.
-func runWithLock(lockPath string, fn func() error) error {
-	lockFile, err := acquireLock(lockPath)
+// withDaemonInstanceLock acquires the daemon instance lock and runs the
+// callback with the lock held. The callback is responsible for creating and
+// managing listeners. The lock is released when the callback returns.
+func withDaemonInstanceLock(lockPath string, fn func() error) error {
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
 		return err
 	}
@@ -94,11 +95,11 @@ func runWithLock(lockPath string, fn func() error) error {
 	return fn()
 }
 
-// serveWithShutdownMulti handles both Unix and TCP listeners.
+// serveHTTPUntilShutdown handles both Unix and TCP listeners.
 // In user mode, tcpListener is nil and only unixListener is served.
 // In system mode, both listeners are served concurrently.
 // A signal or error on ANY listener triggers shutdown of all.
-func serveWithShutdownMulti(
+func serveHTTPUntilShutdown(
 	signalCtx context.Context,
 	server *http.Server,
 	unixListener net.Listener,
@@ -213,7 +214,13 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /admin/token/rotate", app.handleRotateAdminToken)
 }
 
-func runServe(stdout, stderr io.Writer) error {
+// runDaemon implements the docker-helper serve command. It owns the daemon
+// lifecycle: logging initialization, system-mode MAC confinement check, config
+// preparation, daemon instance locking, admin-token loading, database open/init,
+// expired Session cleanup, MAC reconciliation, stale runtime-dir cleanup, route
+// registration, listener preparation, shutdown signal handling, operation
+// admission shutdown, operation termination, and HTTP graceful drain.
+func runDaemon(stdout, stderr io.Writer) error {
 	// Initialize logging before any other work so all errors are structured.
 	// Audit JSONL -> stdout; operational JSONL -> stderr.
 	initLoggers(stderr, stdout, slog.LevelInfo, false)
@@ -243,7 +250,7 @@ func runServe(stdout, stderr io.Writer) error {
 	initLoggers(stderr, stdout, cfg.LogLevel, cfg.AuditEnabled)
 
 	callbackEntered := false
-	err = runWithLock(cfg.LockPath, func() error {
+	err = withDaemonInstanceLock(cfg.InstanceLockPath, func() error {
 		callbackEntered = true
 		adminHash, err := loadAdminToken(cfg.AdminTokenPath)
 		if err != nil {
@@ -330,7 +337,7 @@ func runServe(stdout, stderr io.Writer) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		shutdownCtx, shutdownCancel, drainDone, err := serveWithShutdownMulti(ctx, server, unixListener, tcpListener, cfg.ShutdownTimeout, func() {
+		shutdownCtx, shutdownCancel, drainDone, err := serveHTTPUntilShutdown(ctx, server, unixListener, tcpListener, cfg.ShutdownTimeout, func() {
 			// Shutdown triggered (signal or Serve error) — close the operation
 			// gate so no new operations are accepted.
 			if app.OperationSupervisor != nil {
@@ -374,7 +381,7 @@ func runServe(stdout, stderr io.Writer) error {
 		return err
 	})
 
-	// Log lock/listener errors that runWithLock returns before entering the callback.
+	// Log lock/listener errors that withDaemonInstanceLock returns before entering the callback.
 	// Errors inside the callback (admin token, database, serve) are already logged.
 	if err != nil && !callbackEntered {
 

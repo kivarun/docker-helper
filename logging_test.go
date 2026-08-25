@@ -631,9 +631,9 @@ func TestRunCommandWithWritersServeFailure(t *testing.T) {
 		t.Fatalf("mkdir runtime: %v", err)
 	}
 	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("acquireLock: %v", err)
+		t.Fatalf("acquireDaemonInstanceLock: %v", err)
 	}
 
 	stdoutBuf := new(bytes.Buffer)
@@ -701,11 +701,11 @@ func TestMissingConfigProducesSingleJSONLRecord(t *testing.T) {
 	// Point config to a nonexistent file.
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/path/config.json")
 
-	// runServe(stdout, stderr): audit->stdout, operational->stderr.
+	// runDaemon(stdout, stderr): audit->stdout, operational->stderr.
 	// Pass auditBuf as stdout, opBuf as stderr so operational goes to opBuf.
-	err := runServe(auditBuf, opBuf)
+	err := runDaemon(auditBuf, opBuf)
 	if err == nil {
-		t.Fatal("expected error from runServe with missing config")
+		t.Fatal("expected error from runDaemon with missing config")
 	}
 
 	// Sentinel must be empty — no global stderr writes.
@@ -766,9 +766,9 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
 
 	// Pre-acquire the lock to force a failure.
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("acquireLock: %v", err)
+		t.Fatalf("acquireDaemonInstanceLock: %v", err)
 	}
 
 	opBuf := new(bytes.Buffer)
@@ -777,12 +777,12 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	// runServe(stdout, stderr): audit->stdout, operational->stderr.
+	// runDaemon(stdout, stderr): audit->stdout, operational->stderr.
 	// Pass auditBuf as stdout, opBuf as stderr so operational goes to opBuf.
-	err = runServe(auditBuf, opBuf)
+	err = runDaemon(auditBuf, opBuf)
 	if err == nil {
 		lockFile.Close()
-		t.Fatal("expected error from runServe with held lock")
+		t.Fatal("expected error from runDaemon with held lock")
 	}
 	lockFile.Close()
 
@@ -807,7 +807,7 @@ func TestLockFailureProducesSingleJSONLRecord(t *testing.T) {
 
 // TestServeAuditRoutingToStdout verifies that the audit logger configured
 // by the serve path writes to stdout and not stderr. This exercises the
-// actual runServe wiring rather than calling initLoggers directly.
+// actual runDaemon wiring rather than calling initLoggers directly.
 func TestServeAuditRoutingToStdout(t *testing.T) {
 	dir := t.TempDir()
 
@@ -820,7 +820,7 @@ func TestServeAuditRoutingToStdout(t *testing.T) {
 	}
 
 	allowedRoot := testAllowedRootDir(t)
-	// Enable audit in config so runServe reinitializes with audit enabled.
+	// Enable audit in config so runDaemon reinitializes with audit enabled.
 	configData := []byte(`{"allowed_roots": ["` + allowedRoot + `"],"session_ttl":"12h","audit_enabled":true}`)
 	if err := os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -836,9 +836,9 @@ func TestServeAuditRoutingToStdout(t *testing.T) {
 		t.Fatalf("mkdir runtime: %v", err)
 	}
 	lockPath := filepath.Join(runtimeDir, "docker-helper.sock.lock")
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("acquireLock: %v", err)
+		t.Fatalf("acquireDaemonInstanceLock: %v", err)
 	}
 
 	stdoutBuf := new(bytes.Buffer)
@@ -861,7 +861,7 @@ func TestServeAuditRoutingToStdout(t *testing.T) {
 		t.Errorf("serve wrote to global stderr: %s", sentinel.String())
 	}
 
-	// Write an audit record through the logger configured by runServe.
+	// Write an audit record through the logger configured by runDaemon.
 	writeAudit(auditRecord{Event: "serve.routing.test"})
 
 	// Audit record must appear on stdout, not stderr.

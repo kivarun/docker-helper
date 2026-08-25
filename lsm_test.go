@@ -984,7 +984,7 @@ func TestDetectLSMSELinuxReadError(t *testing.T) {
 }
 
 func TestServeDetectLSMError(t *testing.T) {
-	// runServe: detectLSM error => startup fails closed.
+	// runDaemon: detectLSM error => startup fails closed.
 	origAA := appArmorLSMActive
 	origSEL := selinuxEnabled
 	appArmorLSMActive = func() (bool, error) { return false, nil }

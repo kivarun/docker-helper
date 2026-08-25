@@ -669,7 +669,7 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 		_, _ = syscall.Wait4(childPid, nil, syscall.WNOHANG, nil)
 	})
 
-	// Now trigger production-like shutdown using serveWithShutdownMulti semantics.
+	// Now trigger production-like shutdown using serveHTTPUntilShutdown semantics.
 	// We simulate: signal -> startShutdown -> server.Shutdown(deadline) -> server.Close() -> context cancel
 	shutdownTimeout := 2 * time.Second
 

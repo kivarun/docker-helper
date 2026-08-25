@@ -397,37 +397,39 @@ layer were introduced.
 
 ### P2-3. Daemon lifecycle is named as HTTP serving
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-**runServe** owns logging, runtime config preparation, instance lock, database,
-migrations, MAC reconciliation, listeners, operation shutdown, and HTTP drain:
-[main.go:216-375](../main.go#L216-L375).
+The daemon-lifecycle vocabulary replaced the HTTP-serving vocabulary for the
+top-level command implementation:
 
-**serveWithShutdownMulti** only coordinates HTTP serving/drain; Multi describes
-listener cardinality:
-[main.go:97-108](../main.go#L97-L108).
+- **runDaemon** — the docker-helper serve command implementation; owns the
+  daemon lifecycle (logging, MAC confinement check, config preparation,
+  daemon instance locking, admin-token loading, database open/init, expired
+  Session cleanup, MAC reconciliation, stale runtime-dir cleanup, route
+  registration, listener preparation, shutdown signal handling, operation
+  admission shutdown, operation termination, HTTP graceful drain).
+- **serveHTTPUntilShutdown** — the HTTP helper; owns listener serving and
+  coordinated HTTP drain across all active listeners. A signal or Serve error
+  initiates coordinated shutdown/drain.
+- **InstanceLockPath** — the daemon instance lock path.
+- **acquireDaemonInstanceLock** — acquires the daemon instance lock.
+- **withDaemonInstanceLock** — runs the daemon callback with the instance lock
+  held.
 
-The CLI summary says “Start the HTTP server”:
-[cli.go:369-383](../cli.go#L369-L383).
+**Compatibility**
 
-**Actual responsibility**
+- The public CLI command remains `docker-helper serve`; the serve summary and
+  man page now read "Start the docker-helper daemon".
+- HTTP routes, socket/TCP behavior, startup/error behavior, shutdown timing,
+  and signal behavior are unchanged.
+- The on-disk config schema is unchanged; only the internal `Config.LockPath`
+  field was renamed to `Config.InstanceLockPath`. The CLI `config show
+  lock_path` field name is unchanged.
+- No lifecycle reorderings. Operational log values `serve` / `serve_startup`
+  and the "daemon listening"/"daemon stopped" messages are unchanged.
 
-runServe is the daemon lifecycle owner. serveWithShutdownMulti is the HTTP
-transport shutdown coordinator.
-
-**Preferred vocabulary**
-
-- runDaemon;
-- serveHTTPUntilShutdown;
-- InstanceLockPath;
-- acquireDaemonInstanceLock;
-- withDaemonInstanceLock;
-- CLI summary “Start the docker-helper daemon”.
-
-**Compatibility and batch**
-
-Keep the public serve command. Rename internal symbols and update help/man
-wording in one daemon-lifecycle batch.
+The SELinux fcontext manager's own `acquireLock` seam and the CLI config-change
+lock are separate lock domains and were not renamed.
 
 ### P2-4. operation is overloaded between an async resource and a Docker action
 

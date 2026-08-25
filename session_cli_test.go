@@ -68,9 +68,9 @@ func TestSessionCleanupDaemonLockHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	lockPath := filepath.Join(fullRuntimeDir, "docker-helper.sock.lock")
-	lockFile, err := acquireLock(lockPath)
+	lockFile, err := acquireDaemonInstanceLock(lockPath)
 	if err != nil {
-		t.Fatalf("acquireLock: %v", err)
+		t.Fatalf("acquireDaemonInstanceLock: %v", err)
 	}
 
 	var stdout, stderr bytes.Buffer
