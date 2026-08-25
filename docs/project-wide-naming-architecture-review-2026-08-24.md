@@ -814,14 +814,24 @@ test-only organizational cleanup.
 
 ### P3-5. Legacy allowed_root appears in current-architecture comments
 
-setConfig lists allowed_root as the current configurable field:
-[app.go:69-74](../app.go#L69-L74).
+**Status: RESOLVED**
 
-The AppArmor template says “configured allowed_root”:
-[packaging/apparmor/docker-helper:57-61](../packaging/apparmor/docker-helper#L57-L61).
-
-Use allowed_roots or global allowed-root scope. Keep scalar allowed_root only
-in migration-specific code and documentation.
+- **app.go** — `setConfig` now names the current configurable field
+  `allowed_roots` instead of the legacy scalar `allowed_root`. `setConfig`
+  behavior is unchanged.
+- **packaging/apparmor/docker-helper** — the user AppArmor template no longer
+  describes manual workspace MAC coverage as a configured `allowed_root`. The
+  top instructions now describe AppArmor rules covering the workspace paths
+  the daemon needs, note that these rules provide filesystem MAC coverage
+  only while configured `allowed_roots` continue to govern authorization, and
+  the inline comment reads “Workspace access (manually configured MAC
+  coverage)”. `@@WORKSPACE_RULE@@` and the example rules are unchanged.
+- Authorization `allowed_roots` and AppArmor MAC coverage remain distinct
+  concepts.
+- The legacy scalar `allowed_root` remains only where required: JSON legacy
+  migration compatibility, `AllowedRootLegacy`, migration/rejection tests,
+  compatibility/help text, and explicit historical evidence.
+- No runtime behavior or compatibility surface changed.
 
 ### P3-6. re-reload describes history rather than responsibility
 

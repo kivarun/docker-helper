@@ -10,8 +10,10 @@
 #      This is used for path-based executable attachment.
 #
 #   2. For workspace access, replace the commented @@WORKSPACE_RULE@@ line
-#      with the appropriate AppArmor rules for your allowed_root, or leave
-#      it commented out if workspace access is not needed.  Example:
+#      with the appropriate AppArmor rules covering the workspace paths the
+#      daemon needs to access, or leave it commented out if workspace access
+#      is not needed. These rules provide filesystem MAC coverage only:
+#      configured allowed_roots continue to govern authorization. Example:
 #
 #         /home/user/workspaces/ r,
 #         owner /home/user/workspaces/** rw,
@@ -57,7 +59,7 @@ profile @@BINARY_PATH@@ flags=(attach_disconnected,mediate_deleted) {
 	# Allow the binary itself to be read (needed for execution within profile).
 	owner @@BINARY_PATH@@ r,
 
-	# Workspace access (configured allowed_root).
+	# Workspace access (manually configured MAC coverage).
 	# @@WORKSPACE_RULE@@
 
 	# /tmp for Docker build contexts and temporary files.
