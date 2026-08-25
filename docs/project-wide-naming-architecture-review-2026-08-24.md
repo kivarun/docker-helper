@@ -465,27 +465,34 @@ Docker actions/commands are not Operation resources:
 
 ### P2-5. loadConfig is a runtime-preparation pipeline
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-**loadConfig** reads and validates JSON, resolves defaults, computes mode and
-paths, creates the runtime directory, and materializes a trusted-CA snapshot:
-[config.go:306-339](../config.go#L306-L339),
-[config.go:368-437](../config.go#L368-L437).
+**loadConfig** was renamed to **loadAndPrepareRuntimeConfig**:
+[config.go:306](../config.go#L306). It remains a single runtime-preparation
+pipeline that reads and validates config JSON, resolves legacy/current config
+inputs and defaults, parses durations/logging settings, resolves deployment
+mode, validates system-mode trusted-CA source policy, resolves computed paths,
+creates the runtime directory, builds the complete Config snapshot, and
+prepares/materializes trusted-CA runtime state when enabled.
 
-**Actual responsibility**
-
-It prepares a complete runtime configuration snapshot with filesystem side
-effects.
-
-**Preferred vocabulary**
-
-loadRuntimeConfig or loadAndPrepareRuntimeConfig. Config itself can remain
-unchanged.
+The name now states truthfully that the function has filesystem/runtime
+preparation side effects rather than merely loading configuration.
 
 **Compatibility and batch**
 
-Internal only. Rename the loader and comments without splitting the pipeline
-or changing reload behavior.
+- Internal only: `loadConfig` -> `loadAndPrepareRuntimeConfig`. Config remains
+  the runtime configuration snapshot type. Pure parsing/loading helpers
+  (`validateRawConfig`, `resolveEffectiveConfig`, `parseSessionTTL`,
+  `parseDurationPositive`, and the CA source-path validator) keep their
+  accurate names.
+- The pipeline intentionally remains one runtime-preparation pipeline in
+  Release 2; this batch did not split or reorder filesystem/CA side effects.
+  Runtime-directory creation and trusted-CA preparation remain inside
+  `loadAndPrepareRuntimeConfig`.
+- No external contract changes: config.json schema, CLI, HTTP, computed paths,
+  filesystem layout/permissions, trusted-CA snapshot layout, and error
+  semantics are unchanged. Reload, daemon startup, and config show behavior
+  are unchanged.
 
 ### P2-6. Trusted-CA cryptographic terms are imprecise
 

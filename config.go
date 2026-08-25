@@ -303,7 +303,7 @@ func getStateDir() string {
 	return filepath.Join(xdgState, "docker-helper")
 }
 
-func loadConfig() (*Config, error) {
+func loadAndPrepareRuntimeConfig() (*Config, error) {
 	configPath := getConfigPathFunc()
 
 	data, err := os.ReadFile(configPath)
@@ -355,7 +355,7 @@ func loadConfig() (*Config, error) {
 
 	trustedCAInjection := ec.TrustedCAInjection
 
-	// HTTPAddress: loadConfig always defaults to DefaultHTTPAddress (mode-specific
+	// HTTPAddress: loadAndPrepareRuntimeConfig always defaults to DefaultHTTPAddress (mode-specific
 	// behavior is only for TCP listener creation, not for the Config value).
 	httpAddress := DefaultHTTPAddress
 	if fc.HTTPAddress != "" {

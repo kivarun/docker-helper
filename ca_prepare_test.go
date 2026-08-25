@@ -28,9 +28,9 @@ func TestCAPrepareSuccess(t *testing.T) {
 		"trusted_ca_injection": "auto",
 	})
 
-	cfgObj, err := loadConfig()
+	cfgObj, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
-		t.Fatalf("loadConfig failed: %v", err)
+		t.Fatalf("loadAndPrepareRuntimeConfig failed: %v", err)
 	}
 
 	if cfgObj.TrustedCAInjection != "auto" {
@@ -94,13 +94,13 @@ func TestCAPrepareIdempotent(t *testing.T) {
 		"trusted_ca_injection": "auto",
 	})
 
-	cfgObj1, err := loadConfig()
+	cfgObj1, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	firstDir := cfgObj1.TrustedCAPreparedDir
 
-	cfgObj2, err := loadConfig()
+	cfgObj2, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 		"trusted_ca_injection": "auto",
 	})
 
-	cfgObj, err := loadConfig()
+	cfgObj, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestCAPrepareUmaskResilient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfgObj2, err := loadConfig()
+	cfgObj2, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 		"trusted_ca_injection": "auto",
 	})
 
-	cfgObj1, err := loadConfig()
+	cfgObj1, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestCAPrepareNewFingerprintOnCAChange(t *testing.T) {
 		"trusted_ca_injection": "auto",
 	})
 
-	cfgObj2, err := loadConfig()
+	cfgObj2, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestCAReloadChangesCA(t *testing.T) {
 		"trusted_ca_injection": "auto",
 	})
 
-	cfgObj1, err := loadConfig()
+	cfgObj1, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestCAReloadChangesCA(t *testing.T) {
 		"trusted_ca_injection": "auto",
 	})
 
-	cfgObj2, err := loadConfig()
+	cfgObj2, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

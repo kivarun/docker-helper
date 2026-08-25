@@ -42,9 +42,9 @@ func TestHTTPAddressCustomSystem(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatalf("loadAndPrepareRuntimeConfig: %v", err)
 	}
 	if cfg.HTTPAddress != "127.0.0.1:54321" {
 		t.Errorf("HTTPAddress = %q, want %q", cfg.HTTPAddress, "127.0.0.1:54321")
@@ -67,9 +67,9 @@ func TestHTTPAddressUserModeEmpty(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
+		t.Fatalf("loadAndPrepareRuntimeConfig: %v", err)
 	}
 	// In user mode, HTTPAddress is still set to the default value
 	// (it's just not used for TCP listener creation).
@@ -120,7 +120,7 @@ func TestValidateHTTPAddressInvalid(t *testing.T) {
 
 // --- Hand-edited invalid config rejected ---
 
-func TestLoadConfigRejectsInvalidHTTPAddress(t *testing.T) {
+func TestLoadAndPrepareRuntimeConfigRejectsInvalidHTTPAddress(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 0 }
@@ -137,7 +137,7 @@ func TestLoadConfigRejectsInvalidHTTPAddress(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 
-	_, err := loadConfig()
+	_, err := loadAndPrepareRuntimeConfig()
 	if err == nil {
 		t.Fatal("expected error for invalid http_address")
 	}
@@ -146,7 +146,7 @@ func TestLoadConfigRejectsInvalidHTTPAddress(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsInvalidPort(t *testing.T) {
+func TestLoadAndPrepareRuntimeConfigRejectsInvalidPort(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 0 }
@@ -163,7 +163,7 @@ func TestLoadConfigRejectsInvalidPort(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 
-	_, err := loadConfig()
+	_, err := loadAndPrepareRuntimeConfig()
 	if err == nil {
 		t.Fatal("expected error for invalid port")
 	}

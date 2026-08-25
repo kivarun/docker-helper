@@ -1178,12 +1178,12 @@ func TestRegressionInitDaemonConfigShowConsistent(t *testing.T) {
 	}
 
 	// 2) Verify daemon config loader uses the same paths
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
-		t.Fatalf("loadConfig failed: %v", err)
+		t.Fatalf("loadAndPrepareRuntimeConfig failed: %v", err)
 	}
 	if cfg.AdminTokenPath != adminTokenPath {
-		t.Errorf("loadConfig AdminTokenPath = %q, want %q", cfg.AdminTokenPath, adminTokenPath)
+		t.Errorf("loadAndPrepareRuntimeConfig AdminTokenPath = %q, want %q", cfg.AdminTokenPath, adminTokenPath)
 	}
 
 	// 3) Verify token loading works
@@ -1764,9 +1764,9 @@ func TestConfigHelpUnknownFlagStillRejected(t *testing.T) {
 	}
 }
 
-// TestLoadConfigRejectsInvalidConfig verifies that loadConfig rejects
+// TestLoadAndPrepareRuntimeConfigRejectsInvalidConfig verifies that loadAndPrepareRuntimeConfig rejects
 // missing, empty, relative, or non-positive required fields.
-func TestLoadConfigRejectsInvalidConfig(t *testing.T) {
+func TestLoadAndPrepareRuntimeConfigRejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
 		name    string
 		cfg     string   // %s is replaced with a policy-legal allowed root
@@ -1800,7 +1800,7 @@ func TestLoadConfigRejectsInvalidConfig(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err := loadConfig()
+			_, err := loadAndPrepareRuntimeConfig()
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -1813,7 +1813,7 @@ func TestLoadConfigRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAcceptsValidConfig(t *testing.T) {
+func TestLoadAndPrepareRuntimeConfigAcceptsValidConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	allowedRoot := testAllowedRootDir(t)
@@ -1835,7 +1835,7 @@ func TestLoadConfigAcceptsValidConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, err := loadConfig()
+	c, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1860,7 +1860,7 @@ func TestReloadRejectsInvalidConfig(t *testing.T) {
 			_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 			defer cleanup()
 
-			cfg, err := loadConfig()
+			cfg, err := loadAndPrepareRuntimeConfig()
 			if err != nil {
 				t.Fatal(err)
 			}

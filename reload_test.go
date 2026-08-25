@@ -312,7 +312,7 @@ func TestReloadEndpoint(t *testing.T) {
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
 	// Create a test server with reload endpoint
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestReloadEndpointInvalidAdmin(t *testing.T) {
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +463,7 @@ func TestReloadEndpointInvalidConfig(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +546,7 @@ func TestReloadEndpointUpdatesConfig(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -655,7 +655,7 @@ func TestReloadSuccessLogContainsRequestID(t *testing.T) {
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 	defer logging.reset()
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestReloadRuntimeLogLevel(t *testing.T) {
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -840,7 +840,7 @@ func TestReloadRuntimeAuditEnabled(t *testing.T) {
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1106,7 +1106,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 	_, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1243,7 +1243,7 @@ func TestLoggingReloadConcurrency(t *testing.T) {
 	}
 }
 
-// TestReloadInvalidConfigNoLeak verifies that when loadConfig fails during
+// TestReloadInvalidConfigNoLeak verifies that when loadAndPrepareRuntimeConfig fails during
 // reload, the HTTP response contains only a stable public message while the
 // full internal error is preserved in operational logging.
 func TestReloadInvalidConfigNoLeak(t *testing.T) {
@@ -1254,7 +1254,7 @@ func TestReloadInvalidConfigNoLeak(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelError, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1366,7 +1366,7 @@ func TestConfigSetReloadSuccess(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1433,7 +1433,7 @@ func TestConfigUnsetReloadSuccess(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1625,7 +1625,7 @@ func TestConfigSetHTTPAddressNoReload(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1687,7 +1687,7 @@ func TestConfigSetConcurrent(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1959,7 +1959,7 @@ func TestConfigSetHTTPAddressNoReloadRequest(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2151,7 +2151,7 @@ func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 	opBuf := &bytes.Buffer{}
 	initLoggers(opBuf, io.Discard, slog.LevelError, false)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2288,7 +2288,7 @@ func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 //
 // This exercises the real path:
 //
-//	handleReload -> loadConfig -> validateSystemCASourcePath
+//	handleReload -> loadAndPrepareRuntimeConfig -> validateSystemCASourcePath
 //
 // and proves the active runtime config is unchanged after rejection.
 func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
@@ -2299,7 +2299,7 @@ func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
 	initLoggers(opBuf, io.Discard, slog.LevelInfo, false)
 
 	// 1. Load a valid initial config and create App.
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2474,7 +2474,7 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 	// Reload with a global root that has no MAC coverage.
 	// This must succeed — global roots are authorization-only.
 	deps := reloadDeps{
-		loadConfig: func() (*Config, error) {
+		loadAndPrepareRuntimeConfig: func() (*Config, error) {
 			return &Config{
 				AllowedRoots: []string{"/opt"},
 				SessionTTL:   12 * time.Hour,

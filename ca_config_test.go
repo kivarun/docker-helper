@@ -225,7 +225,7 @@ func TestCAConfigInvalidCA(t *testing.T) {
 			t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 			t.Setenv("XDG_STATE_HOME", "")
 
-			_, err := loadConfig()
+			_, err := loadAndPrepareRuntimeConfig()
 			if err == nil {
 				t.Fatal("expected error")
 			}

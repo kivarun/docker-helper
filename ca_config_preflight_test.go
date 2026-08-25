@@ -645,8 +645,8 @@ func TestSystemCADocumentation(t *testing.T) {
 	}
 }
 
-func TestLoadConfigSystemModeRejectsOutsideCA(t *testing.T) {
-	// loadConfig in system mode must reject trusted_ca_path outside
+func TestLoadAndPrepareRuntimeConfigSystemModeRejectsOutsideCA(t *testing.T) {
+	// loadAndPrepareRuntimeConfig in system mode must reject trusted_ca_path outside
 	// /etc/docker-helper, even when config was written manually.
 	// The system CA source check runs before runtime dir creation,
 	// so we do not need to mock getRuntimeDir.
@@ -677,17 +677,17 @@ func TestLoadConfigSystemModeRejectsOutsideCA(t *testing.T) {
 	getConfigPathFunc = func() string { return configPath }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	_, err := loadConfig()
+	_, err := loadAndPrepareRuntimeConfig()
 	if err == nil {
-		t.Fatal("loadConfig should reject CA outside /etc/docker-helper in system mode")
+		t.Fatal("loadAndPrepareRuntimeConfig should reject CA outside /etc/docker-helper in system mode")
 	}
 	if !strings.Contains(err.Error(), systemCASourceRoot) {
 		t.Errorf("expected error mentioning %s, got: %v", systemCASourceRoot, err)
 	}
 }
 
-func TestLoadConfigUserModeAcceptsArbitraryCA(t *testing.T) {
-	// loadConfig in user mode must accept arbitrary absolute CA paths.
+func TestLoadAndPrepareRuntimeConfigUserModeAcceptsArbitraryCA(t *testing.T) {
+	// loadAndPrepareRuntimeConfig in user mode must accept arbitrary absolute CA paths.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	caPath := filepath.Join(dir, "test-ca.crt")
@@ -720,9 +720,9 @@ func TestLoadConfigUserModeAcceptsArbitraryCA(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("XDG_STATE_HOME", stateDir)
 
-	loaded, err := loadConfig()
+	loaded, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
-		t.Fatalf("loadConfig should accept arbitrary CA path in user mode: %v", err)
+		t.Fatalf("loadAndPrepareRuntimeConfig should accept arbitrary CA path in user mode: %v", err)
 	}
 	if loaded.TrustedCAPath != caPath {
 		t.Errorf("TrustedCAPath = %q, want %q", loaded.TrustedCAPath, caPath)

@@ -14,10 +14,10 @@ import (
 	"time"
 )
 
-// TestLoadConfigRejectsManualSymlinkToForbidden verifies the runtime policy
+// TestLoadAndPrepareRuntimeConfigRejectsManualSymlinkToForbidden verifies the runtime policy
 // invariant: a config.json hand-edited to point allowed_root at a symlink
-// whose target is a forbidden system tree must be rejected by loadConfig.
-func TestLoadConfigRejectsManualSymlinkToForbidden(t *testing.T) {
+// whose target is a forbidden system tree must be rejected by loadAndPrepareRuntimeConfig.
+func TestLoadAndPrepareRuntimeConfigRejectsManualSymlinkToForbidden(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	xdgRuntime := filepath.Join(dir, "xdg_runtime")
@@ -46,8 +46,8 @@ func TestLoadConfigRejectsManualSymlinkToForbidden(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", xdgRuntime)
 	t.Setenv("XDG_STATE_HOME", dir)
 
-	if _, err := loadConfig(); err == nil {
-		t.Fatal("expected loadConfig to reject allowed_root symlink to forbidden tree")
+	if _, err := loadAndPrepareRuntimeConfig(); err == nil {
+		t.Fatal("expected loadAndPrepareRuntimeConfig to reject allowed_root symlink to forbidden tree")
 	} else if !strings.Contains(err.Error(), "forbidden") {
 		t.Errorf("expected forbidden error, got: %v", err)
 	}
@@ -59,10 +59,10 @@ func TestLoadConfigRejectsManualSymlinkToForbidden(t *testing.T) {
 	}
 }
 
-// TestLoadConfigCanonicalizesManualSymlink verifies that a manually written
+// TestLoadAndPrepareRuntimeConfigCanonicalizesManualSymlink verifies that a manually written
 // config whose allowed_root is a symlink to an allowed target is accepted,
 // and the runtime Config stores the canonical target.
-func TestLoadConfigCanonicalizesManualSymlink(t *testing.T) {
+func TestLoadAndPrepareRuntimeConfigCanonicalizesManualSymlink(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 
@@ -99,9 +99,9 @@ func TestLoadConfigCanonicalizesManualSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	loaded, err := loadConfig()
+	loaded, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
-		t.Fatalf("loadConfig() error: %v", err)
+		t.Fatalf("loadAndPrepareRuntimeConfig() error: %v", err)
 	}
 	if loaded.AllowedRoots[0] != canonicalTarget {
 		t.Errorf("AllowedRoot = %q, want canonical %q", loaded.AllowedRoots[0], canonicalTarget)
@@ -115,7 +115,7 @@ func TestReloadSymlinkBypassKeepsOldConfig(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

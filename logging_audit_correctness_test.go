@@ -28,7 +28,7 @@ func setupReloadApp(t *testing.T, auditEnabled bool) (*App, string, string, *byt
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, auditEnabled)
 	t.Cleanup(logging.reset)
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

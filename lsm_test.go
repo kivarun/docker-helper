@@ -649,7 +649,7 @@ func TestServeSystemModePreflightSELinuxPermissive(t *testing.T) {
 		t.Errorf("expected 'permissive' in operational log, got: %s", opLog)
 	}
 	if strings.Contains(opLog, "configuration not found") {
-		t.Error("loadConfig must not be called before MAC preflight")
+		t.Error("loadAndPrepareRuntimeConfig must not be called before MAC preflight")
 	}
 }
 
@@ -683,7 +683,7 @@ func TestServeSystemModePreflightBothActive(t *testing.T) {
 		t.Errorf("expected 'both' in operational log, got: %s", opLog)
 	}
 	if strings.Contains(opLog, "configuration not found") {
-		t.Error("loadConfig must not be called before MAC preflight")
+		t.Error("loadAndPrepareRuntimeConfig must not be called before MAC preflight")
 	}
 }
 

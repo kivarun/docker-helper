@@ -35,9 +35,9 @@ func runReload(stdout, stderr io.Writer, opts operatorClientOptions) int {
 }
 
 // reloadDeps are the production dependencies for handleReload.
-// Tests may inject configuration loading for deterministic testing.
+// Tests may inject runtime-config preparation for deterministic testing.
 type reloadDeps struct {
-	loadConfig func() (*Config, error)
+	loadAndPrepareRuntimeConfig func() (*Config, error)
 }
 
 // handleReload reloads the configuration from disk and updates the daemon's
@@ -56,7 +56,7 @@ type reloadDeps struct {
 // configuration and returns an error.
 func (a *App) handleReload(w http.ResponseWriter, r *http.Request) {
 	a.handleReloadWithDeps(w, r, reloadDeps{
-		loadConfig: loadConfig,
+		loadAndPrepareRuntimeConfig: loadAndPrepareRuntimeConfig,
 	})
 }
 
@@ -70,7 +70,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	started := time.Now()
 	ctx := r.Context()
 
-	newCfg, err := deps.loadConfig()
+	newCfg, err := deps.loadAndPrepareRuntimeConfig()
 	if err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		diagnostic := "invalid configuration"

@@ -26,7 +26,7 @@ func candidateBasePaths() []string {
 }
 
 // testAllowedRootDir creates a unique directory that is valid as a workspace
-// root and returns it in canonical form, matching what loadConfig stores in
+// root and returns it in canonical form, matching what loadAndPrepareRuntimeConfig stores in
 // Config.AllowedRoots[0]. Candidate bases are tried in order: the user's home
 // directory, the test process working directory, and "/" as a last resort.
 // A base does not have to be policy-legal itself (root's home is /root, a

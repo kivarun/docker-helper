@@ -225,7 +225,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 	// Audit JSONL -> stdout; operational JSONL -> stderr.
 	initLoggers(stderr, stdout, slog.LevelInfo, false)
 
-	// System mode requires MAC confinement. Check before loadConfig()
+	// System mode requires MAC confinement. Check before loadAndPrepareRuntimeConfig()
 	// to avoid side effects (runtime directory creation) when confinement
 	// is not satisfied.
 	if resolveDeploymentMode() == ModeSystem {
@@ -235,7 +235,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 		}
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := loadAndPrepareRuntimeConfig()
 	if err != nil {
 		hint := "run docker-helper init"
 		if errors.Is(err, os.ErrNotExist) {

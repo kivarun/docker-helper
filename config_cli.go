@@ -325,7 +325,7 @@ func configAllowedRootList(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	// Use canonical resolved roots (same as loadConfig).
+	// Use canonical resolved roots (same as loadAndPrepareRuntimeConfig).
 	requestedRoots, err := resolveAllowedRoots(raw, fc)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

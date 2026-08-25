@@ -151,9 +151,9 @@ func TestRequireAppArmorConfinementWrongProfile(t *testing.T) {
 // --- Integration: serve preflight ---
 
 // TestServeSystemModePreflightInactive verifies that the MAC backend preflight
-// runs before loadConfig. It uses a nonexistent config path: if loadConfig
+// runs before loadAndPrepareRuntimeConfig. It uses a nonexistent config path: if loadAndPrepareRuntimeConfig
 // were called first, the error would be about missing config, not MAC backend.
-// The "MAC backend" error proves preflight ran before loadConfig.
+// The "MAC backend" error proves preflight ran before loadAndPrepareRuntimeConfig.
 func TestServeSystemModePreflightInactive(t *testing.T) {
 	origActive := appArmorLSMActive
 	appArmorLSMActive = func() (bool, error) { return false, nil }
@@ -169,7 +169,7 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
-	// Nonexistent config path: if loadConfig ran before preflight, the error
+	// Nonexistent config path: if loadAndPrepareRuntimeConfig ran before preflight, the error
 	// would be "configuration not found", not "MAC backend".
 	getConfigPathFunc = func() string { return "/nonexistent/docker-helper/config.json" }
 
@@ -183,12 +183,12 @@ func TestServeSystemModePreflightInactive(t *testing.T) {
 		t.Errorf("expected 'MAC backend' in operational log, got: %s", opLog)
 	}
 	if strings.Contains(opLog, "configuration not found") {
-		t.Error("loadConfig must not be called before MAC preflight (got config error instead of MAC backend error)")
+		t.Error("loadAndPrepareRuntimeConfig must not be called before MAC preflight (got config error instead of MAC backend error)")
 	}
 }
 
 // TestServeSystemModePreflightUnconfined verifies that the confinement check
-// runs before loadConfig. It uses a nonexistent config path: if loadConfig
+// runs before loadAndPrepareRuntimeConfig. It uses a nonexistent config path: if loadAndPrepareRuntimeConfig
 // were called first, the error would be about missing config, not confinement.
 func TestServeSystemModePreflightUnconfined(t *testing.T) {
 	origActive := appArmorLSMActive
@@ -210,7 +210,7 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 		getConfigPathFunc = origGetConfig
 	}()
 
-	// Nonexistent config path: if loadConfig ran before preflight, the error
+	// Nonexistent config path: if loadAndPrepareRuntimeConfig ran before preflight, the error
 	// would be "configuration not found", not "not confined".
 	getConfigPathFunc = func() string { return "/nonexistent/docker-helper/config.json" }
 
@@ -224,7 +224,7 @@ func TestServeSystemModePreflightUnconfined(t *testing.T) {
 		t.Errorf("expected 'not confined' in operational log, got: %s", opLog)
 	}
 	if strings.Contains(opLog, "configuration not found") {
-		t.Error("loadConfig must not be called before AppArmor preflight (got config error instead of confinement error)")
+		t.Error("loadAndPrepareRuntimeConfig must not be called before AppArmor preflight (got config error instead of confinement error)")
 	}
 }
 

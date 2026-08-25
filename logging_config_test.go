@@ -140,9 +140,9 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 				t.Fatalf("write config: %v", err)
 			}
 
-			loaded, err := loadConfig()
+			loaded, err := loadAndPrepareRuntimeConfig()
 			if err != nil {
-				t.Fatalf("loadConfig: %v", err)
+				t.Fatalf("loadAndPrepareRuntimeConfig: %v", err)
 			}
 			if loaded.AuditEnabled != tt.expectedAudit {
 				t.Errorf("audit_enabled = %v, want %v", loaded.AuditEnabled, tt.expectedAudit)
@@ -158,7 +158,7 @@ func TestConfigLoadAuditEnabled(t *testing.T) {
 
 // TestResolveEffectiveConfigAuditEnabled verifies that resolveEffectiveConfig
 // wires deployment mode through EffectiveUID into audit_enabled resolution.
-// This exercises the mode→audit bridge without calling loadConfig (which would
+// This exercises the mode→audit bridge without calling loadAndPrepareRuntimeConfig (which would
 // require root filesystem privileges for system mode).
 func TestResolveEffectiveConfigAuditEnabled(t *testing.T) {
 	falseVal := false
