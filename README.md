@@ -12,7 +12,7 @@ Docker and enforces policy:
 - host paths accepted as build contexts and bind-mount sources are
   restricted to the session workspace;
 - build, pull, and run require a session token; session management
-  requires an admin or launcher credential;
+  requires an admin token or Principal credential;
 - all supported Docker operations are mediated by the daemon;
 - the developer controls which workspace each session can access.
 
@@ -50,18 +50,18 @@ exactly one supported MAC backend: AppArmor or enforcing SELinux.
 
 ## Authentication model
 
-Three credential classes provide different levels of access:
+Three authentication classes provide different levels of access:
 
 1. **Admin token** — full administrative access: manage principals,
    credentials, and all sessions.
-2. **Launcher credential** — bound to a principal: create sessions for
+2. **Principal credential** — bound to a principal: create sessions for
    that principal, list and delete only that principal's sessions.
    Cannot manage principals or credentials.
 3. **Session token** — narrow workspace capability for Docker operations
    (pull, build, run, registry login).
 
 After a session token is issued:
-- revoking the launcher credential does not invalidate the session;
+- revoking the Principal credential does not invalidate the session;
 - disabling the principal deletes its active sessions and blocks their tokens;
 - removing an allowed root does not invalidate the session;
 - session expiry or deletion blocks future requests;
@@ -639,7 +639,7 @@ support explicit endpoint selection:
 
 Default behavior: select the user socket when it exists; otherwise select the
 system socket. The token source changes with the selected socket: user-mode
-`admin.token` for the user socket, and the installed launcher credential (or
+`admin.token` for the user socket, and the installed Principal credential (or
 root system `admin.token`) for the system socket.
 
 `--endpoint` requires `--token-file`. `--system` and `--endpoint` are
@@ -901,7 +901,7 @@ Note: `docker-helper config show` (without a field) displays
   isolated staging copy with FD-relative traversal; system-mode run
   mounts use inode-pinned helper-owned mounts.
 - **Bearer authentication** — admin token uses SHA-256 hashing with
-  constant-time comparison in memory; launcher credentials and session
+  constant-time comparison in memory; Principal credentials and session
   tokens use SHA-256 hashes stored in SQLite and resolved through
   database lookup.
 - **Socket permissions** — user mode Unix socket has 0600 permissions;
@@ -1075,7 +1075,7 @@ owner /run/user/*/docker-helper/docker-helper.sock rw,
 ```
 
 Allowing socket access does not bypass docker-helper authorization.
-API requests still require a valid session token or admin credential.
+API requests still require a valid session token or admin token.
 
 ## Workspace root policy
 
@@ -1138,7 +1138,7 @@ sudo mkdir -p /srv/workspaces/alice
 sudo docker-helper principal allowed-root add \
     --system alice /srv/workspaces/alice
 
-# 5. Create a launcher credential for the principal.
+# 5. Create a Principal credential for the principal.
 sudo docker-helper credential create \
     --system --name laptop alice
 ```
@@ -1171,7 +1171,7 @@ The separation is intentional:
   workspace policy;
 - `config allowed-root add` updates the system-wide authorization ceiling only;
 - `apparmor root add` is an advanced backend-specific operation;
-- `credential create` produces a launcher token for session creation.
+- `credential create` produces a Principal credential token for session creation.
 
 If the operator does not want the default home root to remain usable,
 they may remove it:

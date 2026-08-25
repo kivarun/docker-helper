@@ -192,7 +192,7 @@ Security-sensitive behavior must have focused tests.
 Never expose:
 - admin tokens;
 - session bearer tokens;
-- launcher credential tokens;
+- Principal credential tokens;
 - Authorization headers;
 - secret environment values
 

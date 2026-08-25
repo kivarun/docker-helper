@@ -45,19 +45,19 @@ preferences. No cleanup was performed merely for style.
 - Principal CRUD via admin token;
 - Default allowed root = principal home.
 
-## Phase 2: launcher credentials — completed
+## Phase 2: Principal credentials — completed
 
 - Credential table with token hash, ID, name;
 - Credential token format `dhc_` + 32 bytes;
 - Credential CRUD via admin token;
 - Credential authentication for session creation;
 - `credential create --name` is optional and defaults to `default`;
-- `credential install` atomically stores a non-root user's launcher token.
+- `credential install` atomically stores a non-root user's Principal credential token.
 
 ## Phase 3: principal-owned sessions/auth — completed
 
 - `sessions.principal_id` column;
-- Principal-owned sessions created via launcher credential;
+- Principal-owned sessions created via Principal credential;
 - Session ownership boundary (principal can list/delete own sessions);
 - Session token semantics: credential revocation and allowed-root removal do not
   invalidate issued sessions; disabling a principal deletes its active sessions
@@ -91,7 +91,7 @@ preferences. No cleanup was performed merely for style.
 - automatic default selection of the existing user socket, otherwise the system
   socket, with the matching token source;
 - no retry to another daemon after an endpoint has been selected;
-- non-root init detects an existing system daemon and enters launcher-credential
+- non-root init detects an existing system daemon and enters Principal-credential
   onboarding instead of creating a competing user endpoint;
 - `reload` command uses operator client.
 
@@ -163,7 +163,7 @@ Accepted Release 2 decisions:
 
 - Multi-user system mode introduces explicit **principals**.
 - A system administrator provisions principals through the daemon API using the
-  administrative credential; the CLI is only a client of that API.
+  admin token; the CLI is only a client of that API.
 - A principal is created from an existing OS user. The daemon resolves the OS
   username to UID, GID, and home directory server-side.
 - UID, GID, and filesystem policy are never trusted from launcher/client claims.
@@ -172,16 +172,16 @@ Accepted Release 2 decisions:
 - Administrative CLI UX should follow the same memorable pattern as config
   management, including `show` and `set`, with addressable add/remove operations
   for `allowed_roots` so the whole array does not need to be rewritten.
-- A principal may have multiple opaque launcher credentials. Credentials are
+- A principal may have multiple opaque Principal credentials. Credentials are
   separate revocable entities, stored only as hashes, and the secret value is
   returned only at creation.
 - The CLI supplies the stable credential name `default` when `--name` is
   omitted; the HTTP request continues to carry an explicit name.
-- A non-root user can install one returned launcher token in the standard
+- A non-root user can install one returned Principal credential token in the standard
   user-scoped credential file. Default endpoint selection then chooses the
   matching credential automatically; explicit endpoint and token overrides
   remain authoritative.
-- Launcher credentials identify a principal. The daemon obtains UID/GID and
+- Principal credentials identify a principal. The daemon obtains UID/GID and
   `allowed_roots` from its own principal state; the launcher sends only its
   credential and requested workspace.
 - Session tokens remain narrow workspace-scoped capabilities and inherit owner
@@ -191,7 +191,7 @@ Accepted Release 2 decisions:
 
 - Removing an `allowed_root` prevents creation of new sessions using that root.
 - Existing sessions are not dynamically re-evaluated after allowed-root removal
-  or launcher-credential revocation. They remain valid until normal expiry,
+  or Principal-credential revocation. They remain valid until normal expiry,
   explicit deletion, principal disable, or principal deletion.
 - Disabling a principal transactionally deletes its sessions; re-enabling the
   principal does not revive their tokens.
@@ -268,7 +268,7 @@ behavior yet.
 - Unit tests cover unknown users, duplicate principals, root normalization,
   authorization failures, and CLI/API round trips.
 
-## Workstream 2: launcher credentials
+## Workstream 2: Principal credentials
 
 Add multiple revocable credentials per principal.
 
@@ -300,7 +300,7 @@ principal credentials for ordinary session lifecycle.
 - Session creation request contains a workspace, not UID/GID or roots.
 - The daemon validates the requested workspace against the principal's current
   `allowed_roots` and stores the owning principal with the session.
-- Principals may list/delete their own sessions; administrative credentials may
+- Principals may list/delete their own sessions; the admin token may
   retain broader management rights.
 - Session-authenticated operation endpoints keep the existing session ownership
   boundary.
@@ -314,7 +314,7 @@ principal credentials for ordinary session lifecycle.
 - A forged client UID/GID/root claim has no effect because those fields are not
   accepted as authority.
 - One principal cannot list/delete another principal's sessions with its
-  launcher credential.
+  Principal credential.
 - Existing async operation semantics remain unchanged.
 
 ## Workstream 4: deployment profiles, system paths, and runtime UID/GID

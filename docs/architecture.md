@@ -27,7 +27,7 @@ Docker-facing service can compromise the host.
 Operator / agent
       │
       ├─── admin token (full admin)
-      ├─── launcher credential (principal-scoped)
+      ├─── Principal credential (principal-scoped)
       └─── session token (Docker operations)
       │
    +--+--+
@@ -209,7 +209,7 @@ DELETE /principals/{username}  (admin token)
     ├── commits transaction
     └── best-effort cleanup of session runtime directories
     │
-POST /sessions  (launcher credential)
+POST /sessions  (Principal credential)
     │
     ├── validates credential
     ├── resolves principal_id
@@ -271,7 +271,7 @@ POST /operations/{id}/cancel  (session token)
     ├── bounded force-cleanup fallback if process does not exit
     └── operation becomes terminal (status=failed, result_code=cancelled)
     │
-DELETE /sessions/{id}  (admin token or launcher credential)
+DELETE /sessions/{id}  (admin token or Principal credential)
     │
     └── physically deletes session row
     │
@@ -281,13 +281,13 @@ subsequent requests with deleted session token
 ```
 
 Session token semantics:
-- revoking the launcher credential does not invalidate issued sessions;
+- revoking the Principal credential does not invalidate issued sessions;
 - disabling the principal deletes its active sessions and blocks their tokens;
 - removing an allowed root does not invalidate issued sessions;
 - session expiry or deletion blocks future requests;
 - an already-started Docker operation continues its lifecycle.
 
-A launcher credential stays with the launcher. The coding agent never
+A Principal credential stays with the launcher. The coding agent never
 receives it. The agent only gets a session token, which grants access to
 a single workspace and expires after the configured TTL. This separation
 ensures the agent cannot create sessions for other workspaces or manage
@@ -303,7 +303,7 @@ docker-helper provides a CLI for session management.
 
 ### docker-helper session create
 
-Create a new session. Requires admin token or launcher credential.
+Create a new session. Requires admin token or Principal credential.
 
 ```
 docker-helper session create --workspace PATH [--json]
@@ -320,12 +320,12 @@ Returns the session ID, token, workspace, creation time, and expiration
 time. The token is shown only once and cannot be retrieved later.
 
 With admin token: creates a session with global scope.
-With launcher credential: creates a session for the credential's principal;
+With Principal credential: creates a session for the credential's principal;
 workspace must be inside the principal's allowed roots.
 
 ### docker-helper session list
 
-List active sessions. Requires admin token or launcher credential.
+List active sessions. Requires admin token or Principal credential.
 
 ```
 docker-helper session list [--json]
@@ -341,11 +341,11 @@ Returns a table of active sessions with ID, workspace, creation time,
 and expiration time.
 
 With admin token: lists all sessions.
-With launcher credential: lists only sessions for the credential's principal.
+With Principal credential: lists only sessions for the credential's principal.
 
 ### docker-helper session delete
 
-Delete a session. Requires admin token or launcher credential.
+Delete a session. Requires admin token or Principal credential.
 
 ```
 docker-helper session delete --id SESSION_ID [--json]
@@ -362,7 +362,7 @@ Permanently removes the session. Subsequent requests with the session's
 token will receive 401 Unauthorized.
 
 With admin token: can delete any session.
-With launcher credential: can only delete sessions for its principal.
+With Principal credential: can only delete sessions for its principal.
 
 ### docker-helper session cleanup
 
@@ -412,7 +412,7 @@ for full syntax:
   `unset`.
 - `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
   `set`, `delete`, `allowed-root`.
-- `credential` — Manage launcher credentials. Subcommands: `create`, `list`,
+- `credential` — Manage Principal credentials. Subcommands: `create`, `list`,
   `revoke`, `install`. `credential create --name` is optional and uses the
   literal name `default` when omitted.
 - `admin` — Administrative operations. Subcommand: `token rotate` (rotate
@@ -602,7 +602,7 @@ Docker socket means the unit does not create a full security boundary.
 
 ## Authentication
 
-Three credential classes provide different levels of access:
+Three authentication classes provide different levels of access:
 
 ### Admin token
 
@@ -616,7 +616,7 @@ Three credential classes provide different levels of access:
 - compared with `crypto/subtle.ConstantTimeCompare` to prevent timing
   attacks.
 
-### Launcher credential
+### Principal credential
 
 - created per principal by `POST /principals/{username}/credentials`
   (admin token required);
@@ -630,7 +630,7 @@ Three credential classes provide different levels of access:
 
 #### Credential install
 
-The `credential install` command stores the launcher token for the principal
+The `credential install` command stores the Principal credential token for the principal
 user. It is not run as root.
 
 - Token format: `dhc_` + 64 lowercase hex characters (68 total).
@@ -669,7 +669,7 @@ Endpoint and token resolution for default (no `--system`) mode:
 
 Session management is dual-authenticated:
 - admin token -> global session management (create, list all, delete any);
-- launcher credential -> principal-scoped session management (create for its
+- Principal credential -> principal-scoped session management (create for its
   principal, list and delete only its principal's sessions).
 
 ## Workspace isolation
@@ -688,7 +688,7 @@ Initialization follows the selected deployment identity:
 - non-interactive initialization requires an explicit `--allowed-root`.
 
 When a non-root `docker-helper init` detects an existing system daemon, it uses
-the launcher-credential onboarding path instead of creating a competing user
+the Principal-credential onboarding path instead of creating a competing user
 daemon configuration. The standalone `credential install` command exposes the
 same user-scoped credential store directly.
 
@@ -1742,7 +1742,7 @@ session's workspace.
 
 Session tokens are returned once during creation. The full token is never
 stored in the database — only its SHA-256 hash. Admin token comparison
-uses `ConstantTimeCompare` to prevent timing attacks. Launcher credentials
+uses `ConstantTimeCompare` to prevent timing attacks. Principal credentials
 and session tokens are resolved through database lookup by hash.
 
 ### Direct docker.sock access
@@ -1758,7 +1758,7 @@ through the HTTP API.
 ### Secret leakage through logs
 
 Command arguments, environment variable values, and Docker output are
-never logged. Admin tokens, launcher credentials, and session tokens are
+never logged. Admin tokens, Principal credentials, and session tokens are
 never logged. The audit record for `POST /run` includes `command_arg_count`
 but never the arguments themselves.
 

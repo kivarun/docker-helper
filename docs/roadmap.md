@@ -260,7 +260,7 @@ Include:
 - richer log streaming if polling becomes insufficient;
 - network/proxy capability as a separate tool/project;
 - notification helper with restricted DBus access;
-- immediate re-evaluation/revocation of already-issued sessions after launcher
+- immediate re-evaluation/revocation of already-issued sessions after Principal
   credential revocation or allowed-root changes only if real use demonstrates a
   need. Principal disable/delete already removes that principal's sessions.
 
@@ -278,14 +278,14 @@ Implemented contract:
 - user mode uses XDG paths and a private per-user Unix socket;
 - system mode runs as root, serves explicit principals, and uses a system Unix
   socket plus configurable loopback HTTP (`127.0.0.1:52375` by default);
-- transport does not establish identity; admin, launcher, and session
+- transport does not establish identity; admin-token, Principal-credential, and session-token
   capabilities establish authorization;
 - operator commands select the existing user socket first and otherwise the
   system socket, together with the matching token source; explicit
   `--system`, `--endpoint`, and `--token-file` overrides remain available;
 - principal UID/GID/home are resolved by the daemon, each principal starts with
-  its home as an allowed root, and multiple launcher credentials are supported;
-- `credential install` stores the launcher token for non-root system clients;
+  its home as an allowed root, and multiple Principal credentials are supported;
+- `credential install` stores the Principal credential token for non-root system clients;
 - `credential create --name` defaults to `default`;
 - root initialization defaults to `/home` and may explicitly accept `/home` or
   `/opt`; non-root initialization defaults to the current user's home;
@@ -320,7 +320,7 @@ Explicitly outside Release 2:
 - multiple helper contexts, routing, or helper-to-helper forwarding;
 - host port publishing and generic Docker network configuration;
 - durable operation recovery across daemon restarts;
-- dynamic revocation/re-evaluation of issued sessions after launcher-credential
+- dynamic revocation/re-evaluation of issued sessions after Principal-credential
   revocation or allowed-root changes; principal disable/delete already removes
   that principal's sessions;
 - termination of started operations solely because a session expires or is

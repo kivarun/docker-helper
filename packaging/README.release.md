@@ -191,7 +191,7 @@ For a native package installation, the snippet is at
 `/usr/share/docker-helper/apparmor/local/curl`.
 
 Allowing socket access does not bypass docker-helper authorization.
-API requests still require a valid session token or admin credential.
+API requests still require a valid session token or admin token.
 
 ## Agent-side artifacts
 

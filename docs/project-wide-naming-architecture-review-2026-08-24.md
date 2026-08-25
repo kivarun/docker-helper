@@ -685,28 +685,56 @@ capability fixtures, and authentication production code are unchanged.
 
 ### P2-11. Documentation uses admin credential as a synonym for admin token
 
-**Current vocabulary and evidence**
+**Status: RESOLVED**
 
-README incorrectly labels the current Release 2 Principal credential as a
-Launcher credential while defining the three authentication classes:
-[README.md:51-61](../README.md#L51-L61).
+Release 2 authentication terminology is now consistent across the current
+documentation. The canonical Release 2 vocabulary is:
 
-Later documentation uses “admin credential” or “administrative credential”:
-[README.md:1077-1078](../README.md#L1077-L1078),
-[release-2-plan.md:162-175](release-2-plan.md#L162-L175).
+- **Admin token** — the concrete administrative bearer token. Never called
+  “admin credential” or “administrative credential”.
+- **Principal credential** — the current Release 2 Credential entity owned by
+  a Principal. A Principal may have multiple named Principal credentials, and
+  a Principal credential token is formatted `dhc_...`. Never called “Launcher
+  credential”.
+- **Session token** — the narrow Session capability for Docker actions.
 
-**Actual responsibility**
+“Launcher credential” is Release 3 terminology only; the future R3 Launcher
+entity is not pulled backward into Release 2. A lowercase/generic “launcher”
+remains where it genuinely describes an external caller/client/process.
 
-Credential is a concrete Principal-owned entity in the Release 2 model; the
-canonical term is Principal credential. Launcher credential is reserved for
-the proposed Release 3 delegation model. The root administrative capability
-is the admin token.
+Affected current documents corrected in this batch:
 
-**Preferred vocabulary and batch**
+- **README.md** — the authentication-model introduction now reads “Three
+  authentication classes” (Admin token and Session token are not Credential
+  domain entities); the Principal-owned class is “Principal credential”;
+  “admin credential” reads “admin token”; “launcher token” reads “Principal
+  credential token”; all behavior and examples unchanged.
+- **docs/architecture.md** — diagrams and lifecycle text now use “Principal
+  credential” (`launcher credential (principal-scoped)` →
+  `Principal credential (principal-scoped)`; `POST /sessions (launcher
+  credential)` → `POST /sessions (Principal credential)`); the CLI summary,
+  the Authentication section, and the security sections were updated
+  (“Manage Principal credentials”, “Principal credential token”,
+  “Principal-credential onboarding”). Generic descriptions of an external
+  launcher/client remain unchanged.
+- **docs/roadmap.md** — Release 1 / post-1.0 / Release 2 sections now use
+  “Principal credential”, “Principal credential token”, “admin token”,
+  “session token”, and “Principal-credential revocation”. The Release 3
+  section describing the proposed delegated Launcher entity retains its
+  legitimate Launcher terminology.
+- **docs/release-2-plan.md** — the historical implementation sections use the
+  final accepted R2 vocabulary: “Phase 2: Principal credentials”, “Workstream
+  2: Principal credentials”, “Principal-credential onboarding”,
+  “Principal-credential revocation”, “Principal credential token”, and
+  “admin token”. Generic “launcher/client” actor wording remains.
+- **packaging/README.release.md** — “admin credential” reads “admin token”.
+- **AGENTS.md** — the secret-class list now reads “Principal credential
+  tokens”.
 
-Use Principal credential for the Release 2 entity and admin token for the root
-capability consistently in README, release plan, man pages, and packaging
-comments. This is terminology-only and has no compatibility cost.
+**Compatibility**
+
+Documentation-only terminology reconciliation. No API, CLI, schema, auth,
+persistence, or behavior change; no Go files changed.
 
 ## 4. P3 findings
 
