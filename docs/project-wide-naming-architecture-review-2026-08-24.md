@@ -778,19 +778,22 @@ allocation, and cleanup are exactly as before.
 
 ### P3-3. Shared test helpers are hidden in feature-specific files
 
-setupTestLogging is defined in audit_test.go but is used across many unrelated
-test files:
-[audit_test.go:705-722](../audit_test.go#L705-L722).
+**Status: RESOLVED**
 
-readConfigJSON is defined in config_cli_test.go but is also used by reload and
-allowed-root tests:
-[config_cli_test.go:69-80](../config_cli_test.go#L69-L80).
+Shared test helpers moved out of feature-specific test files into dedicated
+test-only helper files:
 
-The local contains helper is also shared by completion/config tests:
-[multi_root_regression_test.go:1295-1305](../multi_root_regression_test.go#L1295-L1305).
+- **setupTestLogging** and **setupTestLoggingDiscard** now live in
+  `logging_test_helpers_test.go` (behavior unchanged).
+- **readConfigJSON** now lives in `config_test_helpers_test.go` (behavior
+  unchanged); existing callers in config/reload/allowed-root tests use the
+  same helper name.
+- The package-level generic **contains** helper was removed in favor of the
+  standard-library `slices.Contains`; all test call sites now use
+  `slices.Contains`.
 
-Use logging_test_helpers.go and config_test_helpers.go, and replace contains
-with slices.Contains. Test-only batch.
+No production behavior or compatibility surface changed. This is a
+test-only organizational cleanup.
 
 ### P3-4. Historical filenames and planning documents no longer describe scope
 

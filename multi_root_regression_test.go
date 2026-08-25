@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -63,7 +64,7 @@ func TestAllowedRootAddHappyPath(t *testing.T) {
 	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
 		t.Fatalf("cannot parse allowed_roots: %v", err)
 	}
-	if len(roots) != 2 || !contains(roots, allowedRoot) || !contains(roots, newRoot) {
+	if len(roots) != 2 || !slices.Contains(roots, allowedRoot) || !slices.Contains(roots, newRoot) {
 		t.Errorf("expected [%s, %s], got %v", allowedRoot, newRoot, roots)
 	}
 }
@@ -638,7 +639,7 @@ func TestAllowedRootAddDaemonNotRunning(t *testing.T) {
 	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
 		t.Fatalf("cannot parse allowed_roots: %v", err)
 	}
-	if len(roots) != 2 || !contains(roots, allowedRoot) || !contains(roots, newRoot) {
+	if len(roots) != 2 || !slices.Contains(roots, allowedRoot) || !slices.Contains(roots, newRoot) {
 		t.Errorf("expected both roots, got %v", roots)
 	}
 }
@@ -1295,15 +1296,6 @@ func TestAllowedRootRemoveRollbackRereload(t *testing.T) {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-func contains(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
 
 func verifyConfigUnchanged(t *testing.T, configPath string, originalData []byte) {
 	t.Helper()

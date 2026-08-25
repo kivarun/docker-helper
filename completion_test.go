@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -527,18 +528,18 @@ func TestConfigShowFieldsVocabulary(t *testing.T) {
 	fields := configShowFields()
 
 	// Must contain allowed_roots.
-	if !contains(fields, "allowed_roots") {
+	if !slices.Contains(fields, "allowed_roots") {
 		t.Error("config show must contain allowed_roots")
 	}
 
 	// Must NOT contain legacy allowed_root.
-	if contains(fields, "allowed_root") {
+	if slices.Contains(fields, "allowed_root") {
 		t.Error("config show must not contain legacy allowed_root")
 	}
 
 	// Must contain representative computed fields.
 	for _, f := range []string{"mode", "config_path"} {
-		if !contains(fields, f) {
+		if !slices.Contains(fields, f) {
 			t.Errorf("config show must contain %s", f)
 		}
 	}
@@ -555,23 +556,23 @@ func TestConfigSetFieldsVocabulary(t *testing.T) {
 	fields := configSetFields()
 
 	// Must NOT contain allowed_root or allowed_roots.
-	if contains(fields, "allowed_root") {
+	if slices.Contains(fields, "allowed_root") {
 		t.Error("config set must not contain legacy allowed_root")
 	}
-	if contains(fields, "allowed_roots") {
+	if slices.Contains(fields, "allowed_roots") {
 		t.Error("config set must not contain allowed_roots")
 	}
 
 	// Must contain writable scalar fields.
 	for _, f := range []string{"session_ttl", "log_level", "trusted_ca_path", "http_address"} {
-		if !contains(fields, f) {
+		if !slices.Contains(fields, f) {
 			t.Errorf("config set must contain %s", f)
 		}
 	}
 
 	// Must not contain read-only fields.
 	for _, f := range []string{"mode", "config_path", "audit_enabled_source"} {
-		if contains(fields, f) {
+		if slices.Contains(fields, f) {
 			t.Errorf("config set must not contain read-only field %s", f)
 		}
 	}
@@ -581,21 +582,21 @@ func TestConfigUnsetFieldsVocabulary(t *testing.T) {
 	fields := configUnsetFields()
 
 	// Must NOT contain allowed_root or allowed_roots.
-	if contains(fields, "allowed_root") {
+	if slices.Contains(fields, "allowed_root") {
 		t.Error("config unset must not contain legacy allowed_root")
 	}
-	if contains(fields, "allowed_roots") {
+	if slices.Contains(fields, "allowed_roots") {
 		t.Error("config unset must not contain allowed_roots")
 	}
 
 	// Must NOT contain required fields.
-	if contains(fields, "session_ttl") {
+	if slices.Contains(fields, "session_ttl") {
 		t.Error("config unset must not contain required session_ttl")
 	}
 
 	// Must contain optional writable fields.
 	for _, f := range []string{"log_level", "http_address"} {
-		if !contains(fields, f) {
+		if !slices.Contains(fields, f) {
 			t.Errorf("config unset must contain %s", f)
 		}
 	}
@@ -606,12 +607,12 @@ func TestCompletionConfigShowNoStaleAllowedRoot(t *testing.T) {
 
 	// config show must contain allowed_roots.
 	results := runCompletion(t, script, []string{"docker-helper", "config", "show", ""})
-	if !contains(results, "allowed_roots") {
+	if !slices.Contains(results, "allowed_roots") {
 		t.Error("config show completion must contain allowed_roots")
 	}
 
 	// config show must NOT contain stale allowed_root.
-	if contains(results, "allowed_root") {
+	if slices.Contains(results, "allowed_root") {
 		t.Error("config show completion must not contain stale allowed_root")
 	}
 }
@@ -621,10 +622,10 @@ func TestCompletionConfigSetNoStaleAllowedRoot(t *testing.T) {
 
 	// config set FIELD must NOT contain stale allowed_root.
 	results := runCompletion(t, script, []string{"docker-helper", "config", "set", ""})
-	if contains(results, "allowed_root") {
+	if slices.Contains(results, "allowed_root") {
 		t.Error("config set completion must not contain stale allowed_root")
 	}
-	if contains(results, "allowed_roots") {
+	if slices.Contains(results, "allowed_roots") {
 		t.Error("config set completion must not contain allowed_roots")
 	}
 }
@@ -634,10 +635,10 @@ func TestCompletionConfigUnsetNoStaleAllowedRoot(t *testing.T) {
 
 	// config unset must NOT contain stale allowed_root.
 	results := runCompletion(t, script, []string{"docker-helper", "config", "unset", ""})
-	if contains(results, "allowed_root") {
+	if slices.Contains(results, "allowed_root") {
 		t.Error("config unset completion must not contain stale allowed_root")
 	}
-	if contains(results, "allowed_roots") {
+	if slices.Contains(results, "allowed_roots") {
 		t.Error("config unset completion must not contain allowed_roots")
 	}
 }
@@ -652,7 +653,7 @@ func TestCompletionAllowedRootSubcommands(t *testing.T) {
 		t.Fatalf("expected %d subcommands, got %d: %v", len(expected), len(results), results)
 	}
 	for _, sub := range expected {
-		if !contains(results, sub) {
+		if !slices.Contains(results, sub) {
 			t.Errorf("config allowed-root completion must contain %s", sub)
 		}
 	}
@@ -672,7 +673,7 @@ func TestCompletionAllowedRootSubcommands(t *testing.T) {
 	// After "list", must NOT repeat action words.
 	results = runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "list", ""})
 	for _, sub := range expected {
-		if contains(results, sub) {
+		if slices.Contains(results, sub) {
 			t.Errorf("after 'config allowed-root list', must not repeat action words, got: %v", results)
 		}
 	}
@@ -685,7 +686,7 @@ func TestCompletionAllowedRootListNoPathCompletion(t *testing.T) {
 	results := runCompletion(t, script, []string{"docker-helper", "config", "allowed-root", "list", ""})
 	// Should be empty or contain only filesystem entries (not action words).
 	for _, sub := range []string{"list", "add", "remove"} {
-		if contains(results, sub) {
+		if slices.Contains(results, sub) {
 			t.Errorf("after 'config allowed-root list', must not suggest action %q, got: %v", sub, results)
 		}
 	}
@@ -726,13 +727,13 @@ func TestCompletionNoWorkspaceRoot(t *testing.T) {
 
 	// Root commands must NOT include workspace-root.
 	results := runCompletion(t, script, []string{"docker-helper", ""})
-	if contains(results, "workspace-root") {
+	if slices.Contains(results, "workspace-root") {
 		t.Error("root completion must NOT include workspace-root")
 	}
 
 	// Prefix completion: "wo" should NOT yield workspace-root.
 	results = runCompletion(t, script, []string{"docker-helper", "wo"})
-	if contains(results, "workspace-root") {
+	if slices.Contains(results, "workspace-root") {
 		t.Error("prefix 'wo' must NOT yield workspace-root")
 	}
 

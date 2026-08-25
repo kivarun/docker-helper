@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,19 +65,6 @@ func runConfigCLI(t *testing.T, wantCode int, args ...string) (string, string) {
 		t.Fatalf("expected exit code %d, got %d, stderr: %s", wantCode, code, stderr.String())
 	}
 	return stdout.String(), stderr.String()
-}
-
-func readConfigJSON(t *testing.T, path string) map[string]json.RawMessage {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("cannot read config: %v", err)
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatalf("cannot parse config: %v", err)
-	}
-	return raw
 }
 
 // Req 1: config without or with an unknown subcommand is rejected
@@ -2187,7 +2175,7 @@ func TestConfigAllowedRootCommandTree(t *testing.T) {
 		if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
 			t.Fatalf("cannot parse allowed_roots: %v", err)
 		}
-		if !contains(roots, newRoot) {
+		if !slices.Contains(roots, newRoot) {
 			t.Errorf("expected %s in allowed_roots, got: %v", newRoot, roots)
 		}
 	})
