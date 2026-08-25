@@ -14,7 +14,7 @@ import (
 func TestPullStartContainsFields(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -55,7 +55,7 @@ func TestPullStartContainsFields(t *testing.T) {
 func TestPullFinishSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -96,7 +96,7 @@ func TestPullFinishSuccess(t *testing.T) {
 func TestPullFinishErrorWithExitCode(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -139,7 +139,7 @@ func TestPullAuditNoPullOutput(t *testing.T) {
 
 	const pullOutput = "Digest: sha256:abc123\nStatus: Downloaded newer image for alpine:3.24\n"
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -181,7 +181,7 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 
 	const pullErrorOutput = "ERROR: failed to pull: access denied\n"
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -221,7 +221,7 @@ func TestPullAuditNoErrorOutput(t *testing.T) {
 func TestPullImageHyphenRejected(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

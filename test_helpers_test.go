@@ -210,7 +210,7 @@ const testAdminToken = "dht_test_admin_token"
 
 // newTestApp creates a minimal *App with an in-memory SQLite database,
 // a valid allowed root, and a runtime directory. It does not set
-// AdminTokenHash; use newTestAppWithAuth for tests that require admin auth.
+// AdminTokenHash; use newTestAppWithAdminToken for tests that require admin authorization.
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
@@ -252,8 +252,9 @@ func newTestApp(t *testing.T) *App {
 	}
 }
 
-// newTestAppWithAuth creates a test app with admin token hash set.
-func newTestAppWithAuth(t *testing.T) *App {
+// newTestAppWithAdminToken creates an admin-authorized test app with the
+// admin token hash set.
+func newTestAppWithAdminToken(t *testing.T) *App {
 	t.Helper()
 	app := newTestApp(t)
 	hash := sha256.Sum256([]byte(testAdminToken))
@@ -261,8 +262,9 @@ func newTestAppWithAuth(t *testing.T) *App {
 	return app
 }
 
-// withAuth sets the Authorization header on a request using the test admin token.
-func withAuth(r *http.Request) {
+// withAdminToken sets the Authorization header on a request using the
+// test admin token.
+func withAdminToken(r *http.Request) {
 	r.Header.Set("Authorization", "Bearer "+testAdminToken)
 }
 

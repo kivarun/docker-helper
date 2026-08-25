@@ -17,7 +17,7 @@ import (
 )
 
 func TestCredentialAuthValid(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "authuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -56,7 +56,7 @@ func TestCredentialAuthValid(t *testing.T) {
 }
 
 func TestCredentialAuthRandomToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	_, err := authenticateCredential(app.DB, "dhc_randomtoken1234567890abcdef1234567890abcdef1234567890abcdef")
 	if err == nil {
@@ -68,7 +68,7 @@ func TestCredentialAuthRandomToken(t *testing.T) {
 }
 
 func TestCredentialAuthRevoked(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokeduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -109,7 +109,7 @@ func TestCredentialAuthRevoked(t *testing.T) {
 }
 
 func TestCredentialAuthPrincipalDisabled(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disableduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -146,7 +146,7 @@ func TestCredentialAuthPrincipalDisabled(t *testing.T) {
 }
 
 func TestCredentialAuthDBError(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Close the DB to simulate a DB error.
 	app.DB.Close()
@@ -162,7 +162,7 @@ func TestCredentialAuthDBError(t *testing.T) {
 }
 
 func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -220,7 +220,7 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 }
 
 func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
@@ -229,7 +229,7 @@ func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -258,7 +258,7 @@ func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 }
 
 func TestPrincipalWorkspaceInsideFirstRoot(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "wsuser1")
 	subdir := filepath.Join(home, "subdir")
@@ -299,7 +299,7 @@ func TestPrincipalWorkspaceInsideFirstRoot(t *testing.T) {
 }
 
 func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "wsuser2")
 	secondRoot := filepath.Join(app.Config.AllowedRoots[0], "second")
@@ -349,7 +349,7 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 }
 
 func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "wsuser3")
 	outsideRoot := filepath.Join(app.Config.AllowedRoots[0], "outside")
@@ -395,7 +395,7 @@ func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
 }
 
 func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "owner1")
 	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "owner2")
@@ -480,7 +480,7 @@ func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 }
 
 func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "legacyuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -531,7 +531,7 @@ func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
 }
 
 func TestAdminSeesAllSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "adminseesuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -578,7 +578,7 @@ func TestAdminSeesAllSessions(t *testing.T) {
 
 	// Admin lists sessions — should see all.
 	req = httptest.NewRequest(http.MethodGet, "/sessions", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -596,7 +596,7 @@ func TestAdminSeesAllSessions(t *testing.T) {
 }
 
 func TestPrincipalDeletesOwnSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delownuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -650,7 +650,7 @@ func TestPrincipalDeletesOwnSession(t *testing.T) {
 }
 
 func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "delother1")
 	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "delother2")
@@ -722,7 +722,7 @@ func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
 }
 
 func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dellegacyuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -765,7 +765,7 @@ func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
 }
 
 func TestAdminDeletesAnySession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "admindeluser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -810,7 +810,7 @@ func TestAdminDeletesAnySession(t *testing.T) {
 
 	// Admin deletes principal's session.
 	req = httptest.NewRequest(http.MethodDelete, "/sessions/"+resp.Session.ID, nil)
-	withAuth(req)
+	withAdminToken(req)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -820,7 +820,7 @@ func TestAdminDeletesAnySession(t *testing.T) {
 }
 
 func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "surviveuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -934,7 +934,7 @@ func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
 }
 
 func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "survivedisuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -1089,7 +1089,7 @@ func TestSessionAuditNoTokens(t *testing.T) {
 
 func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "noadminfail")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -1137,7 +1137,7 @@ func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 
 func TestInvalidCredentialSingleAuthFailure(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
@@ -1164,7 +1164,7 @@ func TestInvalidCredentialSingleAuthFailure(t *testing.T) {
 }
 
 func TestSessionManagementGenericUnauthorizedMessage(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
 	w := httptest.NewRecorder()
@@ -1185,7 +1185,7 @@ func TestSessionManagementGenericUnauthorizedMessage(t *testing.T) {
 }
 
 func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "principalresp")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -1237,7 +1237,7 @@ func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 
 func TestCredentialSessionListAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "listaudit")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -1285,7 +1285,7 @@ func TestCredentialSessionListAudit(t *testing.T) {
 }
 
 func TestGlobalPolicyNarrowing(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	broadRoot := filepath.Join(app.Config.AllowedRoots[0], "broad")
 	narrowRoot := filepath.Join(broadRoot, "narrow")
@@ -1361,7 +1361,7 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 }
 
 func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	staleRoot := filepath.Join(app.Config.AllowedRoots[0], "stale")
 	newGlobalRoot := filepath.Join(app.Config.AllowedRoots[0], "newglobal")

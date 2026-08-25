@@ -18,7 +18,7 @@ import (
 // This is a regression test for the pipe lifecycle race where cmd.Wait()
 // could close StdoutPipe/StderrPipe before io.Copy goroutines finished reading.
 func TestBuildTailOutputNotLost(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 

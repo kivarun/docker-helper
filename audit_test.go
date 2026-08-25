@@ -69,7 +69,7 @@ func auditRawLinesBySession(buf *bytes.Buffer, sessionID string) []string {
 func TestRunStartAndFinish(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -137,7 +137,7 @@ func TestRunStartAndFinish(t *testing.T) {
 func TestAuditEnvKeysNoValues(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -221,7 +221,7 @@ func TestAuditEnvKeysNoValues(t *testing.T) {
 func TestAuditDebugNoRawValue(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -282,7 +282,7 @@ func TestAuditDebugNoRawValue(t *testing.T) {
 func TestAuditNonZeroExit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -339,7 +339,7 @@ func TestAuditNonZeroExit(t *testing.T) {
 func TestAuditDockerError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -388,7 +388,7 @@ func TestAuditDockerError(t *testing.T) {
 func TestAuditMountsRelativeSource(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -452,7 +452,7 @@ func TestAuditNoContainerOutput(t *testing.T) {
 
 	const containerOutput = "this-is-container-stdout-and-stderr"
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -500,7 +500,7 @@ func TestAuditNoContainerOutput(t *testing.T) {
 func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -551,7 +551,7 @@ func TestAuditRecordTimeIsRFC3339(t *testing.T) {
 func TestAuditCommandArgCount(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -608,7 +608,7 @@ func TestAuditCommandArgCount(t *testing.T) {
 func TestAuditNoCommandInRecord(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -659,7 +659,7 @@ func TestAuditNoCommandInRecord(t *testing.T) {
 func TestRunShutdownGateNoStartAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -725,7 +725,7 @@ func setupTestLoggingDiscard(t *testing.T) {
 
 func TestPullRejectedAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -784,7 +784,7 @@ func TestPullRejectedAudit(t *testing.T) {
 
 func TestBuildRejectedAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -849,7 +849,7 @@ func TestBuildRejectedAudit(t *testing.T) {
 
 func TestRunRejectedAudit(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -916,7 +916,7 @@ func TestRunRejectedAudit(t *testing.T) {
 
 func TestRejectedInvalidJSON(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -950,7 +950,7 @@ func TestRejectedInvalidJSON(t *testing.T) {
 
 func TestRejectedShuttingDown(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 	app.OperationSupervisor.beginShutdown()
 
@@ -1005,7 +1005,7 @@ func TestRejectedShuttingDown(t *testing.T) {
 
 func TestRejectedNoSensitiveData(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -1056,7 +1056,7 @@ func TestRejectedNoSensitiveData(t *testing.T) {
 
 func TestAcceptedOperationNoRejectedEvent(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -1089,7 +1089,7 @@ func TestAcceptedOperationNoRejectedEvent(t *testing.T) {
 
 func TestBuildRejectedInternalError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -1156,7 +1156,7 @@ func TestBuildRejectedInternalError(t *testing.T) {
 
 func TestRejectedWithRequestID(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -1207,7 +1207,7 @@ func TestRejectedWithRequestID(t *testing.T) {
 
 func TestRejectedUnauthenticatedNoRejectedEvent(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Send pull request without authentication.
 	reqBody := map[string]any{"image": "alpine:3.24"}

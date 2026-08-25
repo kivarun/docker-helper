@@ -16,7 +16,7 @@ import (
 )
 
 func TestPrincipalDeleteRemovesAllData(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deluser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -90,7 +90,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 }
 
 func TestPrincipalDeleteSessionTokenInvalidated(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deltokenuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -145,7 +145,7 @@ func TestPrincipalDeleteSessionTokenInvalidated(t *testing.T) {
 }
 
 func TestPrincipalDeleteCredentialTokenInvalidated(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delcreduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -178,7 +178,7 @@ func TestPrincipalDeleteCredentialTokenInvalidated(t *testing.T) {
 }
 
 func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "deladminuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -213,7 +213,7 @@ func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
 }
 
 func TestPrincipalDisableDeletesSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -268,7 +268,7 @@ func TestPrincipalDisableDeletesSessions(t *testing.T) {
 }
 
 func TestPrincipalDisableIdempotent(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disidempuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -311,7 +311,7 @@ func TestPrincipalDisableIdempotent(t *testing.T) {
 }
 
 func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disenuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -377,7 +377,7 @@ func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
 }
 
 func TestPrincipalDeleteAPI204(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "api204user")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -408,7 +408,7 @@ func TestPrincipalDeleteAPI204(t *testing.T) {
 }
 
 func TestPrincipalDeleteAPI404(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
@@ -432,7 +432,7 @@ func TestPrincipalDeleteAPI404(t *testing.T) {
 }
 
 func TestPrincipalDeleteAPI401(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "api401user")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -543,7 +543,7 @@ func TestPrincipalDeleteCLIHelp(t *testing.T) {
 }
 
 func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "discreduser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -596,7 +596,7 @@ func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
 }
 
 func TestPrincipalDisableSessionTokenUnauthorized(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disauthuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -654,7 +654,7 @@ func TestPrincipalDisableSessionTokenUnauthorized(t *testing.T) {
 }
 
 func TestPrincipalDeleteAuditEvent(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditdeluser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -705,7 +705,7 @@ func TestPrincipalDeleteAuditEvent(t *testing.T) {
 }
 
 func TestPrincipalDeleteAuditNotFound(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	var auditBuf bytes.Buffer
 	initLoggers(io.Discard, &auditBuf, slog.LevelError, true)
@@ -735,7 +735,7 @@ func TestPrincipalDeleteAuditNotFound(t *testing.T) {
 }
 
 func TestPrincipalDeleteAuditNoTokenInOutput(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "audittokenuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -782,7 +782,7 @@ func TestPrincipalDeleteAuditNoTokenInOutput(t *testing.T) {
 }
 
 func TestPrincipalDeleteMultipleSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delsessuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -843,7 +843,7 @@ func TestPrincipalDeleteMultipleSessions(t *testing.T) {
 }
 
 func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delexpuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -902,7 +902,7 @@ func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
 // uses a Config snapshot for RuntimeDir, so a concurrent setConfig does not
 // cause a data race or use-after-replace read.
 func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	baseCfg := app.getConfig()
 	allowedRoot := baseCfg.AllowedRoots[0]
@@ -957,7 +957,7 @@ func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
 	setReqBody, _ := json.Marshal(setPrincipalRequest{Enabled: boolPtr(false)})
 	setReq := httptest.NewRequest(http.MethodPatch, "/principals/configraceuser", bytes.NewReader(setReqBody))
 	setReq.Header.Set("Content-Type", "application/json")
-	withAuth(setReq)
+	withAdminToken(setReq)
 	setW := httptest.NewRecorder()
 
 	mux2 := http.NewServeMux()
@@ -998,7 +998,7 @@ func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
 // uses a Config snapshot for RuntimeDir, so a concurrent setConfig does not
 // cause a data race or use-after-replace read.
 func TestPrincipalDeleteConcurrentConfigReload(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	baseCfg := app.getConfig()
 	allowedRoot := baseCfg.AllowedRoots[0]
@@ -1051,7 +1051,7 @@ func TestPrincipalDeleteConcurrentConfigReload(t *testing.T) {
 
 	// Delete the principal via the handler.
 	delReq := httptest.NewRequest(http.MethodDelete, "/principals/delconfigraceuser", nil)
-	withAuth(delReq)
+	withAdminToken(delReq)
 	delW := httptest.NewRecorder()
 
 	mux2 := http.NewServeMux()

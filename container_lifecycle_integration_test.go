@@ -122,7 +122,7 @@ func cleanupContainerByID(t *testing.T, containerID string) {
 func TestShmSizeIntegration(t *testing.T) {
 	dockerAvailable(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -235,7 +235,7 @@ func startRunOperation(t *testing.T, app *App, token string, body map[string]any
 func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 	dockerAvailable(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -301,7 +301,7 @@ func TestContainerLifecycleGracefulSIGTERM(t *testing.T) {
 func TestContainerLifecycleForcedKill(t *testing.T) {
 	dockerAvailable(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -394,7 +394,7 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 func TestContainerLifecycleGracefulCancel(t *testing.T) {
 	dockerAvailable(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -475,7 +475,7 @@ func TestContainerLifecycleGracefulCancel(t *testing.T) {
 func TestContainerLifecycleForcedCancel(t *testing.T) {
 	dockerAvailable(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

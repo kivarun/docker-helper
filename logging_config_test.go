@@ -377,7 +377,7 @@ func TestDebugRequestLogEmitAtDebug(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -398,7 +398,7 @@ func TestDebugRequestLogSuppressedAtInfo(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -419,7 +419,7 @@ func TestDebugRequestLogFields(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health?foo=bar", nil)
 	req.Pattern = "GET /health"
@@ -490,7 +490,7 @@ func TestDebugRequestLogNoSessionIDLeak(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -533,7 +533,7 @@ func TestDebugRequestLogParameterizedRoute(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -544,7 +544,7 @@ func TestDebugRequestLogParameterizedRoute(t *testing.T) {
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -588,7 +588,7 @@ func TestDebugRequestLogIncludesHealth(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -609,7 +609,7 @@ func TestDebugRequestLogNon200Status(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelDebug, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/run", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer invalid-token")

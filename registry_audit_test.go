@@ -14,7 +14,7 @@ import (
 func TestRegistryLoginAuditStartFinish(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -83,7 +83,7 @@ func TestRegistryLoginAuditStartFinish(t *testing.T) {
 func TestRegistryLoginRegistryHyphenRejected(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -136,7 +136,7 @@ func TestRegistryLoginRegistryHyphenRejected(t *testing.T) {
 func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -181,7 +181,7 @@ func TestRegistryLoginAuditPasswordNotLogged(t *testing.T) {
 func TestRegistryLoginAuditUsernameNotLogged(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

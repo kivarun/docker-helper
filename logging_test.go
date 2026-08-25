@@ -174,7 +174,7 @@ func TestRequestIDInResponseHeader(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -204,7 +204,7 @@ func TestRequestIDInAuditRecord(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -262,7 +262,7 @@ func TestRequestScopedOperationalErrorContainsIDs(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -338,7 +338,7 @@ func TestNoCommandInAuditStream(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -399,7 +399,7 @@ func TestNoEnvValueInAuditStream(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -900,7 +900,7 @@ func TestResponseEncodingErrorThroughHandler(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -975,13 +975,13 @@ func TestDeleteSessionAuditContainsRequestID(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(app.handleDeleteSession))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/nonexistent-id", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)

@@ -13,7 +13,7 @@ import (
 )
 
 func TestRunSessionCapabilityAuthValidToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -40,7 +40,7 @@ func TestRunSessionCapabilityAuthValidToken(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthMissingAuthorization(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -56,7 +56,7 @@ func TestRunSessionCapabilityAuthMissingAuthorization(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthWrongScheme(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -73,7 +73,7 @@ func TestRunSessionCapabilityAuthWrongScheme(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthEmptyBearer(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -90,7 +90,7 @@ func TestRunSessionCapabilityAuthEmptyBearer(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthInvalidToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -107,7 +107,7 @@ func TestRunSessionCapabilityAuthInvalidToken(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthExpiredSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -134,7 +134,7 @@ func TestRunSessionCapabilityAuthExpiredSession(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthDeletedSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -164,7 +164,7 @@ func TestRunSessionCapabilityAuthDeletedSession(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthResponseContract(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)
@@ -195,7 +195,7 @@ func TestRunSessionCapabilityAuthResponseContract(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	called := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -222,7 +222,7 @@ func TestRunSessionCapabilityAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 }
 
 func TestRunSessionCapabilityAuthAdminTokenRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:latest"}
 	body, _ := json.Marshal(reqBody)

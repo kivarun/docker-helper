@@ -29,7 +29,7 @@ func testBuildCmd(output string, exitCode int) func(context.Context, string, ...
 }
 
 func TestBuildSessionAuthValidToken(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -65,7 +65,7 @@ func TestBuildSessionAuthValidToken(t *testing.T) {
 }
 
 func TestBuildSessionAuthMissingToken(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -85,7 +85,7 @@ func TestBuildSessionAuthMissingToken(t *testing.T) {
 }
 
 func TestBuildSessionAuthInvalidToken(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	reqBody := map[string]string{
 		"context":    ".",
@@ -106,7 +106,7 @@ func TestBuildSessionAuthInvalidToken(t *testing.T) {
 }
 
 func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	called := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -137,7 +137,7 @@ func TestBuildSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 }
 
 func TestBuildContextDotUsesWorkspace(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -183,7 +183,7 @@ func TestBuildContextDotUsesWorkspace(t *testing.T) {
 }
 
 func TestBuildContextRelativeSubdir(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
@@ -231,7 +231,7 @@ func TestBuildContextRelativeSubdir(t *testing.T) {
 }
 
 func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -274,7 +274,7 @@ func TestBuildContextAbsoluteInsideWorkspace(t *testing.T) {
 }
 
 func TestBuildContextSiblingDirectoryRejected(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -324,7 +324,7 @@ func TestBuildContextSiblingDirectoryRejected(t *testing.T) {
 }
 
 func TestBuildContextOutsideAllowedRootRejected(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	escapeDir := t.TempDir()
 
@@ -357,7 +357,7 @@ func TestBuildContextOutsideAllowedRootRejected(t *testing.T) {
 }
 
 func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	escapeDir := t.TempDir()
 	linkPath := filepath.Join(app.Config.AllowedRoots[0], "escape-link")
@@ -395,7 +395,7 @@ func TestBuildContextSymlinkEscapeRejected(t *testing.T) {
 }
 
 func TestBuildWorkspaceIsSymlink(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	realDir := filepath.Join(app.Config.AllowedRoots[0], "real-dir")
@@ -443,7 +443,7 @@ func TestBuildWorkspaceIsSymlink(t *testing.T) {
 }
 
 func TestBuildDockerfileInsideContext(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -498,7 +498,7 @@ func TestBuildDockerfileInsideContext(t *testing.T) {
 }
 
 func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -529,7 +529,7 @@ func TestBuildDockerfileOutsideContextRejected(t *testing.T) {
 }
 
 func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -575,7 +575,7 @@ func TestBuildDockerReceivesCanonicalContext(t *testing.T) {
 }
 
 func TestBuildContextErrorContainsCode(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -643,7 +643,7 @@ func TestParseOffset(t *testing.T) {
 }
 
 func TestHandleOperationLogsInvalidOffset(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

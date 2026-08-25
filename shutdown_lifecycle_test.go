@@ -54,7 +54,7 @@ func TestShutdownGlobalDeadlineOwnership(t *testing.T) {
 // TestShutdownTwoStuckOpsOneBudget proves that two stuck operations
 // are terminated within one wall-clock shutdown budget, not sequentially.
 func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
@@ -168,7 +168,7 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 // operation, both cleanup callbacks proceed concurrently, and no operation
 // gets a fresh deadline.
 func TestShutdownRunContainerCleanup(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 

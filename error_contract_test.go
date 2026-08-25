@@ -20,7 +20,7 @@ import (
 // malformed body with the same contract: 400, ok=false, code
 // "invalid_json", message "invalid JSON request".
 func TestErrorContractInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -42,7 +42,7 @@ func TestErrorContractInvalidJSON(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, tt.path, bytes.NewReader([]byte(`{bad`)))
 			if tt.admin {
-				withAuth(req)
+				withAdminToken(req)
 			} else {
 				req.Header.Set("Authorization", "Bearer "+result.Token)
 			}
@@ -73,7 +73,7 @@ func TestErrorContractInvalidJSON(t *testing.T) {
 // ---------- invalid image ----------
 
 func TestErrorContractInvalidImage(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -115,7 +115,7 @@ func TestErrorContractInvalidImage(t *testing.T) {
 // ---------- invalid environment ----------
 
 func TestErrorContractInvalidEnvName(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -149,7 +149,7 @@ func TestErrorContractInvalidEnvName(t *testing.T) {
 // ---------- build/mount errors do not leak paths ----------
 
 func TestErrorContractBuildErrorNoPathLeak(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -182,7 +182,7 @@ func TestErrorContractBuildErrorNoPathLeak(t *testing.T) {
 }
 
 func TestErrorContractMountErrorNoPathLeak(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -218,11 +218,11 @@ func TestErrorContractMountErrorNoPathLeak(t *testing.T) {
 // ---------- session creation errors ----------
 
 func TestErrorContractInvalidWorkspace(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	reqBody, _ := json.Marshal(map[string]string{"workspace": "/nonexistent-path-xyz"})
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -243,7 +243,7 @@ func TestErrorContractInvalidWorkspace(t *testing.T) {
 }
 
 func TestErrorContractSessionCreateInternalError(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	// Replace DB with one that fails Exec.
 	dbPath := app.Config.DatabasePath
@@ -253,7 +253,7 @@ func TestErrorContractSessionCreateInternalError(t *testing.T) {
 
 	reqBody, _ := json.Marshal(map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])})
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -276,13 +276,13 @@ func TestErrorContractSessionCreateInternalError(t *testing.T) {
 // ---------- list/delete session errors ----------
 
 func TestErrorContractListSessionsInternalError(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	// Close DB so query fails.
 	app.DB.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleListSessions(w, req)
 
@@ -303,13 +303,13 @@ func TestErrorContractListSessionsInternalError(t *testing.T) {
 }
 
 func TestErrorContractDeleteSessionNotFound(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -330,7 +330,7 @@ func TestErrorContractDeleteSessionNotFound(t *testing.T) {
 }
 
 func TestErrorContractDeleteSessionInternalError(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -347,7 +347,7 @@ func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -370,7 +370,7 @@ func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 // ---------- requireSessionCapability DB error ----------
 
 func TestErrorContractRequireSessionDBError(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -403,7 +403,7 @@ func TestErrorContractRequireSessionDBError(t *testing.T) {
 }
 
 func TestErrorContractRequireSessionNotFoundStill401(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	reqBody, _ := json.Marshal(map[string]string{"image": "alpine:latest"})
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader(reqBody))
@@ -427,7 +427,7 @@ func TestErrorContractRequireSessionNotFoundStill401(t *testing.T) {
 // ---------- container_exit_nonzero unchanged ----------
 
 func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -496,7 +496,7 @@ func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 // ---------- all ok:false responses have non-empty code ----------
 
 func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -539,7 +539,7 @@ func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) { app.handleCreateSession(w, r) },
 			req: func() *http.Request {
 				r := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{bad`)))
-				withAuth(r)
+				withAdminToken(r)
 				return r
 			}(),
 		},
@@ -617,7 +617,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -724,7 +724,7 @@ func TestDockerErrorLogPull(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
@@ -783,7 +783,7 @@ func TestDockerErrorLogRun(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -891,7 +891,7 @@ func TestImageReferenceNotRejectedByHelper(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelError, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)

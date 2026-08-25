@@ -371,7 +371,7 @@ func TestRevokedCredentialRemainsInList(t *testing.T) {
 }
 
 func TestCredentialHTTPCreate(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "httpcreduser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -395,7 +395,7 @@ func TestCredentialHTTPCreate(t *testing.T) {
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/httpcreduser/credentials", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -420,7 +420,7 @@ func TestCredentialHTTPCreate(t *testing.T) {
 }
 
 func TestCredentialHTTPCreatePrincipalNotFound(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"name": "oc"}
 	body, _ := json.Marshal(reqBody)
@@ -429,7 +429,7 @@ func TestCredentialHTTPCreatePrincipalNotFound(t *testing.T) {
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/nonexistent/credentials", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -440,7 +440,7 @@ func TestCredentialHTTPCreatePrincipalNotFound(t *testing.T) {
 }
 
 func TestCredentialHTTPCreateDuplicateName(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dupnamehttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -468,7 +468,7 @@ func TestCredentialHTTPCreateDuplicateName(t *testing.T) {
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/dupnamehttpuser/credentials", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -479,7 +479,7 @@ func TestCredentialHTTPCreateDuplicateName(t *testing.T) {
 }
 
 func TestCredentialHTTPList(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "listhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -504,7 +504,7 @@ func TestCredentialHTTPList(t *testing.T) {
 	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
 
 	req := httptest.NewRequest(http.MethodGet, "/principals/listhttpuser/credentials", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -528,7 +528,7 @@ func TestCredentialHTTPList(t *testing.T) {
 }
 
 func TestCredentialHTTPRevoke(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokehttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -554,7 +554,7 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/credentials/"+cred.ID+"/revoke", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -573,7 +573,7 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 
 	// Second revoke of the same credential — idempotent.
 	req2 := httptest.NewRequest(http.MethodPost, "/credentials/"+cred.ID+"/revoke", nil)
-	withAuth(req2)
+	withAdminToken(req2)
 	w2 := httptest.NewRecorder()
 
 	mux.ServeHTTP(w2, req2)
@@ -594,13 +594,13 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 	}
 }
 func TestCredentialHTTPRevokeNotFound(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/credentials/dhcr_nonexistent/revoke", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -611,7 +611,7 @@ func TestCredentialHTTPRevokeNotFound(t *testing.T) {
 }
 
 func TestCredentialHTTPAdminAuth(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"name": "oc"}
 	body, _ := json.Marshal(reqBody)
@@ -774,7 +774,7 @@ func TestCredentialAuditNoToken(t *testing.T) {
 }
 
 func TestCredentialHTTPCreateMissingName(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "missingnameuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -798,7 +798,7 @@ func TestCredentialHTTPCreateMissingName(t *testing.T) {
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/missingnameuser/credentials", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -809,13 +809,13 @@ func TestCredentialHTTPCreateMissingName(t *testing.T) {
 }
 
 func TestCredentialHTTPCreateInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/user/credentials", bytes.NewReader([]byte("not json")))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -994,7 +994,7 @@ func TestCredentialCLICreateDefaultName(t *testing.T) {
 }
 
 func TestCredentialHTTPRevokeDBError(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dberruser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -1023,7 +1023,7 @@ func TestCredentialHTTPRevokeDBError(t *testing.T) {
 	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/credentials/"+cred.ID+"/revoke", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)

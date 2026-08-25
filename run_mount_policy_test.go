@@ -17,7 +17,7 @@ import (
 )
 
 func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -41,7 +41,7 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 }
 
 func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -71,7 +71,7 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 }
 
 func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -113,7 +113,7 @@ func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 }
 
 func TestRunMountUserModeRejectsFile(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -145,7 +145,7 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 }
 
 func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -182,7 +182,7 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 }
 
 func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -222,7 +222,7 @@ func getLastOp(sup *operationSupervisor) *operation {
 
 // TestRunSecondPinError cleans first pin, supervisor contains no operation, Docker not called.
 func TestRunSecondPinError(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -295,7 +295,7 @@ func TestRunSecondPinError(t *testing.T) {
 
 // TestRunRegistryShuttingDown cleans pins, supervisor does not receive operation.
 func TestRunSupervisorShuttingDown(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	supervisor := newOperationSupervisor()
 	supervisor.beginShutdown()
@@ -358,7 +358,7 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 
 // TestRunSystemModeEmptyRuntimeDir does not pass original path to Docker.
 func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.Config.RuntimeDir = ""
 	app.OperationSupervisor = newOperationSupervisor()
@@ -417,7 +417,7 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 
 // TestRunSystemModeArgvContainsStablePaths verifies Docker receives pinned paths.
 func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -486,7 +486,7 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 // TestRunUserModeUsesResolvedMountSourceWithoutPinning verifies user mode skips
 // workspace mount source pinning and uses the resolved source path directly.
 func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -534,7 +534,7 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 
 // TestRunStartErrorCleansPinsOnce verifies cleanup on cmd.Start failure.
 func TestRunStartErrorCleansPinsOnce(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -590,7 +590,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 
 // TestRunNormalCompletionCleansPinsOnce verifies cleanup after cmd.Wait.
 func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -645,7 +645,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 
 // TestRunCleanupReverseOrder verifies cleanup runs in reverse mount order.
 func TestRunCleanupReverseOrder(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -717,7 +717,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 // TestRunCleanupErrorDoesNotChangeResult verifies cleanup error doesn't
 // override the operation result.
 func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
@@ -778,7 +778,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 // TestRunAuditContainsUserSourcePaths verifies audit uses user-provided
 // source paths, not stable runtime paths.
 func TestRunAuditContainsUserSourcePaths(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 

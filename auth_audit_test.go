@@ -148,7 +148,7 @@ func assertNoAuthFailure(t *testing.T, buf *bytes.Buffer) {
 
 func TestAuthAuditSessionControlParseFailed_MissingHeader(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const headerMarker = "hdr_admin_parse_secret_x7k2m"
 	const bodyMarker = "body_admin_parse_secret_p9q4n"
@@ -171,7 +171,7 @@ func TestAuthAuditSessionControlParseFailed_MissingHeader(t *testing.T) {
 
 func TestAuthAuditSessionControlParseFailed_WrongScheme(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const authHeader = "Basic dXNlcjpwYXNz"
 
@@ -193,7 +193,7 @@ func TestAuthAuditSessionControlParseFailed_WrongScheme(t *testing.T) {
 
 func TestAuthAuditSessionControlParseFailed_EmptyBearer(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const authHeader = "Bearer "
 
@@ -218,7 +218,7 @@ func TestAuthAuditSessionControlParseFailed_EmptyBearer(t *testing.T) {
 // ========================
 
 func TestAuthAuditSessionControlUnauthorizedResponseContract(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte(`{}`)))
 	w := httptest.NewRecorder()
@@ -249,7 +249,7 @@ func TestAuthAuditSessionControlUnauthorizedResponseContract(t *testing.T) {
 
 func TestAuthAuditCredentialNotFound_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const token = "dht_wrong_admin_token_xyz"
 	const authHeader = "Bearer " + token
@@ -279,7 +279,7 @@ func TestAuthAuditCredentialNotFound_CreateSession(t *testing.T) {
 
 func TestAuthAuditPrincipalCredentialRevoked_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditrevoked")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -332,7 +332,7 @@ func TestAuthAuditPrincipalCredentialRevoked_CreateSession(t *testing.T) {
 
 func TestAuthAuditPrincipalDisabled_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditdisabled")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -399,7 +399,7 @@ func TestAuthAuditPrincipalDisabled_CreateSession(t *testing.T) {
 
 func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const headerMarker = "hdr_session_parse_secret_g2h6j"
 	const bodyMarker = "auth_test_body_session_parse:v1"
@@ -422,7 +422,7 @@ func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Run(t *testing.T) {
 
 func TestAuthAuditSessionCapabilityParseFailed_WrongScheme_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const authHeader = "Basic dXNlcjpwYXNz"
 
@@ -444,7 +444,7 @@ func TestAuthAuditSessionCapabilityParseFailed_WrongScheme_Run(t *testing.T) {
 
 func TestAuthAuditSessionCapabilityParseFailed_EmptyBearer_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const authHeader = "Bearer "
 
@@ -466,7 +466,7 @@ func TestAuthAuditSessionCapabilityParseFailed_EmptyBearer_Run(t *testing.T) {
 
 func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Build(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/build", bytes.NewReader([]byte(`{}`)))
 	w := httptest.NewRecorder()
@@ -489,7 +489,7 @@ func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Build(t *testing.T)
 
 func TestAuthAuditSessionCapabilityNotFound_UnknownToken(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	const token = "dht_unknown_token_abc123"
 	const authHeader = "Bearer " + token
@@ -519,7 +519,7 @@ func TestAuthAuditSessionCapabilityNotFound_UnknownToken(t *testing.T) {
 
 func TestAuthAuditSessionCapabilityDatabaseError_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	// Create a real session so the token is known.
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -560,13 +560,13 @@ func TestAuthAuditSessionCapabilityDatabaseError_Run(t *testing.T) {
 
 func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -578,7 +578,7 @@ func TestAuthAuditNoFailureOnValidAdminAuth_CreateSession(t *testing.T) {
 }
 func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -622,7 +622,7 @@ func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 
 func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -641,7 +641,7 @@ func TestAuthAuditHealthNoAuthFailure(t *testing.T) {
 
 func TestAuthAuditAdminHashNotLeaked(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 
 	adminHash := sha256.Sum256([]byte(testAdminToken))
 	hashHex := strings.ToLower(fmt.Sprintf("%x", adminHash[:]))

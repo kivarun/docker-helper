@@ -203,14 +203,14 @@ func assertNoInjectedError(t *testing.T, raw string, injected string) {
 
 func TestSessionCreateAuditSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 	reqBody := map[string]string{"workspace": workspace}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -251,10 +251,10 @@ func TestSessionCreateAuditSuccess(t *testing.T) {
 
 func TestSessionCreateAuditInvalidJSON(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("not-json")))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -280,13 +280,13 @@ func TestSessionCreateAuditInvalidJSON(t *testing.T) {
 
 func TestSessionCreateAuditInvalidWorkspace(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"workspace": "/tmp/outside-workspace"}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -314,7 +314,7 @@ func TestSessionCreateAuditInvalidWorkspace(t *testing.T) {
 // returns a known error. The error text must not appear in audit JSON.
 func TestSessionCreateAuditDatabaseError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Controlled injection: replace DB with one that fails Exec.
 	dbPath := app.Config.DatabasePath
@@ -326,7 +326,7 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -355,7 +355,7 @@ func TestSessionCreateAuditDatabaseError(t *testing.T) {
 // so that EvalSymlinks fails with system_error.
 func TestSessionCreateAuditSystemError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Valid workspace that passes steps 1-5.
 	validWorkspace := t.TempDir()
@@ -372,7 +372,7 @@ func TestSessionCreateAuditSystemError(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleCreateSession(w, req)
 
@@ -401,7 +401,7 @@ func TestSessionCreateAuditSystemError(t *testing.T) {
 
 func TestSessionDeleteAuditSuccess(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 	result, err := app.createSession(workspace)
@@ -413,7 +413,7 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -449,13 +449,13 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 
 func TestSessionDeleteAuditNotFound(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -488,7 +488,7 @@ func TestSessionDeleteAuditNotFound(t *testing.T) {
 // known error. The workspace must be preserved in the audit.
 func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 	result, err := app.createSession(workspace)
@@ -507,7 +507,7 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 

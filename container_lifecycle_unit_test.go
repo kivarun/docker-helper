@@ -41,7 +41,7 @@ func TestReadContainerIDFromCidfile(t *testing.T) {
 }
 
 func TestCidfileCreatedAndCleanedUpOnNormalCompletion(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -95,7 +95,7 @@ func TestCidfileCreatedAndCleanedUpOnNormalCompletion(t *testing.T) {
 }
 
 func TestCidfileRemovedOnFailedStart(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -159,7 +159,7 @@ func TestKillContainerBestEffortDoesNotPanicOnMissingDocker(t *testing.T) {
 }
 
 func TestCidfileNotExposedInHTTPResponse(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -187,7 +187,7 @@ func TestCidfileNotExposedInHTTPResponse(t *testing.T) {
 // immediately available after cmd.Start(), the cleanup phase waits for it
 // within a bounded context, and performs daemon-side kill when it appears.
 func TestCidfileRaceDelayedPublication(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
@@ -305,7 +305,7 @@ func TestCidfileRaceDelayedPublication(t *testing.T) {
 // context expires before the cidfile appears, shutdown still proceeds with
 // CLI kill and doesn't hang.
 func TestCidfileRaceContextExpiresWithoutCidfile(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 

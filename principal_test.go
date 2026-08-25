@@ -374,7 +374,7 @@ func TestRemoveAllowedRootAbsent(t *testing.T) {
 }
 
 func TestPrincipalAdminAuth(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "authuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -458,7 +458,7 @@ func TestPrincipalCaseSensitive(t *testing.T) {
 }
 
 func TestPrincipalHTTPCreate(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "httpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -475,7 +475,7 @@ func TestPrincipalHTTPCreate(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreatePrincipal(w, req)
@@ -494,7 +494,7 @@ func TestPrincipalHTTPCreate(t *testing.T) {
 }
 
 func TestPrincipalHTTPShow(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "showhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -515,7 +515,7 @@ func TestPrincipalHTTPShow(t *testing.T) {
 	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
 
 	req := httptest.NewRequest(http.MethodGet, "/principals/showhttpuser", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -534,7 +534,7 @@ func TestPrincipalHTTPShow(t *testing.T) {
 }
 
 func TestPrincipalHTTPSetEnabled(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sethttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -558,7 +558,7 @@ func TestPrincipalHTTPSetEnabled(t *testing.T) {
 	reqBody, _ := json.Marshal(setPrincipalRequest{Enabled: &disabled})
 
 	req := httptest.NewRequest(http.MethodPatch, "/principals/sethttpuser", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -577,7 +577,7 @@ func TestPrincipalHTTPSetEnabled(t *testing.T) {
 }
 
 func TestPrincipalHTTPSetEnabledIdempotent(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "idemhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -601,7 +601,7 @@ func TestPrincipalHTTPSetEnabledIdempotent(t *testing.T) {
 	reqBody, _ := json.Marshal(setPrincipalRequest{Enabled: &enabled})
 
 	req := httptest.NewRequest(http.MethodPatch, "/principals/idemhttpuser", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -620,7 +620,7 @@ func TestPrincipalHTTPSetEnabledIdempotent(t *testing.T) {
 }
 
 func TestPrincipalHTTPAddAllowedRoot(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "addroothttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -648,7 +648,7 @@ func TestPrincipalHTTPAddAllowedRoot(t *testing.T) {
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: extraRoot})
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/addroothttpuser/allowed-roots", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -667,7 +667,7 @@ func TestPrincipalHTTPAddAllowedRoot(t *testing.T) {
 }
 
 func TestPrincipalHTTPAddAllowedRootRelativeRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "relhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -690,7 +690,7 @@ func TestPrincipalHTTPAddAllowedRootRelativeRejected(t *testing.T) {
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: "relative/path"})
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/relhttpuser/allowed-roots", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -701,7 +701,7 @@ func TestPrincipalHTTPAddAllowedRootRelativeRejected(t *testing.T) {
 }
 
 func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "delhttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -738,7 +738,7 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: extraRoot})
 
 	req := httptest.NewRequest(http.MethodDelete, "/principals/delhttpuser/allowed-roots", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -757,7 +757,7 @@ func TestPrincipalHTTPRemoveAllowedRootDeletedDir(t *testing.T) {
 }
 
 func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "nonexistuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -780,7 +780,7 @@ func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: "/no/such/path/that/exists"})
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/nonexistuser/allowed-roots", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -803,7 +803,7 @@ func TestPrincipalHTTPAddAllowedRootNonexistent(t *testing.T) {
 }
 
 func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "fileuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -831,7 +831,7 @@ func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: regFile})
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/fileuser/allowed-roots", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -854,7 +854,7 @@ func TestPrincipalHTTPAddAllowedRootIsFile(t *testing.T) {
 }
 
 func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "relremuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -877,7 +877,7 @@ func TestPrincipalHTTPRemoveAllowedRootRelativeRejected(t *testing.T) {
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: "relative/path"})
 
 	req := httptest.NewRequest(http.MethodDelete, "/principals/relremuser/allowed-roots", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -1202,7 +1202,7 @@ func TestPrincipalCascadeDelete(t *testing.T) {
 }
 
 func TestPrincipalHTTPCreateUnknownOSUser(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	orig := OSUserLookup
 	defer func() { OSUserLookup = orig }()
@@ -1214,7 +1214,7 @@ func TestPrincipalHTTPCreateUnknownOSUser(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreatePrincipal(w, req)
@@ -1225,7 +1225,7 @@ func TestPrincipalHTTPCreateUnknownOSUser(t *testing.T) {
 }
 
 func TestPrincipalHTTPCreateDuplicate(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "duphttpuser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -1242,7 +1242,7 @@ func TestPrincipalHTTPCreateDuplicate(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreatePrincipal(w, req)
@@ -1251,7 +1251,7 @@ func TestPrincipalHTTPCreateDuplicate(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/principals", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w = httptest.NewRecorder()
 
 	app.handleCreatePrincipal(w, req)
@@ -1262,13 +1262,13 @@ func TestPrincipalHTTPCreateDuplicate(t *testing.T) {
 }
 
 func TestPrincipalHTTPShowNotFound(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /principals/{username}", app.handleShowPrincipal)
 
 	req := httptest.NewRequest(http.MethodGet, "/principals/nonexistent", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -1382,7 +1382,7 @@ func TestListPrincipalSummaries(t *testing.T) {
 }
 
 func TestPrincipalHTTPList(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	orig := OSUserLookup
 	defer func() { OSUserLookup = orig }()
@@ -1404,7 +1404,7 @@ func TestPrincipalHTTPList(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET", "/principals", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleListPrincipals(w, req)
 
@@ -1440,10 +1440,10 @@ func TestPrincipalHTTPList(t *testing.T) {
 }
 
 func TestPrincipalHTTPListEmpty(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest("GET", "/principals", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleListPrincipals(w, req)
 
@@ -1456,7 +1456,7 @@ func TestPrincipalHTTPListEmpty(t *testing.T) {
 }
 
 func TestPrincipalHTTPListDisabledIncluded(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	orig := OSUserLookup
 	defer func() { OSUserLookup = orig }()
@@ -1481,7 +1481,7 @@ func TestPrincipalHTTPListDisabledIncluded(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET", "/principals", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleListPrincipals(w, req)
 
@@ -1505,7 +1505,7 @@ func TestPrincipalHTTPListDisabledIncluded(t *testing.T) {
 }
 
 func TestPrincipalListAuth(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Session token (legacy admin session).
 	sessionResult, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -1564,7 +1564,7 @@ func TestPrincipalListAuth(t *testing.T) {
 }
 
 func TestPrincipalHTTPAddAllowedRootOutsideGlobal(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "outsideglobaluser")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -1594,7 +1594,7 @@ func TestPrincipalHTTPAddAllowedRootOutsideGlobal(t *testing.T) {
 
 	reqBody, _ := json.Marshal(allowedRootRequest{Path: outsidePath})
 	req := httptest.NewRequest(http.MethodPost, "/principals/outsideglobaluser/allowed-roots", bytes.NewReader(reqBody))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)

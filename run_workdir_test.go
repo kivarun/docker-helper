@@ -11,7 +11,7 @@ import (
 )
 
 func TestRunWorkdirPassedToDocker(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -69,7 +69,7 @@ func TestRunWorkdirPassedToDocker(t *testing.T) {
 }
 
 func TestRunNoWorkdir(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -121,7 +121,7 @@ func TestRunNoWorkdir(t *testing.T) {
 }
 
 func TestRunRelativeWorkdirRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

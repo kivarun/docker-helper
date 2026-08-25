@@ -21,7 +21,7 @@ func (e *mockExitError) ExitCode() int { return e.code }
 func (e *mockExitError) Unwrap() error { return nil }
 
 func TestRunNonZeroExit(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -101,7 +101,7 @@ func TestRunNonZeroExit(t *testing.T) {
 }
 
 func TestRunNonZeroExitCodeZero(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -149,7 +149,7 @@ func TestRunNonZeroExitCodeZero(t *testing.T) {
 }
 
 func TestRunDockerErrorStill500(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -204,7 +204,7 @@ func TestRunDockerErrorStill500(t *testing.T) {
 }
 
 func TestRunSuccessNoExitCode(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -274,7 +274,7 @@ func TestExtractExitCodeNil(t *testing.T) {
 }
 
 func TestRunNonZeroExitCode125(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

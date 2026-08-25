@@ -18,10 +18,11 @@ func setupStagingSeam(t *testing.T, app *App) {
 	app.StageBuildContextFn = newStagingSeam(t, stagingSeamOptions{})
 }
 
-// newTestAppWithAuthAndStaging creates a test app with auth and staging seam.
-func newTestAppWithAuthAndStaging(t *testing.T) *App {
+// newTestAppWithAdminTokenAndStaging creates an admin-authorized test app
+// with a staging seam.
+func newTestAppWithAdminTokenAndStaging(t *testing.T) *App {
 	t.Helper()
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	setupStagingSeam(t, app)
 	return app
 }

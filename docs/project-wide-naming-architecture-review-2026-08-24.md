@@ -646,32 +646,42 @@ change, no change to credential DB/storage, and no N4 token-format resolution.
 
 ### P2-10. Generic test auth fixtures always select the admin-token branch
 
-**Current names and evidence**
+**Status: RESOLVED**
 
-**newTestAppWithAuth** and **withAuth** install the test admin token:
-[test_helpers_test.go:255-267](../test_helpers_test.go#L255-L267).
+The generic-looking test authentication fixtures were renamed to explicitly
+identify the admin-token authority branch they exercise:
 
-**newTestAppWithAuthAndStaging** builds on the same fixture:
-[build_test_helpers_test.go:21-26](../build_test_helpers_test.go#L21-L26).
+- **newTestAppWithAuth** → **newTestAppWithAdminToken** — creates an
+  admin-authorized test app with the admin token hash set.
+- **withAuth** → **withAdminToken** — sets the `Authorization: Bearer
+  <testAdminToken>` header.
+- **newTestAppWithAuthAndStaging** → **newTestAppWithAdminTokenAndStaging** —
+  builds the admin-authorized test app with a staging seam.
 
-**Actual responsibility**
+**Canonical vocabulary**
 
-These are admin-authorized fixtures, not generic authentication fixtures.
+- `newTestAppWithAdminToken`
+- `withAdminToken`
+- `newTestAppWithAdminTokenAndStaging`
 
-**Why misleading**
+**Previous names (resolved)**
 
-In the three-level authority model, a test can accidentally exercise admin
-behavior while its name appears authority-neutral.
+- ~~newTestAppWithAuth~~ → newTestAppWithAdminToken
+- ~~withAuth~~ → withAdminToken
+- ~~newTestAppWithAuthAndStaging~~ → newTestAppWithAdminTokenAndStaging
 
-**Preferred vocabulary**
+**Compatibility**
 
-- newTestAppWithAdminToken;
-- withAdminToken;
-- newTestAppWithAdminTokenAndStaging.
-
-**Compatibility and batch**
-
-Test-only mechanical rename.
+Test-only mechanical rename. Fixture semantics are exactly unchanged:
+`newTestAppWithAdminToken` still calls `newTestApp(t)`, hashes
+`testAdminToken` with SHA-256, assigns `app.AdminTokenHash`, and returns the
+App; `withAdminToken` still sets `Authorization: Bearer <testAdminToken>`;
+`newTestAppWithAdminTokenAndStaging` still creates the app via
+`newTestAppWithAdminToken(t)` and calls `setupStagingSeam(t, app)`. No test
+behavior, requests, assertions, setup order, tokens, headers, expected
+statuses, audit expectations, or production source changed. `testAdminToken`,
+production admin-token symbols, Principal credential fixtures, Session
+capability fixtures, and authentication production code are unchanged.
 
 ### P2-11. Documentation uses admin credential as a synonym for admin token
 

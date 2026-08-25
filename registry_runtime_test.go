@@ -7,7 +7,7 @@ import (
 )
 
 func TestSessionDeleteRemovesRuntimeDir(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -44,7 +44,7 @@ func TestSessionDeleteRemovesRuntimeDir(t *testing.T) {
 }
 
 func TestCleanupStaleSessionRuntimeDirs(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Create two sessions
 	result1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -102,7 +102,7 @@ func TestCleanupStaleSessionRuntimeDirs(t *testing.T) {
 }
 
 func TestCleanupStaleSessionRuntimeDirsPreservesActive(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Create a session
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

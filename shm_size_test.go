@@ -176,7 +176,7 @@ func TestValidateShmSizeOverflow(t *testing.T) {
 // --- handleRun integration tests ---
 
 func TestRunShmSizeOmitted(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -212,7 +212,7 @@ func TestRunShmSizeOmitted(t *testing.T) {
 }
 
 func TestRunShmSizeEmpty(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -251,7 +251,7 @@ func TestRunShmSizeEmpty(t *testing.T) {
 }
 
 func TestRunShmSizeValid(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -295,7 +295,7 @@ func TestRunShmSizeValid(t *testing.T) {
 }
 
 func TestRunShmSizePlacementBeforeImage(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -349,7 +349,7 @@ func TestRunShmSizePlacementBeforeImage(t *testing.T) {
 }
 
 func TestRunShmSizeInvalidRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -394,7 +394,7 @@ func TestRunShmSizeInvalidRejected(t *testing.T) {
 func TestRunShmSizeAuditIncluded(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -465,7 +465,7 @@ func TestRunShmSizeAuditIncluded(t *testing.T) {
 func TestRunShmSizeAuditOmitted(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

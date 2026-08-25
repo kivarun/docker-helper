@@ -14,7 +14,7 @@ import (
 
 func TestRunAuditCAInjectedAuto(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -116,7 +116,7 @@ func TestRunAuditCAInjectedAuto(t *testing.T) {
 
 func TestRunAuditCAInjectedDisabled(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

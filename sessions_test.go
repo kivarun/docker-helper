@@ -11,13 +11,13 @@ import (
 )
 
 func TestHTTPCreateSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)
@@ -43,10 +43,10 @@ func TestHTTPCreateSession(t *testing.T) {
 }
 
 func TestHTTPCreateSessionInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("invalid")))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)
@@ -57,13 +57,13 @@ func TestHTTPCreateSessionInvalidJSON(t *testing.T) {
 }
 
 func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)
@@ -74,7 +74,7 @@ func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
 }
 
 func TestHTTPListSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	_, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -82,7 +82,7 @@ func TestHTTPListSessions(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleListSessions(w, req)
@@ -105,7 +105,7 @@ func TestHTTPListSessions(t *testing.T) {
 }
 
 func TestHTTPDeleteSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -116,7 +116,7 @@ func TestHTTPDeleteSession(t *testing.T) {
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -127,13 +127,13 @@ func TestHTTPDeleteSession(t *testing.T) {
 }
 
 func TestHTTPDeleteSessionNotFound(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_nonexistent", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -144,13 +144,13 @@ func TestHTTPDeleteSessionNotFound(t *testing.T) {
 }
 
 func TestHTTPCreateSessionRFC3339(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)

@@ -17,7 +17,7 @@ import (
 // is received (simulated by beginShutdown), new operations are rejected
 // while existing operations remain under shutdown lifecycle.
 func TestShutdownGateClosesOnSignal(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 
@@ -94,7 +94,7 @@ func TestShutdownGateClosesOnSignal(t *testing.T) {
 // in flight when the signal arrives is handled correctly: either accepted
 // (if admit completed before gate close) or rejected (if gate closed first).
 func TestShutdownGateConcurrentBuildAndSignal(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 

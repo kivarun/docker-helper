@@ -14,7 +14,7 @@ import (
 )
 
 func TestLegacySessionUsesDaemonUIDGID(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Create admin session (principal_id = NULL).
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -38,7 +38,7 @@ func TestLegacySessionUsesDaemonUIDGID(t *testing.T) {
 }
 
 func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "execuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -100,7 +100,7 @@ func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 }
 
 func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home1 := filepath.Join(app.Config.AllowedRoots[0], "home", "diffuser1")
 	home2 := filepath.Join(app.Config.AllowedRoots[0], "home", "diffuser2")
@@ -191,7 +191,7 @@ func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 }
 
 func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "disabledexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -248,7 +248,7 @@ func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 }
 
 func TestRevokedCredentialSessionStillRuns(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revokedexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -314,7 +314,7 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 }
 
 func TestRunRequestRejectsUserField(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -343,7 +343,7 @@ func TestRunRequestRejectsUserField(t *testing.T) {
 }
 
 func TestPrincipalIdentityDBError(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "dberruser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -401,7 +401,7 @@ func TestPrincipalIdentityDBError(t *testing.T) {
 
 func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "auditexecuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -459,7 +459,7 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 }
 
 func TestResolveSessionExecutionIdentityFromDB(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "fromdbuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {

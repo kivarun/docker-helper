@@ -13,7 +13,7 @@ import (
 )
 
 func TestRunEnvironmentSingleVar(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -73,7 +73,7 @@ func TestRunEnvironmentSingleVar(t *testing.T) {
 }
 
 func TestRunEnvironmentMultipleVars(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -133,7 +133,7 @@ func TestRunEnvironmentMultipleVars(t *testing.T) {
 }
 
 func TestRunEnvironmentEmptyValue(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -193,7 +193,7 @@ func TestRunEnvironmentEmptyValue(t *testing.T) {
 }
 
 func TestRunEnvironmentInvalidName(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -220,7 +220,7 @@ func TestRunEnvironmentInvalidName(t *testing.T) {
 }
 
 func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -247,7 +247,7 @@ func TestRunEnvironmentNameStartsWithDigit(t *testing.T) {
 }
 
 func TestRunEnvironmentNameWithSpace(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -274,7 +274,7 @@ func TestRunEnvironmentNameWithSpace(t *testing.T) {
 }
 
 func TestRunEnvironmentNameWithDash(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -301,7 +301,7 @@ func TestRunEnvironmentNameWithDash(t *testing.T) {
 }
 
 func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

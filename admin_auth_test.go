@@ -9,13 +9,13 @@ import (
 )
 
 func TestAdminAuthValidTokenCreateSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(body))
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleCreateSession(w, req)
@@ -26,10 +26,10 @@ func TestAdminAuthValidTokenCreateSession(t *testing.T) {
 }
 
 func TestAdminAuthValidTokenListSessions(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	app.handleListSessions(w, req)
@@ -40,7 +40,7 @@ func TestAdminAuthValidTokenListSessions(t *testing.T) {
 }
 
 func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -51,7 +51,7 @@ func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
 	mux.HandleFunc("DELETE /sessions/{id}", withRequestID(withLogging(app.handleDeleteSession)))
 
 	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+result.Session.ID, nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 
 	mux.ServeHTTP(w, req)
@@ -62,7 +62,7 @@ func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
 }
 
 func TestAdminAuthMissingAuthorization(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
 	w := httptest.NewRecorder()
@@ -75,7 +75,7 @@ func TestAdminAuthMissingAuthorization(t *testing.T) {
 }
 
 func TestAdminAuthWrongScheme(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
@@ -89,7 +89,7 @@ func TestAdminAuthWrongScheme(t *testing.T) {
 }
 
 func TestAdminAuthEmptyBearer(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Authorization", "Bearer ")
@@ -103,7 +103,7 @@ func TestAdminAuthEmptyBearer(t *testing.T) {
 }
 
 func TestAdminAuthInvalidToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
 	req.Header.Set("Authorization", "Bearer dht_wrong_token")
@@ -117,7 +117,7 @@ func TestAdminAuthInvalidToken(t *testing.T) {
 }
 
 func TestAdminAuthResponseContainsCode(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
 	w := httptest.NewRecorder()
@@ -135,7 +135,7 @@ func TestAdminAuthResponseContainsCode(t *testing.T) {
 }
 
 func TestAdminAuthResponseContainsWWWAuthenticate(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader([]byte("{}")))
 	w := httptest.NewRecorder()
@@ -148,7 +148,7 @@ func TestAdminAuthResponseContainsWWWAuthenticate(t *testing.T) {
 }
 
 func TestAdminAuthHealthPublic(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -161,7 +161,7 @@ func TestAdminAuthHealthPublic(t *testing.T) {
 }
 
 func TestAdminAuthInvalidTokenDoesNotCreateSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"workspace": testWorkspaceDir(t, app.Config.AllowedRoots[0])}
 	body, _ := json.Marshal(reqBody)

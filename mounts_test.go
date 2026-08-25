@@ -15,7 +15,7 @@ import (
 )
 
 func TestMountSourceDotMountsWorkspace(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -62,7 +62,7 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 }
 
 func TestMountRelativeSubdir(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -103,7 +103,7 @@ func TestMountRelativeSubdir(t *testing.T) {
 }
 
 func TestMountRegularFile(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -139,7 +139,7 @@ func TestMountRegularFile(t *testing.T) {
 }
 
 func TestMountReadOnly(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -186,7 +186,7 @@ func TestMountReadOnly(t *testing.T) {
 }
 
 func TestMountSameSourceDifferentTargets(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -231,7 +231,7 @@ func TestMountSameSourceDifferentTargets(t *testing.T) {
 }
 
 func TestMountDuplicateTarget(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -268,7 +268,7 @@ func TestMountDuplicateTarget(t *testing.T) {
 }
 
 func TestMountAbsoluteSource(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -295,7 +295,7 @@ func TestMountAbsoluteSource(t *testing.T) {
 }
 
 func TestMountEmptySource(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -322,7 +322,7 @@ func TestMountEmptySource(t *testing.T) {
 }
 
 func TestMountNonExistentSource(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -349,7 +349,7 @@ func TestMountNonExistentSource(t *testing.T) {
 }
 
 func TestMountSymlinkEscape(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	escapeDir := t.TempDir()
 	linkPath := filepath.Join(app.Config.AllowedRoots[0], "escape-link")
@@ -383,7 +383,7 @@ func TestMountSymlinkEscape(t *testing.T) {
 }
 
 func TestMountRelativeTarget(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -410,7 +410,7 @@ func TestMountRelativeTarget(t *testing.T) {
 }
 
 func TestMountEmptyTarget(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -437,7 +437,7 @@ func TestMountEmptyTarget(t *testing.T) {
 }
 
 func TestMountTargetRoot(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -485,7 +485,7 @@ func TestMountTargetRoot(t *testing.T) {
 }
 
 func TestDockerSecurityOpt(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -525,7 +525,7 @@ func TestDockerSecurityOpt(t *testing.T) {
 }
 
 func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -576,7 +576,7 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 }
 
 func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -627,7 +627,7 @@ func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 }
 
 func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -683,7 +683,7 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 }
 
 func TestRunLSMNoneFailsClosed(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -736,7 +736,7 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 }
 
 func TestDockerUser(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -780,7 +780,7 @@ func TestDockerUser(t *testing.T) {
 }
 
 func TestMountValidationPreventsRunCommand(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -817,7 +817,7 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 }
 
 func TestMountCommaInTarget(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -863,7 +863,7 @@ func TestMountCommaInTarget(t *testing.T) {
 }
 
 func TestMountCommaInSource(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	commaDir := filepath.Join(app.Config.AllowedRoots[0], "dir,with,commas")
 	if err := os.MkdirAll(commaDir, 0755); err != nil {
@@ -914,7 +914,7 @@ func TestMountCommaInSource(t *testing.T) {
 }
 
 func TestMountDuplicateTargetAfterClean(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -961,7 +961,7 @@ func TestMountDuplicateTargetAfterClean(t *testing.T) {
 }
 
 func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

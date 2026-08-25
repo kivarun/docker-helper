@@ -270,7 +270,7 @@ func TestReloadAuditNoSensitiveValues(t *testing.T) {
 
 func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "revoke-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -294,7 +294,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/principals/revoke-test/credentials/"+cred.ID+"/revoke", nil)
 	req.SetPathValue("username", "revoke-test")
 	req.SetPathValue("id", cred.ID)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRevokeCredential(w, req)
 	if w.Code != http.StatusOK {
@@ -312,12 +312,12 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 
 func TestRevokeCredentialNotFoundNoMutation(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/test/credentials/dhcr_nonexistent/revoke", nil)
 	req.SetPathValue("username", "test")
 	req.SetPathValue("id", "dhcr_nonexistent")
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRevokeCredential(w, req)
 	if w.Code != http.StatusNotFound {
@@ -335,7 +335,7 @@ func TestRevokeCredentialNotFoundNoMutation(t *testing.T) {
 
 func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	_, _ = setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "idempotent-test")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -360,7 +360,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/principals/idempotent-test/credentials/"+cred.ID+"/revoke", nil)
 	req.SetPathValue("username", "idempotent-test")
 	req.SetPathValue("id", cred.ID)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRevokeCredential(w, req)
 	if w.Code != http.StatusOK {
@@ -371,7 +371,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/principals/idempotent-test/credentials/"+cred.ID+"/revoke", nil)
 	req.SetPathValue("username", "idempotent-test")
 	req.SetPathValue("id", cred.ID)
-	withAuth(req)
+	withAdminToken(req)
 	w = httptest.NewRecorder()
 	app.handleRevokeCredential(w, req)
 	if w.Code != http.StatusOK {
@@ -389,7 +389,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 
 func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Create a real credential that can be revoked.
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "preread-test")
@@ -420,7 +420,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/principals/preread-test/credentials/"+cred.ID+"/revoke", nil)
 	req.SetPathValue("username", "preread-test")
 	req.SetPathValue("id", cred.ID)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRevokeCredential(w, req)
 	if w.Code != http.StatusInternalServerError {
@@ -457,7 +457,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 // result, not a daemon operational error.
 func TestPullNonZeroNoOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -483,7 +483,7 @@ func TestPullNonZeroNoOperationalError(t *testing.T) {
 // a docker Start failure (process never started) is an operational error.
 func TestPullStartFailureOperationalError(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -555,7 +555,7 @@ func TestAuditWriterFailureDoesNotBreakRequest(t *testing.T) {
 
 func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -593,7 +593,7 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 
 func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -632,11 +632,11 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 
 func TestAdminTokenRotateInternalErrorDiagnostic(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.RotateRenameFn = func(oldPath, newPath string) error { return errors.New("rename failed") }
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/token/rotate", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRotateAdminToken(w, req)
 	if w.Code != http.StatusInternalServerError {
@@ -660,7 +660,7 @@ func TestAdminTokenRotateInternalErrorDiagnostic(t *testing.T) {
 // cleanup error log is guaranteed to be emitted.
 func TestBuildCleanupCorrelationFields(t *testing.T) {
 	_, opBuf := setupTestLogging(t)
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -766,7 +766,7 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessioncleanupuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -885,7 +885,7 @@ func TestSessionDeleteCleanupCorrelation(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	home := filepath.Join(app.Config.AllowedRoots[0], "home", "sessiondeleteuser")
 	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
@@ -1121,7 +1121,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 	app.Config.Mode = ModeSystem
 

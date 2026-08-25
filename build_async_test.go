@@ -15,7 +15,7 @@ import (
 // TestBuildStartFailureReturns201WithFailedOperation proves that when
 // cmd.Start() fails, POST /build returns 201 with a failed operation.
 func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -72,7 +72,7 @@ func TestBuildStartFailureReturns201WithFailedOperation(t *testing.T) {
 // TestBuildLiveOutput proves build output becomes visible through logs
 // while the command is still running.
 func TestBuildLiveOutput(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -167,7 +167,7 @@ func TestBuildLiveOutput(t *testing.T) {
 
 // TestBuildSuccessTransition proves running -> succeeded transition.
 func TestBuildSuccessTransition(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -221,7 +221,7 @@ func TestBuildSuccessTransition(t *testing.T) {
 
 // TestBuildNonZeroExitTransition proves running -> failed with exit code.
 func TestBuildNonZeroExitTransition(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -275,7 +275,7 @@ func TestBuildNonZeroExitTransition(t *testing.T) {
 func TestAuditFinishEmittedOnce(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -324,7 +324,7 @@ func TestAuditFinishEmittedOnce(t *testing.T) {
 // the process exits. This is a regression test for the old
 // io.MultiReader(stdout, stderr) approach which could block.
 func TestBuildStdoutStderrNoDeadlock(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

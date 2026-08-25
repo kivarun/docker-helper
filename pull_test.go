@@ -18,7 +18,7 @@ import (
 )
 
 func TestPullSessionAuthValidToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -44,7 +44,7 @@ func TestPullSessionAuthValidToken(t *testing.T) {
 }
 
 func TestPullSessionAuthMissingAuthorization(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
 	body, _ := json.Marshal(reqBody)
@@ -60,7 +60,7 @@ func TestPullSessionAuthMissingAuthorization(t *testing.T) {
 }
 
 func TestPullSessionAuthWrongScheme(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
 	body, _ := json.Marshal(reqBody)
@@ -77,7 +77,7 @@ func TestPullSessionAuthWrongScheme(t *testing.T) {
 }
 
 func TestPullSessionAuthEmptyBearer(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
 	body, _ := json.Marshal(reqBody)
@@ -94,7 +94,7 @@ func TestPullSessionAuthEmptyBearer(t *testing.T) {
 }
 
 func TestPullSessionAuthInvalidToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
 	body, _ := json.Marshal(reqBody)
@@ -111,7 +111,7 @@ func TestPullSessionAuthInvalidToken(t *testing.T) {
 }
 
 func TestPullSessionAuthExpiredSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -142,7 +142,7 @@ func TestPullSessionAuthExpiredSession(t *testing.T) {
 }
 
 func TestPullSessionAuthDeletedSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -176,7 +176,7 @@ func TestPullSessionAuthDeletedSession(t *testing.T) {
 }
 
 func TestPullSessionAuthResponseContainsCode(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
 	body, _ := json.Marshal(reqBody)
@@ -197,7 +197,7 @@ func TestPullSessionAuthResponseContainsCode(t *testing.T) {
 }
 
 func TestPullSessionAuthResponseContainsWWWAuthenticate(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{"image": "alpine:3.24"}
 	body, _ := json.Marshal(reqBody)
@@ -213,7 +213,7 @@ func TestPullSessionAuthResponseContainsWWWAuthenticate(t *testing.T) {
 }
 
 func TestPullSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	called := false
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -240,7 +240,7 @@ func TestPullSessionAuthInvalidTokenDoesNotRunDocker(t *testing.T) {
 }
 
 func TestPullSessionAuthAdminTokenRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "true")
@@ -261,7 +261,7 @@ func TestPullSessionAuthAdminTokenRejected(t *testing.T) {
 }
 
 func TestPullImageRequired(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -296,7 +296,7 @@ func TestPullImageRequired(t *testing.T) {
 }
 
 func TestPullInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -315,7 +315,7 @@ func TestPullInvalidJSON(t *testing.T) {
 }
 
 func TestPullUnknownFieldsRejected(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -341,7 +341,7 @@ func TestPullUnknownFieldsRejected(t *testing.T) {
 }
 
 func TestPullSuccessResponse(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -385,7 +385,7 @@ func TestPullSuccessResponse(t *testing.T) {
 }
 
 func TestPullErrorResponse(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -423,7 +423,7 @@ func TestPullErrorResponse(t *testing.T) {
 }
 
 func TestPullDockerArgs(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -463,7 +463,7 @@ func TestPullDockerArgs(t *testing.T) {
 }
 
 func TestPullRequestCancellation(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -559,7 +559,7 @@ func TestPullRequestCancellation(t *testing.T) {
 }
 
 func TestPullTerminatedByDaemonShutdown(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -720,7 +720,7 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 }
 
 func TestPullBoundedOutputTruncatedSuccess(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -776,7 +776,7 @@ func TestPullBoundedOutputTruncatedSuccess(t *testing.T) {
 }
 
 func TestPullBoundedOutputTruncatedFailure(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -836,7 +836,7 @@ func TestPullBoundedOutputTruncatedFailure(t *testing.T) {
 }
 
 func TestPullBoundedOutputNoTruncation(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

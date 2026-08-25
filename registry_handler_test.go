@@ -14,7 +14,7 @@ import (
 )
 
 func TestRegistryLoginMissingSession(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	reqBody := map[string]string{
 		"registry": "registry.example.com",
@@ -34,7 +34,7 @@ func TestRegistryLoginMissingSession(t *testing.T) {
 }
 
 func TestRegistryLoginInvalidJSON(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -53,7 +53,7 @@ func TestRegistryLoginInvalidJSON(t *testing.T) {
 }
 
 func TestRegistryLoginMissingFields(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -93,7 +93,7 @@ func TestRegistryLoginMissingFields(t *testing.T) {
 }
 
 func TestRegistryLoginSuccess(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -159,7 +159,7 @@ func TestRegistryLoginSuccess(t *testing.T) {
 }
 
 func TestRegistryLoginFailure(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -205,7 +205,7 @@ func TestRegistryLoginFailure(t *testing.T) {
 }
 
 func TestRegistryLoginSessionDockerDirCreated(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -253,7 +253,7 @@ func TestRegistryLoginSessionDockerDirCreated(t *testing.T) {
 func TestRegistryLoginNilExecCommandContext(t *testing.T) {
 	// Regression: registry login must not panic when ExecCommandContext is nil
 	// (the production default). It must use the real exec.CommandContext fallback.
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -301,7 +301,7 @@ func TestRegistryLoginNilExecCommandContext(t *testing.T) {
 // discards Docker stdout/stderr and does not retain or expose any output,
 // even when the Docker command emits a large amount of data.
 func TestRegistryLoginDiscardsOutput(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
@@ -353,7 +353,7 @@ func TestRegistryLoginDiscardsOutput(t *testing.T) {
 // TestRegistryLoginFailureNoOutput verifies that a failed registry login
 // does not include Docker output in the response.
 func TestRegistryLoginFailureNoOutput(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {

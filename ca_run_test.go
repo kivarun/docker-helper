@@ -32,7 +32,7 @@ func waitRun(t *testing.T, app *App, w *httptest.ResponseRecorder) {
 
 func setupRunTestApp(t *testing.T) (*App, string) {
 	t.Helper()
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

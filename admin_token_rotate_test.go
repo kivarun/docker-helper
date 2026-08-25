@@ -38,7 +38,7 @@ func assertAdminTokenFormat(t *testing.T, token string) {
 }
 
 func TestRotateAdminTokenFormat(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	newToken, err := app.rotateAdminToken(app.getAdminTokenHash())
 	if err != nil {
@@ -52,7 +52,7 @@ func TestRotateAdminTokenFormat(t *testing.T) {
 }
 
 func TestRotateAdminTokenSuccess(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Old token is valid before rotation.
 	req := httptest.NewRequest("GET", "/principals", nil)
@@ -116,7 +116,7 @@ func TestRotateAdminTokenSuccess(t *testing.T) {
 // token remains valid, the token file is unchanged, and no temp file is
 // left behind.
 func TestRotateAdminTokenRenameFailure(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	tokenPath := app.getConfig().AdminTokenPath
 	writeTestTokenFile(t, tokenPath, testAdminToken+"\n")
@@ -174,7 +174,7 @@ func TestRotateAdminTokenRenameFailure(t *testing.T) {
 // authorizing token is no longer current at commit time is rejected as
 // stale and leaves the winner's state untouched.
 func TestRotateAdminTokenStaleCommit(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	oldHash := app.getAdminTokenHash()
 
 	first, err := app.rotateAdminToken(oldHash)
@@ -224,10 +224,10 @@ func TestRotateAdminTokenStaleCommit(t *testing.T) {
 }
 
 func TestHandleRotateAdminToken(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest("POST", "/admin/token/rotate", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRotateAdminToken(w, req)
 
@@ -246,7 +246,7 @@ func TestHandleRotateAdminToken(t *testing.T) {
 }
 
 func TestHandleRotateAdminTokenAuth(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	// Actual session token.
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -320,7 +320,7 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 // matches the winner's token, and the winner is the only active token.
 // This test is expected to run under the race detector.
 func TestHandleRotateAdminTokenConcurrent(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	type outcome struct {
 		code  int
@@ -404,10 +404,10 @@ func TestHandleRotateAdminTokenConcurrent(t *testing.T) {
 func TestRotateAdminTokenAuditSuccess(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	req := httptest.NewRequest("POST", "/admin/token/rotate", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRotateAdminToken(w, req)
 
@@ -450,13 +450,13 @@ func TestRotateAdminTokenAuditSuccess(t *testing.T) {
 func TestRotateAdminTokenAuditFailure(t *testing.T) {
 	auditBuf, opBuf := setupTestLogging(t)
 
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	app.RotateRenameFn = func(oldpath, newpath string) error {
 		return os.ErrInvalid
 	}
 
 	req := httptest.NewRequest("POST", "/admin/token/rotate", nil)
-	withAuth(req)
+	withAdminToken(req)
 	w := httptest.NewRecorder()
 	app.handleRotateAdminToken(w, req)
 
@@ -494,7 +494,7 @@ func TestRotateAdminTokenAuditFailure(t *testing.T) {
 // loopback HTTP listeners share one App/auth state: a rotation performed
 // through one transport is immediately effective on both.
 func TestRotateAdminTokenBothTransports(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, app)
@@ -698,7 +698,7 @@ func TestAdminTokenRotateCLIAuthFailure(t *testing.T) {
 // token rotation and admin-authenticated session requests do not produce
 // a data race on AdminTokenHash.
 func TestAdminTokenRotationConcurrentSessionAuth(t *testing.T) {
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
 	var wg sync.WaitGroup

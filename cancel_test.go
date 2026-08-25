@@ -19,7 +19,7 @@ import (
 // TestCancelRunningBuild proves that cancelling a running build
 // terminates the process and returns result_code=cancelled.
 func TestCancelRunningBuild(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -110,7 +110,7 @@ func TestCancelRunningBuild(t *testing.T) {
 
 // TestCancelUnknownOperation returns 404 for unknown operation ID.
 func TestCancelUnknownOperation(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -130,7 +130,7 @@ func TestCancelUnknownOperation(t *testing.T) {
 
 // TestCancelOtherSessionOperation returns 404 for operation belonging to another session.
 func TestCancelOtherSessionOperation(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	session1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -177,7 +177,7 @@ func TestCancelOtherSessionOperation(t *testing.T) {
 
 // TestCancelPreservesLogs proves that operation logs remain accessible after cancel.
 func TestCancelPreservesLogs(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -251,7 +251,7 @@ func TestCancelPreservesLogs(t *testing.T) {
 // TestCancelAuditEvent proves that cancelled operations emit the correct
 // audit event with result=cancelled.
 func TestCancelAuditEvent(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -295,7 +295,7 @@ func TestCancelAuditEvent(t *testing.T) {
 
 // TestCancelNoRegistry proves that cancel returns 404 when supervisor is nil.
 func TestCancelNoSupervisor(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = nil
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -347,7 +347,7 @@ func TestCancelClassificationUsesSentinels(t *testing.T) {
 // TestCancelIdempotent proves that cancelling an already-cancelled operation
 // returns the terminal state without error.
 func TestCancelIdempotent(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -406,7 +406,7 @@ func TestCancelIdempotent(t *testing.T) {
 // TestCancelRunCidfileCleanup proves that cancelling a run operation
 // cleans up the cidfile.
 func TestCancelRunCidfileCleanup(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -462,7 +462,7 @@ func TestCancelRunCidfileCleanup(t *testing.T) {
 // TestShutdownDoesNotProduceCancelledResult proves that daemon shutdown
 // does not produce result_code=cancelled for build operations.
 func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -531,7 +531,7 @@ func TestShutdownDoesNotProduceCancelledResult(t *testing.T) {
 // TestShutdownRunDoesNotProduceCancelledResult proves that daemon shutdown
 // does not produce result_code=cancelled for run operations.
 func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -595,7 +595,7 @@ func TestShutdownRunDoesNotProduceCancelledResult(t *testing.T) {
 // Uses a synchronization channel to deterministically control ordering:
 // cancel acquires op.mu and sets reason, then terminateForShutdown runs.
 func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -647,7 +647,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 // Uses a synchronization channel to deterministically control ordering:
 // terminateForShutdown acquires op.mu and sets reason, then cancel runs.
 func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -701,7 +701,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 func TestTerminalTransitionSucceedWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -791,7 +791,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 func TestTerminalTransitionFailWins(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -878,7 +878,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 // operation completes naturally before cancel processes it, the natural
 // result is preserved (sequential idempotency).
 func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -948,7 +948,7 @@ func TestCancelAfterNaturalCompletionPreservesResult(t *testing.T) {
 // operation that already completed with a natural failure result does not
 // overwrite the result to "cancelled".
 func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -998,7 +998,7 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 func TestConcurrentDoubleCancel(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -1136,7 +1136,7 @@ func TestConcurrentDoubleCancel(t *testing.T) {
 func TestCancelPlusShutdownCleanup(t *testing.T) {
 	auditBuf, _ := setupTestLogging(t)
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -1285,7 +1285,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 // the shared force deadline (the context deadline), not a fresh full
 // defaultForceCleanupTimeout.
 func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -1346,7 +1346,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 // TestCancelResponseNoTimestampFields verifies that the cancel response
 // does not contain timestamp fields (created_at, started_at, completed_at, duration).
 func TestCancelResponseNoTimestampFields(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))

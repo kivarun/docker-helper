@@ -15,7 +15,7 @@ import (
 // setupBuildTest creates an app, supervisor, session and Dockerfile for build tests.
 func setupBuildTest(t *testing.T) (*App, *operationSupervisor, *CreatedSession, string) {
 	t.Helper()
-	app := newTestAppWithAuth(t)
+	app := newTestAppWithAdminToken(t)
 	supervisor := newOperationSupervisor()
 	app.OperationSupervisor = supervisor
 

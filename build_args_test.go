@@ -15,7 +15,7 @@ import (
 )
 
 func TestBuildArgsProducesExpectedArgv(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -77,7 +77,7 @@ func TestBuildArgsProducesExpectedArgv(t *testing.T) {
 }
 
 func TestBuildArgsDeterministicOrder(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -140,7 +140,7 @@ func TestBuildArgsDeterministicOrder(t *testing.T) {
 }
 
 func TestBuildArgsEmptyValue(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -190,7 +190,7 @@ func TestBuildArgsEmptyValue(t *testing.T) {
 }
 
 func TestBuildArgsInvalidKeyRejected(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -237,7 +237,7 @@ func TestBuildArgsInvalidKeyRejected(t *testing.T) {
 }
 
 func TestBuildArgsOmittedPreservesBehavior(t *testing.T) {
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
@@ -285,7 +285,7 @@ func TestBuildArgsAuditContainsKeysNotValues(t *testing.T) {
 	initLoggers(new(bytes.Buffer), auditBuf, slog.LevelInfo, true)
 	defer logging.reset()
 
-	app := newTestAppWithAuthAndStaging(t)
+	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
