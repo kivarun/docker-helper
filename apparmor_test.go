@@ -2115,6 +2115,30 @@ func TestSystemProfileSocketLockFileLocking(t *testing.T) {
 	}
 }
 
+func TestSystemProfileAppArmorLifecycleLockFileLocking(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// The AppArmor lifecycle lock file must grant rwk: read is required by
+	// os.OpenFile(..., O_RDWR, ...) and k (file locking) by syscall.Flock.
+	if !strings.Contains(content, "/run/lock/docker-helper-apparmor.lock rwk,") {
+		t.Error("system profile must grant rwk on /run/lock/docker-helper-apparmor.lock for the AppArmor lifecycle lock")
+	}
+
+	// It must not regress to a permission lacking read (O_RDWR) or lock (flock).
+	for _, bad := range []string{
+		"/run/lock/docker-helper-apparmor.lock w,",
+		"/run/lock/docker-helper-apparmor.lock rw,",
+	} {
+		if strings.Contains(content, bad) {
+			t.Errorf("system profile must not use %q for the AppArmor lifecycle lock", bad)
+		}
+	}
+}
+
 func TestUserProfileContainsDockerBuildx(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper")
 	if err != nil {

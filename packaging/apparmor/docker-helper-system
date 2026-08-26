@@ -65,7 +65,7 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/usr/bin/docker-helper r,
 
 	# AppArmor lock file.
-	/run/lock/docker-helper-apparmor.lock w,
+	/run/lock/docker-helper-apparmor.lock rwk,
 
 	# AppArmor parser (for managed roots reload).
 	/usr/sbin/apparmor_parser rix,
