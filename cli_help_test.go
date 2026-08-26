@@ -248,6 +248,33 @@ func TestBlackBoxVersionExact(t *testing.T) {
 	}
 }
 
+// TestBlackBoxVersionAliases verifies --version and -v behave like the
+// version subcommand while the version subcommand itself is preserved.
+func TestBlackBoxVersionAliases(t *testing.T) {
+	for _, arg := range []string{"--version", "-v"} {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{arg}, &stdout, &stderr)
+		if code != 0 {
+			t.Errorf("%s: expected exit code 0, got %d", arg, code)
+		}
+		if stdout.String() != version+"\n" {
+			t.Errorf("%s: expected %q, got %q", arg, version+"\n", stdout.String())
+		}
+		if stderr.Len() > 0 {
+			t.Errorf("%s: expected empty stderr, got: %s", arg, stderr.String())
+		}
+	}
+	// --version rejects extra arguments.
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"--version", "extra"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("--version extra: expected exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unexpected argument") {
+		t.Errorf("--version extra: expected unexpected-argument error, got: %s", stderr.String())
+	}
+}
+
 func TestBlackBoxCreateHelpNoRun(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_CONFIG", "/nonexistent/config.json")
 	var stdout, stderr bytes.Buffer

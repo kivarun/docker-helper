@@ -103,6 +103,17 @@ func (c *Command) dispatchBranch(args []string, path []string, stdout, stderr io
 		return 0
 	}
 
+	// Root-level version aliases: docker-helper --version / -v behave like
+	// the version subcommand. Handled before subcommand resolution.
+	if c == rootCommand && (args[0] == "--version" || args[0] == "-v") {
+		if len(args) > 1 {
+			fmt.Fprintf(stderr, "error: unexpected argument %q\n", args[1])
+			return 2
+		}
+		fmt.Fprintln(stdout, version)
+		return 0
+	}
+
 	// Find matching subcommand
 	sub := c.resolveSubcommand(args[0])
 	if sub != nil {

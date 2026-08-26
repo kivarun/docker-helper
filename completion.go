@@ -8,8 +8,18 @@ import (
 	"strings"
 )
 
-var completionCommand = &Command{
-	Name:       "completion",
+// pathValuedFlags are flags whose value is a filesystem path (or endpoint
+// socket path); Bash completion completes them with filesystem paths.
+var pathValuedFlags = []string{
+	"endpoint",
+	"token-file",
+	"workspace",
+	"context",
+	"dockerfile",
+	"allowed-root",
+}
+
+var completionCommand = &Command{Name: "completion",
 	Summary:    "Generate shell completion script",
 	Usage:      "docker-helper completion <shell>",
 	MaxPosArgs: 1,
@@ -455,7 +465,15 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "_docker_helper_complete_flag_value() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local flag=\"$2\"")
-	fmt.Fprintln(w, "    # No flag-based value completion needed; positional handles config")
+	fmt.Fprintln(w, "    # Path-valued flags complete with filesystem paths.")
+	fmt.Fprintln(w, "    case \"$flag\" in")
+	for _, f := range pathValuedFlags {
+		fmt.Fprintf(w, "        %q)\n", f)
+		fmt.Fprintln(w, "            compopt -o filenames 2>/dev/null || true")
+		fmt.Fprintln(w, "            COMPREPLY=( $(compgen -f -- \"$cur\") )")
+		fmt.Fprintln(w, "            ;;")
+	}
+	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "complete -F _docker_helper_completion docker-helper")

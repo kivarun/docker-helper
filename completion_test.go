@@ -712,6 +712,20 @@ func TestCompletionAllowedRootRemoveFilesystemCompletion(t *testing.T) {
 	}
 }
 
+// TestCompletionPathValuedFlagsFilesystemCompletion verifies the generated
+// script completes filesystem paths for the path-valued flags surfaced in UAT.
+func TestCompletionPathValuedFlagsFilesystemCompletion(t *testing.T) {
+	script := completionScript(t)
+	for _, flag := range pathValuedFlags {
+		if !strings.Contains(script, "\""+flag+"\"") {
+			t.Errorf("completion script must include a completion case for --%s", flag)
+		}
+	}
+	if !strings.Contains(script, "compgen -f -- \"$cur\"") {
+		t.Error("completion script must use 'compgen -f' for path-valued flags")
+	}
+}
+
 func TestCompletionAllowedRootPartialActionNoPathCompletion(t *testing.T) {
 	script := completionScript(t)
 
