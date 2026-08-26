@@ -26,15 +26,15 @@ type testWorkspaceMACDriver struct {
 	coverageMap           map[string]string // workspace -> boundary
 	helperOwnedBoundaries map[string]bool   // boundary -> is helper-owned
 	removeErrors          map[string]bool   // boundary -> should removal fail
-	boundaryType          string
+	boundaryBackend       LSMBackend
 }
 
-func newTestWorkspaceMACDriver(backendType string) *testWorkspaceMACDriver {
+func newTestWorkspaceMACDriver(backend LSMBackend) *testWorkspaceMACDriver {
 	return &testWorkspaceMACDriver{
 		coverageMap:           make(map[string]string),
 		helperOwnedBoundaries: make(map[string]bool),
 		removeErrors:          make(map[string]bool),
-		boundaryType:          backendType,
+		boundaryBackend:       backend,
 	}
 }
 
@@ -84,8 +84,8 @@ func (b *testWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, erro
 	return result, nil
 }
 
-func (b *testWorkspaceMACDriver) backendType() string {
-	return b.boundaryType
+func (b *testWorkspaceMACDriver) backend() LSMBackend {
+	return b.boundaryBackend
 }
 
 // setupTestMACCoordinator creates a test app with a MAC coordinator and mock driver.
@@ -104,7 +104,7 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	allowedRoot := testAllowedRootDir(t)
@@ -309,7 +309,7 @@ func TestLegacyAppArmorOwnershipReconciliation(t *testing.T) {
 	}
 
 	// Simulate pre-existing helper-owned boundary (in fragment but not in mac_boundaries).
-	driver := newTestWorkspaceMACDriver("apparmor")
+	driver := newTestWorkspaceMACDriver(LSMAppArmor)
 	driver.coverageMap["/data/workspace"] = "/data"
 	driver.helperOwnedBoundaries["/data"] = true
 
@@ -467,8 +467,8 @@ func (b *failingWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, e
 	return nil, nil
 }
 
-func (b *failingWorkspaceMACDriver) backendType() string {
-	return "test"
+func (b *failingWorkspaceMACDriver) backend() LSMBackend {
+	return LSMBackend("test")
 }
 
 // =============================================================================
@@ -534,8 +534,8 @@ func (b *selinuxTestDriver) discoverHelperOwnedBoundaries() ([]string, error) {
 	return nil, nil
 }
 
-func (b *selinuxTestDriver) backendType() string {
-	return "selinux"
+func (b *selinuxTestDriver) backend() LSMBackend {
+	return LSMSELinux
 }
 
 func TestSELinuxAncestorRuleCorrectType(t *testing.T) {
@@ -722,7 +722,7 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	parentWS := "/data/parent"
@@ -813,7 +813,7 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	parentWS := "/data/parent"
@@ -894,7 +894,7 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	workspace := "/data/workspace"
@@ -980,7 +980,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	}
 
 	// Create lifecycle with "apparmor" driver.
-	apparmorDriver := newTestWorkspaceMACDriver("apparmor")
+	apparmorDriver := newTestWorkspaceMACDriver(LSMAppArmor)
 	mac1 := newSessionMACCoordinator(db, apparmorDriver)
 
 	workspace := "/data/workspace"
@@ -1008,7 +1008,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 	mac1.ReleaseSessionBinding("sess-1")
 
 	// Now create lifecycle with "selinux" driver.
-	selinuxDriver := newTestWorkspaceMACDriver("selinux")
+	selinuxDriver := newTestWorkspaceMACDriver(LSMSELinux)
 	mac2 := newSessionMACCoordinator(db, selinuxDriver)
 
 	// selinux should NOT see apparmor's ownership.
@@ -1079,7 +1079,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1209,7 +1209,7 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1325,7 +1325,7 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1458,7 +1458,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1587,7 +1587,7 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -1696,7 +1696,7 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -2154,7 +2154,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	driver := newTestWorkspaceMACDriver("test")
+	driver := newTestWorkspaceMACDriver(LSMBackend("test"))
 	mac := newSessionMACCoordinator(db, driver)
 
 	parentWS := "/data/parent"
@@ -2171,7 +2171,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 	// Manually insert a child boundary into mac_boundaries so it is owned
 	// by docker-helper but has no active consumer and is not in deferredBoundaries.
 	_, err = db.Exec(`INSERT INTO mac_boundaries (backend, boundary) VALUES (?, ?)`,
-		driver.backendType(), childWS)
+		driver.backend(), childWS)
 	if err != nil {
 		t.Fatalf("insert child boundary: %v", err)
 	}

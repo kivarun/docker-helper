@@ -41,8 +41,9 @@ type workspaceMACDriver interface {
 	// Operator-compatible boundaries MUST NOT be returned.
 	discoverHelperOwnedBoundaries() ([]string, error)
 
-	// backendType returns the backend identifier ("apparmor" or "selinux").
-	backendType() string
+	// backend returns the LSM backend identity for this driver
+	// ("apparmor" or "selinux").
+	backend() LSMBackend
 }
 
 // sessionMACCoordinator is the single internal owner of session MAC state.
@@ -491,7 +492,7 @@ func (c *sessionMACCoordinator) listLiveSessionsWithIDs() ([]liveSessionWithID, 
 func (c *sessionMACCoordinator) recordBoundaryOwnership(boundary string) error {
 	_, err := c.db.Exec(
 		`INSERT OR REPLACE INTO mac_boundaries (backend, boundary) VALUES (?, ?)`,
-		c.backendType(), boundary,
+		c.backend(), boundary,
 	)
 	return err
 }
@@ -499,10 +500,10 @@ func (c *sessionMACCoordinator) recordBoundaryOwnership(boundary string) error {
 // isBoundaryOwnedByHelper checks if the boundary is owned by docker-helper
 // for the current backend.
 func (c *sessionMACCoordinator) isBoundaryOwnedByHelper(boundary string) (bool, error) {
-	var backend string
+	var backend LSMBackend
 	err := c.db.QueryRow(
 		`SELECT backend FROM mac_boundaries WHERE backend = ? AND boundary = ?`,
-		c.backendType(), boundary,
+		c.backend(), boundary,
 	).Scan(&backend)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -510,23 +511,23 @@ func (c *sessionMACCoordinator) isBoundaryOwnedByHelper(boundary string) (bool, 
 		}
 		return false, err
 	}
-	return backend == c.backendType(), nil
+	return backend == c.backend(), nil
 }
 
 // forgetBoundaryOwnership removes ownership metadata for a released boundary.
 func (c *sessionMACCoordinator) forgetBoundaryOwnership(boundary string) error {
 	_, err := c.db.Exec(
 		`DELETE FROM mac_boundaries WHERE boundary = ? AND backend = ?`,
-		boundary, c.backendType(),
+		boundary, c.backend(),
 	)
 	return err
 }
 
-func (c *sessionMACCoordinator) backendType() string {
+func (c *sessionMACCoordinator) backend() LSMBackend {
 	if c.driver == nil {
-		return ""
+		return LSMNone
 	}
-	return c.driver.backendType()
+	return c.driver.backend()
 }
 
 // listOwnedBoundaries returns all boundaries owned by docker-helper for the
@@ -534,7 +535,7 @@ func (c *sessionMACCoordinator) backendType() string {
 func (c *sessionMACCoordinator) listOwnedBoundaries() ([]string, error) {
 	rows, err := c.db.Query(
 		`SELECT boundary FROM mac_boundaries WHERE backend = ?`,
-		c.backendType(),
+		c.backend(),
 	)
 	if err != nil {
 		return nil, err
@@ -645,8 +646,8 @@ func (d *appArmorWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, 
 	return d.listManagedBoundaries()
 }
 
-func (d *appArmorWorkspaceMACDriver) backendType() string {
-	return "apparmor"
+func (d *appArmorWorkspaceMACDriver) backend() LSMBackend {
+	return LSMAppArmor
 }
 
 // selinuxFcontextOps is the subset of selinuxFcontextManager operations
@@ -758,8 +759,8 @@ func (d *selinuxWorkspaceMACDriver) discoverHelperOwnedBoundaries() ([]string, e
 	return nil, nil
 }
 
-func (d *selinuxWorkspaceMACDriver) backendType() string {
-	return "selinux"
+func (d *selinuxWorkspaceMACDriver) backend() LSMBackend {
+	return LSMSELinux
 }
 
 // newWorkspaceMACDriver creates the appropriate driver for the given LSM.
