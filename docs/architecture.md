@@ -453,9 +453,9 @@ and requires a daemon restart.
 The operation is transactional: the entire read-modify-write-reload cycle
 runs under a process-level lock. If the daemon rejects the reload (e.g.
 invalid config), the original config.json is restored atomically and the
-command exits with a non-zero status. If rollback and re-reload succeed,
-config.json and the daemon are synchronized. If re-reload fails, they may
-diverge until the next manual reload or restart.
+command exits with a non-zero status. If rollback and reload after rollback
+succeed, config.json and the daemon are synchronized. If the reload after
+rollback fails, they may diverge until the next manual reload or restart.
 
 `docker-helper config unset FIELD` — removes an optional field to restore
 its default. `allowed_roots` and `session_ttl` are required and cannot be

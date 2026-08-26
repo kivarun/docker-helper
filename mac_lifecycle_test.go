@@ -136,6 +136,20 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 	return app, mac, driver
 }
 
+// TestNewSessionMACCoordinatorRejectsNilDriver verifies that the coordinator
+// constructor fails fast on a nil driver. A coordinator without a driver is
+// forbidden architecture: absence of MAC is represented only by
+// App.MACCoordinator == nil.
+func TestNewSessionMACCoordinatorRejectsNilDriver(t *testing.T) {
+	app := newTestApp(t)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("newSessionMACCoordinator(db, nil) must panic")
+		}
+	}()
+	newSessionMACCoordinator(app.DB, nil)
+}
+
 // insertTestSession inserts a test session into the database.
 func insertTestSession(t *testing.T, db *sql.DB, sessionID, workspace string) {
 	t.Helper()

@@ -1172,6 +1172,23 @@ Resolved in the commit that maintains this ledger:
 - current Release 2 / shipping documentation uses the canonical R2 vocabulary
   (Session token, Principal credential, admin token).
 
+### D. MAC coordinator nil-driver residue — RESOLVED
+
+After fixing the user-mode startup composition, `sessionMACCoordinator` still
+retained the obsolete nil-driver operating mode (synthetic coverage, skipped
+release/reconcile/cleanup paths, `backend()` falling back to `LSMNone`). That
+mode is now forbidden architecture:
+
+- the coordinator constructor requires a non-nil `workspaceMACDriver` and
+  fails fast otherwise;
+- absence of MAC is represented only by `App.MACCoordinator == nil`;
+- all operational nil-driver branches were removed;
+- production behavior for valid system-mode coordinators is unchanged.
+
+Documentation residue: the README and `docs/architecture.md` rollback
+paragraphs used the historical "re-reload" term; they now say "reload after
+rollback".
+
 ### Observable contract changes in refactor commits
 
 Some commits categorized primarily as refactors nevertheless included

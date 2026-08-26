@@ -70,6 +70,9 @@ type sessionMACCoordinator struct {
 }
 
 func newSessionMACCoordinator(db *sql.DB, driver workspaceMACDriver) *sessionMACCoordinator {
+	if driver == nil {
+		panic("sessionMACCoordinator requires a non-nil workspaceMACDriver")
+	}
 	return &sessionMACCoordinator{
 		db:                     db,
 		driver:                 driver,
@@ -88,15 +91,6 @@ func newSessionMACCoordinator(db *sql.DB, driver workspaceMACDriver) *sessionMAC
 func (c *sessionMACCoordinator) CreateSessionBinding(workspace string, sessionID string, insertFn func(workspaceMACCoverage) error) (workspaceMACCoverage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if c.driver == nil {
-		cov := workspaceMACCoverage{Boundary: workspace}
-		if err := insertFn(cov); err != nil {
-			return workspaceMACCoverage{}, err
-		}
-		c.sessionBindings[sessionID] = cov
-		return cov, nil
-	}
 
 	coverage, newlyCreated, err := c.driver.ensureCoverage(workspace)
 	if err != nil {
@@ -158,10 +152,6 @@ func (c *sessionMACCoordinator) ReleaseSessionBinding(sessionID string) {
 	}
 	delete(c.sessionBindings, sessionID)
 
-	if c.driver == nil {
-		return
-	}
-
 	c.conditionalReleaseBoundary(coverage.Boundary, coverage.HelperOwned)
 	// Retry cleanup of previously deferred boundaries now that a consumer disappeared.
 	c.retryDeferredBoundaries()
@@ -205,9 +195,7 @@ func (c *sessionMACCoordinator) AcquireWorkspaceUse(sessionID, workspace string)
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			delete(c.workspaceUseLeases, leaseKey)
-			if c.driver != nil {
-				c.conditionalReleaseBoundary(coverage.Boundary, coverage.HelperOwned)
-			}
+			c.conditionalReleaseBoundary(coverage.Boundary, coverage.HelperOwned)
 			// Retry cleanup of previously deferred boundaries.
 			c.retryDeferredBoundaries()
 		})
@@ -221,10 +209,6 @@ func (c *sessionMACCoordinator) AcquireWorkspaceUse(sessionID, workspace string)
 //
 // This method acquires and releases the coordinator lock.
 func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
-	if c.driver == nil {
-		return nil
-	}
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -307,10 +291,6 @@ func (c *sessionMACCoordinator) importHelperOwnedBoundaries() error {
 // the boundary. Accounts for live bindings and leases.
 // Must be called with c.mu held.
 func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, helperOwned bool) {
-	if c.driver == nil {
-		return
-	}
-
 	count := c.boundaryConsumerCounts[boundary]
 	if count <= 1 {
 		delete(c.boundaryConsumerCounts, boundary)
@@ -352,10 +332,6 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, help
 // now that a consumer has disappeared.
 // Must be called with c.mu held.
 func (c *sessionMACCoordinator) retryDeferredBoundaries() {
-	if c.driver == nil {
-		return
-	}
-
 	for boundary := range c.deferredBoundaries {
 		if c.boundaryConsumerCounts[boundary] > 0 {
 			// Still has direct consumers, skip.
@@ -416,10 +392,6 @@ func (c *sessionMACCoordinator) isBoundaryStillNeeded(boundary string) bool {
 // that no longer have any consumers.
 // Must be called with c.mu held.
 func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
-	if c.driver == nil {
-		return nil
-	}
-
 	boundaries, err := c.listOwnedBoundaries()
 	if err != nil {
 		return err
@@ -524,9 +496,6 @@ func (c *sessionMACCoordinator) forgetBoundaryOwnership(boundary string) error {
 }
 
 func (c *sessionMACCoordinator) backend() LSMBackend {
-	if c.driver == nil {
-		return LSMNone
-	}
 	return c.driver.backend()
 }
 
