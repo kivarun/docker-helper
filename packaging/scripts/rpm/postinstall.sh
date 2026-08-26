@@ -13,23 +13,6 @@ fi
 was_active=false
 systemctl is-active --quiet docker-helper.service && was_active=true
 
-# Migrate AppArmor managed boundaries state from legacy location.
-AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
-AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
-AA_STATE_DIR="$(dirname "$AA_STATE_FILE")"
-AA_TOP_STATE_DIR="$(dirname "$AA_STATE_DIR")"
-mkdir -p "$AA_TOP_STATE_DIR"
-chmod 0700 "$AA_TOP_STATE_DIR"
-mkdir -p "$AA_STATE_DIR"
-chmod 0755 "$AA_STATE_DIR"
-if [ -f "$AA_LEGACY_FRAGMENT" ] && [ ! -f "$AA_STATE_FILE" ]; then
-  tmp_file="$(mktemp "$AA_STATE_DIR/managed-boundaries-XXXXXX.tmp")"
-  if ! cp "$AA_LEGACY_FRAGMENT" "$tmp_file" || ! chmod 0644 "$tmp_file" || ! mv -f "$tmp_file" "$AA_STATE_FILE"; then
-    rm -f "$tmp_file"
-    exit 1
-  fi
-fi
-
 # Detect MAC backend(s).
 aa_enabled="$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" || true
 selinux_enforcing="$(cat /sys/fs/selinux/enforce 2>/dev/null | tr -d '[:space:]')" || true
@@ -44,9 +27,28 @@ if [ "$aa_active" = "true" ] && [ "$selinux_active" = "true" ]; then
 fi
 
 if [ "$aa_active" = "true" ]; then
+  # AppArmor state preparation/migration (only when AppArmor is active).
+  AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
+  AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
+  AA_STATE_DIR="$(dirname "$AA_STATE_FILE")"
+  AA_TOP_STATE_DIR="$(dirname "$AA_STATE_DIR")"
+  mkdir -p "$AA_TOP_STATE_DIR"
+  chmod 0700 "$AA_TOP_STATE_DIR"
+  mkdir -p "$AA_STATE_DIR"
+  chmod 0755 "$AA_STATE_DIR"
+  if [ -f "$AA_LEGACY_FRAGMENT" ] && [ ! -f "$AA_STATE_FILE" ]; then
+    tmp_file="$(mktemp "$AA_STATE_DIR/managed-boundaries-XXXXXX.tmp")"
+    if ! cp "$AA_LEGACY_FRAGMENT" "$tmp_file" || ! chmod 0644 "$tmp_file" || ! mv -f "$tmp_file" "$AA_STATE_FILE"; then
+      rm -f "$tmp_file"
+      exit 1
+    fi
+  fi
+
+  # Load AppArmor profile.
   if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system; then
     exit 1
   fi
+
   # Clean up legacy fragment after successful profile replacement.
   if [ -f "$AA_LEGACY_FRAGMENT" ] && [ -f "$AA_STATE_FILE" ]; then
     rm -f "$AA_LEGACY_FRAGMENT"

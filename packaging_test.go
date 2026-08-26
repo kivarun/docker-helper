@@ -4836,6 +4836,298 @@ func TestDebPostinstallSELinuxNoFalseAppArmorWarning(t *testing.T) {
 	}
 }
 
+// TestRpmPostinstallSelinuxOnlyNoAppArmorState verifies that on an
+// SELinux-only host (AppArmor inactive), the RPM postinstall does NOT
+// create AppArmor state or invoke apparmor_parser.
+func TestRpmPostinstallSelinuxOnlyNoAppArmorState(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create legacy AppArmor fragment to test that it is NOT migrated.
+	legacyPath := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper.d", "managed-roots")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("# legacy content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_STATE_FILE=" + filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor", "managed-boundaries"),
+			"AA_LEGACY_FRAGMENT=" + legacyPath,
+		})
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0 on SELinux-only host, got %d, stdout: %s", code, stdout)
+	}
+
+	// AppArmor state directory must NOT be created.
+	if _, err := os.Stat(filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor")); !os.IsNotExist(err) {
+		t.Error("AppArmor state directory must NOT be created on SELinux-only host")
+	}
+
+	// Legacy fragment must NOT be migrated or removed.
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		t.Error("legacy fragment must be retained on SELinux-only host")
+	}
+
+	// apparmor_parser must NOT be invoked.
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") {
+			t.Errorf("apparmor_parser must not be invoked on SELinux-only host: %s", c)
+		}
+	}
+}
+
+// TestRpmPostinstallAppArmorActiveStillMigrates verifies that when
+// AppArmor IS active, the RPM postinstall still prepares/migrates state.
+func TestRpmPostinstallAppArmorActiveStillMigrates(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("Y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create legacy AppArmor fragment to test migration.
+	legacyPath := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper.d", "managed-roots")
+	stateFile := filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor", "managed-boundaries")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("# legacy content for migration test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/rpm/postinstall.sh", fakeDir, logFile,
+		[]string{"1"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"AA_STATE_FILE=" + stateFile,
+			"AA_LEGACY_FRAGMENT=" + legacyPath,
+		})
+	if code != 0 {
+		t.Fatalf("rpm postinst should exit 0 when AppArmor active, got %d, stdout: %s", code, stdout)
+	}
+
+	// State file must be migrated.
+	actual, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != "# legacy content for migration test\n" {
+		t.Errorf("state file migration failed, got: %q", string(actual))
+	}
+
+	// Legacy fragment must be removed after successful profile load.
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Error("legacy fragment must be removed after successful profile load")
+	}
+}
+
+// TestDebPostinstallInactiveNoAppArmorState verifies that when
+// AppArmor is inactive, the DEB postinstall does NOT create AppArmor state.
+func TestDebPostinstallInactiveNoAppArmorState(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create legacy AppArmor fragment to test that it is NOT migrated.
+	legacyPath := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper.d", "managed-roots")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("# legacy content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"AA_STATE_FILE=" + filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor", "managed-boundaries"),
+			"AA_LEGACY_FRAGMENT=" + legacyPath,
+		})
+	if code != 0 {
+		t.Fatalf("deb postinst should exit 0 when AppArmor inactive, got %d, stdout: %s", code, stdout)
+	}
+
+	// AppArmor state directory must NOT be created.
+	if _, err := os.Stat(filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor")); !os.IsNotExist(err) {
+		t.Error("AppArmor state directory must NOT be created when AppArmor inactive")
+	}
+
+	// Legacy fragment must NOT be migrated or removed.
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		t.Error("legacy fragment must be retained when AppArmor inactive")
+	}
+
+	// apparmor_parser must NOT be invoked.
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") {
+			t.Errorf("apparmor_parser must not be invoked when AppArmor inactive: %s", c)
+		}
+	}
+
+	// Must emit the AppArmor-inactive warning.
+	if !strings.Contains(stdout, "AppArmor LSM is not active") {
+		t.Errorf("expected 'AppArmor LSM is not active' warning, got: %s", stdout)
+	}
+}
+
+// TestDebPostinstallActiveStillMigrates verifies that when AppArmor IS
+// active, the DEB postinstall still prepares/migrates state.
+func TestDebPostinstallActiveStillMigrates(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("Y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create legacy AppArmor fragment to test migration.
+	legacyPath := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper.d", "managed-roots")
+	stateFile := filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor", "managed-boundaries")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("# legacy content for migration test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"AA_STATE_FILE=" + stateFile,
+			"AA_LEGACY_FRAGMENT=" + legacyPath,
+		})
+	if code != 0 {
+		t.Fatalf("deb postinst should exit 0 when AppArmor active, got %d, stdout: %s", code, stdout)
+	}
+
+	// State file must be migrated.
+	actual, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != "# legacy content for migration test\n" {
+		t.Errorf("state file migration failed, got: %q", string(actual))
+	}
+
+	// Legacy fragment must be removed after successful profile load.
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Error("legacy fragment must be removed after successful profile load")
+	}
+}
+
+// TestDebPostinstallNeitherMACNoAppArmorState verifies that when no MAC
+// backend is active, the DEB postinstall does NOT create AppArmor state.
+func TestDebPostinstallNeitherMACNoAppArmorState(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, false, false)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	tmpDir := t.TempDir()
+	aaEnabledDir := filepath.Join(tmpDir, "sys", "module", "apparmor", "parameters")
+	if err := os.MkdirAll(aaEnabledDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(aaEnabledDir, "enabled"), []byte("N"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	selinuxEnforceDir := filepath.Join(tmpDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxEnforceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxEnforceDir, "enforce"), []byte("0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create legacy AppArmor fragment to test that it is NOT migrated.
+	legacyPath := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper.d", "managed-roots")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("# legacy content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := runScript(t, "packaging/scripts/deb/postinstall.sh", fakeDir, logFile,
+		[]string{"configure"}, true, []string{
+			"AA_ENABLED_PATH=" + filepath.Join(aaEnabledDir, "enabled"),
+			"SELINUX_ENFORCE_PATH=" + filepath.Join(selinuxEnforceDir, "enforce"),
+			"AA_STATE_FILE=" + filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor", "managed-boundaries"),
+			"AA_LEGACY_FRAGMENT=" + legacyPath,
+		})
+	if code != 0 {
+		t.Fatalf("deb postinst should exit 0 when no MAC active, got %d, stdout: %s", code, stdout)
+	}
+
+	// AppArmor state directory must NOT be created.
+	if _, err := os.Stat(filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor")); !os.IsNotExist(err) {
+		t.Error("AppArmor state directory must NOT be created when no MAC active")
+	}
+
+	// Legacy fragment must NOT be migrated or removed.
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		t.Error("legacy fragment must be retained when no MAC active")
+	}
+
+	// apparmor_parser must NOT be invoked.
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") {
+			t.Errorf("apparmor_parser must not be invoked when no MAC active: %s", c)
+		}
+	}
+
+	// Must emit the AppArmor-inactive warning.
+	if !strings.Contains(stdout, "AppArmor LSM is not active") {
+		t.Errorf("expected 'AppArmor LSM is not active' warning, got: %s", stdout)
+	}
+}
+
 // TestDebPostinstallNeitherMAC verifies that when no MAC backend is active,
 // the DEB postinstall emits the AppArmor-specific warning.
 func TestDebPostinstallNeitherMAC(t *testing.T) {
