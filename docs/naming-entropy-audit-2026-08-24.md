@@ -15,9 +15,17 @@ across the whole repository is clean. Project-wide findings are recorded in
 the separate review linked above.
 
 The identified refactor batches in this reference scope have been applied.
-Control review found two actionable naming findings; both were corrected.
-Final independent re-review found no remaining actionable naming issue
-within this reference scope. The reference area is accepted.
+Control review found two actionable naming findings; both were corrected, and
+the original reference-area audit/refactor was accepted. A later
+project-wide independent follow-up review found one additional
+backend-identity residue: `workspaceMACDriver.backendType() string` duplicated
+the backend identity despite the already-existing `LSMBackend` domain type. It
+was corrected in `9dc5eb5708652c2c52faa8cb98d12117c078d7ce`; backend identity
+now uses `LSMBackend` consistently. After that follow-up correction, no
+currently known actionable naming issue remains in the reference scope. (The
+same follow-up also found the separate user-mode startup composition bug fixed
+in `374785a035e96dd3976a9f8e84ca209835328ac9`, but that was a functional
+lifecycle defect rather than a naming finding.)
 
 Rule: one domain concept -> one canonical term. Different concepts must not
 share one word. Different implementations must not invent synonyms for the

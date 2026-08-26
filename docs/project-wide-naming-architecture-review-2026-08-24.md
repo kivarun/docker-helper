@@ -2,16 +2,25 @@
 
 Date: 2026-08-24
 
-Baseline: origin/main at ab48afdd8167009b3d1323ea17caef001b4d654b.
+Review baseline: origin/main at ab48afdd8167009b3d1323ea17caef001b4d654b.
 
-Status: analysis only. This document records findings and narrow refactor
-boundaries; it does not change the current Release 2 contract.
+Status: maintained resolved-findings ledger. Implementation findings recorded
+here are resolved through 9dc5eb5708652c2c52faa8cb98d12117c078d7ce; this
+revision also records the documentation/shipping-vocabulary reconciliation
+described in section 9.
+
+This document is a maintained resolution ledger, not an analysis-only
+snapshot. Original evidence and line references describe the review baseline
+and may no longer match current line numbers; RESOLVED sections describe the
+later implementation that addressed each finding. Baseline evidence is not
+presented as current source evidence.
 
 The MAC/workspace-path reference area was not re-audited in depth. It is used
 as the quality model defined in
 [naming-entropy-audit-2026-08-24.md](naming-entropy-audit-2026-08-24.md).
-The only MAC finding below is a direct contradiction between that accepted
-model and a shipping policy source.
+In the original review findings, the only MAC finding was a direct
+contradiction between that accepted model and a shipping policy source. Later
+independent MAC-related findings are recorded separately in section 9.
 
 ## 1. Executive summary
 
@@ -973,6 +982,8 @@ architecture rewrite is required.
 
 ### N1. Bulk Session deletion bypasses the MAC lifecycle owner
 
+**Original finding / baseline evidence**
+
 Normal Session deletion calls MACCoordinator.ReleaseSessionBinding:
 [session.go:324-363](../session.go#L324-L363),
 [session.go:366-415](../session.go#L366-L415).
@@ -997,7 +1008,23 @@ This is a release-significant lifecycle defect. Bulk deletion should return
 the deleted IDs to an App-level lifecycle owner that releases every coordinator
 binding while preserving operation leases.
 
+**Status: RESOLVED**
+
+**Resolution**
+
+- Principal disable/delete lifecycle now returns revoked/deleted Session IDs
+  (`RevokedSessionIDs` on disable, deleted Session IDs on delete).
+- The App-level lifecycle owner releases every corresponding MAC Session
+  binding after the DB commit
+  ([app.go:208-239](../app.go#L208-L239)).
+- Active operation workspace-use leases continue to preserve the required MAC
+  coverage until the operation releases its lease.
+- Standalone/offline session cleanup remains daemon-lock protected where
+  applicable.
+
 ### N2. Principal handlers can race with Config reload
+
+**Original finding / baseline evidence**
 
 getConfig and setConfig protect App.Config with the App mutex:
 [app.go:61-84](../app.go#L61-L84).
@@ -1008,6 +1035,15 @@ Principal disable and delete read a.Config.RuntimeDir directly:
 
 Use a Config snapshot before cleanup and add a race test covering concurrent
 reload with Principal disable/delete.
+
+**Status: RESOLVED**
+
+**Resolution**
+
+- Principal handlers now take a Config snapshot through the synchronized
+  config accessor (`getConfig`) before runtime-dir cleanup.
+- No Config lock is held over filesystem I/O.
+- The previous reload race is removed.
 
 ### N3. Session-control database auth failure loses request correlation
 
@@ -1085,3 +1121,72 @@ The HTTP handler classifies with `errors.Is`
 - Already-terminal race: unchanged idempotent success response.
 - Successful cancellation and unexpected internal errors (500): unchanged.
 - Cancellation synchronization and shutdown termination behavior unchanged.
+
+## 9. Independent follow-up review
+
+A later independent review, run after the original project-wide audit, found
+and fixed the following additional issues. They are recorded here so this
+ledger stays internally coherent.
+
+### A. P1 user-mode restart regression — RESOLVED
+
+Fixed by `374785a035e96dd3976a9f8e84ca209835328ac9`.
+
+The original audit baseline predated this defect. In user mode:
+
+- `newWorkspaceMACDriver()` returns nil;
+- startup nevertheless constructed a `sessionMACCoordinator` with that nil
+  driver;
+- persisted Session MAC bindings were not reconstructed on restart;
+- old live Sessions failed `/run` and `/build` after restart with
+  "no MAC binding for session".
+
+Resolution:
+
+- no active MAC driver => `App.MACCoordinator` remains nil;
+- reconciliation only occurs when a coordinator/driver exists;
+- a regression test covers persisted Session use through `/run` and `/build`
+  after a simulated user-mode restart.
+
+This was a functional release-safety defect discovered after the original
+naming audit.
+
+### B. P2 stringly-typed backend identity — RESOLVED
+
+Fixed by `9dc5eb5708652c2c52faa8cb98d12117c078d7ce`.
+
+- `workspaceMACDriver.backendType() string` created a duplicate string
+  representation of the MAC backend despite the existing `LSMBackend` domain
+  type;
+- backend identity now uses `LSMBackend` end-to-end through the MAC lifecycle
+  layer;
+- the AppArmor/SELinux drivers return `LSMAppArmor` / `LSMSELinux`;
+- the SQLite schema and persisted backend values remain unchanged.
+
+### C. P3 shipping Release 2 terminology — RESOLVED
+
+Resolved in the commit that maintains this ledger:
+
+- the man page no longer describes a Release 3 "launcher credential";
+- the AppArmor curl fragment no longer says "admin credential";
+- current Release 2 / shipping documentation uses the canonical R2 vocabulary
+  (Session token, Principal credential, admin token).
+
+### Observable contract changes in refactor commits
+
+Some commits categorized primarily as refactors nevertheless included
+intentional observable text changes:
+
+- `ac101e1b277b92efa78376e54e1aadb0e527fc9f` changed the Session-capability
+  HTTP 401 message from the incorrect session-management wording to
+  "Session authentication required.";
+- `7938883e3655b21b9322ab8e38c87b326faa5701` changed CLI stderr terminology
+  from "re-reload" to "reload after rollback".
+
+These changes were semantically justified, but HTTP message text and CLI
+diagnostic text are observable contract surfaces under project rules.
+
+Process lesson: future commits that intentionally change such observable
+surfaces should be classified and reviewed explicitly as contract/fix changes,
+even when accompanied by internal refactoring. These historical changes are
+not reverted.

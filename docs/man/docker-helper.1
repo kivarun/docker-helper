@@ -248,8 +248,9 @@ For reload, session, principal, credential, and admin token rotate commands, sel
 Without explicit endpoint selection, a deterministic default is used:
 an existing user socket is selected first; otherwise the system socket is
 selected. The token source follows that selection: user admin token for the
-user socket, or the installed non-root launcher credential/root admin token
-for the system socket. A failed request is not retried against another daemon.
+user socket, or the installed Principal credential for the non-root
+system-daemon caller, or the root admin token for the system socket. A failed
+request is not retried against another daemon.
 .SH EXIT STATUS
 .TP
 .B 0

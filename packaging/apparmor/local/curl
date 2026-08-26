@@ -12,7 +12,8 @@
 #   sudo apparmor_parser -r /etc/apparmor.d/curl
 #
 # Allowing socket access does NOT bypass docker-helper authorization.
-# API requests still require a valid session token or admin credential.
+# API requests still require the appropriate valid Session token,
+# Principal credential, or admin token.
 
 # docker-helper user mode socket
 owner /run/user/*/docker-helper/docker-helper.sock rw,
