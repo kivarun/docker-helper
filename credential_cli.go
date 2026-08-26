@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"text/tabwriter"
 
 	"golang.org/x/term"
 )
@@ -106,13 +107,17 @@ var credentialListCommand = &Command{
 					return 0
 				}
 
+				tw := tabwriter.NewWriter(stdout, 0, 0, 1, ' ', 0)
+				fmt.Fprintln(tw, "ID\tNAME\tCREATED\tREVOKED")
 				for _, c := range result.Credentials {
-					revoked := "no"
+					revoked := "-"
 					if c.RevokedAt != nil {
 						revoked = *c.RevokedAt
 					}
-					fmt.Fprintf(stdout, "  %-16s %-12s created=%s revoked=%s\n", c.ID, c.Name, c.CreatedAt, revoked)
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+						c.ID, c.Name, c.CreatedAt, revoked)
 				}
+				tw.Flush()
 				return 0
 			},
 		}
@@ -125,6 +130,16 @@ var credentialRevokeCommand = &Command{
 	Usage:      "docker-helper credential revoke [--system] [--endpoint ENDPOINT] [--token-file PATH] CREDENTIAL_ID",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
+	Help: `Revoke a credential by its credential ID.
+
+CREDENTIAL_ID is the credential's unique identifier, prefixed with "dhcr_".
+It is printed by 'docker-helper credential create' and can be listed with:
+
+    docker-helper credential list USER
+
+Revoking a credential permanently invalidates its token. The credential
+record remains in the database as history, and its name becomes available
+for reuse by a new credential.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		return Invocation{

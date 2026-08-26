@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1101,6 +1102,76 @@ func TestCredentialCLIHelp(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("credential --help should contain %q, got:\n%s", want, out)
 		}
+	}
+}
+
+// TestCredentialRevokeHelpExplainsCredentialID verifies the revoke help
+// explains CREDENTIAL_ID (dhcr_...) and how to obtain it via credential list.
+func TestCredentialRevokeHelpExplainsCredentialID(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"credential", "revoke", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("credential revoke --help exited %d", code)
+	}
+	out := stdout.String()
+	for _, want := range []string{"CREDENTIAL_ID", "dhcr_", "credential list USER"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("credential revoke --help should mention %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestCredentialListHumanOutput verifies the list output uses explicit column
+// headers (ID, NAME, CREATED, REVOKED) and renders revoked and active rows.
+func TestCredentialListHumanOutput(t *testing.T) {
+	activeCreated := "2026-08-26T10:00:00+03:00"
+	revokedCreated := "2026-08-25T09:00:00+03:00"
+	revokedAt := "2026-08-26T08:00:00+03:00"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /principals/alice/credentials", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(listCredentialsResponse{
+			OK: true,
+			Credentials: []credentialJSON{
+				{ID: "dhcr_active", Principal: "alice", Name: "oc", CreatedAt: activeCreated},
+				{ID: "dhcr_revoked", Principal: "alice", Name: "laptop", CreatedAt: revokedCreated, RevokedAt: &revokedAt},
+			},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	token := "test-token"
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"credential", "list", "--endpoint", server.URL, "--token-file", tokenPath, "alice"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d (stderr: %s)", code, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines (header + 2 rows), got %d: %q", len(lines), stdout.String())
+	}
+	header := strings.Fields(lines[0])
+	if !slices.Equal(header, []string{"ID", "NAME", "CREATED", "REVOKED"}) {
+		t.Errorf("header = %v, want [ID NAME CREATED REVOKED]", header)
+	}
+	active := strings.Fields(lines[1])
+	if active[0] != "dhcr_active" || active[1] != "oc" {
+		t.Errorf("active row = %v, want ID dhcr_active NAME oc", active)
+	}
+	revoked := strings.Fields(lines[2])
+	if revoked[0] != "dhcr_revoked" || revoked[1] != "laptop" {
+		t.Errorf("revoked row = %v, want ID dhcr_revoked NAME laptop", revoked)
+	}
+	if len(revoked) < 4 || revoked[3] == "-" {
+		t.Errorf("revoked row should show revoked timestamp, got: %v", revoked)
 	}
 }
 

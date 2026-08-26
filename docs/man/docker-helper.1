@@ -187,10 +187,22 @@ Remove an allowed root from a principal.
 Create a new credential for a principal. If \-\-name is not specified, defaults to "default".
 .TP
 .B docker-helper credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
-List credentials for a principal.
+List credentials for a principal as a table with the columns
+ID, NAME, CREATED, and REVOKED. The ID column contains each credential's
+\fBdhcr_\fR identifier, which is the value used by \fBcredential revoke\fR.
 .TP
 .B docker-helper credential revoke [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] CREDENTIAL_ID
-Revoke a credential.
+Revoke a credential by its credential ID.
+CREDENTIAL_ID is the credential's unique identifier, prefixed with
+\fBdhcr_\fR, printed by \fBcredential create\fR and listed by:
+.RS 4
+.nf
+docker-helper credential list USER
+.fi
+.RE
+Revoking permanently invalidates the credential token. The credential
+record remains in the database as history, and its name becomes available
+for reuse by a new credential.
 .TP
 .B docker-helper credential install [\-\-force]
 Install a credential token for system-mode authentication.
