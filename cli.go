@@ -172,26 +172,30 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 		if c.MaxPosArgs == -1 {
 			// Unlimited
 			if nArgs < c.MinPosArgs {
-				fmt.Fprintf(stderr, "error: expected %d positional argument(s), got %d\n", c.MinPosArgs, nArgs)
+				c.printArgError(stderr, path, fmt.Sprintf("missing required argument(s): expected at least %d, got %d", c.MinPosArgs, nArgs))
 				return 2
 			}
 		} else if c.MaxPosArgs == 0 {
 			// No positional args allowed (zero-value default behavior)
 			if nArgs > 0 {
-				fmt.Fprintf(stderr, "error: unexpected argument %q\n", fs.Arg(0))
+				c.printArgError(stderr, path, fmt.Sprintf("unexpected argument %q", fs.Arg(0)))
 				return 2
 			}
 		} else {
 			// Bounded range
-			if nArgs < c.MinPosArgs || nArgs > c.MaxPosArgs {
-				fmt.Fprintf(stderr, "error: expected %d positional argument(s), got %d\n", c.MinPosArgs, nArgs)
+			if nArgs < c.MinPosArgs {
+				c.printArgError(stderr, path, fmt.Sprintf("missing required argument(s): expected at least %d, got %d", c.MinPosArgs, nArgs))
+				return 2
+			}
+			if nArgs > c.MaxPosArgs {
+				c.printArgError(stderr, path, fmt.Sprintf("too many arguments: expected at most %d, got %d", c.MaxPosArgs, nArgs))
 				return 2
 			}
 		}
 	} else {
 		// Default: reject all positional args
 		if nArgs > 0 {
-			fmt.Fprintf(stderr, "error: unexpected argument %q\n", fs.Arg(0))
+			c.printArgError(stderr, path, fmt.Sprintf("unexpected argument %q", fs.Arg(0)))
 			return 2
 		}
 	}
@@ -206,6 +210,15 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 
 	// Run the command
 	return inv.Run(stdout, stderr)
+}
+
+// printArgError writes a semantic argument error followed by the specific
+// command's Usage line, so users get actionable guidance instead of internal
+// positional-count arithmetic.
+func (c *Command) printArgError(stderr io.Writer, path []string, msg string) {
+	fmt.Fprintf(stderr, "error: %s\n", msg)
+	fmt.Fprintln(stderr)
+	fmt.Fprintln(stderr, c.usageLine(buildPrefix(path)))
 }
 
 func (c *Command) printSubcommandRequired(stderr io.Writer, path []string) {

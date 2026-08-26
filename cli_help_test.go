@@ -193,6 +193,46 @@ func TestBlackBoxServeServeUnexpected(t *testing.T) {
 	}
 }
 
+// TestBlackBoxMissingPositionalArg verifies a missing required positional
+// argument yields a semantic error plus the specific command's Usage, exit 2.
+func TestBlackBoxMissingPositionalArg(t *testing.T) {
+	for _, cmd := range [][]string{
+		{"credential", "list"},
+		{"principal", "show"},
+		{"pull"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters(cmd, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("%v: expected exit code 2, got %d", cmd, code)
+		}
+		out := stderr.String()
+		if !strings.Contains(out, "missing required argument") {
+			t.Errorf("%v: expected missing-argument error, got: %s", cmd, out)
+		}
+		if !strings.Contains(out, "Usage:") {
+			t.Errorf("%v: expected Usage line, got: %s", cmd, out)
+		}
+	}
+}
+
+// TestBlackBoxTooManyPositionalArgs verifies exceeding MaxPosArgs yields a
+// semantic error plus the specific command's Usage, exit 2.
+func TestBlackBoxTooManyPositionalArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"principal", "show", "alice", "field", "extra"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "too many arguments") {
+		t.Errorf("expected too-many-arguments error, got: %s", out)
+	}
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("expected Usage line, got: %s", out)
+	}
+}
+
 func TestBlackBoxVersionExact(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"version"}, &stdout, &stderr)
