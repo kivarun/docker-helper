@@ -1859,6 +1859,168 @@ func TestInstallSystemExistingNewStatePreserved(t *testing.T) {
 	}
 }
 
+func TestInstallSystemStateDirectorySecurity(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+
+	stateDir := env.dest("var/lib/docker-helper")
+	stateSubDir := env.dest("var/lib/docker-helper/apparmor")
+	legacyPath := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
+
+	// Create legacy fragment to trigger migration.
+	if err := os.WriteFile(legacyPath, []byte("# legacy\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := env.runPrepareApparmorState(t); err != nil {
+		t.Fatalf("prepare_apparmor_state failed: %v\n%s", err, out)
+	}
+
+	// Top-level state directory must be 0700.
+	topInfo, err := os.Stat(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topInfo.Mode().Perm() != 0700 {
+		t.Errorf("top state dir mode = %o, want 0700", topInfo.Mode().Perm())
+	}
+
+	// AppArmor state subdirectory must exist.
+	subInfo, err := os.Stat(stateSubDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !subInfo.IsDir() {
+		t.Error("AppArmor state subdirectory should exist")
+	}
+}
+
+func TestInstallSystemMigrationUsesAtomicRename(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+
+	stateFile := env.dest("var/lib/docker-helper/apparmor/managed-boundaries")
+	stateDir := env.dest("var/lib/docker-helper/apparmor")
+	legacyPath := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
+	legacyContent := "# legacy content for atomic migration test\n"
+
+	if err := os.WriteFile(legacyPath, []byte(legacyContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := env.runPrepareApparmorState(t); err != nil {
+		t.Fatalf("prepare_apparmor_state failed: %v\n%s", err, out)
+	}
+
+	// Verify the file was migrated correctly.
+	actual, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != legacyContent {
+		t.Errorf("migrated content = %q, want %q", string(actual), legacyContent)
+	}
+
+	// No temp files should remain.
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("temp file should be cleaned up: %s", e.Name())
+		}
+	}
+}
+
+func TestInstallSystemMigrationFailureDoesNotLeaveDestination(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+
+	stateFile := env.dest("var/lib/docker-helper/apparmor/managed-boundaries")
+	legacyPath := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
+
+	if err := os.WriteFile(legacyPath, []byte("# legacy\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Override cp to fail, simulating a copy failure during migration.
+	fakeCp := filepath.Join(env.fakeBinDir, "cp")
+	if err := os.WriteFile(fakeCp, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prepend fake bin dir to PATH so our fake cp is used.
+	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
+		export PATH="%s:$PATH"
+		source %s
+		AA_STATE_FILE="%s"
+		AA_LEGACY_FRAGMENT="%s"
+		prepare_apparmor_state
+	`, env.fakeBinDir, env.scriptPath, env.dest("var/lib/docker-helper/apparmor/managed-boundaries"), legacyPath))
+	cmd.Dir = env.scriptDir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("prepare_apparmor_state should fail when cp fails: %s", out)
+	}
+
+	// The destination managed-boundaries must NOT exist after failure.
+	if _, err := os.Stat(stateFile); err == nil {
+		t.Fatal("destination managed-boundaries must not exist after migration failure")
+	}
+}
+
+func TestInstallSystemLegacyRetainedOnProfileLoadFailure(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	legacyPath := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
+	stateFile := env.dest("var/lib/docker-helper/apparmor/managed-boundaries")
+
+	if err := os.WriteFile(legacyPath, []byte("# legacy content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the parser fail.
+	env.fakeParser(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 1
+`, env.logFile))
+
+	out, err := env.run(t, "--yes --allowed-root /tmp/ws", "")
+	if err == nil {
+		t.Fatalf("parser failure should cause install to fail: %s", out)
+	}
+
+	// Legacy fragment must be retained after profile load failure.
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		t.Fatal("legacy fragment must be retained when profile load fails")
+	}
+
+	// New state file should exist (migration succeeded before profile load).
+	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+		t.Fatal("new state file should exist after migration succeeds")
+	}
+}
+
+func TestInstallSystemLegacyRemovedAfterSuccessfulProfileLoad(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	legacyPath := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
+
+	if err := os.WriteFile(legacyPath, []byte("# legacy content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := env.run(t, "--yes --allowed-root /tmp/ws", "")
+	if err != nil {
+		t.Fatalf("install should succeed: %v\n%s", err, out)
+	}
+
+	// Legacy fragment must be removed after successful profile load.
+	if _, err := os.Stat(legacyPath); err == nil {
+		t.Fatal("legacy fragment must be removed after successful profile load")
+	}
+}
+
 func TestInstallSystemParserFailurePreventsServiceStart(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 	env.fakeParser(t, fmt.Sprintf(`#!/bin/bash

@@ -252,6 +252,14 @@ install_apparmor_profile() {
 prepare_apparmor_state() {
 	info "Preparing AppArmor managed boundaries state"
 	local state_dir="$(dirname "$AA_STATE_FILE")"
+	local top_state_dir="$(dirname "$state_dir")"
+
+	# Ensure the top-level state directory exists with the systemd
+	# StateDirectory security contract (0700).
+	mkdir -p "$top_state_dir"
+	chmod 0700 "$top_state_dir"
+
+	# Ensure the AppArmor state subdirectory exists.
 	mkdir -p "$state_dir"
 	chmod 0755 "$state_dir"
 
@@ -259,8 +267,13 @@ prepare_apparmor_state() {
 	# not already exist, so an existing new state file is never overwritten.
 	if [[ -f "$AA_LEGACY_FRAGMENT" ]] && [[ ! -f "$AA_STATE_FILE" ]]; then
 		info "Migrating legacy AppArmor managed-roots fragment to $AA_STATE_FILE"
-		cp "$AA_LEGACY_FRAGMENT" "$AA_STATE_FILE"
-		chmod 0644 "$AA_STATE_FILE"
+		local tmp_file
+		tmp_file="$(mktemp "$state_dir/managed-boundaries-XXXXXX.tmp")"
+		if ! cp "$AA_LEGACY_FRAGMENT" "$tmp_file" || ! chmod 0644 "$tmp_file" || ! mv -f "$tmp_file" "$AA_STATE_FILE"; then
+			rm -f "$tmp_file"
+			error "Failed to migrate legacy AppArmor managed-roots fragment"
+			exit 1
+		fi
 	fi
 }
 

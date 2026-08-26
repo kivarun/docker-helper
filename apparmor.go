@@ -594,7 +594,7 @@ func (m *appArmorProfileManager) check() error {
 	// Diagnose managed boundaries that violate the workspace-path policy.
 	for _, boundary := range boundaries {
 		if err := validateWorkspacePathPolicy(boundary); err != nil {
-			return fmt.Errorf("managed root %q violates workspace root policy: %s", boundary, err)
+			return fmt.Errorf("managed boundary %q violates workspace root policy: %s", boundary, err)
 		}
 	}
 

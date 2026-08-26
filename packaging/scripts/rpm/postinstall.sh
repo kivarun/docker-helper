@@ -16,11 +16,18 @@ systemctl is-active --quiet docker-helper.service && was_active=true
 # Migrate AppArmor managed boundaries state from legacy location.
 AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
 AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
-mkdir -p "$(dirname "$AA_STATE_FILE")"
-chmod 0755 "$(dirname "$AA_STATE_FILE")"
+AA_STATE_DIR="$(dirname "$AA_STATE_FILE")"
+AA_TOP_STATE_DIR="$(dirname "$AA_STATE_DIR")"
+mkdir -p "$AA_TOP_STATE_DIR"
+chmod 0700 "$AA_TOP_STATE_DIR"
+mkdir -p "$AA_STATE_DIR"
+chmod 0755 "$AA_STATE_DIR"
 if [ -f "$AA_LEGACY_FRAGMENT" ] && [ ! -f "$AA_STATE_FILE" ]; then
-  cp "$AA_LEGACY_FRAGMENT" "$AA_STATE_FILE"
-  chmod 0644 "$AA_STATE_FILE"
+  tmp_file="$(mktemp "$AA_STATE_DIR/managed-boundaries-XXXXXX.tmp")"
+  if ! cp "$AA_LEGACY_FRAGMENT" "$tmp_file" || ! chmod 0644 "$tmp_file" || ! mv -f "$tmp_file" "$AA_STATE_FILE"; then
+    rm -f "$tmp_file"
+    exit 1
+  fi
 fi
 
 # Detect MAC backend(s).
