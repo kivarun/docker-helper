@@ -508,13 +508,14 @@ func TestUnixEndpointAutoToken(t *testing.T) {
 	}
 }
 
-// --- Agent commands have no operator flags ---
+// --- Agent commands have discoverable endpoint flags but no Principal --token-file ---
 
-func TestAgentCommandsNoOperatorFlags(t *testing.T) {
+func TestAgentCommandsEndpointFlagsNoTokenFile(t *testing.T) {
 	for _, cmd := range [][]string{
 		{"build", "--help"},
 		{"run", "--help"},
 		{"pull", "--help"},
+		{"registry", "login", "--help"},
 	} {
 		var stdout, stderr bytes.Buffer
 		code := runCommandWithWriters(cmd, &stdout, &stderr)
@@ -522,11 +523,15 @@ func TestAgentCommandsNoOperatorFlags(t *testing.T) {
 			t.Fatalf("%v: exit code %d", cmd, code)
 		}
 		out := stdout.String()
-		if strings.Contains(out, "--system") {
-			t.Errorf("%v should NOT contain --system", cmd)
+		for _, flag := range []string{"--system", "--endpoint"} {
+			if !strings.Contains(out, flag) {
+				t.Errorf("%v --help should contain %q", cmd, flag)
+			}
 		}
-		if strings.Contains(out, "--endpoint") {
-			t.Errorf("%v should NOT contain --endpoint", cmd)
+		// Agent commands authenticate with the Session token from the
+		// environment; they must NOT expose Principal --token-file semantics.
+		if strings.Contains(out, "--token-file") {
+			t.Errorf("%v --help should NOT contain --token-file", cmd)
 		}
 	}
 }

@@ -221,22 +221,41 @@ Remove a workspace root from the AppArmor profile.
 Validate the AppArmor profile.
 .SS Agent Commands
 .TP
-.B docker-helper pull IMAGE
+.B docker-helper pull [\-\-system] [\-\-endpoint ENDPOINT] IMAGE
 Pull a Docker image.
 .TP
-.B docker-helper build \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
+.B docker-helper build [\-\-system] [\-\-endpoint ENDPOINT] \-\-context PATH \-\-dockerfile FILE \-\-image NAME [\-\-build-arg KEY=VALUE ...]
 Build a Docker image. \-\-build-arg may be repeated to pass multiple build arguments.
 .TP
-.B docker-helper run \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-mount SOURCE:TARGET[:ro] ...] \-\- [command]
+.B docker-helper run [\-\-system] [\-\-endpoint ENDPOINT] \-\-image NAME [\-\-entrypoint CMD] [\-\-workdir PATH] [\-\-shm-size SIZE] [\-\-env KEY=VALUE ...] [\-\-mount SOURCE:TARGET[:ro] ...] \-\- [command]
 Run a Docker container. \-\-env and \-\-mount may be repeated.
 .TP
-.B docker-helper registry login \-\-registry REGISTRY \-\-username USER [\-\-password-stdin] [\-\-json]
+.B docker-helper registry login [\-\-system] [\-\-endpoint ENDPOINT] \-\-registry REGISTRY \-\-username USER [\-\-password-stdin] [\-\-json]
 Log in to a container registry for the current session.
 With \-\-password-stdin, read the password from stdin.
 With \-\-json, output in JSON format.
-.SH OPERATOR ENDPOINT SELECTION
-For reload, session, principal, credential, and admin token rotate commands, select the target daemon:
+.PP
+Agent-facing commands (pull, build, run, registry login) select the daemon
+endpoint with \fB\-\-system\fR or \fB\-\-endpoint ENDPOINT\fR and authenticate
+with the Session token from \fBDOCKER_HELPER_SESSION_TOKEN\fR (never a
+Principal credential; agent commands do not take \fB\-\-token-file\fR).
+Resolution precedence:
 .IP \(bu 4
+\fB\-\-endpoint\fR (explicit)
+.IP \(bu 4
+\fB\-\-system\fR (system socket)
+.IP \(bu 4
+\fBDOCKER_HELPER_SOCKET_PATH\fR
+.IP \(bu 4
+the existing user-mode socket \fB$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock\fR
+.IP \(bu 4
+the system socket \fB/run/docker-helper/docker-helper.sock\fR
+.PP
+The presence of \fBXDG_RUNTIME_DIR\fR alone does not select a user socket;
+agent commands fall back to the system socket when no user-mode daemon is
+present. \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
+.SH OPERATOR ENDPOINT SELECTION
+For reload, session, principal, credential, and admin token rotate commands, select the target daemon:.IP \(bu 4
 \fB\-\-system\fR: Connect to system daemon (default for system mode)
 .IP \(bu 4
 \fB\-\-endpoint URL\fR: Explicit endpoint: \fI/absolute/path\fR, \fIunix:///absolute/path\fR, or \fIhttp://127.0.0.1:PORT\fR (HTTP is loopback only; requires \fB\-\-token-file\fR; Unix sockets auto-resolve token)

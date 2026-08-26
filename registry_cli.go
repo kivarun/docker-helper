@@ -53,6 +53,7 @@ Examples:
       --username user \
       --password-stdin`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint := registerAgentEndpointFlags(fs)
 		registry := fs.String("registry", "", "Registry address")
 		username := fs.String("username", "", "Registry username")
 		passwordStdin := fs.Bool("password-stdin", false, "Read password from stdin")
@@ -86,7 +87,7 @@ Examples:
 					return 1
 				}
 
-				client, err := agentClient()
+				client, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

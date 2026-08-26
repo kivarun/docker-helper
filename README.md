@@ -702,6 +702,28 @@ docker-helper registry login --registry REG --username USER
 logs, and returns the final exit status. Operation IDs and log offsets are
 handled internally.
 
+Agent-facing commands (`pull`, `build`, `run`, `registry login`) select the
+daemon endpoint the same way operator commands do, but authenticate with the
+Session token from `DOCKER_HELPER_SESSION_TOKEN` (never a Principal
+credential):
+
+```
+--system              connect to system daemon (Unix socket)
+--endpoint ENDPOINT   explicit endpoint (/path, unix:///path, or http://127.0.0.1:port)
+```
+
+Resolution precedence:
+
+1. `--endpoint` (explicit)
+2. `--system` (system socket)
+3. `DOCKER_HELPER_SOCKET_PATH`
+4. the existing user-mode socket `$XDG_RUNTIME_DIR/docker-helper/docker-helper.sock`
+5. the system socket `/run/docker-helper/docker-helper.sock`
+
+The presence of `XDG_RUNTIME_DIR` alone does not select a user socket; agent
+commands fall back to the system socket when no user-mode daemon is present.
+`--system` and `--endpoint` are mutually exclusive.
+
 SIGINT (Ctrl+C) or SIGTERM cancels the current operation:
 - SIGINT -> exit 130
 - SIGTERM -> exit 143

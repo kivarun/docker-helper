@@ -19,38 +19,98 @@ const (
 	operationPollInterval = 500 * time.Millisecond
 
 	// agentSocketPath is the fallback Unix socket path for agent-facing CLI
-	// commands when neither DOCKER_HELPER_SOCKET_PATH nor XDG_RUNTIME_DIR
-	// are set (system/sandbox default).
+	// commands when no explicit endpoint, system flag, DOCKER_HELPER_SOCKET_PATH,
+	// or existing user-mode socket selects a daemon (system/sandbox default).
 	agentSocketPath = "/run/docker-helper/docker-helper.sock"
 )
 
+// agentClientOptions specifies how an agent-facing command connects to a daemon.
+// Agent commands authenticate with the Session token (DOCKER_HELPER_SESSION_TOKEN),
+// never a Principal credential; these options only select the transport endpoint.
+type agentClientOptions struct {
+	System   bool   // --system: force the system daemon socket
+	Endpoint string // --endpoint: explicit endpoint URL
+}
+
+// registerAgentEndpointFlags adds --system and --endpoint to an agent command's
+// FlagSet and returns pointers to their values.
+func registerAgentEndpointFlags(fs *flag.FlagSet) (system *bool, endpoint *string) {
+	system = fs.Bool("system", false, "Connect to system daemon")
+	endpoint = fs.String("endpoint", "", "Explicit endpoint (/path/to/socket, unix:///path, or http://127.0.0.1:port)")
+	return
+}
+
 // resolveAgentSocketPath returns the Unix socket path for agent-facing CLI commands.
-// Precedence:
+// Resolution precedence:
 //  1. DOCKER_HELPER_SOCKET_PATH if set
-//  2. $XDG_RUNTIME_DIR/docker-helper/docker-helper.sock if XDG_RUNTIME_DIR is set
+//  2. $XDG_RUNTIME_DIR/docker-helper/docker-helper.sock if that user-mode socket exists
 //  3. /run/docker-helper/docker-helper.sock (system/sandbox default)
+//
+// The presence of XDG_RUNTIME_DIR alone does not select a nonexistent user socket;
+// agent commands fall back to the system socket when no user-mode daemon is present.
 func resolveAgentSocketPath() string {
 	if socketPath := os.Getenv("DOCKER_HELPER_SOCKET_PATH"); socketPath != "" {
 		return socketPath
 	}
 	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
-		return filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+		userSocket := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+		if fileExists(userSocket) {
+			return userSocket
+		}
 	}
 	return agentSocketPath
 }
 
-// agentClient returns an apiClient configured for the current session.
-// It reads the session token from DOCKER_HELPER_SESSION_TOKEN and uses
-// the default Unix socket path (no config.json required).
-func agentClient() (*apiClient, error) {
+// fileExists reports whether the path exists (as a file or socket).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// resolveAgentClient resolves the agent-facing client for the given endpoint
+// options. The Session token is always read from DOCKER_HELPER_SESSION_TOKEN.
+func resolveAgentClient(opts agentClientOptions) (*apiClient, error) {
+	if opts.System && opts.Endpoint != "" {
+		return nil, fmt.Errorf("--system and --endpoint are mutually exclusive")
+	}
+
 	token := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
 	if token == "" {
 		return nil, fmt.Errorf("DOCKER_HELPER_SESSION_TOKEN is not set")
 	}
+	tokenSource := func() (string, error) { return token, nil }
 
-	return newUnixAPIClient(resolveAgentSocketPath(), func() (string, error) {
-		return token, nil
-	}, nil), nil
+	if opts.Endpoint != "" {
+		return resolveAgentEndpoint(opts.Endpoint, tokenSource)
+	}
+	if opts.System {
+		return newUnixAPIClient(filepath.Join(systemRuntimeDir, "docker-helper.sock"), tokenSource, nil), nil
+	}
+	return newUnixAPIClient(resolveAgentSocketPath(), tokenSource, nil), nil
+}
+
+// resolveAgentEndpoint resolves an explicit endpoint for an agent command.
+// Unlike operator commands, the authentication token comes from the environment
+// (the Session token), so an http endpoint does not require --token-file.
+func resolveAgentEndpoint(endpoint string, tokenSource func() (string, error)) (*apiClient, error) {
+	if err := validateOperatorEndpoint(endpoint); err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(endpoint, "unix://") {
+		return newUnixAPIClient(strings.TrimPrefix(endpoint, "unix://"), tokenSource, nil), nil
+	}
+	if strings.HasPrefix(endpoint, "/") {
+		return newUnixAPIClient(endpoint, tokenSource, nil), nil
+	}
+	addr := strings.TrimPrefix(endpoint, "http://")
+	return newHTTPAPIClient(addr, tokenSource, nil), nil
+}
+
+// agentClient returns an apiClient configured for the current session using the
+// default endpoint resolution (no explicit --system/--endpoint).
+// It reads the session token from DOCKER_HELPER_SESSION_TOKEN (no config.json required).
+func agentClient() (*apiClient, error) {
+	return resolveAgentClient(agentClientOptions{})
 }
 
 // waitForOperationContext polls an operation until it reaches a terminal state.
@@ -184,11 +244,12 @@ var pullCommand = &Command{
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint := registerAgentEndpointFlags(fs)
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				image := fs.Arg(0)
 
-				c, err := agentClient()
+				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -227,6 +288,7 @@ var buildCommand = &Command{
 	Usage:   "docker-helper build --context PATH --dockerfile FILE --image NAME [flags]",
 	Help:    `SIGINT/SIGTERM cancels the running build operation.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint := registerAgentEndpointFlags(fs)
 		ctx := fs.String("context", "", "Build context path relative to session workspace")
 		dockerfile := fs.String("dockerfile", "", "Dockerfile path relative to context")
 		image := fs.String("image", "", "Image name and tag")
@@ -260,7 +322,7 @@ var buildCommand = &Command{
 					argsMap[parts[0]] = parts[1]
 				}
 
-				c, err := agentClient()
+				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -325,6 +387,7 @@ var runContainerCommand = &Command{
 	MaxPosArgs: -1, // Unlimited positional args after --
 	Help:       `SIGINT/SIGTERM cancels the running container operation.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint := registerAgentEndpointFlags(fs)
 		image := fs.String("image", "", "Image name and tag")
 		entrypoint := fs.String("entrypoint", "", "Container entrypoint")
 		workdir := fs.String("workdir", "", "Absolute working directory inside container")
@@ -391,7 +454,7 @@ var runContainerCommand = &Command{
 					runMounts = append(runMounts, rm)
 				}
 
-				c, err := agentClient()
+				c, err := resolveAgentClient(agentClientOptions{System: *system, Endpoint: *endpoint})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

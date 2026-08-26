@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -1101,11 +1102,30 @@ func TestResolveAgentSocketPathExplicitWins(t *testing.T) {
 	}
 }
 
-func TestResolveAgentSocketPathXDG(t *testing.T) {
+func TestResolveAgentSocketPathXDGUserSocketExists(t *testing.T) {
+	runtimeDir := t.TempDir()
+	userSocket := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
+	if err := os.MkdirAll(filepath.Dir(userSocket), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userSocket, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
-	t.Setenv("XDG_RUNTIME_DIR", "/my/runtime")
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	got := resolveAgentSocketPath()
-	want := "/my/runtime/docker-helper/docker-helper.sock"
+	if got != userSocket {
+		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, userSocket)
+	}
+}
+
+func TestResolveAgentSocketPathXDGNoUserSocketFallsBackToSystem(t *testing.T) {
+	// XDG_RUNTIME_DIR is set but the user-mode socket does not exist: the
+	// agent CLI must fall back to the system socket rather than fail.
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	got := resolveAgentSocketPath()
+	want := "/run/docker-helper/docker-helper.sock"
 	if got != want {
 		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, want)
 	}
@@ -1118,6 +1138,95 @@ func TestResolveAgentSocketPathFallback(t *testing.T) {
 	want := "/run/docker-helper/docker-helper.sock"
 	if got != want {
 		t.Errorf("resolveAgentSocketPath() = %q, want %q", got, want)
+	}
+}
+
+// TestResolveAgentClientSystemFlag verifies --system selects the system socket
+// regardless of XDG_RUNTIME_DIR / DOCKER_HELPER_SOCKET_PATH.
+func TestResolveAgentClientSystemFlag(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "/some/other/path.sock")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	c, err := resolveAgentClient(agentClientOptions{System: true})
+	if err != nil {
+		t.Fatalf("resolveAgentClient(--system): %v", err)
+	}
+	if c.baseURL != "http://localhost" {
+		t.Errorf("baseURL = %q, want http://localhost", c.baseURL)
+	}
+}
+
+// TestResolveAgentClientEndpointVerifiesExplicitEndpoint verifies --endpoint
+// selects an explicit unix socket path.
+func TestResolveAgentClientEndpoint(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "/some/other/path.sock")
+
+	c, err := resolveAgentClient(agentClientOptions{Endpoint: "/explicit.sock"})
+	if err != nil {
+		t.Fatalf("resolveAgentClient(--endpoint): %v", err)
+	}
+	token, err := c.tokenSource()
+	if err != nil {
+		t.Fatalf("token source: %v", err)
+	}
+	if token != "tok" {
+		t.Errorf("token = %q, want session token", token)
+	}
+}
+
+// TestResolveAgentClientMutuallyExclusive verifies --system and --endpoint
+// cannot be combined.
+func TestResolveAgentClientMutuallyExclusive(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
+	_, err := resolveAgentClient(agentClientOptions{System: true, Endpoint: "/x.sock"})
+	if err == nil {
+		t.Fatal("expected mutual-exclusion error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestResolveAgentClientMissingSessionToken verifies the session token is still
+// required even when an endpoint is supplied (no Principal token semantics).
+func TestResolveAgentClientMissingSessionToken(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+	_, err := resolveAgentClient(agentClientOptions{System: true})
+	if err == nil {
+		t.Fatal("expected missing-session-token error")
+	}
+	if !strings.Contains(err.Error(), "DOCKER_HELPER_SESSION_TOKEN") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestAgentFlagsPresentInHelp verifies the new --system/--endpoint flags are
+// discoverable on every agent-facing command.
+func TestAgentFlagsPresentInHelp(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		args []string
+	}{
+		{cmd: "pull"},
+		{cmd: "build"},
+		{cmd: "run"},
+		{cmd: "registry", args: []string{"login"}},
+	}
+	for _, tc := range cases {
+		args := append([]string{tc.cmd}, tc.args...)
+		args = append(args, "--help")
+		var out, errB bytes.Buffer
+		exitCode := runCommandWithWriters(args, &out, &errB)
+		if exitCode != 0 {
+			t.Errorf("%v: expected exit 0, got %d", tc.cmd, exitCode)
+		}
+		for _, flag := range []string{"--system", "--endpoint"} {
+			if !strings.Contains(out.String(), flag) {
+				t.Errorf("%v --help: missing flag %q", tc.cmd, flag)
+			}
+		}
 	}
 }
 
