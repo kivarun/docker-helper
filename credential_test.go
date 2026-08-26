@@ -373,6 +373,148 @@ func TestRevokedCredentialRemainsInList(t *testing.T) {
 	}
 }
 
+// TestCredentialNameReusableAfterRevoke verifies that after revoking a
+// credential, a new credential with the same name can be created, receiving a
+// new ID and token, while the revoked record is preserved as history.
+func TestCredentialNameReusableAfterRevoke(t *testing.T) {
+	app := newTestApp(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "reuseuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(username string) (uid, gid, homeDir string, err error) {
+		return "1011", "1011", home, nil
+	}
+
+	if _, err := createPrincipal(app.DB, "reuseuser", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+
+	cred1, token1, err := createCredential(app.DB, "reuseuser", "oc")
+	if err != nil {
+		t.Fatalf("first createCredential() error: %v", err)
+	}
+
+	if _, err := revokeCredential(app.DB, cred1.ID); err != nil {
+		t.Fatalf("revokeCredential() error: %v", err)
+	}
+
+	cred2, token2, err := createCredential(app.DB, "reuseuser", "oc")
+	if err != nil {
+		t.Fatalf("re-create same name after revoke error: %v", err)
+	}
+
+	if cred2.ID == cred1.ID {
+		t.Errorf("new credential ID = %q, want distinct from revoked %q", cred2.ID, cred1.ID)
+	}
+	if token2 == token1 {
+		t.Error("new credential token must be distinct from the revoked one")
+	}
+
+	// The revoked record remains as history; the new active record also present.
+	creds, err := listCredentials(app.DB, "reuseuser")
+	if err != nil {
+		t.Fatalf("listCredentials() error: %v", err)
+	}
+	if len(creds) != 2 {
+		t.Fatalf("expected 2 credentials (revoked + active), got %d", len(creds))
+	}
+}
+
+// TestCredentialUpgradeRc18DBReusesName verifies that an existing rc.18
+// database (hard UNIQUE(principal_id, name), a revoked credential) migrates
+// so the name can be reused while the revoked record is preserved.
+func TestCredentialUpgradeRc18DBReusesName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+
+	// Build an rc.18 schema: hard UNIQUE(principal_id, name).
+	_, err = db.Exec(`
+		CREATE TABLE principals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			uid INTEGER NOT NULL,
+			gid INTEGER NOT NULL,
+			home TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1
+		);
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE(principal_id, name)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create rc.18 schema: %v", err)
+	}
+
+	// Principal 1 with a revoked credential named "oc".
+	_, err = db.Exec(
+		`INSERT INTO principals (username, uid, gid, home, enabled) VALUES ('alice', 2001, 2001, '/home/alice', 1)`,
+	)
+	if err != nil {
+		t.Fatalf("insert principal: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO credentials (id, principal_id, name, token_hash, created_at, revoked_at)
+		 VALUES ('dhcr_old', 1, 'oc', 'oldhash', 1000, 2000)`,
+	)
+	if err != nil {
+		t.Fatalf("insert revoked credential: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen and run the current migration.
+	db, err = openDatabase(path)
+	if err != nil {
+		t.Fatalf("reopenDatabase() error: %v", err)
+	}
+	defer db.Close()
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+
+	// Same name can now be created for the same principal.
+	cred2, _, err := createCredential(db, "alice", "oc")
+	if err != nil {
+		t.Fatalf("create after upgrade error: %v", err)
+	}
+	if cred2.ID == "dhcr_old" {
+		t.Error("new credential must have a distinct ID")
+	}
+
+	// Old revoked record preserved.
+	var revokedAt sql.NullInt64
+	err = db.QueryRow(`SELECT revoked_at FROM credentials WHERE id='dhcr_old'`).Scan(&revokedAt)
+	if err != nil {
+		t.Fatalf("old record missing: %v", err)
+	}
+	if !revokedAt.Valid {
+		t.Error("expected old record to remain revoked")
+	}
+
+	// Active-name uniqueness still enforced: creating "oc" again must fail.
+	if _, _, err := createCredential(db, "alice", "oc"); err == nil {
+		t.Fatal("expected duplicate active name to be rejected after upgrade")
+	}
+}
+
 func TestCredentialHTTPCreate(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 

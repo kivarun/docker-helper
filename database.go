@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -65,8 +66,7 @@ func initializeDatabase(db *sql.DB) error {
 			token_hash TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL,
 			revoked_at INTEGER,
-			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
-			UNIQUE(principal_id, name)
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
 		);
 	`)
 	if err != nil {
@@ -85,6 +85,76 @@ func initializeDatabase(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("cannot add principal_id to sessions: %w", err)
 		}
+	}
+
+	// Credential lifecycle migration: a credential name must be reusable after
+	// its previous credential is revoked. The old schema enforced a hard
+	// UNIQUE(principal_id, name), permanently reserving a name after revoke.
+	// Replace it with a partial unique index over active (revoked_at IS NULL)
+	// credentials, preserving revoked records as history.
+	//
+	// Detect the old table-level UNIQUE constraint by inspecting the stored
+	// table DDL (the canonical schema this code created). If present, rebuild
+	// the table without the constraint so the name can be reused after revoke.
+	var credTableSQL string
+	err = db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='credentials'`,
+	).Scan(&credTableSQL)
+	if err != nil {
+		return fmt.Errorf("cannot inspect credentials schema: %w", err)
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(credTableSQL), ""))
+	if strings.Contains(normalized, "unique(principal_id,name)") {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("cannot begin credentials migration: %w", err)
+		}
+		_, err = tx.Exec(`
+			CREATE TABLE credentials_new (
+				id TEXT PRIMARY KEY,
+				principal_id INTEGER NOT NULL,
+				name TEXT NOT NULL,
+				token_hash TEXT NOT NULL UNIQUE,
+				created_at INTEGER NOT NULL,
+				revoked_at INTEGER,
+				FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
+			);
+		`)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("cannot create new credentials table: %w", err)
+		}
+		_, err = tx.Exec(`INSERT INTO credentials_new SELECT id, principal_id, name, token_hash, created_at, revoked_at FROM credentials`)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("cannot migrate credentials data: %w", err)
+		}
+		_, err = tx.Exec(`DROP TABLE credentials`)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("cannot drop old credentials table: %w", err)
+		}
+		_, err = tx.Exec(`ALTER TABLE credentials_new RENAME TO credentials`)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			return fmt.Errorf("cannot rename credentials table: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("cannot commit credentials migration: %w", err)
+		}
+	}
+
+	// Enforce active-name uniqueness with a partial unique index. On a fresh
+	// database this is created after the initial CREATE TABLE; after the
+	// migration above it is created on the rebuilt table. The old hard
+	// UNIQUE guaranteed no duplicate active (principal_id, name) rows, so this
+	// index creation cannot fail on migrated data.
+	_, err = db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS credentials_active_name_unique
+		ON credentials(principal_id, name) WHERE revoked_at IS NULL;
+	`)
+	if err != nil {
+		return fmt.Errorf("cannot create active credential unique index: %w", err)
 	}
 
 	// Additive migration: mac_boundaries tracks docker-helper-owned MAC boundaries.
