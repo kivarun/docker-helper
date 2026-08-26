@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -432,106 +433,14 @@ func TestCAPreflightUnsetAbsentWithBrokenCA(t *testing.T) {
 	}
 }
 
-// --- System-mode CA source-path policy tests ---
-
-func TestValidateSystemCASourcePathUnder(t *testing.T) {
-	// Test the canonical containment semantics using a temp root.
-	root := t.TempDir()
-	insideFile := filepath.Join(root, "subdir", "file.crt")
-	if err := os.MkdirAll(filepath.Dir(insideFile), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(insideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside root pointing to file still inside root.
-	insideTarget := filepath.Join(root, "real.crt")
-	if err := os.WriteFile(insideTarget, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	insideLink := filepath.Join(root, "link-inside.crt")
-	if err := os.Symlink(insideTarget, insideLink); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside root pointing to outside file.
-	outsideDir := t.TempDir()
-	outsideFile := filepath.Join(outsideDir, "outside.crt")
-	if err := os.WriteFile(outsideFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	outsideLink := filepath.Join(root, "link-outside.crt")
-	if err := os.Symlink(outsideFile, outsideLink); err != nil {
-		t.Fatal(err)
-	}
-
-	// Similarly-prefixed path outside the root.
-	similarRoot := root + "-other"
-	if err := os.MkdirAll(similarRoot, 0755); err != nil {
-		t.Fatal(err)
-	}
-	similarFile := filepath.Join(similarRoot, "file.crt")
-	if err := os.WriteFile(similarFile, []byte("cert"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name    string
-		path    string
-		wantErr bool
-	}{
-		{
-			name: "file inside root passes",
-			path: insideFile,
-		},
-		{
-			name: "symlink inside -> inside passes",
-			path: insideLink,
-		},
-		{
-			name:    "symlink inside -> outside fails",
-			path:    outsideLink,
-			wantErr: true,
-		},
-		{
-			name:    "similarly-prefixed sibling fails",
-			path:    similarFile,
-			wantErr: true,
-		},
-		{
-			name:    "path == root fails",
-			path:    root,
-			wantErr: true,
-		},
-		{
-			name:    "nonexistent file fails",
-			path:    filepath.Join(root, "nope.crt"),
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateSystemCASourcePathUnder(tt.path, root)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateSystemCASourcePathUnder(%q, %q) error = %v, wantErr %v", tt.path, root, err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestSystemModeCAOutsideSourceFails(t *testing.T) {
-	// System mode + auto + outside source must fail before config write.
+func TestSystemModeCAOutsideSourceAccepted(t *testing.T) {
+	// UAT regression: in system mode, with trusted_ca_injection=auto and
+	// trusted_ca_path pointing to a valid CA file outside /etc/docker-helper,
+	// the config must load successfully. There is no source-location restriction.
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
-	tokenPath := filepath.Join(dir, "admin.token")
 	caPath := filepath.Join(dir, "test-ca.crt")
 	generateTestCAPEM(t, caPath)
-
-	if err := os.WriteFile(tokenPath, []byte("test-admin-token\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
 
 	allowedRoot := testAllowedRootDir(t)
 	// Pre-set the CA path so we only need one command to test the validation.
@@ -552,37 +461,114 @@ func TestSystemModeCAOutsideSourceFails(t *testing.T) {
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = origUID }()
 
-	// Mock config path so operator client token resolution uses the test dir.
+	// Mock config path so the config transaction reads the test config.
 	origGetConfig := getConfigPathFunc
 	getConfigPathFunc = func() string { return configPath }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	// Prevent reaching a real system daemon.
-	origSocket := systemSocketExists
-	systemSocketExists = func() bool { return false }
-	defer func() { systemSocketExists = origSocket }()
-
-	// Save original config bytes.
-	originalBytes, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
+	// The config transaction calls validateCAConfig before writing; the reload
+	// itself is out of scope here, so report "daemon not running" like the
+	// other config mutation integration tests.
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		return reloadOutcome{reloadDaemonNotRunning, nil}
 	}
+	defer func() { attemptReload = origAttemptReload }()
 
-	// Try to enable auto with a CA outside /etc/docker-helper.
-	// This should fail during validation, before any config write or reload.
+	// Enable auto with a CA outside /etc/docker-helper. This must succeed.
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d, stderr: %q", code, stderr.String())
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stdout: %q, stderr: %q", code, stdout.String(), stderr.String())
 	}
 
-	// Config must be byte-for-byte unchanged.
-	newBytes, err := os.ReadFile(configPath)
-	if err != nil {
+	// The config must be persisted with trusted_ca_injection=auto.
+	raw := readConfigJSON(t, configPath)
+	var injection string
+	if err := json.Unmarshal(raw["trusted_ca_injection"], &injection); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(originalBytes, newBytes) {
-		t.Error("config.json should be byte-for-byte unchanged when system CA source policy fails")
+	if injection != "auto" {
+		t.Errorf("trusted_ca_injection = %q, want %q", injection, "auto")
+	}
+	var path string
+	if err := json.Unmarshal(raw["trusted_ca_path"], &path); err != nil {
+		t.Fatal(err)
+	}
+	if path != caPath {
+		t.Errorf("trusted_ca_path = %q, want %q", path, caPath)
+	}
+}
+
+func TestSystemModeCAOutsideSourceAllowsUnrelatedMutation(t *testing.T) {
+	// Regression: an unrelated config mutation must not fail because
+	// trusted_ca_path points to a valid CA outside /etc/docker-helper.
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	caPath := filepath.Join(dir, "test-ca.crt")
+	generateTestCAPEM(t, caPath)
+
+	allowedRoot := testAllowedRootDir(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         allowedRoot,
+		"session_ttl":          "12h",
+		"trusted_ca_path":      caPath,
+		"trusted_ca_injection": "auto",
+	})
+
+	t.Setenv("DOCKER_HELPER_CONFIG", configPath)
+	shortRuntime := filepath.Join(os.TempDir(), fmt.Sprintf("dh-ca-sys-%d", os.Getpid()))
+	t.Setenv("XDG_RUNTIME_DIR", shortRuntime)
+	t.Cleanup(func() { os.RemoveAll(shortRuntime) })
+
+	// Mock system mode.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	defer func() { EffectiveUID = origUID }()
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return configPath }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	// The config transaction calls validateCAConfig before writing; the reload
+	// itself is out of scope here, so report "daemon not running" like the
+	// other config mutation integration tests.
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		return reloadOutcome{reloadDaemonNotRunning, nil}
+	}
+	defer func() { attemptReload = origAttemptReload }()
+
+	// Unrelated mutation: add a new allowed root.
+	newRoot := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "allowed-root", "add", newRoot}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d, stdout: %q, stderr: %q", code, stdout.String(), stderr.String())
+	}
+
+	// The allowed root must be added and the CA settings preserved unchanged.
+	raw := readConfigJSON(t, configPath)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(roots, newRoot) {
+		t.Errorf("allowed_roots = %v, want it to contain %s", roots, newRoot)
+	}
+	var injection string
+	if err := json.Unmarshal(raw["trusted_ca_injection"], &injection); err != nil {
+		t.Fatal(err)
+	}
+	if injection != "auto" {
+		t.Errorf("trusted_ca_injection = %q, want %q", injection, "auto")
+	}
+	var path string
+	if err := json.Unmarshal(raw["trusted_ca_path"], &path); err != nil {
+		t.Fatal(err)
+	}
+	if path != caPath {
+		t.Errorf("trusted_ca_path = %q, want %q", path, caPath)
 	}
 }
 
@@ -612,44 +598,11 @@ func TestUserModeCAArbitraryPath(t *testing.T) {
 	}
 }
 
-// TestSystemCADocumentation verifies that the Release 2 system-mode CA source
-// documentation explicitly identifies /etc/docker-helper as the CA source namespace.
-func TestSystemCADocumentation(t *testing.T) {
-	readmeData, err := os.ReadFile("README.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	readme := string(readmeData)
-
-	// Locate the trusted CA injection section.
-	caSectionIdx := strings.Index(readme, "### Trusted CA injection")
-	if caSectionIdx < 0 {
-		t.Fatal("README.md must contain '### Trusted CA injection' section")
-	}
-	// Find the next top-level section (## heading at line start) to bound the section.
-	caSection := readme[caSectionIdx:]
-	// Look for "\n## " to avoid matching #### subsections.
-	nextSectionIdx := strings.Index(caSection[1:], "\n## ")
-	if nextSectionIdx >= 0 {
-		caSection = caSection[:nextSectionIdx+1]
-	}
-
-	// The system-mode subsection must mention /etc/docker-helper.
-	systemIdx := strings.Index(caSection, "#### System mode")
-	if systemIdx < 0 {
-		t.Fatal("README.md CA section must contain '#### System mode' subsection")
-	}
-	systemSubsection := caSection[systemIdx:]
-	if !strings.Contains(systemSubsection, "/etc/docker-helper") {
-		t.Error("README.md system-mode CA section must document /etc/docker-helper as the CA source namespace")
-	}
-}
-
-func TestLoadAndPrepareRuntimeConfigSystemModeRejectsOutsideCA(t *testing.T) {
-	// loadAndPrepareRuntimeConfig in system mode must reject trusted_ca_path outside
-	// /etc/docker-helper, even when config was written manually.
-	// The system CA source check runs before runtime dir creation,
-	// so we do not need to mock getRuntimeDir.
+// TestLoadAndPrepareRuntimeConfigSystemModeAcceptsOutsideCA is the UAT
+// regression for config load: in system mode, with trusted_ca_injection=auto
+// and trusted_ca_path pointing to a valid CA file outside /etc/docker-helper,
+// loadAndPrepareRuntimeConfig must succeed and prepare the CA snapshot.
+func TestLoadAndPrepareRuntimeConfigSystemModeAcceptsOutsideCA(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	caPath := filepath.Join(dir, "test-ca.crt")
@@ -677,12 +630,21 @@ func TestLoadAndPrepareRuntimeConfigSystemModeRejectsOutsideCA(t *testing.T) {
 	getConfigPathFunc = func() string { return configPath }
 	defer func() { getConfigPathFunc = origGetConfig }()
 
-	_, err := loadAndPrepareRuntimeConfig()
-	if err == nil {
-		t.Fatal("loadAndPrepareRuntimeConfig should reject CA outside /etc/docker-helper in system mode")
+	// Mock the runtime dir so system mode does not touch /run/docker-helper.
+	runtimeDir := filepath.Join(dir, "runtime")
+	origRuntimeDir := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return runtimeDir, nil }
+	defer func() { getRuntimeDirFunc = origRuntimeDir }()
+
+	loaded, err := loadAndPrepareRuntimeConfig()
+	if err != nil {
+		t.Fatalf("loadAndPrepareRuntimeConfig should accept CA outside /etc/docker-helper in system mode: %v", err)
 	}
-	if !strings.Contains(err.Error(), systemCASourceRoot) {
-		t.Errorf("expected error mentioning %s, got: %v", systemCASourceRoot, err)
+	if loaded.TrustedCAPath != caPath {
+		t.Errorf("TrustedCAPath = %q, want %q", loaded.TrustedCAPath, caPath)
+	}
+	if loaded.TrustedCAPreparedDir == "" {
+		t.Error("TrustedCAPreparedDir should be set")
 	}
 }
 

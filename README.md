@@ -409,7 +409,7 @@ Configuration fields:
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log and synchronous pull output (bounded buffer, default: `4194304` = 4 MiB) |
-| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). In system mode, must be under `/etc/docker-helper` |
+| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). The source may be located anywhere on the host. |
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. |
 | `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |
 
@@ -478,9 +478,8 @@ docker-helper config set trusted_ca_injection auto
 
 #### System mode
 
-System mode requires the CA file to be placed under the helper-owned
-system configuration directory `/etc/docker-helper`. Arbitrary host paths
-are not supported in confined system mode.
+System mode accepts any absolute path to a readable CA file, just like user
+mode. The source does not have to live under `/etc/docker-helper`.
 
 ```bash
 sudo install -m 0644 company-root-ca.crt /etc/docker-helper/company-root-ca.crt
@@ -496,6 +495,14 @@ Then enable injection:
 
 ```bash
 sudo docker-helper config set trusted_ca_path /etc/docker-helper/company-root-ca.crt
+sudo docker-helper config set trusted_ca_injection auto
+```
+
+The CA source may also be an arbitrary host path, for example a certificate
+managed by the distribution CA bundle:
+
+```bash
+sudo docker-helper config set trusted_ca_path /var/lib/ca-certificates/pem/RCA-CA.pem
 sudo docker-helper config set trusted_ca_injection auto
 ```
 

@@ -116,11 +116,9 @@ Absolute path to a regular file containing exactly one PEM-encoded
 X.509 CA certificate. No additional PEM blocks or content. Required when
 \fBtrusted_ca_injection\fR is set to "auto".
 .RS 4
-In system mode, the source must be a regular file canonically contained
-under \fI/etc/docker-helper/\fR. Symlink escapes outside that directory are
-rejected. This matches the existing AppArmor and SELinux read access for
-the helper-owned system configuration namespace. Arbitrary host paths
-are not supported in confined system mode.
+The source may be located anywhere on the host; there is no requirement
+that it live under \fI/etc/docker-helper/\fR. The file must be a regular
+file readable by the daemon and contain exactly one valid CA certificate.
 .RE
 .TP
 .B http_address (string, optional, default="127.0.0.1:52375")

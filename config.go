@@ -33,11 +33,6 @@ const (
 // the user's ~/.config/systemd/user/ directory on first initialization.
 const systemUserUnitPath = "/usr/lib/systemd/user/docker-helper.service"
 
-// systemCASourceRoot is the Release 2 system-mode trusted CA source namespace.
-// In system mode with trusted_ca_injection=auto, the configured trusted_ca_path
-// must resolve to a regular file canonically contained under this directory.
-const systemCASourceRoot = "/etc/docker-helper"
-
 // EffectiveUID returns the effective UID of the process.
 // Can be replaced in tests.
 var EffectiveUID = func() int { return os.Geteuid() }
@@ -367,15 +362,12 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 
 	mode := resolveDeploymentMode()
 
-	// System-mode CA source-path policy: enforce canonical containment
-	// under /etc/docker-helper before runtime directory creation or any CA I/O.
-	// This protects against manually edited config.json bypassing CLI preflight.
+	// System mode with trusted_ca_injection=auto requires trusted_ca_path.
+	// This is enforced before runtime directory creation or any CA I/O to
+	// protect against manually edited config.json bypassing CLI preflight.
 	if mode == ModeSystem && trustedCAInjection == "auto" {
 		if fc.TrustedCAPath == "" {
 			return nil, fmt.Errorf("trusted_ca_path is required when trusted_ca_injection is \"auto\"")
-		}
-		if err := validateSystemCASourcePath(fc.TrustedCAPath); err != nil {
-			return nil, err
 		}
 	}
 
@@ -1316,14 +1308,6 @@ func validateCAConfigWithHasher(
 		return nil
 	}
 
-	// System-mode CA source-path policy: trusted_ca_path must resolve to a
-	// regular file canonically contained under /etc/docker-helper.
-	if resolveDeploymentMode() == ModeSystem {
-		if err := validateSystemCASourcePath(caPath); err != nil {
-			return err
-		}
-	}
-
 	caData, err := readValidatedCAFile(caPath)
 	if err != nil {
 		return err
@@ -1336,55 +1320,6 @@ func validateCAConfigWithHasher(
 	}
 	if _, err := hasher(cert); err != nil {
 		return fmt.Errorf("CA certificate subject hash computation failed: %w", err)
-	}
-
-	return nil
-}
-
-// validateSystemCASourcePath verifies that caPath resolves to a regular file
-// canonically contained under the system CA source root (/etc/docker-helper).
-// Symlink escapes outside the root are rejected.
-func validateSystemCASourcePath(caPath string) error {
-	return validateSystemCASourcePathUnder(caPath, systemCASourceRoot)
-}
-
-// validateSystemCASourcePathUnder is like validateSystemCASourcePath but
-// accepts an explicit root for testing. Production always uses systemCASourceRoot.
-func validateSystemCASourcePathUnder(caPath, root string) error {
-	// Resolve the CA path.
-	canonicalCAPath, err := filepath.EvalSymlinks(caPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
-		}
-		return fmt.Errorf("cannot resolve trusted_ca_path: %w", err)
-	}
-
-	// Resolve the root.
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			canonicalRoot = filepath.Clean(root)
-		} else {
-			return fmt.Errorf("cannot resolve CA source root: %w", err)
-		}
-	}
-
-	// Check strict containment: path must be a proper descendant of root.
-	if !pathStrictlyWithin(canonicalRoot, canonicalCAPath) {
-		return fmt.Errorf("system mode trusted_ca_path must be under %s: %s", root, caPath)
-	}
-
-	// Verify the final resolved path is a regular file.
-	info, err := os.Stat(caPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("trusted_ca_path does not exist: %s", caPath)
-		}
-		return fmt.Errorf("cannot access trusted_ca_path: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("trusted_ca_path must be a regular file: %s", caPath)
 	}
 
 	return nil

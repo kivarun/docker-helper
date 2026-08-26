@@ -1185,10 +1185,10 @@ into containers started via `POST /run`:
     supported. Other CA-related environment variables like `SSL_CERT_FILE`,
     `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` are not used.
 
-In system mode, the configured source must also be readable by the active MAC
-policy. Arbitrary host locations are not an accepted portable contract. Release
-2 must either constrain/document a helper-owned source location or complete the
-previously accepted managed-import workflow.
+The configured `trusted_ca_path` may be any absolute host path; there is no
+requirement that the source live under `/etc/docker-helper`. The file must be
+readable by the daemon. Existing Release 1 / earlier Release 2 configurations
+continue to work without migration or copying the CA.
 
 ## Error handling
 

@@ -2283,16 +2283,18 @@ func TestReloadCATypedErrorDiagnostic(t *testing.T) {
 	}
 }
 
-// TestReloadRejectsOutsideCASourceSystemMode verifies that the reload endpoint
-// rejects a config.json with trusted_ca_injection=auto and trusted_ca_path
-// outside /etc/docker-helper when running in system mode.
+// TestReloadAcceptsOutsideCASourceSystemMode verifies that the reload endpoint
+// accepts a config.json with trusted_ca_injection=auto and trusted_ca_path
+// pointing to a valid CA file outside /etc/docker-helper when running in system
+// mode. A trusted CA source may live anywhere on the host; there is no
+// source-location restriction.
 //
 // This exercises the real path:
 //
-//	handleReload -> loadAndPrepareRuntimeConfig -> validateSystemCASourcePath
+//	handleReload -> loadAndPrepareRuntimeConfig -> prepareCAInjection
 //
-// and proves the active runtime config is unchanged after rejection.
-func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
+// and proves the active runtime config is updated with the new CA settings.
+func TestReloadAcceptsOutsideCASourceSystemMode(t *testing.T) {
 	configPath, _, socketPath, _, cleanup := setupReloadTestEnv(t)
 	defer cleanup()
 
@@ -2347,10 +2349,16 @@ func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
 	caFile := filepath.Join(t.TempDir(), "outside-ca.pem")
 	generateTestCAPEM(t, caFile)
 
-	// 5. Switch EffectiveUID to 0 (system mode) for the reload attempt.
+	// 5. Switch EffectiveUID to 0 (system mode) for the reload attempt, and
+	//    mock the runtime dir so system mode does not touch /run/docker-helper.
 	origEffectiveUID := EffectiveUID
 	EffectiveUID = func() int { return 0 }
 	defer func() { EffectiveUID = origEffectiveUID }()
+
+	reloadRuntimeDir := filepath.Join(t.TempDir(), "runtime")
+	origRuntimeDir := getRuntimeDirFunc
+	getRuntimeDirFunc = func() (string, error) { return reloadRuntimeDir, nil }
+	defer func() { getRuntimeDirFunc = origRuntimeDir }()
 
 	// 6. Manually replace config.json with a structurally valid config
 	//    containing trusted_ca_injection=auto and an outside CA path.
@@ -2389,50 +2397,28 @@ func TestReloadRejectsOutsideCASourceSystemMode(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// 8. Prove HTTP status is 400.
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	// 8. Prove HTTP status is 200.
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}
 
-	// 9. Prove response code is invalid_config.
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("invalid JSON: %s", body)
-	}
-	if code, ok := result["code"].(string); !ok || code != "invalid_config" {
-		t.Fatalf("expected code=invalid_config, got: %s", body)
-	}
-
-	// 10. Prove the App's active runtime config is unchanged.
+	// 9. Prove the App's active runtime config now carries the outside CA.
 	currentConfig := app.getConfig()
-	if currentConfig.AllowedRoots[0] != originalConfig.AllowedRoots[0] {
-		t.Errorf("AllowedRoot changed: got %q, want %q", currentConfig.AllowedRoots[0], originalConfig.AllowedRoots[0])
+	if currentConfig.TrustedCAInjection != "auto" {
+		t.Errorf("TrustedCAInjection = %q, want %q", currentConfig.TrustedCAInjection, "auto")
 	}
-	if currentConfig.SessionTTL != originalConfig.SessionTTL {
-		t.Errorf("SessionTTL changed: got %v, want %v", currentConfig.SessionTTL, originalConfig.SessionTTL)
+	if currentConfig.TrustedCAPath != caFile {
+		t.Errorf("TrustedCAPath = %q, want %q", currentConfig.TrustedCAPath, caFile)
 	}
-	if currentConfig.LogLevel != originalConfig.LogLevel {
-		t.Errorf("LogLevel changed: got %v, want %v", currentConfig.LogLevel, originalConfig.LogLevel)
-	}
-
-	// 11. In particular, trusted_ca_injection and trusted_ca_path are not replaced.
-	if currentConfig.TrustedCAInjection != originalConfig.TrustedCAInjection {
-		t.Errorf("TrustedCAInjection changed: got %q, want %q", currentConfig.TrustedCAInjection, originalConfig.TrustedCAInjection)
-	}
-	if currentConfig.TrustedCAPath != originalConfig.TrustedCAPath {
-		t.Errorf("TrustedCAPath changed: got %q, want %q", currentConfig.TrustedCAPath, originalConfig.TrustedCAPath)
+	if currentConfig.TrustedCAPreparedDir == "" {
+		t.Error("TrustedCAPreparedDir should be set after successful reload")
 	}
 
-	// 12. Prove the rejection was caused by the system CA source containment
-	//     policy, not an unrelated later failure. The operational log contains
-	//     the error from validateSystemCASourcePath.
+	// 10. Prove the successful reload was logged with the CA settings.
 	opLogs := opBuf.String()
-	if !strings.Contains(opLogs, systemCASourceRoot) {
-		t.Errorf("expected reload error log to contain %q (system CA source policy), got:\n%s", systemCASourceRoot, opLogs)
+	if !strings.Contains(opLogs, "configuration reloaded") {
+		t.Errorf("expected 'configuration reloaded' in operational log, got:\n%s", opLogs)
 	}
 }
 
