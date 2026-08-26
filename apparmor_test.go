@@ -2439,3 +2439,230 @@ func TestBuildxNoBroadWildcard(t *testing.T) {
 		})
 	}
 }
+
+// --- Confined profile-reload policy regression tests ---
+
+func TestSystemProfileMACAdmin(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// MAC_ADMIN is required for kernel profile replacement via apparmor_parser --replace.
+	if !strings.Contains(content, "capability mac_admin,") {
+		t.Error("system profile must grant capability mac_admin for confined profile replacement")
+	}
+
+	// MAC_OVERRIDE must NOT be granted; it is unrelated to profile replacement.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "mac_override") {
+			t.Error("system profile must not grant mac_override")
+		}
+	}
+}
+
+func TestSystemProfileAppArmorReplaceWritable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// .replace interface must be writable for --replace to work.
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/.replace w,") {
+		t.Error("system profile must grant write to .replace interface for profile replacement")
+	}
+}
+
+func TestSystemProfileAppArmorFeaturesReadable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// Feature metadata must be readable for parser version detection.
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/features/ r,") {
+		t.Error("system profile must grant read to AppArmor features directory")
+	}
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/features/** r,") {
+		t.Error("system profile must grant read to AppArmor features/** entries")
+	}
+
+	// Interface metadata must be readable for parser capability probing.
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/.access r,") {
+		t.Error("system profile must grant read to .access interface metadata")
+	}
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/.features r,") {
+		t.Error("system profile must grant read to .features interface metadata")
+	}
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/.ops r,") {
+		t.Error("system profile must grant read to .ops interface metadata")
+	}
+}
+
+func TestSystemProfileParserConfReadable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// Parser configuration must be readable if present.
+	if !strings.Contains(content, "/etc/apparmor/parser.conf r,") {
+		t.Error("system profile must grant read to /etc/apparmor/parser.conf")
+	}
+}
+
+func TestSystemProfileProcMountsReadable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// /proc/mounts must be readable for apparmorfs discovery.
+	if !strings.Contains(content, "/proc/mounts r,") {
+		t.Error("system profile must grant read to /proc/mounts for apparmorfs discovery")
+	}
+}
+
+func TestSystemProfileNoGenericSecurityfsWrite(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// Must NOT grant generic write to the entire securityfs or apparmor subtree.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		// Check for broad /sys/kernel/security/** with write
+		if strings.Contains(trimmed, "/sys/kernel/security/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "w") {
+				t.Errorf("system profile must not grant generic write to /sys/kernel/security/** (found: %s)", trimmed)
+			}
+		}
+		// Check for broad /sys/kernel/security/apparmor/** with write
+		if strings.Contains(trimmed, "/sys/kernel/security/apparmor/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "w") {
+				t.Errorf("system profile must not grant generic write to /sys/kernel/security/apparmor/** (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
+func TestSystemProfileNoRemoveWritable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// .remove must NOT be writable — we only need replacement, not removal.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, ".remove") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "w") {
+				t.Errorf("system profile must not grant write to .remove (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
+func TestSystemProfileNoLoadWritable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// .load must NOT be writable — we use --replace, not --write-cache/--load.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, ".load") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "w") {
+				t.Errorf("system profile must not grant write to .load (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
+func TestSystemProfileNoBroadProcAccess(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// Must NOT grant broad /proc/** write access.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "/proc/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "w") {
+				t.Errorf("system profile must not grant broad /proc/** write (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
+func TestSystemProfileAppArmorReloadComment(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// The MAC_ADMIN grant must be documented with the reason.
+	if !strings.Contains(content, "profile replacement") {
+		t.Error("system profile must document the reason for MAC_ADMIN (profile replacement)")
+	}
+}
+
+// --- Live parser syntax validation ---
+
+func TestSystemProfileParserValidation(t *testing.T) {
+	if _, err := exec.LookPath("apparmor_parser"); err != nil {
+		t.Skip("apparmor_parser not available")
+	}
+
+	profilePath := "packaging/apparmor/docker-helper-system"
+	data, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatalf("cannot read system profile: %v", err)
+	}
+
+	// Write to a temp location for parser validation.
+	dir := t.TempDir()
+	tempPath := filepath.Join(dir, "docker-helper-system")
+	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("apparmor_parser", "--skip-kernel-load", "--skip-read-cache", tempPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("system profile parser validation failed: %v\n%s", err, out)
+	}
+}

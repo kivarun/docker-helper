@@ -76,6 +76,45 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/apparmor.d/ r,
 	/etc/apparmor.d/** r,
 
+	# AppArmor parser configuration (read-only, if present).
+	/etc/apparmor/parser.conf r,
+
+	# AppArmor securityfs — required for confined profile replacement.
+	#
+	# docker-helper must replace the loaded docker-helper-system profile after
+	# updating managed workspace boundaries.  apparmor_parser --replace needs:
+	#   - MAC_ADMIN to load policy into the kernel;
+	#   - read access to AppArmor feature and interface metadata for
+	#     version detection and capability probing;
+	#   - write access to the .replace interface for profile replacement.
+	#
+	# This section is deliberately narrow: only the metadata the parser probes
+	# and the single .replace interface used by --replace are exposed.
+	# .remove, .load, and unrelated namespace administration are NOT granted.
+
+	# MAC_ADMIN is required by the kernel for any profile load/replace operation.
+	# This is the only MAC capability granted; mac_override is intentionally omitted.
+	capability mac_admin,
+
+	# AppArmor feature metadata — parser probes these for version detection
+	# and capability negotiation before attempting any policy operation.
+	/sys/kernel/security/apparmor/features/ r,
+	/sys/kernel/security/apparmor/features/** r,
+
+	# AppArmor interface metadata — parser reads these to discover available
+	# operations and negotiate with the kernel.
+	/sys/kernel/security/apparmor/.access r,
+	/sys/kernel/security/apparmor/.features r,
+	/sys/kernel/security/apparmor/.ops r,
+
+	# Profile replacement interface — write access required by --replace.
+	# Only .replace is writable; .load and .remove are intentionally excluded.
+	/sys/kernel/security/apparmor/.replace w,
+
+	# /proc/mounts — apparmor_parser reads the global mount list to discover
+	# the AppArmor securityfs mount point when --subdomainfs is not provided.
+	/proc/mounts r,
+
 	# Dynamic AppArmor managed boundaries (included if present).
 	#include if exists "/var/lib/docker-helper/apparmor/managed-boundaries"
 
