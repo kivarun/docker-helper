@@ -21,7 +21,8 @@ case "$1" in
     rm -rf /var/lib/docker-helper
     rm -rf /run/docker-helper
 
-    # Clean up the managed-roots directory if it's empty.
+    # Clean up the legacy managed-roots fragment on purge.
+    rm -f /etc/apparmor.d/docker-helper.d/managed-roots
     rmdir /etc/apparmor.d/docker-helper.d 2>/dev/null || true
 
     exit 0

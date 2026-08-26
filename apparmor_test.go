@@ -2139,6 +2139,126 @@ func TestSystemProfileAppArmorLifecycleLockFileLocking(t *testing.T) {
 	}
 }
 
+func TestSystemProfileIncludesManagedBoundaries(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// Must include the dynamic managed boundaries state via if-exists.
+	if !strings.Contains(content, `#include if exists "/var/lib/docker-helper/apparmor/managed-boundaries"`) {
+		t.Error("system profile must include managed boundaries state via if-exists")
+	}
+
+	// Must NOT include the legacy managed-roots fragment path.
+	if strings.Contains(content, "docker-helper.d/managed-roots") {
+		t.Error("system profile must not reference legacy managed-roots fragment")
+	}
+}
+
+func TestSystemProfileAppArmorStateSubtreePermissions(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// Must grant rw on the dedicated AppArmor state subtree.
+	if !strings.Contains(content, "/var/lib/docker-helper/apparmor/ rw,") {
+		t.Error("system profile must grant rw on /var/lib/docker-helper/apparmor/ directory")
+	}
+	if !strings.Contains(content, "/var/lib/docker-helper/apparmor/* rw,") {
+		t.Error("system profile must grant rw on /var/lib/docker-helper/apparmor/* files")
+	}
+
+	// Must NOT grant generic write access to /etc/apparmor.d/**.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/etc/apparmor.d/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "w") {
+				t.Errorf("system profile must not grant write on /etc/apparmor.d/** (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
+func TestProductionAppArmorStatePath(t *testing.T) {
+	if appArmorManagedBoundariesPath != "/var/lib/docker-helper/apparmor/managed-boundaries" {
+		t.Errorf("appArmorManagedBoundariesPath = %q, want /var/lib/docker-helper/apparmor/managed-boundaries", appArmorManagedBoundariesPath)
+	}
+
+	mgr := newProductionAppArmorProfileManager()
+	if mgr.managedFragmentPath != "/var/lib/docker-helper/apparmor/managed-boundaries" {
+		t.Errorf("production manager path = %q, want /var/lib/docker-helper/apparmor/managed-boundaries", mgr.managedFragmentPath)
+	}
+}
+
+func TestParseFragmentLegacyHeader(t *testing.T) {
+	legacy := renderFragment([]string{"/a", "/b"})
+	legacy = bytes.Replace(legacy, []byte(fragmentHeader2+"\n"), []byte(legacyFragmentHeader2+"\n"), 1)
+
+	parsed, err := parseFragment(legacy)
+	if err != nil {
+		t.Fatalf("parseFragment legacy header failed: %v", err)
+	}
+	if !reflectSliceEqual(parsed, []string{"/a", "/b"}) {
+		t.Errorf("parsed = %v, want [/a /b]", parsed)
+	}
+}
+
+func TestRewriteNormalizesLegacyHeader(t *testing.T) {
+	rootDir := testAllowedRootDir(t)
+	testDir := filepath.Join(rootDir, "workspace")
+	if err := os.MkdirAll(testDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, mgr, _ := setupAppArmorTest(t)
+
+	// Write legacy header content
+	legacy := renderFragment([]string{})
+	legacy = bytes.Replace(legacy, []byte(fragmentHeader2+"\n"), []byte(legacyFragmentHeader2+"\n"), 1)
+	if err := os.MkdirAll(filepath.Dir(mgr.managedFragmentPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mgr.managedFragmentPath, legacy, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a boundary — this rewrites the file with the new header.
+	_, err := mgr.addManagedBoundary(testDir)
+	if err != nil {
+		t.Fatalf("addManagedBoundary failed: %v", err)
+	}
+
+	data, err := os.ReadFile(mgr.managedFragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(fragmentHeader2)) {
+		t.Error("rewrite should normalize to boundary header")
+	}
+	if bytes.Contains(data, []byte(legacyFragmentHeader2)) {
+		t.Error("rewrite should not retain legacy header")
+	}
+}
+
+func TestRenderFragmentBoundaryTerminology(t *testing.T) {
+	data := renderFragment([]string{"/workspace"})
+	content := string(data)
+	if !strings.Contains(content, "workspace boundaries") {
+		t.Error("renderFragment should use 'workspace boundaries' terminology")
+	}
+	if strings.Contains(content, "workspace roots") {
+		t.Error("renderFragment should not use 'workspace roots' terminology")
+	}
+}
+
 func TestUserProfileContainsDockerBuildx(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper")
 	if err != nil {

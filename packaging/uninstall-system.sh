@@ -26,8 +26,8 @@ BINARY_DEST="${BINARY_DEST:-/usr/bin/docker-helper}"
 UNIT_DEST="${UNIT_DEST:-/etc/systemd/system/docker-helper.service}"
 UNIT_NAME="${UNIT_NAME:-docker-helper.service}"
 AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
-AA_FRAGMENT_DEST="${AA_FRAGMENT_DEST:-/etc/apparmor.d/docker-helper.d/managed-roots}"
-AA_FRAGMENT_DIR="${AA_FRAGMENT_DIR:-/etc/apparmor.d/docker-helper.d}"
+AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
+AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/docker-helper}"
 STATE_DIR="${STATE_DIR:-/var/lib/docker-helper}"
@@ -185,12 +185,13 @@ purge_persistent_data() {
 	rm -rf "$STATE_DIR"
 	rm -rf "$RUNTIME_DIR"
 
-	if [[ -f "$AA_FRAGMENT_DEST" ]]; then
-		info "Removing managed-roots fragment $AA_FRAGMENT_DEST"
-		rm -f "$AA_FRAGMENT_DEST"
-		# Remove docker-helper.d directory if empty
-		if [[ -d "$AA_FRAGMENT_DIR" ]] && [[ -z "$(ls -A "$AA_FRAGMENT_DIR" 2>/dev/null)" ]]; then
-			rmdir "$AA_FRAGMENT_DIR" 2>/dev/null || true
+	# Clean up the legacy managed-roots fragment on purge.
+	if [[ -f "$AA_LEGACY_FRAGMENT" ]]; then
+		info "Removing legacy managed-roots fragment $AA_LEGACY_FRAGMENT"
+		rm -f "$AA_LEGACY_FRAGMENT"
+		local legacy_dir="$(dirname "$AA_LEGACY_FRAGMENT")"
+		if [[ -d "$legacy_dir" ]] && [[ -z "$(ls -A "$legacy_dir" 2>/dev/null)" ]]; then
+			rmdir "$legacy_dir" 2>/dev/null || true
 		fi
 	fi
 }
@@ -209,7 +210,7 @@ main() {
 			info "  $CONFIG_DIR"
 			info "  $STATE_DIR"
 			info "  $RUNTIME_DIR"
-			info "  $AA_FRAGMENT_DEST"
+			info "  $AA_LEGACY_FRAGMENT"
 			info ""
 			if ! ask_no_default "Permanently delete all persistent data and continue"; then
 				info "Aborting without changes."
@@ -238,11 +239,9 @@ main() {
 		info "Preserved (can be reused for reinstall):"
 		info "  $CONFIG_DIR"
 		info "  $STATE_DIR"
-		info "  $AA_FRAGMENT_DEST"
 		info ""
 		info "To remove them manually:"
 		info "  rm -rf $CONFIG_DIR $STATE_DIR"
-		info "  rm -f $AA_FRAGMENT_DEST"
 	fi
 }
 

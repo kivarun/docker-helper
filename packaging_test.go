@@ -434,7 +434,7 @@ func TestBuildBundleScriptContent(t *testing.T) {
 	for _, s := range []string{
 		"docker-helper", "install.sh", "uninstall.sh", "install-system.sh", "uninstall-system.sh",
 		"systemd/user", "systemd/user/docker-helper.service", "systemd/system/docker-helper.service",
-		"apparmor", "apparmor/docker-helper", "apparmor/docker-helper-system", "apparmor/docker-helper.d/managed-roots",
+		"apparmor", "apparmor/docker-helper", "apparmor/docker-helper-system",
 		"apparmor/local/curl",
 		"SKILL.md", "README.release.md", "LICENSE",
 	} {
@@ -1279,7 +1279,7 @@ func TestUserUnitStillExists(t *testing.T) {
 // --- System AppArmor profile tests ---
 
 // TestSystemAppArmorProfileFile verifies the system AppArmor profile:
-// named profile with managed-roots fragment, required capabilities,
+// named profile with managed-boundaries include, required capabilities,
 // Docker socket policy, scoped mount policy, and no broad/overly
 // permissive rules.
 func TestSystemAppArmorProfileFile(t *testing.T) {
@@ -1290,9 +1290,13 @@ func TestSystemAppArmorProfileFile(t *testing.T) {
 	}
 	content := string(data)
 
-	// Must include the managed-roots fragment.
-	if !strings.Contains(content, "docker-helper.d/managed-roots") {
-		t.Error("profile must include managed-roots fragment")
+	// Must include the dynamic managed boundaries state via if-exists.
+	if !strings.Contains(content, `#include if exists "/var/lib/docker-helper/apparmor/managed-boundaries"`) {
+		t.Error("profile must include managed boundaries state via if-exists")
+	}
+	// Must not include the legacy managed-roots fragment path.
+	if strings.Contains(content, "docker-helper.d/managed-roots") {
+		t.Error("profile must not reference legacy managed-roots fragment")
 	}
 	// Must not grant broad home access.
 	if strings.Contains(content, "/home/**") {
@@ -1323,9 +1327,29 @@ func TestSystemAppArmorProfileFile(t *testing.T) {
 	if strings.Contains(content, "profile /usr/bin/docker-helper") {
 		t.Error("profile must not use path-based attachment")
 	}
-	// Instructions must not use touch for managed-roots.
+	// Instructions must not use touch for managed boundaries state.
 	if strings.Contains(content, "touch") {
-		t.Error("profile instructions must not use touch for managed-roots")
+		t.Error("profile instructions must not use touch for managed boundaries state")
+	}
+	// AppArmor managed boundaries state subtree: rw on directory and files.
+	if !strings.Contains(content, "/var/lib/docker-helper/apparmor/ rw,") {
+		t.Error("profile must grant rw on /var/lib/docker-helper/apparmor/ directory")
+	}
+	if !strings.Contains(content, "/var/lib/docker-helper/apparmor/* rw,") {
+		t.Error("profile must grant rw on /var/lib/docker-helper/apparmor/* files")
+	}
+	// Must NOT grant generic write access to /etc/apparmor.d/**.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/etc/apparmor.d/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "w") {
+				t.Errorf("profile must not grant write on /etc/apparmor.d/** (found: %s)", trimmed)
+			}
+		}
 	}
 	// Docker socket policy: stream connect only, plus filesystem rules.
 	if !strings.Contains(content, "unix (connect,send,receive)") {
@@ -1379,33 +1403,23 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 		t.Skip("apparmor_parser not available, skipping syntax validation")
 	}
 
-	// Create temp include directory for managed-roots fragment
-	includeDir := t.TempDir()
-	fragmentDir := filepath.Join(includeDir, "docker-helper.d")
-	if err := os.MkdirAll(fragmentDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write empty managed-roots fragment
-	fragmentData := renderFragment([]string{})
-	if err := os.WriteFile(filepath.Join(fragmentDir, "managed-roots"), fragmentData, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Read profile and replace include path
+	// Read profile.
 	profileData, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Write profile to temp file for parser
-	profileFile := filepath.Join(includeDir, "docker-helper-system")
+	// Write profile to temp file for parser. The managed boundaries include
+	// uses if-exists, so it is skipped when the state file is absent, which
+	// still validates the profile rules and the include directive syntax.
+	dir := t.TempDir()
+	profileFile := filepath.Join(dir, "docker-helper-system")
 	if err := os.WriteFile(profileFile, profileData, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Run parser in dry-run mode (-Q = dry run, -T = no cache, -I = include dir)
-	cmd := exec.Command(parserPath, "-Q", "-T", "-I", includeDir, profileFile)
+	// Run parser in dry-run mode (-Q = dry run, -T = no cache).
+	cmd := exec.Command(parserPath, "-Q", "-T", profileFile)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("apparmor_parser syntax validation failed: %v\noutput: %s", err, out)
@@ -1417,8 +1431,8 @@ func TestSystemAppArmorProfileParserSyntax(t *testing.T) {
 // TestInstallSystemScriptContent guards the facts normal CI cannot
 // exercise: the root fail-closed check, the real system destination paths,
 // and the separation from user-mode artifacts. Allowed-root handling,
-// managed-roots preservation, AppArmor-before-init ordering, and profile
-// load flags are proven by the behavioral tests below.
+// managed-boundaries state migration, AppArmor-before-init ordering, and
+// profile load flags are proven by the behavioral tests below.
 func TestInstallSystemScriptContent(t *testing.T) {
 	data, err := os.ReadFile("packaging/install-system.sh")
 	if err != nil {
@@ -1435,10 +1449,11 @@ func TestInstallSystemScriptContent(t *testing.T) {
 		"/usr/bin/docker-helper",
 		"/etc/systemd/system/docker-helper.service",
 		"/etc/apparmor.d/docker-helper-system",
+		"/var/lib/docker-helper/apparmor/managed-boundaries",
 		"/etc/apparmor.d/docker-helper.d/managed-roots",
 	} {
 		if !strings.Contains(content, p) {
-			t.Errorf("install-system.sh must reference destination path: %s", p)
+			t.Errorf("install-system.sh must reference path: %s", p)
 		}
 	}
 	// Must not install the agent skill or touch user artifacts.
@@ -1548,17 +1563,16 @@ func (e *systemScriptEnv) run(t *testing.T, args, stdin string) (string, error) 
 	return string(out), err
 }
 
-// runFragmentInstall invokes install_apparmor_fragment directly from the
-// production script against the fixture bundle and destination.
-func (e *systemScriptEnv) runFragmentInstall(t *testing.T) (string, error) {
+// runPrepareApparmorState invokes prepare_apparmor_state directly from the
+// production script against the fixture state and legacy paths.
+func (e *systemScriptEnv) runPrepareApparmorState(t *testing.T) (string, error) {
 	t.Helper()
 	cmd := exec.Command("bash", "-c", fmt.Sprintf(`
 		source %s
-		AA_FRAGMENT_SRC="apparmor/docker-helper.d/managed-roots"
-		AA_FRAGMENT_DEST="%s"
-		script_dir="%s"
-		install_apparmor_fragment
-	`, e.scriptPath, e.dest("etc/apparmor.d/docker-helper.d/managed-roots"), e.scriptDir))
+		AA_STATE_FILE="%s"
+		AA_LEGACY_FRAGMENT="%s"
+		prepare_apparmor_state
+	`, e.scriptPath, e.dest("var/lib/docker-helper/apparmor/managed-boundaries"), e.dest("etc/apparmor.d/docker-helper.d/managed-roots")))
 	cmd.Dir = e.scriptDir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -1657,13 +1671,10 @@ exit 0
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "systemd", "system", "docker-helper.service"), []byte("[Service]"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(e.scriptDir, "apparmor", "docker-helper.d"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(e.scriptDir, "apparmor"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(e.scriptDir, "apparmor", "docker-helper-system"), []byte("profile docker-helper-system {}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(e.scriptDir, "apparmor", "docker-helper.d", "managed-roots"), renderFragment([]string{}), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1672,7 +1683,8 @@ exit 0
 		"BINARY_DEST=" + e.dest("bin/docker-helper"),
 		"UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper.service"),
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
-		"AA_FRAGMENT_DEST=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
+		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
+		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
 		"CONFIG_PATH=" + e.dest("etc/docker-helper/config.json"),
 		"AA_PARSER=" + filepath.Join(e.fakeBinDir, "apparmor_parser"),
 		"SYSTEMCTL=" + filepath.Join(e.fakeBinDir, "systemctl"),
@@ -1683,7 +1695,7 @@ exit 0
 }
 
 // newSystemUninstallScriptEnv creates the fixture for uninstall-system.sh
-// with an installed sentinel binary, the managed-roots fragment, and the
+// with an installed sentinel binary, the legacy managed-roots fragment, and the
 // uninstall override environment.
 func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 	t.Helper()
@@ -1696,14 +1708,21 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		[]byte("# fixture managed-roots fragment\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Dir(e.dest("var/lib/docker-helper/apparmor/managed-boundaries")), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
+		[]byte("# fixture managed boundaries state\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	e.env = []string{
 		"PATH=" + e.fakeBinDir + ":" + os.Getenv("PATH"),
 		"BINARY_DEST=" + e.dest("bin/docker-helper"),
 		"UNIT_DEST=" + e.dest("etc/systemd/system/docker-helper.service"),
 		"AA_PROFILE_DEST=" + e.dest("etc/apparmor.d/docker-helper-system"),
-		"AA_FRAGMENT_DEST=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
-		"AA_FRAGMENT_DIR=" + e.dest("etc/apparmor.d/docker-helper.d"),
+		"AA_STATE_FILE=" + e.dest("var/lib/docker-helper/apparmor/managed-boundaries"),
+		"AA_LEGACY_FRAGMENT=" + e.dest("etc/apparmor.d/docker-helper.d/managed-roots"),
 		"CONFIG_DIR=" + e.dest("etc/docker-helper"),
 		"STATE_DIR=" + e.dest("var/lib/docker-helper"),
 		"RUNTIME_DIR=" + e.dest("run/docker-helper"),
@@ -1786,44 +1805,57 @@ func TestInstallSystemFreshYesWithoutAllowedRoot(t *testing.T) {
 	}
 }
 
-func TestInstallSystemPreservesManagedRoots(t *testing.T) {
+func TestInstallSystemMigratesLegacyFragment(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 
-	existingContent := "# existing operator-managed content\n"
-	fragmentDest := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
-	if err := os.WriteFile(fragmentDest, []byte(existingContent), 0644); err != nil {
+	legacyContent := "# legacy managed-roots content\n"
+	legacyPath := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
+	if err := os.WriteFile(legacyPath, []byte(legacyContent), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	if out, err := env.runFragmentInstall(t); err != nil {
-		t.Fatalf("install_apparmor_fragment failed: %v\n%s", err, out)
+	stateFile := env.dest("var/lib/docker-helper/apparmor/managed-boundaries")
+	if out, err := env.runPrepareApparmorState(t); err != nil {
+		t.Fatalf("prepare_apparmor_state failed: %v\n%s", err, out)
 	}
 
-	actual, err := os.ReadFile(fragmentDest)
+	actual, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != legacyContent {
+		t.Errorf("legacy fragment not migrated to new state\ngot:  %q\nwant: %q", string(actual), legacyContent)
+	}
+}
+
+func TestInstallSystemExistingNewStatePreserved(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+
+	// Existing new state file must NOT be overwritten by legacy.
+	stateFile := env.dest("var/lib/docker-helper/apparmor/managed-boundaries")
+	existingContent := "# existing new state\n"
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, []byte(existingContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyPath := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
+	if err := os.WriteFile(legacyPath, []byte("# different legacy content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if out, err := env.runPrepareApparmorState(t); err != nil {
+		t.Fatalf("prepare_apparmor_state failed: %v\n%s", err, out)
+	}
+
+	actual, err := os.ReadFile(stateFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(actual) != existingContent {
-		t.Errorf("existing fragment not preserved\ngot:  %q\nwant: %q", string(actual), existingContent)
-	}
-}
-
-func TestInstallSystemCopiesMissingFragment(t *testing.T) {
-	env := newSystemInstallScriptEnv(t)
-
-	bundledContent := renderFragment([]string{})
-	fragmentDest := env.dest("etc/apparmor.d/docker-helper.d/managed-roots")
-
-	if out, err := env.runFragmentInstall(t); err != nil {
-		t.Fatalf("install_apparmor_fragment failed: %v\n%s", err, out)
-	}
-
-	actual, err := os.ReadFile(fragmentDest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(actual) != string(bundledContent) {
-		t.Errorf("fragment not copied correctly\ngot:  %q\nwant: %q", string(actual), string(bundledContent))
+		t.Errorf("existing new state was overwritten by legacy\ngot:  %q\nwant: %q", string(actual), existingContent)
 	}
 }
 
@@ -1974,6 +2006,9 @@ func TestUninstallSystemNormalPreservesConfig(t *testing.T) {
 	if _, err := os.Stat(env.dest("var/lib/docker-helper")); os.IsNotExist(err) {
 		t.Error("state should be preserved without --purge")
 	}
+	if _, err := os.Stat(env.dest("var/lib/docker-helper/apparmor/managed-boundaries")); os.IsNotExist(err) {
+		t.Error("AppArmor state should be preserved without --purge")
+	}
 	if _, err := os.Stat(env.dest("etc/apparmor.d/docker-helper.d/managed-roots")); os.IsNotExist(err) {
 		t.Error("fragment should be preserved without --purge")
 	}
@@ -2002,6 +2037,9 @@ func TestUninstallSystemPurgeRemovesData(t *testing.T) {
 	}
 	if _, err := os.Stat(env.dest("run/docker-helper")); !os.IsNotExist(err) {
 		t.Error("runtime should be removed with --purge")
+	}
+	if _, err := os.Stat(env.dest("var/lib/docker-helper/apparmor")); !os.IsNotExist(err) {
+		t.Error("AppArmor state should be removed with --purge")
 	}
 	if _, err := os.Stat(env.dest("etc/apparmor.d/docker-helper.d/managed-roots")); !os.IsNotExist(err) {
 		t.Error("fragment should be removed with --purge")
@@ -2289,9 +2327,8 @@ exit 42
 // --- nFPM config static tests ---
 
 // TestNfpmConfigFile verifies the nFPM config: required fields, system
-// asset destinations, exclusions, vendor systemd directory, managed-roots
-// config type, modes, version templating, and per-format depends and
-// lifecycle scripts.
+// asset destinations, exclusions, vendor systemd directory, modes, version
+// templating, and per-format depends and lifecycle scripts.
 func TestNfpmConfigFile(t *testing.T) {
 	data, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -2311,12 +2348,20 @@ func TestNfpmConfigFile(t *testing.T) {
 		"/usr/bin/docker-helper",
 		"/usr/lib/systemd/system/docker-helper.service",
 		"/etc/apparmor.d/docker-helper-system",
-		"/etc/apparmor.d/docker-helper.d/managed-roots",
 		"/usr/share/docker-helper/apparmor/local/curl",
 	} {
 		if !strings.Contains(content, path) {
 			t.Errorf("nfpm.yaml missing required destination: %s", path)
 		}
+	}
+
+	// Must not ship the dynamic AppArmor state under /etc (it is durable
+	// helper-owned state, not a package-owned config file).
+	if strings.Contains(content, "managed-roots") {
+		t.Error("nfpm.yaml must not package the dynamic AppArmor managed boundaries state under /etc")
+	}
+	if strings.Contains(content, "var/lib/docker-helper/apparmor") {
+		t.Error("nfpm.yaml must not package AppArmor state under /var/lib (state is created/migrated by lifecycle code)")
 	}
 
 	// Must not ship operator-managed runtime/state paths.
@@ -2347,21 +2392,6 @@ func TestNfpmConfigFile(t *testing.T) {
 	// systemd unit must not be installed to /etc/systemd/system.
 	if strings.Contains(content, "/etc/systemd/system") {
 		t.Error("systemd unit must not be installed to /etc/systemd/system")
-	}
-
-	// managed-roots entry must be config|noreplace so operator edits
-	// survive upgrades on both DEB (conffile) and RPM (%config(noreplace)).
-	idx := strings.Index(content, "dst: /etc/apparmor.d/docker-helper.d/managed-roots")
-	if idx < 0 {
-		t.Fatal("managed-roots destination entry not found")
-	}
-	before := content[:idx]
-	entryStart := strings.LastIndex(before, "- src:")
-	if entryStart < 0 {
-		entryStart = 0
-	}
-	if !strings.Contains(content[entryStart:], "type: config|noreplace") {
-		t.Error("managed-roots content entry must have type: config|noreplace")
 	}
 
 	// Modes: binary 0755, assets 0644.
@@ -2912,19 +2942,16 @@ func verifyDEBPackage(t *testing.T, dpkgDeb, debFile string) {
 		t.Error("DEB Depends must not include docker package")
 	}
 
-	// Conffiles — extract control tarball and read conffiles.
+	// Conffiles — extract control tarball and verify no conffiles
+	// (dynamic AppArmor state is not package-owned).
 	controlDir := t.TempDir()
 	cmd = exec.Command(dpkgDeb, "--control", debFile, controlDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("dpkg-deb --control failed: %v\n%s", err, out)
 	}
 	conffilesData, err := os.ReadFile(filepath.Join(controlDir, "conffiles"))
-	if err != nil {
-		t.Fatalf("DEB conffiles not found in control tarball: %v", err)
-	}
-	conffilesStr := string(conffilesData)
-	if !strings.Contains(conffilesStr, "/etc/apparmor.d/docker-helper.d/managed-roots") {
-		t.Errorf("DEB conffiles must contain managed-roots, got:\n%s", conffilesStr)
+	if err == nil && len(conffilesData) > 0 {
+		t.Errorf("DEB should not contain conffiles, got:\n%s", string(conffilesData))
 	}
 }
 
@@ -2962,25 +2989,9 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	cmd = exec.Command(rpmPath, "-qp", "--qf", "[%{FILENAMES} %{FILEFLAGS:fflags}\\n]", rpmFile)
 	flagOut, _ := cmd.CombinedOutput()
 	flagStr := string(flagOut)
-	managedRootsFound := false
 	aaProfileFound := false
 	for _, line := range strings.Split(flagStr, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.Contains(line, "/etc/apparmor.d/docker-helper.d/managed-roots") {
-			managedRootsFound = true
-			parts := strings.Fields(line)
-			if len(parts) < 2 {
-				t.Errorf("RPM managed-roots flags line has no flags field: %s", line)
-				continue
-			}
-			flags := parts[len(parts)-1]
-			if !strings.Contains(flags, "c") {
-				t.Errorf("RPM managed-roots must have config flag (c): %s", line)
-			}
-			if !strings.Contains(flags, "n") {
-				t.Errorf("RPM managed-roots must have noreplace flag (n): %s", line)
-			}
-		}
 		if strings.Contains(line, "/etc/apparmor.d/docker-helper-system") {
 			aaProfileFound = true
 			parts := strings.Fields(line)
@@ -2991,9 +3002,6 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 				}
 			}
 		}
-	}
-	if !managedRootsFound {
-		t.Errorf("managed-roots not found in RPM file flags output:\n%s", flagStr)
 	}
 	if !aaProfileFound {
 		t.Errorf("docker-helper-system not found in RPM file flags output:\n%s", flagStr)
@@ -3007,7 +3015,6 @@ func verifyPackageContents(t *testing.T, format, contents string) {
 		"/usr/bin/docker-helper",
 		"/usr/lib/systemd/system/docker-helper.service",
 		"/etc/apparmor.d/docker-helper-system",
-		"/etc/apparmor.d/docker-helper.d/managed-roots",
 		"/usr/share/docker-helper/apparmor/local/curl",
 	} {
 		if !strings.Contains(contents, path) {
@@ -3020,6 +3027,7 @@ func verifyPackageContents(t *testing.T, format, contents string) {
 		"/etc/docker-helper/admin.token",
 		"/var/lib/docker-helper",
 		"/run/docker-helper",
+		"/etc/apparmor.d/docker-helper.d",
 	} {
 		if strings.Contains(contents, path) {
 			t.Errorf("%s must not contain: %s", format, path)
@@ -3051,7 +3059,6 @@ func verifyPackageModes(t *testing.T, format, contents string) {
 			}
 		case "usr/lib/systemd/system/docker-helper.service",
 			"etc/apparmor.d/docker-helper-system",
-			"etc/apparmor.d/docker-helper.d/managed-roots",
 			"usr/share/docker-helper/apparmor/local/curl":
 			if mode != "-rw-r--r--" {
 				t.Errorf("%s: %s mode = %s, want -rw-r--r-- (0644)", format, path, mode)
@@ -3078,7 +3085,6 @@ func verifyRPMModesPerms(t *testing.T, modeOutput string) {
 			}
 		case "usr/lib/systemd/system/docker-helper.service",
 			"etc/apparmor.d/docker-helper-system",
-			"etc/apparmor.d/docker-helper.d/managed-roots",
 			"usr/share/docker-helper/apparmor/local/curl":
 			if mode != "-rw-r--r--" {
 				t.Errorf("RPM: %s mode = %s, want -rw-r--r--", path, mode)
@@ -3356,6 +3362,9 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	modified = strings.ReplaceAll(modified, "/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH")
 	// Replace SELinux enforce path with a test-controlled path.
 	modified = strings.ReplaceAll(modified, "/sys/fs/selinux/enforce", "$SELINUX_ENFORCE_PATH")
+	// Replace migration state paths with test-controlled paths.
+	modified = strings.ReplaceAll(modified, "/var/lib/docker-helper/apparmor/managed-boundaries", "$AA_STATE_FILE")
+	modified = strings.ReplaceAll(modified, "/etc/apparmor.d/docker-helper.d/managed-roots", "$AA_LEGACY_FRAGMENT")
 	modifiedFile := filepath.Join(scriptDir, "modified.sh")
 	if err := os.WriteFile(modifiedFile, []byte(modified), 0755); err != nil {
 		t.Fatal(err)
@@ -3388,6 +3397,16 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		t.Fatal(err)
 	}
 
+	// Default: AppArmor migration state paths under test-controlled directory.
+	aaStateFile := filepath.Join(tmpDir, "var", "lib", "docker-helper", "apparmor", "managed-boundaries")
+	if err := os.MkdirAll(filepath.Dir(aaStateFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	aaLegacyFragment := filepath.Join(tmpDir, "etc", "apparmor.d", "docker-helper.d", "managed-roots")
+	if err := os.MkdirAll(filepath.Dir(aaLegacyFragment), 0755); err != nil {
+		t.Fatal(err)
+	}
+
 	env := append(os.Environ(),
 		"PATH="+fakeDir+":"+os.Getenv("PATH"),
 		"STOP_FAIL=false",
@@ -3399,6 +3418,8 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		"TEST_RUN_SYSTEMD="+testRunDir,
 		"AA_ENABLED_PATH="+aaEnabledPath,
 		"SELINUX_ENFORCE_PATH="+selinuxEnforcePath,
+		"AA_STATE_FILE="+aaStateFile,
+		"AA_LEGACY_FRAGMENT="+aaLegacyFragment,
 	)
 	env = append(env, extraEnv...)
 

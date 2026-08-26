@@ -25,8 +25,8 @@ UNIT_DEST="${UNIT_DEST:-/etc/systemd/system/docker-helper.service}"
 UNIT_NAME="${UNIT_NAME:-docker-helper.service}"
 AA_PROFILE_SRC="${AA_PROFILE_SRC:-apparmor/docker-helper-system}"
 AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
-AA_FRAGMENT_SRC="${AA_FRAGMENT_SRC:-apparmor/docker-helper.d/managed-roots}"
-AA_FRAGMENT_DEST="${AA_FRAGMENT_DEST:-/etc/apparmor.d/docker-helper.d/managed-roots}"
+AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
+AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
 CONFIG_PATH="${CONFIG_PATH:-/etc/docker-helper/config.json}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
@@ -120,12 +120,6 @@ check_bundled_assets() {
 	local profile_path="$script_dir/$AA_PROFILE_SRC"
 	if [[ ! -f "$profile_path" ]]; then
 		error "AppArmor profile not found at $profile_path"
-		exit 1
-	fi
-
-	local fragment_path="$script_dir/$AA_FRAGMENT_SRC"
-	if [[ ! -f "$fragment_path" ]]; then
-		error "AppArmor managed-roots fragment not found at $fragment_path"
 		exit 1
 	fi
 }
@@ -255,18 +249,31 @@ install_apparmor_profile() {
 	chmod 0644 "$AA_PROFILE_DEST"
 }
 
-install_apparmor_fragment() {
-	info "Installing AppArmor managed-roots fragment"
-	local dest_dir="$(dirname "$AA_FRAGMENT_DEST")"
-	mkdir -p "$dest_dir"
+prepare_apparmor_state() {
+	info "Preparing AppArmor managed boundaries state"
+	local state_dir="$(dirname "$AA_STATE_FILE")"
+	mkdir -p "$state_dir"
+	chmod 0755 "$state_dir"
 
-	if [[ -f "$AA_FRAGMENT_DEST" ]]; then
-		info "Existing managed-roots fragment preserved (not overwritten)"
-		return
+	# Migrate the legacy managed-roots fragment only when the new state does
+	# not already exist, so an existing new state file is never overwritten.
+	if [[ -f "$AA_LEGACY_FRAGMENT" ]] && [[ ! -f "$AA_STATE_FILE" ]]; then
+		info "Migrating legacy AppArmor managed-roots fragment to $AA_STATE_FILE"
+		cp "$AA_LEGACY_FRAGMENT" "$AA_STATE_FILE"
+		chmod 0644 "$AA_STATE_FILE"
 	fi
+}
 
-	cp "$script_dir/$AA_FRAGMENT_SRC" "$AA_FRAGMENT_DEST"
-	chmod 0644 "$AA_FRAGMENT_DEST"
+cleanup_legacy_apparmor_state() {
+	# Called only after the new profile has been loaded successfully, so the
+	# migrated copy is the authoritative one before the legacy file is removed.
+	if [[ -f "$AA_LEGACY_FRAGMENT" ]] && [[ -f "$AA_STATE_FILE" ]]; then
+		rm -f "$AA_LEGACY_FRAGMENT"
+		local legacy_dir="$(dirname "$AA_LEGACY_FRAGMENT")"
+		if [[ -d "$legacy_dir" ]] && [[ -z "$(ls -A "$legacy_dir" 2>/dev/null)" ]]; then
+			rmdir "$legacy_dir" 2>/dev/null || true
+		fi
+	fi
 }
 
 install_completion() {
@@ -365,9 +372,10 @@ main() {
 	install_binary
 	install_unit
 	install_apparmor_profile
-	install_apparmor_fragment
+	prepare_apparmor_state
 	install_completion
 	load_apparmor_profile
+	cleanup_legacy_apparmor_state
 	run_init
 	reload_systemd
 
@@ -393,7 +401,7 @@ main() {
 	info "  systemctl status $UNIT_NAME"
 	info "  systemctl restart $UNIT_NAME"
 	info ""
-	info "Manage AppArmor workspace roots with:"
+	info "Manage AppArmor workspace boundaries with:"
 	info "  docker-helper apparmor root add PATH"
 	info "  docker-helper apparmor root remove PATH"
 }

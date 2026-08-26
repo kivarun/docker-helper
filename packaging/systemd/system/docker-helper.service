@@ -51,7 +51,7 @@ ProtectClock=true
 ProtectHostname=true
 
 # Docker socket access (required for Docker operations)
-# Principal workspaces are accessed via managed AppArmor roots,
+# concrete Session workspaces receive managed AppArmor MAC boundaries,
 # not hardcoded here. ProtectHome is disabled to allow workspace access.
 
 [Install]

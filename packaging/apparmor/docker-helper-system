@@ -5,12 +5,10 @@
 #
 # Installation:
 #   sudo cp docker-helper-system /etc/apparmor.d/
-#   sudo mkdir -p /etc/apparmor.d/docker-helper.d
-#   sudo install -D -m 0644 docker-helper.d/managed-roots \
-#       /etc/apparmor.d/docker-helper.d/managed-roots
 #   sudo apparmor_parser -a /etc/apparmor.d/docker-helper-system
 #
-# Workspace access is managed dynamically via the managed-roots fragment.
+# Dynamic AppArmor managed boundaries are stored in the helper-owned state
+# directory at /var/lib/docker-helper/apparmor/ and included automatically.
 # Do not add workspace rules directly to this profile.
 
 #include <tunables/global>
@@ -38,6 +36,10 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# Socket lock file — file locking (k) is required for the single-instance
 	# lock; the broader /run/docker-helper/** rule intentionally omits k.
 	/run/docker-helper/docker-helper.sock.lock rwk,
+
+	# Dynamic AppArmor managed boundaries state (atomic temp + rename).
+	/var/lib/docker-helper/apparmor/ rw,
+	/var/lib/docker-helper/apparmor/* rw,
 
 	# Docker socket — filesystem access.
 	/run/docker.sock rw,
@@ -67,15 +69,15 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# AppArmor lock file.
 	/run/lock/docker-helper-apparmor.lock rwk,
 
-	# AppArmor parser (for managed roots reload).
+	# AppArmor parser (for managed boundaries reload).
 	/usr/sbin/apparmor_parser rix,
 
 	# AppArmor profiles directory (read own profile).
 	/etc/apparmor.d/ r,
 	/etc/apparmor.d/** r,
 
-	# Managed workspace roots fragment (included dynamically).
-	#include <docker-helper.d/managed-roots>
+	# Dynamic AppArmor managed boundaries (included if present).
+	#include if exists "/var/lib/docker-helper/apparmor/managed-boundaries"
 
 	# /tmp for Docker build contexts and temporary files.
 	/tmp/ r,

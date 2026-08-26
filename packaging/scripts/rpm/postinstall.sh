@@ -13,6 +13,16 @@ fi
 was_active=false
 systemctl is-active --quiet docker-helper.service && was_active=true
 
+# Migrate AppArmor managed boundaries state from legacy location.
+AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
+AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
+mkdir -p "$(dirname "$AA_STATE_FILE")"
+chmod 0755 "$(dirname "$AA_STATE_FILE")"
+if [ -f "$AA_LEGACY_FRAGMENT" ] && [ ! -f "$AA_STATE_FILE" ]; then
+  cp "$AA_LEGACY_FRAGMENT" "$AA_STATE_FILE"
+  chmod 0644 "$AA_STATE_FILE"
+fi
+
 # Detect MAC backend(s).
 aa_enabled="$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" || true
 selinux_enforcing="$(cat /sys/fs/selinux/enforce 2>/dev/null | tr -d '[:space:]')" || true
@@ -29,6 +39,11 @@ fi
 if [ "$aa_active" = "true" ]; then
   if ! apparmor_parser --replace --skip-read-cache /etc/apparmor.d/docker-helper-system; then
     exit 1
+  fi
+  # Clean up legacy fragment after successful profile replacement.
+  if [ -f "$AA_LEGACY_FRAGMENT" ] && [ -f "$AA_STATE_FILE" ]; then
+    rm -f "$AA_LEGACY_FRAGMENT"
+    rmdir /etc/apparmor.d/docker-helper.d 2>/dev/null || true
   fi
 fi
 
