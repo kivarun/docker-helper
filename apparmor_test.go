@@ -2479,6 +2479,21 @@ func TestSystemProfileAppArmorReplaceWritable(t *testing.T) {
 	}
 }
 
+func TestSystemProfileAppArmorInterfaceDirReadable(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// libapparmor stat()s the AppArmor interface directory during mountpoint
+	// discovery after reading /proc/mounts.  The directory itself must be
+	// readable, not only its children.
+	if !strings.Contains(content, "/sys/kernel/security/apparmor/ r,") {
+		t.Error("system profile must grant read to /sys/kernel/security/apparmor/ for interface discovery")
+	}
+}
+
 func TestSystemProfileAppArmorFeaturesReadable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {

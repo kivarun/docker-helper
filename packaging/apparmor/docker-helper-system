@@ -96,6 +96,10 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# This is the only MAC capability granted; mac_override is intentionally omitted.
 	capability mac_admin,
 
+	# AppArmor interface directory — libapparmor stat()s this path during
+	# mountpoint discovery after reading /proc/mounts.
+	/sys/kernel/security/apparmor/ r,
+
 	# AppArmor feature metadata — parser probes these for version detection
 	# and capability negotiation before attempting any policy operation.
 	/sys/kernel/security/apparmor/features/ r,
