@@ -276,17 +276,21 @@ func runDaemon(stdout, stderr io.Writer) error {
 		}
 
 		// Create MAC coordinator and reconcile live sessions.
-		macDriver, err := newWorkspaceMACDriver(cfg.Mode, detectLSM)
+		// User mode (or no active MAC driver) leaves MACCoordinator nil, per the
+		// documented App invariant, so persisted live sessions remain usable
+		// without in-memory MAC bindings.
+		macCoordinator, err := newMACCoordinatorForMode(db, cfg.Mode, detectLSM)
 		if err != nil {
 			serveStartupError(err, "")
 			return err
 		}
-		macCoordinator := newSessionMACCoordinator(db, macDriver)
 
 		// Reconcile: ensure all live sessions have valid MAC state.
-		if err := macCoordinator.ReconcileLiveSessions(); err != nil {
-			serveStartupError(err, "MAC state for live sessions cannot be reconciled")
-			return err
+		if macCoordinator != nil {
+			if err := macCoordinator.ReconcileLiveSessions(); err != nil {
+				serveStartupError(err, "MAC state for live sessions cannot be reconciled")
+				return err
+			}
 		}
 
 		// Clean up stale session runtime directories that no longer

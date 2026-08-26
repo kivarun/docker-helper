@@ -796,3 +796,19 @@ func newWorkspaceMACDriver(mode DeploymentMode, detectLSM func() (LSMBackend, er
 		return nil, nil
 	}
 }
+
+// newMACCoordinatorForMode builds the session MAC coordinator for the given
+// deployment mode, returning nil when no MAC driver is active (e.g. user
+// mode). runDaemon uses this so App.MACCoordinator stays nil whenever there is
+// no active MAC driver; persisted live sessions then need no in-memory MAC
+// bindings to be usable.
+func newMACCoordinatorForMode(db *sql.DB, mode DeploymentMode, detectLSM func() (LSMBackend, error)) (*sessionMACCoordinator, error) {
+	driver, err := newWorkspaceMACDriver(mode, detectLSM)
+	if err != nil {
+		return nil, err
+	}
+	if driver == nil {
+		return nil, nil
+	}
+	return newSessionMACCoordinator(db, driver), nil
+}
