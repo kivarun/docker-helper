@@ -66,6 +66,23 @@ func TestSELinuxPolicyContainerWorkspaceAccess(t *testing.T) {
 	}
 }
 
+func TestSELinuxPolicyCgroupSearch(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// Regression for the live enforcing AVC:
+	//   scontext=docker_helper_t tcontext=cgroup_t tclass=dir denied { search } comm="docker"
+	// The type must be required and only the minimal dir search granted.
+	if !strings.Contains(content, "type cgroup_t;") {
+		t.Error("policy must require type cgroup_t;")
+	}
+	if !strings.Contains(content, "allow docker_helper_t cgroup_t:dir { search };") {
+		t.Error("policy must grant docker_helper_t cgroup_t:dir search")
+	}
+}
+
 func TestSELinuxPolicyNoBroadHostTypeGrants(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
 	if err != nil {

@@ -80,6 +80,7 @@ module docker_helper 1.0;
 		type http_port_t;
 		type cert_t;
 		type container_file_t;
+		type cgroup_t;
 
 		role system_r;
 
@@ -255,6 +256,11 @@ allow docker_helper_t http_port_t:tcp_socket { name_connect };
 allow docker_helper_t cert_t:dir { search read open };
 allow docker_helper_t cert_t:lnk_file { read };
 allow docker_helper_t cert_t:file { read open getattr };
+
+# cgroup traversal for Docker (from live AVC evidence):
+#   scontext=docker_helper_t tcontext=cgroup_t tclass=dir denied { search } comm="docker"
+# Search only; no broader cgroup permissions.
+allow docker_helper_t cgroup_t:dir { search };
 
 # --- docker_helper_container_t: custom container domain ---
 
