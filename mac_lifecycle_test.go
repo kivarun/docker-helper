@@ -1081,6 +1081,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 // handler with a pinned mount whose Cleanup fails, and verifies that the
 // MAC lease is retained (not released) by inspecting the lifecycle state.
 func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -1211,6 +1212,7 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 // TestRunHandlerCleanupSuccessReleasesLease drives handleRun with a
 // successful pinned mount cleanup and verifies the MAC lease IS released.
 func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)
@@ -1589,6 +1591,7 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 // TestAdmitRejectionRunPinsBeforeLease drives handleRun with admit
 // rejection and verifies pins are cleaned up before the lease is released.
 func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 	db, err := openDatabase(dbPath)

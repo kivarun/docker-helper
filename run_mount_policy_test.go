@@ -145,6 +145,7 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 }
 
 func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
@@ -222,6 +223,7 @@ func getLastOp(sup *operationSupervisor) *operation {
 
 // TestRunSecondPinError cleans first pin, supervisor contains no operation, Docker not called.
 func TestRunSecondPinError(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
@@ -295,6 +297,7 @@ func TestRunSecondPinError(t *testing.T) {
 
 // TestRunRegistryShuttingDown cleans pins, supervisor does not receive operation.
 func TestRunSupervisorShuttingDown(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	supervisor := newOperationSupervisor()
@@ -358,6 +361,7 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 
 // TestRunSystemModeEmptyRuntimeDir does not pass original path to Docker.
 func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.Config.RuntimeDir = ""
@@ -417,6 +421,7 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 
 // TestRunSystemModeArgvContainsStablePaths verifies Docker receives pinned paths.
 func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
@@ -534,6 +539,7 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 
 // TestRunStartErrorCleansPinsOnce verifies cleanup on cmd.Start failure.
 func TestRunStartErrorCleansPinsOnce(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
@@ -590,6 +596,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 
 // TestRunNormalCompletionCleansPinsOnce verifies cleanup after cmd.Wait.
 func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
@@ -645,6 +652,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 
 // TestRunCleanupReverseOrder verifies cleanup runs in reverse mount order.
 func TestRunCleanupReverseOrder(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
@@ -717,6 +725,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 // TestRunCleanupErrorDoesNotChangeResult verifies cleanup error doesn't
 // override the operation result.
 func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
@@ -778,6 +787,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 // TestRunAuditContainsUserSourcePaths verifies audit uses user-provided
 // source paths, not stable runtime paths.
 func TestRunAuditContainsUserSourcePaths(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()

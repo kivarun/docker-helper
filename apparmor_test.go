@@ -79,6 +79,15 @@ func mockSELinuxInactive(t *testing.T) {
 	t.Cleanup(func() { selinuxEnabled = saved })
 }
 
+// mockDetectLSM replaces detectLSM to return the given backend, allowing
+// tests that exercise system-mode handlers to run without a real MAC backend.
+func mockDetectLSM(t *testing.T, backend LSMBackend, err error) {
+	t.Helper()
+	saved := detectLSM
+	detectLSM = func() (LSMBackend, error) { return backend, err }
+	t.Cleanup(func() { detectLSM = saved })
+}
+
 // --- Command registration and help ---
 
 // TestAppArmorHelpOutput verifies help dispatch for every apparmor command

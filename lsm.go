@@ -91,7 +91,10 @@ func parseSELinuxType(ctx string) (string, error) {
 //
 // ENOENT for an individual backend marker means that backend is not active.
 // Detection errors must not silently downgrade security.
-func detectLSM() (LSMBackend, error) {
+//
+// This is a test seam: tests may replace detectLSM to simulate a specific
+// backend without requiring the host to have that backend active.
+var detectLSM = func() (LSMBackend, error) {
 	appArmorActive, err := appArmorLSMActive()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

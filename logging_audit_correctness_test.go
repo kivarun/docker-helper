@@ -1116,6 +1116,7 @@ func countAuditEvents(buf *bytes.Buffer, event, result string) int {
 // fails during run completion, the operational log contains the correct
 // correlation fields: operation=run, operation_id, session_id, error.
 func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	auditBuf := new(bytes.Buffer)
 	opBuf := new(bytes.Buffer)
 	initLoggers(opBuf, auditBuf, slog.LevelWarn, true)
