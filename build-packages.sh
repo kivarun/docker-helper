@@ -60,8 +60,10 @@ if ! command -v semodule_package >/dev/null 2>&1; then
   echo "error: semodule_package not found (install semodule-utils or policycoreutils)" >&2
   exit 1
 fi
-# Remove any previous generated output to prevent stale artifacts.
-rm -f "${SCRIPT_DIR}/dist/docker_helper.pp"
+# Remove any previous generated output to prevent stale artifacts. Clean both
+# the current docker_helper.pp and the legacy docker-helper.pp so a stale
+# artifact from an older checkout/build cannot remain in dist/.
+rm -f "${SCRIPT_DIR}/dist/docker_helper.pp" "${SCRIPT_DIR}/dist/docker-helper.pp"
 echo "Building SELinux policy module..."
 checkmodule -M -m -o "${SCRIPT_DIR}/dist/docker_helper.mod" \
   "${SCRIPT_DIR}/packaging/selinux/docker-helper.te"
