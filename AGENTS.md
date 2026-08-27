@@ -1,3 +1,60 @@
+# docker-helper — developer instructions
+
+Long-lived development rules for docker-helper (the policy-enforcing Docker
+proxy daemon for sandboxed agents). Read the Orientation first; the numbered
+rules below are the repo's governance and encode past incidents — follow them.
+
+## Orientation
+
+- **Single binary, single package.** One Go module (`docker-helper`, Go 1.23),
+  all code in `package main` at the repo root: one binary is daemon, CLI, and
+  HTTP API. There are no library subpackages, so `go test ./...` is one
+  package and `go test -run 'TestName' .` runs one test.
+- **Linux-only.** Files guarded by `//go:build linux`/`!linux`
+  (`staging_*.go`, `mount_pin_*.go`). Do not assume other OSes.
+- **Build:** `go build -o docker-helper .` writes the gitignored
+  `./docker-helper`. Release/static tooling: `build-static.sh <version>`,
+  `build-bundle.sh`, `build-packages.sh`, `build-manpages.sh`; artifacts land
+  in gitignored `dist/`.
+- **Entrypoints:** `main.go` (wiring), `cli.go` + `config_cli.go` +
+  `agent_cli.go` (command tree), `app.go` (daemon startup), `operation.go`
+  (async build/run lifecycle), `mac_lifecycle.go` (AppArmor/SELinux
+  confinement lifecycle). Canonical design reference: `docs/architecture.md`.
+- **Mode model:** the same binary runs non-root (user mode) or root (system
+  mode), decided at runtime by effective UID. Tests simulate both modes
+  without root by reassigning package-global seams — `EffectiveUID`
+  (`config.go`), `getConfigPathFunc`, `getRuntimeDirFunc`, `systemSocketExists`
+  (`operator_client.go`), `trustedCARestorecon` (`ca.go`). These are
+  package-global state: never use `t.Parallel()` in tests that swap them.
+- **Docker-dependent tests skip** when `docker`/the daemon is unavailable
+  (e.g. `container_lifecycle_integration_test.go`); the rest of the suite runs
+  without Docker.
+- **Shipped policy is tested.** AppArmor profiles (`packaging/apparmor/`),
+  SELinux policy (`packaging/selinux/`), systemd units, and install scripts
+  are asserted by root-package tests (`apparmor_test.go`,
+  `selinux_fcontext_test.go`, `packaging_test.go`). When you change daemon
+  behavior that touches the host, consider whether the shipped policy must
+  change too — and change the file, not just the test.
+- **Man pages are source-controlled** in `docs/man/*.1`/`*.5` and must stay in
+  sync with CLI/help text; `build-manpages.sh` compresses them into
+  `dist/man/`. `manpage_test.go`, `completion_test.go`, `cli_help_test.go`
+  guard formatting and derived content.
+- **Version:** `var version = "dev"` in `main.go`. Official versions come only
+  from ldflags (`-X main.version=...`) in the build scripts. Never hardcode a
+  release number in source (see §20).
+- **Docs roles:** `README.md` = operator quick start; `docs/architecture.md` =
+  canonical design/API/audit reference; `docs/roadmap.md` + `docs/release-*.md`
+  = release scope and plans; `.claude/skills/docker-helper/SKILL.md` =
+  instructions for agents USING docker-helper, not developing it (see §19).
+- **Validation gate** (identical to CI `ci.yml`): `gofmt -l .` (must be empty),
+  `go test ./...`, `go test -race ./...`, `go vet ./...`, `git diff --check`.
+  CI-only extras needing extra tools: `scripts/check-selinux-policy.sh`
+  (checkpolicy/semodule-utils) and `scripts/check-static-build.sh`
+  (musl-tools). See §23.
+- **Secrets:** never write admin tokens, session tokens, Principal
+  credentials, or Authorization headers into logs, audit output, error
+  messages, or stderr (see §9).
+
 # Development approach
 
 1. Work incrementally.
