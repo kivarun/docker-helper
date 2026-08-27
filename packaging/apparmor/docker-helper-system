@@ -181,7 +181,12 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/ssl/certs/** r,
 	/etc/pki/tls/certs/** r,
 	# Buildx TLS CA roots (demonstrated by build registry metadata fetch).
+	# On openSUSE the standard paths are symlinks into /var/lib/ca-certificates;
+	# AppArmor mediates the resolved targets, so those must be readable too.
 	/etc/ssl/ca-bundle.pem r,
+	/var/lib/ca-certificates/ca-bundle.pem r,
+	/var/lib/ca-certificates/pem/ r,
+	/var/lib/ca-certificates/pem/** r,
 	# openSUSE trust anchors (administrator-installed CA material).
 	/etc/pki/trust/anchors/ r,
 	/etc/pki/trust/anchors/** r,

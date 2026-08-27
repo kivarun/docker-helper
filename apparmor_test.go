@@ -2362,40 +2362,81 @@ func TestSystemProfileNoGitExec(t *testing.T) {
 	}
 }
 
-// TestSystemProfileDockerBuildCABundleRead verifies the Buildx TLS CA-roots
-// read added for `docker build` (evidence-driven AppArmor fix). Buildx loads
-// system roots from /etc/ssl/ca-bundle.pem when fetching registry metadata.
-// The rule must be present, strictly read-only, and no broad /etc/ssl/**
-// wildcard read may be used instead.
-func TestSystemProfileDockerBuildCABundleRead(t *testing.T) {
+// TestSystemProfileDockerBuildSystemTrustStoreReadOnly verifies the Buildx
+// TLS system-trust-store reads added for `docker build` (evidence-driven
+// AppArmor fix). Buildx loads system roots when fetching registry metadata.
+// On openSUSE the standard paths are symlinks into /var/lib/ca-certificates,
+// and AppArmor mediates the resolved targets, so both the standard and the
+// resolved openSUSE paths must be readable. Every granted rule must be
+// strictly read-only, and no broad /etc/ssl/** or /var/lib/ca-certificates/**
+// read may be used instead.
+func TestSystemProfileDockerBuildSystemTrustStoreReadOnly(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
 		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
-	if !strings.Contains(content, "/etc/ssl/ca-bundle.pem r,") {
-		t.Error("system profile must allow read of /etc/ssl/ca-bundle.pem for docker build")
+	required := []string{
+		"/etc/ssl/ca-bundle.pem r,",
+		"/var/lib/ca-certificates/ca-bundle.pem r,",
+		"/var/lib/ca-certificates/pem/ r,",
+		"/var/lib/ca-certificates/pem/** r,",
+	}
+	for _, rule := range required {
+		if !strings.Contains(content, rule) {
+			t.Errorf("system profile missing system trust-store read rule: %s", rule)
+		}
 	}
 
-	// The CA-bundle rule must be strictly read-only.
+	// Every system trust-store rule must be strictly read-only.
+	trustStorePaths := []string{
+		"/etc/ssl/ca-bundle.pem",
+		"/var/lib/ca-certificates/ca-bundle.pem",
+		"/var/lib/ca-certificates/pem/",
+	}
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.Contains(trimmed, "/etc/ssl/ca-bundle.pem") {
-			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
-			perm = strings.TrimSuffix(perm, ",")
-			for _, extra := range []string{"w", "a", "k", "m", "l", "c", "x", "d", "p", "i"} {
-				if strings.Contains(perm, extra) {
-					t.Errorf("CA-bundle rule must be read-only (found %q in %q): %s", extra, perm, trimmed)
-				}
+		matches := false
+		for _, p := range trustStorePaths {
+			if strings.Contains(trimmed, p) {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+		perm = strings.TrimSuffix(perm, ",")
+		if !strings.Contains(perm, "r") {
+			t.Errorf("system trust-store rule must grant read: %s", trimmed)
+		}
+		for _, extra := range []string{"w", "a", "k", "m", "l", "c", "x", "d", "p", "i"} {
+			if strings.Contains(perm, extra) {
+				t.Errorf("system trust-store rule must be read-only (found %q in %q): %s", extra, perm, trimmed)
 			}
 		}
 	}
 
-	// No broad /etc/ssl/** wildcard read may be used as a shortcut.
+	// No broad /var/lib/ca-certificates/** read may be introduced.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/var/lib/ca-certificates/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "r") {
+				t.Errorf("system profile must not grant broad /var/lib/ca-certificates/** read (found: %s)", trimmed)
+			}
+		}
+	}
+
+	// No broad /etc/ssl/** read may be introduced.
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
