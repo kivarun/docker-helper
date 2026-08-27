@@ -1745,6 +1745,13 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(content, "allow docker_helper_t sysctl_net_t:file { read open };") {
 		t.Error("policy must grant docker_helper_t sysctl_net_t file read open")
 	}
+	// tmpfs_t filesystem getattr is required for restorecon -R -m to statfs()
+	// the target filesystem (trusted-ca lives on tmpfs). It is NOT a mount-scan
+	// permission. Proven necessary by enforcing UAT:
+	//   restorecon: statfs(/run/docker-helper/trusted-ca) failed: Permission denied
+	if !strings.Contains(content, "allow docker_helper_t tmpfs_t:filesystem { getattr };") {
+		t.Error("policy must grant docker_helper_t tmpfs_t:filesystem getattr for restorecon statfs")
+	}
 	// Absence of the temporary mount-scan grants that were only needed when
 	// restorecon was run without -m. Assert the exact unwanted allow rules so
 	// unrelated legitimate references to these types do not cause false
@@ -1752,7 +1759,6 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	for _, absent := range []string{
 		"allow docker_helper_t fs_t:filesystem { getattr };",
 		"allow docker_helper_t device_t:filesystem { getattr };",
-		"allow docker_helper_t tmpfs_t:filesystem { getattr };",
 		"allow docker_helper_t devpts_t:filesystem { getattr };",
 		"allow docker_helper_t cgroup_t:filesystem { getattr };",
 		"allow docker_helper_t pstore_t:filesystem { getattr };",

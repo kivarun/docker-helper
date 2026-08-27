@@ -88,6 +88,7 @@ module docker_helper 1.0;
 		type selinux_config_t;
 		type default_context_t;
 		type file_context_t;
+		type tmpfs_t;
 
 		role system_r;
 
@@ -98,7 +99,7 @@ module docker_helper 1.0;
 		class chr_file { append create getattr ioctl read watch open write };
 		class blk_file { append create getattr ioctl read };
 		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock };
-		class filesystem { mount remount unmount };
+		class filesystem { mount remount unmount getattr };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
@@ -289,6 +290,11 @@ allow docker_helper_t self:capability { dac_read_search sys_admin };
 
 # Mount-pin: unmount filesystem (proven in enforcing UAT)
 allow docker_helper_t fs_t:filesystem { unmount };
+
+# restorecon -R -m inspects the filesystem containing its explicit target path
+# (trusted-ca lives on tmpfs). statfs() on the target filesystem requires
+# getattr on the filesystem class. This is not a mount-scan permission.
+allow docker_helper_t tmpfs_t:filesystem { getattr };
 
 # --- Buildx execution/runtime/network/certificates (proven in enforcing UAT) ---
 
