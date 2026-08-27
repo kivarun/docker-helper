@@ -217,7 +217,7 @@ allow docker_helper_t setfiles_exec_t:file { getattr read open execute execute_n
 allow docker_helper_t selinux_config_t:file { read open getattr };
 allow docker_helper_t default_context_t:dir { search };
 allow docker_helper_t file_context_t:dir { search };
-allow docker_helper_t file_context_t:file { read };
+allow docker_helper_t file_context_t:file { read open };
 
 # /sys/fs/selinux/enforce (from live AVC evidence)
 allow docker_helper_t security_t:file { read open getattr };

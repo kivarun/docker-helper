@@ -1715,7 +1715,7 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(content, "allow docker_helper_t file_context_t:dir { search };") {
 		t.Error("policy must grant docker_helper_t file_context_t dir search")
 	}
-	if !strings.Contains(content, "allow docker_helper_t file_context_t:file { read };") {
-		t.Error("policy must grant docker_helper_t file_context_t file read")
+	if !strings.Contains(content, "allow docker_helper_t file_context_t:file { read open };") {
+		t.Error("policy must grant docker_helper_t file_context_t file read open")
 	}
 }
