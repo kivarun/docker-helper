@@ -1,0 +1,47 @@
+name: UAT (black-box)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# This UAT is intentionally NOT a required check or a release gate yet: it is
+# an independent workflow so it can stabilize before being promoted. See
+# scripts/uat-blackbox.sh for the full coverage list and rationale.
+
+jobs:
+  uat-blackbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install build/test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools checkpolicy semodule-utils apparmor-utils openssl
+
+      - name: Install nFPM (pinned)
+        run: |
+          NFPM_VERSION=2.47.0
+          NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
+          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$NFPM_TARBALL" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
+          echo "${NFPM_SHA256}  ${NFPM_TARBALL}" | sha256sum --check -
+          tar xzf "$NFPM_TARBALL" nfpm
+          chmod +x nfpm
+          sudo mv nfpm /usr/local/bin/
+          nfpm --version | grep -qF "2.47.0"
+
+      - name: Run black-box UAT
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" scripts/uat-blackbox.sh
