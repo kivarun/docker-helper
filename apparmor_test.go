@@ -2115,6 +2115,100 @@ func TestSystemProfileSocketLockFileLocking(t *testing.T) {
 	}
 }
 
+// TestSystemProfileDockerBuildProcIntrospection verifies the /proc accesses
+// added for `docker build` (evidence-driven AppArmor fix). docker/docker-buildx
+// read their own /proc/<pid>/cgroup and docker reads /proc/sys/net/core/somaxconn.
+// Only those specific rules may exist: no broad /proc/** read and no broad
+// /proc/sys/** read may be introduced.
+func TestSystemProfileDockerBuildProcIntrospection(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// Own-process cgroup read must be allowed for docker/docker-buildx.
+	if !strings.Contains(content, "owner @{PROC}/@{pid}/cgroup r,") {
+		t.Error("system profile must allow owner /proc/<pid>/cgroup read for docker build")
+	}
+
+	// The single net/core/somaxconn sysctl read must be present for docker.
+	if !strings.Contains(content, "/proc/sys/net/core/somaxconn r,") {
+		t.Error("system profile must allow /proc/sys/net/core/somaxconn read for docker build")
+	}
+
+	// Only that specific net sysctl is added: no broad /proc/sys read may exist.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/proc/sys/**") || strings.Contains(trimmed, "/proc/sys/net/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "r") {
+				t.Errorf("system profile must not grant broad proc sysctl read (found: %s)", trimmed)
+			}
+		}
+	}
+
+	// No broad /proc/** read rule may be introduced.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/proc/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "r") {
+				t.Errorf("system profile must not grant broad /proc/** read (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
+// TestSystemProfileDockerBuildxLockFileLocking verifies the Buildx lock-file
+// permission added for `docker build` (evidence-driven AppArmor fix).
+// Buildx serializes access to its per-session Docker CLI state via
+// .../docker/buildx/.lock; file locking (k) must be granted only to that file,
+// never to the generic /run/docker-helper/** rule.
+func TestSystemProfileDockerBuildxLockFileLocking(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Skipf("system profile not found: %v", err)
+	}
+	content := string(data)
+
+	// The Buildx lock file must have the k (file locking) permission.
+	if !strings.Contains(content, "/run/docker-helper/sessions/dhs_*/docker/buildx/.lock k,") {
+		t.Error("system profile must grant k on the per-session Buildx .lock file")
+	}
+
+	// No rwk may be granted to the whole buildx directory.
+	for _, bad := range []string{
+		"/run/docker-helper/sessions/dhs_*/docker/buildx/ rwk,",
+		"/run/docker-helper/sessions/dhs_*/docker/buildx/** rwk,",
+		"/run/docker-helper/sessions/dhs_*/docker/buildx/* rwk,",
+	} {
+		if strings.Contains(content, bad) {
+			t.Errorf("system profile must not grant rwk on the whole buildx directory: %s", bad)
+		}
+	}
+
+	// The generic /run/docker-helper/** rule must still NOT include k.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/run/docker-helper/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "k") {
+				t.Errorf("system profile must not grant k on /run/docker-helper/** (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
 func TestSystemProfileAppArmorLifecycleLockFileLocking(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {

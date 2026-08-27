@@ -37,6 +37,11 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# lock; the broader /run/docker-helper/** rule intentionally omits k.
 	/run/docker-helper/docker-helper.sock.lock rwk,
 
+	# Buildx serializes access to its per-session Docker CLI state.
+	# Keep file locking restricted to the Buildx lock file; do not add `k`
+	# to the existing broad /run/docker-helper/** rule.
+	/run/docker-helper/sessions/dhs_*/docker/buildx/.lock k,
+
 	# Dynamic AppArmor managed boundaries state (atomic temp + rename).
 	/var/lib/docker-helper/apparmor/ rw,
 	/var/lib/docker-helper/apparmor/* rw,
@@ -150,6 +155,13 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	owner /proc/*/status r,
 	/proc/sys/kernel/random/uuid r,
 	/proc/sys/kernel/osrelease r,
+
+	# Docker / Buildx runtime introspection required by `docker build`.
+	# Own-process cgroup read (docker/docker-buildx) and the single
+	# net/core/somaxconn sysctl read are the only demonstrated build needs.
+	owner @{PROC}/@{pid}/cgroup r,
+	/proc/sys/net/core/somaxconn r,
+
 	/sys/devices/** r,
 
 	# OpenSSL/CA certificates.
