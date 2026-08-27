@@ -516,6 +516,166 @@ func TestCredentialUpgradeRc18DBReusesName(t *testing.T) {
 	}
 }
 
+// TestCredentialUpgradeIdempotent verifies the migration is safe to re-run on
+// an already-migrated database: running initializeDatabase a second time does
+// not rebuild or lose rows, and the name-reuse contract still holds.
+func TestCredentialUpgradeIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+
+	// Build an rc.18 schema: hard UNIQUE(principal_id, name).
+	_, err = db.Exec(`
+		CREATE TABLE principals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			uid INTEGER NOT NULL,
+			gid INTEGER NOT NULL,
+			home TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1
+		);
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE(principal_id, name)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create rc.18 schema: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO principals (username, uid, gid, home, enabled) VALUES ('alice', 2001, 2001, '/home/alice', 1)`,
+	)
+	if err != nil {
+		t.Fatalf("insert principal: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO credentials (id, principal_id, name, token_hash, created_at, revoked_at)
+		 VALUES ('dhcr_old', 1, 'oc', 'oldhash', 1000, 2000)`,
+	)
+	if err != nil {
+		t.Fatalf("insert revoked credential: %v", err)
+	}
+
+	// First migration run rebuilds the table.
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("first initializeDatabase() error: %v", err)
+	}
+
+	// Second run on the already-migrated database must be safe and idempotent.
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("second initializeDatabase() (idempotent) error: %v", err)
+	}
+
+	// The old revoked record is preserved across both runs.
+	var revokedAt sql.NullInt64
+	err = db.QueryRow(`SELECT revoked_at FROM credentials WHERE id='dhcr_old'`).Scan(&revokedAt)
+	if err != nil {
+		t.Fatalf("old record missing after idempotent migration: %v", err)
+	}
+	if !revokedAt.Valid {
+		t.Error("expected old record to remain revoked")
+	}
+
+	// Name reuse still works after the idempotent second run.
+	cred2, _, err := createCredential(db, "alice", "oc")
+	if err != nil {
+		t.Fatalf("create after idempotent migration error: %v", err)
+	}
+	if cred2.ID == "dhcr_old" {
+		t.Error("new credential must have a distinct ID")
+	}
+	db.Close()
+}
+
+// TestCredentialUpgradeConflictFailsClearly verifies that if a database somehow
+// contains more than one active credential with the same (principal_id, name)
+// (a corrupt state the canonical schema cannot produce), the migration fails
+// clearly rather than silently discarding or renaming rows.
+func TestCredentialUpgradeConflictFailsClearly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+
+	// Credentials table with NO hard UNIQUE(principal_id, name) constraint,
+	// holding two active credentials with the same name.
+	_, err = db.Exec(`
+		CREATE TABLE principals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			uid INTEGER NOT NULL,
+			gid INTEGER NOT NULL,
+			home TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1
+		);
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create corrupt schema: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO principals (username, uid, gid, home, enabled) VALUES ('alice', 2001, 2001, '/home/alice', 1)`,
+	)
+	if err != nil {
+		t.Fatalf("insert principal: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO credentials (id, principal_id, name, token_hash, created_at, revoked_at)
+		 VALUES ('dhcr_a', 1, 'oc', 'hashA', 1000, NULL)`,
+	)
+	if err != nil {
+		t.Fatalf("insert first active credential: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO credentials (id, principal_id, name, token_hash, created_at, revoked_at)
+		 VALUES ('dhcr_b', 1, 'oc', 'hashB', 1001, NULL)`,
+	)
+	if err != nil {
+		t.Fatalf("insert second active credential: %v", err)
+	}
+
+	// Migration must fail clearly rather than delete or rename a conflicting row.
+	err = initializeDatabase(db)
+	if err == nil {
+		t.Fatal("expected migration to fail on conflicting active rows, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "credential") {
+		t.Errorf("expected a clear credential-related error, got: %v", err)
+	}
+
+	// Neither conflicting row may have been discarded.
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE principal_id=1 AND name='oc'`).Scan(&count)
+	if err != nil {
+		t.Fatalf("count credentials: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected both conflicting rows preserved, got %d", count)
+	}
+	db.Close()
+}
+
 func TestCredentialHTTPCreate(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
