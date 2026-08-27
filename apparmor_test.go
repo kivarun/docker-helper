@@ -2118,12 +2118,13 @@ func TestSystemProfileSocketLockFileLocking(t *testing.T) {
 // TestSystemProfileDockerBuildProcIntrospection verifies the /proc accesses
 // added for `docker build` (evidence-driven AppArmor fix). docker/docker-buildx
 // read their own /proc/<pid>/cgroup and docker reads /proc/sys/net/core/somaxconn.
-// Only those specific rules may exist: no broad /proc/** read and no broad
-// /proc/sys/** read may be introduced.
+// Only those specific rules may exist: no broad proc read (in either the
+// literal /proc or the @{PROC} variable spelling) and no broad proc sysctl
+// read may be introduced.
 func TestSystemProfileDockerBuildProcIntrospection(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2137,30 +2138,44 @@ func TestSystemProfileDockerBuildProcIntrospection(t *testing.T) {
 		t.Error("system profile must allow /proc/sys/net/core/somaxconn read for docker build")
 	}
 
-	// Only that specific net sysctl is added: no broad /proc/sys read may exist.
+	// Only that specific net sysctl is added: no broad proc sysctl read may
+	// exist, in either the literal /proc or the @{PROC} variable spelling.
+	// The /proc/sys/kernel/** deny rule below intentionally carries no read,
+	// so it must not be flagged.
+	sysctlBroad := []string{
+		"/proc/sys/**",
+		"/proc/sys/net/**",
+		"@{PROC}/sys/**",
+		"@{PROC}/sys/net/**",
+	}
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.Contains(trimmed, "/proc/sys/**") || strings.Contains(trimmed, "/proc/sys/net/**") {
-			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
-			if strings.Contains(perm, "r") {
-				t.Errorf("system profile must not grant broad proc sysctl read (found: %s)", trimmed)
+		for _, pattern := range sysctlBroad {
+			if strings.Contains(trimmed, pattern) {
+				perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+				if strings.Contains(perm, "r") {
+					t.Errorf("system profile must not grant broad proc sysctl read %s (found: %s)", pattern, trimmed)
+				}
 			}
 		}
 	}
 
-	// No broad /proc/** read rule may be introduced.
+	// No broad proc read rule may be introduced, in either spelling.
+	procReadBroad := []string{"/proc/**", "@{PROC}/**"}
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.Contains(trimmed, "/proc/**") {
-			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
-			if strings.Contains(perm, "r") {
-				t.Errorf("system profile must not grant broad /proc/** read (found: %s)", trimmed)
+		for _, pattern := range procReadBroad {
+			if strings.Contains(trimmed, pattern) {
+				perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+				if strings.Contains(perm, "r") {
+					t.Errorf("system profile must not grant broad proc read %s (found: %s)", pattern, trimmed)
+				}
 			}
 		}
 	}
@@ -2174,7 +2189,7 @@ func TestSystemProfileDockerBuildProcIntrospection(t *testing.T) {
 func TestSystemProfileDockerBuildxLockFileLocking(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
