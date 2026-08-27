@@ -1156,6 +1156,13 @@ func TestSystemUnitFile(t *testing.T) {
 	if strings.Contains(content, "RestrictRTP=") {
 		t.Error("unit must not contain invalid RestrictRTP= directive")
 	}
+	// RuntimeDirectoryPreserve=restart keeps the RuntimeDirectory inode across
+	// `systemctl restart` so long-lived agent containers bind-mounting
+	// /run/docker-helper continue to see the socket. Cleanup still happens on a
+	// real stop.
+	if !strings.Contains(content, "RuntimeDirectoryPreserve=restart") {
+		t.Error("unit must contain RuntimeDirectoryPreserve=restart")
+	}
 }
 
 // TestSystemUnitNoMountNamespace verifies that the system unit does not

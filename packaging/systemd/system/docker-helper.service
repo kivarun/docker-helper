@@ -23,6 +23,11 @@ StateDirectory=docker-helper
 StateDirectoryMode=0700
 RuntimeDirectory=docker-helper
 RuntimeDirectoryMode=0755
+# Preserve the RuntimeDirectory inode across service restarts so that
+# long-lived agent containers with a bind-mount of /run/docker-helper continue
+# to see the updated socket after `systemctl restart`. Normal cleanup semantics
+# still apply on a real service stop.
+RuntimeDirectoryPreserve=restart
 
 AppArmorProfile=docker-helper-system
 SELinuxContext=system_u:system_r:docker_helper_t:s0
