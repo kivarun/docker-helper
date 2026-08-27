@@ -210,8 +210,9 @@ allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink }
 
 # restorecon relabels the trusted CA tree from docker_helper_runtime_t to
 # docker_helper_trusted_ca_t. relabelfrom is on the runtime source types,
-# relabelto on the trusted CA target types. Proven necessary in enforcing UAT
-# with restorecon -R -m.
+# relabelto on the trusted CA target types.
+# Proven necessary by enforcing UAT of trusted CA relabeling.
+# Production restorecon invocation uses -R -m.
 allow docker_helper_t docker_helper_runtime_t:dir { relabelfrom };
 allow docker_helper_t docker_helper_trusted_ca_t:dir { relabelto };
 allow docker_helper_t docker_helper_runtime_t:lnk_file { getattr relabelfrom };

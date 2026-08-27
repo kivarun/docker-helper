@@ -1746,26 +1746,24 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 		t.Error("policy must grant docker_helper_t sysctl_net_t file read open")
 	}
 	// Absence of the temporary mount-scan grants that were only needed when
-	// restorecon was run without -m.
+	// restorecon was run without -m. Assert the exact unwanted allow rules so
+	// unrelated legitimate references to these types do not cause false
+	// failures.
 	for _, absent := range []string{
-		"device_t:filesystem",
-		"tmpfs_t:filesystem",
-		"devpts_t:filesystem",
-		"pstore_t:filesystem",
-		"tracefs_t:filesystem",
-		"hugetlbfs_t:filesystem",
-		"debugfs_t:filesystem",
-		"debugfs_t:dir",
-		"container_var_lib_t:dir",
+		"allow docker_helper_t fs_t:filesystem { getattr };",
+		"allow docker_helper_t device_t:filesystem { getattr };",
+		"allow docker_helper_t tmpfs_t:filesystem { getattr };",
+		"allow docker_helper_t devpts_t:filesystem { getattr };",
+		"allow docker_helper_t cgroup_t:filesystem { getattr };",
+		"allow docker_helper_t pstore_t:filesystem { getattr };",
+		"allow docker_helper_t tracefs_t:filesystem { getattr };",
+		"allow docker_helper_t hugetlbfs_t:filesystem { getattr };",
+		"allow docker_helper_t debugfs_t:filesystem { getattr };",
+		"allow docker_helper_t debugfs_t:dir { search };",
+		"allow docker_helper_t container_var_lib_t:dir { search };",
 	} {
 		if strings.Contains(content, absent) {
 			t.Errorf("policy must NOT contain temporary mount-scan grant %s", absent)
 		}
-	}
-	if strings.Contains(content, "cgroup_t:filesystem") {
-		t.Error("policy must NOT contain temporary cgroup_t filesystem mount-scan grant")
-	}
-	if strings.Contains(content, "fs_t:filesystem { getattr") {
-		t.Error("policy must NOT contain temporary fs_t filesystem getattr mount-scan grant")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -1023,15 +1024,15 @@ func TestOpenSSLSubjectHashMultiAttributeRDN(t *testing.T) {
 
 func TestTrustedCARestoreconInvokesWithMountScanDisabled(t *testing.T) {
 	origSEL := selinuxEnabled
-	origCmd := trustedCArestorecon
+	origCmd := trustedCARestorecon
 	defer func() {
 		selinuxEnabled = origSEL
-		trustedCArestorecon = origCmd
+		trustedCARestorecon = origCmd
 	}()
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
 
 	var args []string
-	trustedCArestorecon = func(a ...string) ([]byte, error) {
+	trustedCARestorecon = func(a ...string) ([]byte, error) {
 		args = a
 		return []byte{}, nil
 	}
@@ -1054,15 +1055,15 @@ func TestTrustedCARestoreconInvokesWithMountScanDisabled(t *testing.T) {
 
 func TestTrustedCARestoreconSkipsWhenSELinuxInactive(t *testing.T) {
 	origSEL := selinuxEnabled
-	origCmd := trustedCArestorecon
+	origCmd := trustedCARestorecon
 	defer func() {
 		selinuxEnabled = origSEL
-		trustedCArestorecon = origCmd
+		trustedCARestorecon = origCmd
 	}()
 	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
 
 	called := false
-	trustedCArestorecon = func(a ...string) ([]byte, error) {
+	trustedCARestorecon = func(a ...string) ([]byte, error) {
 		called = true
 		return []byte{}, nil
 	}
@@ -1077,19 +1078,24 @@ func TestTrustedCARestoreconSkipsWhenSELinuxInactive(t *testing.T) {
 
 func TestTrustedCARestoreconErrorPropagates(t *testing.T) {
 	origSEL := selinuxEnabled
-	origCmd := trustedCArestorecon
+	origCmd := trustedCARestorecon
 	defer func() {
 		selinuxEnabled = origSEL
-		trustedCArestorecon = origCmd
+		trustedCARestorecon = origCmd
 	}()
 	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
-	trustedCArestorecon = func(a ...string) ([]byte, error) {
-		return []byte("policy error"), fmt.Errorf("restorecon: denied")
+
+	sentinel := errors.New("restorecon: denied")
+	trustedCARestorecon = func(a ...string) ([]byte, error) {
+		return []byte("policy error"), sentinel
 	}
 
 	err := restoreconTrustedCATree("/run/docker-helper/trusted-ca")
 	if err == nil {
 		t.Fatal("expected error when restorecon fails")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error must wrap sentinel, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "policy error") {
 		t.Errorf("error should include restorecon output, got: %v", err)
