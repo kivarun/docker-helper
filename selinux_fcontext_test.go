@@ -1706,13 +1706,16 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(content, "type file_context_t;") {
 		t.Error("policy must require type file_context_t")
 	}
-	if !strings.Contains(content, "allow docker_helper_t selinux_config_t:file { read open };") {
-		t.Error("policy must grant docker_helper_t selinux_config_t read open")
+	if !strings.Contains(content, "allow docker_helper_t selinux_config_t:file { read open getattr };") {
+		t.Error("policy must grant docker_helper_t selinux_config_t read open getattr")
 	}
 	if !strings.Contains(content, "allow docker_helper_t default_context_t:dir { search };") {
 		t.Error("policy must grant docker_helper_t default_context_t dir search")
 	}
 	if !strings.Contains(content, "allow docker_helper_t file_context_t:dir { search };") {
 		t.Error("policy must grant docker_helper_t file_context_t dir search")
+	}
+	if !strings.Contains(content, "allow docker_helper_t file_context_t:file { read };") {
+		t.Error("policy must grant docker_helper_t file_context_t file read")
 	}
 }
