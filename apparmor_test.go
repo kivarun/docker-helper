@@ -2440,14 +2440,15 @@ func TestBuildxNoBroadWildcard(t *testing.T) {
 	}
 }
 
-// TestTrustAnchorRulesPresentAndReadOnly verifies both shipped AppArmor
-// profiles grant read access to the standard openSUSE trust-anchor location
-// (/etc/pki/trust/anchors) and that this access is strictly read-only.
+// TestAppArmorProfilesOpenSUSETrustAnchorsReadOnly verifies both shipped
+// AppArmor profiles grant read access to the standard openSUSE trust-anchor
+// location (/etc/pki/trust/anchors) and that this access is strictly
+// read-only.
 //
 // Trusted CA preparation reads the configured trusted_ca_path from within
 // the confined daemon in both system and user mode, so both profiles must
 // cover the openSUSE location used for administrator-installed CA material.
-func TestTrustAnchorRulesPresentAndReadOnly(t *testing.T) {
+func TestAppArmorProfilesOpenSUSETrustAnchorsReadOnly(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",
 		"user":   "packaging/apparmor/docker-helper",
@@ -2495,11 +2496,11 @@ func TestTrustAnchorRulesPresentAndReadOnly(t *testing.T) {
 	}
 }
 
-// TestNoBroadPkiAccess verifies neither shipped profile grants broad access
-// to /etc/pki/**. Trusted CA access is scoped to the specific standard CA
-// locations (/etc/pki/tls/certs/**, /etc/pki/trust/anchors/**), never a bare
-// /etc/pki/** wildcard.
-func TestNoBroadPkiAccess(t *testing.T) {
+// TestAppArmorProfilesNoBroadPKIAccess verifies neither shipped profile
+// grants broad access to /etc/pki/**. Trusted CA access is scoped to the
+// specific standard CA locations (/etc/pki/tls/certs/**,
+// /etc/pki/trust/anchors/**), never a bare /etc/pki/** wildcard.
+func TestAppArmorProfilesNoBroadPKIAccess(t *testing.T) {
 	profiles := map[string]string{
 		"system": "packaging/apparmor/docker-helper-system",
 		"user":   "packaging/apparmor/docker-helper",
