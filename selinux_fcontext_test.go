@@ -1622,3 +1622,61 @@ func TestSELinuxRootSlashEquivalenceSourceOverlap(t *testing.T) {
 		t.Errorf("expected overlap error, got: %v", err)
 	}
 }
+
+func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// Dedicated CA type declaration.
+	if !strings.Contains(content, "type docker_helper_trusted_ca_t, file_type;") {
+		t.Error("policy must declare type docker_helper_trusted_ca_t")
+	}
+	// Type transitions for dynamic creation.
+	if !strings.Contains(content, "type_transition docker_helper_t docker_helper_trusted_ca_t:dir docker_helper_trusted_ca_t;") {
+		t.Error("policy must have type_transition for dir")
+	}
+	if !strings.Contains(content, "type_transition docker_helper_t docker_helper_trusted_ca_t:file docker_helper_trusted_ca_t;") {
+		t.Error("policy must have type_transition for file")
+	}
+	if !strings.Contains(content, "type_transition docker_helper_t docker_helper_trusted_ca_t:lnk_file docker_helper_trusted_ca_t;") {
+		t.Error("policy must have type_transition for lnk_file")
+	}
+	// docker_helper_t management perms.
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:dir { create getattr search read open write add_name remove_name setattr };") {
+		t.Error("policy must grant docker_helper_t trusted_ca_t dir management")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:file { create read write open getattr setattr rename unlink };") {
+		t.Error("policy must grant docker_helper_t trusted_ca_t file management")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink };") {
+		t.Error("policy must grant docker_helper_t trusted_ca_t lnk_file management")
+	}
+	// Container read-only perms.
+	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_trusted_ca_t:dir { getattr search read open };") {
+		t.Error("policy must grant container trusted_ca_t dir read-only")
+	}
+	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_trusted_ca_t:file { getattr read open };") {
+		t.Error("policy must grant container trusted_ca_t file read-only")
+	}
+	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_trusted_ca_t:lnk_file { getattr read };") {
+		t.Error("policy must grant container trusted_ca_t lnk_file read-only")
+	}
+	// .fc file-context mapping.
+	fcData, err := os.ReadFile("packaging/selinux/docker-helper.fc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fcContent := string(fcData)
+	if !strings.Contains(fcContent, "/run/docker-helper/trusted-ca(/.*)?") {
+		t.Error("fc file must contain trusted-ca mapping")
+	}
+	if !strings.Contains(fcContent, "docker_helper_trusted_ca_t") {
+		t.Error("fc file must map trusted-ca to docker_helper_trusted_ca_t")
+	}
+	// Absence of general container -> runtime_t grants.
+	if strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:") {
+		t.Error("policy must NOT grant container general access to runtime_t")
+	}
+}

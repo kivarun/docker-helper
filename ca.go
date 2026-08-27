@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -554,7 +555,13 @@ func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, er
 						return "", fmt.Errorf("cannot set trusted CA directory permissions: %w", err)
 					}
 					if err := os.Chmod(caFile, 0644); err != nil {
-						return "", fmt.Errorf("cannot set trusted CA file permissions: %w", err)
+						return "", fmt.Errorf("cannot set CA file permissions: %w", err)
+					}
+					// Relabel the trusted CA tree (handles upgrade/restart where
+					// existing material may be mislabeled).
+					trustedCABase := filepath.Join(runtimeDir, "trusted-ca")
+					if err := restoreconTrustedCATree(trustedCABase); err != nil {
+						return "", fmt.Errorf("trusted CA labeling failed: %w", err)
 					}
 					return snapshotDir, nil
 				}
@@ -606,7 +613,35 @@ func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, er
 		return "", fmt.Errorf("cannot create CA hash symlink: %w", err)
 	}
 
+	// Relabel the trusted CA tree to the dedicated type (required for the
+	// container to read the CA material). The type_transition rules handle
+	// future dynamic files within the labeled tree.
+	trustedCABase := filepath.Join(runtimeDir, "trusted-ca")
+	if err := restoreconTrustedCATree(trustedCABase); err != nil {
+		return "", fmt.Errorf("trusted CA labeling failed: %w", err)
+	}
+
 	return snapshotDir, nil
+}
+
+// restoreconTrustedCATree relabels the trusted CA base directory tree to the
+// dedicated docker_helper_trusted_ca_t type (from the file-context rule).
+// Dynamically created runtime files do not inherit the CA type from the
+// docker_helper_runtime_t parent, so an explicit restorecon is required after
+// materialization. It is a no-op when SELinux is not active.
+func restoreconTrustedCATree(baseDir string) error {
+	active, _, err := selinuxEnabled()
+	if err != nil {
+		return fmt.Errorf("cannot determine SELinux state for trusted CA restorecon: %w", err)
+	}
+	if !active {
+		return nil
+	}
+	cmd := exec.Command("/usr/sbin/restorecon", "-R", baseDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("trusted CA restorecon failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // isTrustedCAMountOverlap returns true if the agent mount target overlaps

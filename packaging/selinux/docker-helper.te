@@ -123,6 +123,12 @@ type docker_helper_runtime_t, file_type;
 # /home paths use user_home_type and are NOT relabelled.
 type docker_helper_workspace_t, file_type;
 
+# Dedicated type for injected trusted CA material under /run/docker-helper/trusted-ca.
+# A dedicated type (not docker_helper_runtime_t) is required so the container
+# domain can read the injected CA while retaining no access to the rest of the
+# helper runtime state (socket/lock/cidfiles/mount machinery).
+type docker_helper_trusted_ca_t, file_type;
+
 # Custom container domain for docker-helper containers.
 # Composes with container-selinux via shared attributes:
 #   container_domain       — generic container confinement rules
@@ -181,6 +187,22 @@ allow docker_helper_t docker_helper_runtime_t:lnk_file { create read unlink };
 # State (from live AVC evidence)
 allow docker_helper_t docker_helper_state_t:dir { getattr search read open write add_name remove_name };
 allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink };
+
+# Trusted CA material is dynamically created by the daemon under
+# /run/docker-helper/trusted-ca. Type transitions label newly created snapshot
+# dirs, ca.pem, and the hash symlink as docker_helper_trusted_ca_t so they are
+# readable by the container domain. The trusted-ca base directory itself is
+# labeled via the file-context rule + restorecon at preparation time.
+type_transition docker_helper_t docker_helper_trusted_ca_t:dir docker_helper_trusted_ca_t;
+type_transition docker_helper_t docker_helper_trusted_ca_t:file docker_helper_trusted_ca_t;
+type_transition docker_helper_t docker_helper_trusted_ca_t:lnk_file docker_helper_trusted_ca_t;
+
+# Trusted CA management (from CA preparation operations): create snapshot
+# dirs, write/chmod/rename ca.pem, create/read the hash symlink, inspect and
+# reuse an existing snapshot.
+allow docker_helper_t docker_helper_trusted_ca_t:dir { create getattr search read open write add_name remove_name setattr };
+allow docker_helper_t docker_helper_trusted_ca_t:file { create read write open getattr setattr rename unlink };
+allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink };
 
 # /sys/fs/selinux/enforce (from live AVC evidence)
 allow docker_helper_t security_t:file { read open getattr };
@@ -367,3 +389,8 @@ allow docker_helper_container_t docker_helper_workspace_t:sock_file {
 allow docker_helper_container_t docker_helper_workspace_t:fifo_file {
 	create open getattr setattr read write append rename link unlink ioctl lock
 };
+
+# Container read-only access to injected trusted CA material.
+allow docker_helper_container_t docker_helper_trusted_ca_t:dir { getattr search read open };
+allow docker_helper_container_t docker_helper_trusted_ca_t:file { getattr read open };
+allow docker_helper_container_t docker_helper_trusted_ca_t:lnk_file { getattr read };

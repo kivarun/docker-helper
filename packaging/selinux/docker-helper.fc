@@ -11,3 +11,4 @@
 /etc/docker-helper(/.*)?                system_u:object_r:docker_helper_config_t:s0
 /var/lib/docker-helper(/.*)?            system_u:object_r:docker_helper_state_t:s0
 /run/docker-helper(/.*)?                system_u:object_r:docker_helper_runtime_t:s0
+/run/docker-helper/trusted-ca(/.*)?     system_u:object_r:docker_helper_trusted_ca_t:s0
