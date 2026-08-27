@@ -2362,6 +2362,54 @@ func TestSystemProfileNoGitExec(t *testing.T) {
 	}
 }
 
+// TestSystemProfileDockerBuildCABundleRead verifies the Buildx TLS CA-roots
+// read added for `docker build` (evidence-driven AppArmor fix). Buildx loads
+// system roots from /etc/ssl/ca-bundle.pem when fetching registry metadata.
+// The rule must be present, strictly read-only, and no broad /etc/ssl/**
+// wildcard read may be used instead.
+func TestSystemProfileDockerBuildCABundleRead(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, "/etc/ssl/ca-bundle.pem r,") {
+		t.Error("system profile must allow read of /etc/ssl/ca-bundle.pem for docker build")
+	}
+
+	// The CA-bundle rule must be strictly read-only.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/etc/ssl/ca-bundle.pem") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			perm = strings.TrimSuffix(perm, ",")
+			for _, extra := range []string{"w", "a", "k", "m", "l", "c", "x", "d", "p", "i"} {
+				if strings.Contains(perm, extra) {
+					t.Errorf("CA-bundle rule must be read-only (found %q in %q): %s", extra, perm, trimmed)
+				}
+			}
+		}
+	}
+
+	// No broad /etc/ssl/** wildcard read may be used as a shortcut.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/etc/ssl/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "r") {
+				t.Errorf("system profile must not grant broad /etc/ssl/** read (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
 func TestSystemProfileAppArmorLifecycleLockFileLocking(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
