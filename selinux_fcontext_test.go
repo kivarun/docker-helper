@@ -83,8 +83,9 @@ func TestSELinuxPolicyCgroupSearch(t *testing.T) {
 	}
 	// Regression for the live enforcing AVC:
 	//   scontext=docker_helper_t tcontext=cgroup_t tclass=file denied { read } comm="docker" name=cpu.max
-	if !strings.Contains(content, "allow docker_helper_t cgroup_t:file { read };") {
-		t.Error("policy must grant docker_helper_t cgroup_t:file read")
+	//   scontext=docker_helper_t tcontext=cgroup_t tclass=file denied { open } path=.../docker-helper.service/cpu.max
+	if !strings.Contains(content, "allow docker_helper_t cgroup_t:file { read open };") {
+		t.Error("policy must grant docker_helper_t cgroup_t:file read open")
 	}
 }
 
@@ -96,11 +97,12 @@ func TestSELinuxPolicyContainerProcAndChrFile(t *testing.T) {
 	content := string(data)
 	// Regression for the live enforcing AVC:
 	//   scontext=docker_helper_container_t tcontext=proc_t tclass=file denied { read } name=filesystems
+	//   scontext=docker_helper_container_t tcontext=proc_t tclass=file denied { open } path=/proc/filesystems
 	if !strings.Contains(content, "type proc_t;") {
 		t.Error("policy must require type proc_t;")
 	}
-	if !strings.Contains(content, "allow docker_helper_container_t proc_t:file { read };") {
-		t.Error("policy must grant docker_helper_container_t proc_t:file read")
+	if !strings.Contains(content, "allow docker_helper_container_t proc_t:file { read open };") {
+		t.Error("policy must grant docker_helper_container_t proc_t:file read open")
 	}
 	// Regression for the live enforcing AVC:
 	//   scontext=docker_helper_container_t tcontext=container_file_t tclass=chr_file denied { open } paths /dev/tty, /dev/null, /dev/zero
@@ -111,6 +113,47 @@ func TestSELinuxPolicyContainerProcAndChrFile(t *testing.T) {
 	}
 	if !strings.Contains(content, "allow docker_helper_container_t container_file_t:chr_file { create getattr read append ioctl watch open write };") {
 		t.Error("container_file_t:chr_file rule must include open and write")
+	}
+}
+
+func TestSELinuxPolicyInitTAndSystemPermissions(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// Regression for the live enforcing AVC:
+	//   scontext=init_t tcontext=docker_helper_runtime_t tclass=lnk_file denied { unlink } name=abba55a5.0
+	// systemd RuntimeDirectory cleanup must be able to unlink its symlinks.
+	if !strings.Contains(content, "allow init_t docker_helper_runtime_t:lnk_file { unlink };") {
+		t.Error("policy must grant init_t docker_helper_runtime_t:lnk_file unlink")
+	}
+	// Regression for the live enforcing AVC:
+	//   scontext=init_t tcontext=docker_helper_t tclass=process denied { siginh }
+	// The process class declaration and the init_t -> docker_helper_t process
+	// rule must both carry siginh.
+	if !strings.Contains(content, "class process { transition siginh };") {
+		t.Error("process class declaration must include siginh")
+	}
+	if !strings.Contains(content, "allow init_t docker_helper_t:process { transition siginh };") {
+		t.Error("init_t -> docker_helper_t process rule must include siginh")
+	}
+	// Regression for the live enforcing AVC:
+	//   scontext=docker_helper_t tcontext=security_t tclass=file denied { getattr } path=/sys/fs/selinux/enforce
+	if !strings.Contains(content, "allow docker_helper_t security_t:file { read open getattr };") {
+		t.Error("policy must grant docker_helper_t security_t:file read open getattr")
+	}
+	// Regression for the live enforcing AVC:
+	//   scontext=docker_helper_t tcontext=sysctl_net_t tclass=dir denied { search } name=net
+	// The type must be required and only directory search granted (no file access).
+	if !strings.Contains(content, "type sysctl_net_t;") {
+		t.Error("policy must require type sysctl_net_t;")
+	}
+	if !strings.Contains(content, "allow docker_helper_t sysctl_net_t:dir { search };") {
+		t.Error("policy must grant docker_helper_t sysctl_net_t:dir search")
+	}
+	if strings.Contains(content, "allow docker_helper_t sysctl_net_t:file") {
+		t.Error("policy must NOT grant docker_helper_t sysctl_net_t file access")
 	}
 }
 

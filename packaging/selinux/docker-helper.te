@@ -82,6 +82,7 @@ module docker_helper 1.0;
 		type container_file_t;
 		type cgroup_t;
 		type proc_t;
+		type sysctl_net_t;
 
 		role system_r;
 
@@ -97,7 +98,7 @@ module docker_helper 1.0;
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
 		class capability { dac_read_search sys_admin };
-		class process { transition };
+		class process { transition siginh };
 		class process2 { nnp_transition };
 	}
 
@@ -147,7 +148,7 @@ allow docker_helper_t docker_helper_exec_t:file { read open execute getattr entr
 allow init_t docker_helper_exec_t:file { read open execute };
 
 # systemd (init_t) -> docker_helper_t explicit transition (SELinuxContext= in unit file)
-allow init_t docker_helper_t:process { transition };
+allow init_t docker_helper_t:process { transition siginh };
 allow init_t docker_helper_t:process2 { nnp_transition };
 
 # systemd (init_t) needs to create/cleanup RuntimeDirectory (from live AVC evidence)
@@ -155,6 +156,9 @@ allow init_t docker_helper_runtime_t:dir { create rmdir write remove_name };
 
 # systemd (init_t) needs to unlink socket lock file (from live AVC evidence)
 allow init_t docker_helper_runtime_t:file { unlink };
+
+# systemd (init_t) needs to unlink RuntimeDirectory symlinks (from live AVC evidence)
+allow init_t docker_helper_runtime_t:lnk_file { unlink };
 
 # journald: docker_helper_t reads the inherited systemd stream socket
 # for stdout/stderr (StandardOutput=journal, StandardError=journal).
@@ -176,7 +180,7 @@ allow docker_helper_t docker_helper_state_t:dir { getattr search read open write
 allow docker_helper_t docker_helper_state_t:file { create read write open getattr setattr lock unlink };
 
 # /sys/fs/selinux/enforce (from live AVC evidence)
-allow docker_helper_t security_t:file { read open };
+allow docker_helper_t security_t:file { read open getattr };
 
 # TCP listener socket (from live AVC evidence)
 allow docker_helper_t self:tcp_socket { create setopt bind listen accept getattr read write };
@@ -242,6 +246,11 @@ allow docker_helper_t self:unix_stream_socket { connectto };
 # Network configuration read
 allow docker_helper_t net_conf_t:file { read open getattr };
 
+# /proc/sys/net directory search by Docker (from live AVC evidence):
+#   scontext=docker_helper_t tcontext=sysctl_net_t tclass=dir denied { search } name=net
+# Directory search only; no sysctl_net_t file access granted.
+allow docker_helper_t sysctl_net_t:dir { search };
+
 # UDP socket for DNS resolution (proven in enforcing UAT)
 allow docker_helper_t self:udp_socket {
 	create setopt connect getattr read write
@@ -265,8 +274,8 @@ allow docker_helper_t cgroup_t:dir { search };
 
 # cgroup cpu.max read by Docker (from live AVC evidence):
 #   scontext=docker_helper_t tcontext=cgroup_t tclass=file denied { read } comm="docker" name=cpu.max
-# Read only; no broader cgroup permissions.
-allow docker_helper_t cgroup_t:file { read };
+# Read/open only; no broader cgroup permissions.
+allow docker_helper_t cgroup_t:file { read open };
 
 # --- docker_helper_container_t: custom container domain ---
 
@@ -291,8 +300,8 @@ allow docker_helper_container_t container_file_t:fifo_file { create getattr read
 
 # /proc/filesystems read by the container runtime (from live AVC evidence):
 #   scontext=docker_helper_container_t tcontext=proc_t tclass=file denied { read } name=filesystems
-# Read only; no broader proc access.
-allow docker_helper_container_t proc_t:file { read };
+# Read/open only; no broader proc access.
+allow docker_helper_container_t proc_t:file { read open };
 
 # --- Container workspace access ---
 #
