@@ -48,10 +48,10 @@
 #
 # Build:
 #   checkmodule -M -m -o docker_helper.tmp docker-helper.te
-#   semodule_package -o docker-helper.pp -m docker_helper.tmp -f docker-helper.fc
+#   semodule_package -o docker_helper.pp -m docker_helper.tmp -f docker-helper.fc
 #
 # Install:
-#   sudo semodule -i docker-helper.pp
+#   sudo semodule -i docker_helper.pp
 #
 # Remove:
 #   sudo semodule -r docker_helper

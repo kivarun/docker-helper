@@ -61,11 +61,11 @@ if ! command -v semodule_package >/dev/null 2>&1; then
   exit 1
 fi
 # Remove any previous generated output to prevent stale artifacts.
-rm -f "${SCRIPT_DIR}/dist/docker-helper.pp"
+rm -f "${SCRIPT_DIR}/dist/docker_helper.pp"
 echo "Building SELinux policy module..."
 checkmodule -M -m -o "${SCRIPT_DIR}/dist/docker_helper.mod" \
   "${SCRIPT_DIR}/packaging/selinux/docker-helper.te"
-semodule_package -o "${SCRIPT_DIR}/dist/docker-helper.pp" \
+semodule_package -o "${SCRIPT_DIR}/dist/docker_helper.pp" \
   -m "${SCRIPT_DIR}/dist/docker_helper.mod" \
   -f "${SCRIPT_DIR}/packaging/selinux/docker-helper.fc"
 rm -f "${SCRIPT_DIR}/dist/docker_helper.mod"

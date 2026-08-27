@@ -39,7 +39,7 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 mod_file="${tmp_dir}/docker_helper.mod"
-pp_file="${tmp_dir}/docker-helper.pp"
+pp_file="${tmp_dir}/docker_helper.pp"
 
 echo "Compiling SELinux policy module..."
 checkmodule -M -m -o "$mod_file" "$te_file"

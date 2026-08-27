@@ -1063,7 +1063,7 @@ symlinks, Unix-domain socket pathnames, and FIFOs.
 Both `user_home_type` and `docker_helper_workspace_t` have equivalent
 container-side development workspace semantics.
 
-The RPM contains `/usr/share/selinux/docker-helper.pp` and its lifecycle script
+The RPM contains `/usr/share/selinux/docker_helper.pp` and its lifecycle script
 loads the module on an enforcing SELinux host. The DEB does not install the
 SELinux module. See [docs/selinux-support-plan.md](docs/selinux-support-plan.md)
 for the policy contract and outstanding distribution UAT.

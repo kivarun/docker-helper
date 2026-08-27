@@ -39,13 +39,13 @@ Source files: `packaging/selinux/docker-helper.te`, `packaging/selinux/docker-he
 ```bash
 cd packaging/selinux
 checkmodule -M -m -o docker_helper.tmp docker-helper.te
-semodule_package -o docker-helper.pp -m docker_helper.tmp -f docker-helper.fc
+semodule_package -o docker_helper.pp -m docker_helper.tmp -f docker-helper.fc
 ```
 
 ### Install / remove
 
 ```bash
-sudo semodule -i docker-helper.pp
+sudo semodule -i docker_helper.pp
 sudo semodule -r docker_helper
 ```
 

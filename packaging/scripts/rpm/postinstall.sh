@@ -57,7 +57,7 @@ if [ "$aa_active" = "true" ]; then
 fi
 
 if [ "$selinux_active" = "true" ]; then
-  if ! semodule -i /usr/share/selinux/docker-helper.pp; then
+  if ! semodule -i /usr/share/selinux/docker_helper.pp; then
     exit 1
   fi
   if command -v restorecon >/dev/null 2>&1; then

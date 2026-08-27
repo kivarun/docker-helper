@@ -284,12 +284,12 @@ The policy is compiled during the release build:
 
 ```sh
 checkmodule -M -m -o docker_helper.mod packaging/selinux/docker-helper.te
-semodule_package -o dist/docker-helper.pp \
+semodule_package -o dist/docker_helper.pp \
   -m dist/docker_helper.mod -f packaging/selinux/docker-helper.fc
 ```
 
 Target hosts need runtime policy tools, not the compiler. The RPM contains
-`/usr/share/selinux/docker-helper.pp`. On an enforcing SELinux system its
+`/usr/share/selinux/docker_helper.pp`. On an enforcing SELinux system its
 scriptlet installs/replaces the module and restores only docker-helper-owned
 paths. Upgrade preserves the active module; final erase removes it.
 

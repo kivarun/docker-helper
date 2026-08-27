@@ -2713,7 +2713,7 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	}
 
 	// Create a dummy SELinux policy module (required by RPM nfpm config).
-	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	dummyPP := filepath.Join(tmpDir, "docker_helper.pp")
 	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -2732,8 +2732,8 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	}
 	// Replace dist/docker-helper with the dummy binary path.
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
-	// Replace dist/docker-helper.pp with the dummy PP path (RPM-only section).
-	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	// Replace dist/docker_helper.pp with the dummy PP path (RPM-only section).
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker_helper.pp", "src: "+dummyPP)
 	// Replace dist/completions/docker-helper with the dummy completion path.
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	// Replace ${VERSION} with test version.
@@ -2818,7 +2818,7 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	}
 
 	// Create a dummy SELinux policy module (required by RPM nfpm config).
-	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	dummyPP := filepath.Join(tmpDir, "docker_helper.pp")
 	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -2836,7 +2836,7 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 		t.Fatal(err)
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
-	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker_helper.pp", "src: "+dummyPP)
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
 
@@ -2874,8 +2874,8 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
 		cmd := exec.Command(dpkgDeb, "--contents", debFile)
 		out, _ := cmd.CombinedOutput()
-		if strings.Contains(string(out), "/usr/share/selinux/docker-helper.pp") {
-			t.Error("DEB must NOT contain /usr/share/selinux/docker-helper.pp (DEB is AppArmor-only)")
+		if strings.Contains(string(out), "/usr/share/selinux/docker_helper.pp") {
+			t.Error("DEB must NOT contain /usr/share/selinux/docker_helper.pp (DEB is AppArmor-only)")
 		}
 	} else {
 		t.Log("dpkg-deb not available, skipping DEB SELinux payload check")
@@ -2885,8 +2885,8 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	if rpmPath, err := exec.LookPath("rpm"); err == nil {
 		cmd := exec.Command(rpmPath, "-qpl", rpmFile)
 		out, _ := cmd.CombinedOutput()
-		if !strings.Contains(string(out), "/usr/share/selinux/docker-helper.pp") {
-			t.Error("RPM must contain /usr/share/selinux/docker-helper.pp")
+		if !strings.Contains(string(out), "/usr/share/selinux/docker_helper.pp") {
+			t.Error("RPM must contain /usr/share/selinux/docker_helper.pp")
 		}
 	} else {
 		t.Log("rpm not available, skipping RPM SELinux payload check")
@@ -4246,14 +4246,14 @@ func TestNfpmConfigIncludesSELinuxPolicy(t *testing.T) {
 
 	// nfpm source must point to the freshly generated artifact in dist/,
 	// never to packaging/selinux/ (which would permit stale policy reuse).
-	if !strings.Contains(content, "dist/docker-helper.pp") {
-		t.Error("nfpm.yaml must source dist/docker-helper.pp (freshly generated artifact)")
+	if !strings.Contains(content, "dist/docker_helper.pp") {
+		t.Error("nfpm.yaml must source dist/docker_helper.pp (freshly generated artifact)")
 	}
-	if strings.Contains(content, "packaging/selinux/docker-helper.pp") {
-		t.Error("nfpm.yaml must not source packaging/selinux/docker-helper.pp (stale policy risk)")
+	if strings.Contains(content, "packaging/selinux/docker_helper.pp") {
+		t.Error("nfpm.yaml must not source packaging/selinux/docker_helper.pp (stale policy risk)")
 	}
-	if !strings.Contains(content, "/usr/share/selinux/docker-helper.pp") {
-		t.Error("nfpm.yaml must install .pp to /usr/share/selinux/docker-helper.pp")
+	if !strings.Contains(content, "/usr/share/selinux/docker_helper.pp") {
+		t.Error("nfpm.yaml must install .pp to /usr/share/selinux/docker_helper.pp")
 	}
 }
 
@@ -4276,16 +4276,16 @@ func TestBuildPackagesScriptContentSELinux(t *testing.T) {
 	if !strings.Contains(content, "docker-helper.te") {
 		t.Error("build-packages.sh must reference docker-helper.te")
 	}
-	if !strings.Contains(content, "docker-helper.pp") {
-		t.Error("build-packages.sh must produce docker-helper.pp")
+	if !strings.Contains(content, "docker_helper.pp") {
+		t.Error("build-packages.sh must produce docker_helper.pp")
 	}
 
 	// Must generate under dist/, never under packaging/selinux/.
-	if !strings.Contains(content, "dist/docker-helper.pp") {
-		t.Error("build-packages.sh must output to dist/docker-helper.pp")
+	if !strings.Contains(content, "dist/docker_helper.pp") {
+		t.Error("build-packages.sh must output to dist/docker_helper.pp")
 	}
-	if strings.Contains(content, "packaging/selinux/docker-helper.pp") {
-		t.Error("build-packages.sh must not output to packaging/selinux/docker-helper.pp (stale policy risk)")
+	if strings.Contains(content, "packaging/selinux/docker_helper.pp") {
+		t.Error("build-packages.sh must not output to packaging/selinux/docker_helper.pp (stale policy risk)")
 	}
 
 	// Must fail-closed: exit 1 when tools are missing, not warn-and-continue.
@@ -4386,7 +4386,7 @@ func TestRpmPostinstallSELinuxActive(t *testing.T) {
 	for _, c := range calls {
 		if strings.Contains(c, "semodule") && strings.Contains(c, "-i") {
 			foundSemodule = true
-			if !strings.Contains(c, "/usr/share/selinux/docker-helper.pp") {
+			if !strings.Contains(c, "/usr/share/selinux/docker_helper.pp") {
 				t.Errorf("semodule -i must use correct path: %s", c)
 			}
 		}
@@ -5365,7 +5365,7 @@ func TestPackageMetadataScripts(t *testing.T) {
 	}
 
 	// Create a dummy SELinux policy module (required by nfpm.yaml).
-	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	dummyPP := filepath.Join(tmpDir, "docker_helper.pp")
 	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -5383,7 +5383,7 @@ func TestPackageMetadataScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
-	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker_helper.pp", "src: "+dummyPP)
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", "0.0.0")
 	configFile := filepath.Join(tmpDir, "nfpm.yaml")
@@ -5506,7 +5506,7 @@ func TestPackageMetadataManPages(t *testing.T) {
 	}
 
 	// Create a dummy SELinux policy module (required by nfpm.yaml).
-	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	dummyPP := filepath.Join(tmpDir, "docker_helper.pp")
 	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -5543,7 +5543,7 @@ func TestPackageMetadataManPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
-	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker_helper.pp", "src: "+dummyPP)
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper.1.gz"))
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper-config.5.gz"))
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
@@ -5649,7 +5649,7 @@ func TestPackageBashCompletion(t *testing.T) {
 	}
 
 	// Create a dummy SELinux policy module (required by nfpm.yaml).
-	dummyPP := filepath.Join(tmpDir, "docker-helper.pp")
+	dummyPP := filepath.Join(tmpDir, "docker_helper.pp")
 	if err := os.WriteFile(dummyPP, []byte("dummy-pp"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -5686,7 +5686,7 @@ func TestPackageBashCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
-	configContent = strings.ReplaceAll(configContent, "src: dist/docker-helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/docker_helper.pp", "src: "+dummyPP)
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper.1.gz"))
 	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+filepath.Join(tmpDir, "man", "docker-helper-config.5.gz"))
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
