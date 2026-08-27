@@ -84,6 +84,7 @@ module docker_helper 1.0;
 		type cgroup_t;
 		type proc_t;
 		type sysctl_net_t;
+		type setfiles_exec_t;
 
 		role system_r;
 
@@ -203,6 +204,11 @@ type_transition docker_helper_t docker_helper_trusted_ca_t:lnk_file docker_helpe
 allow docker_helper_t docker_helper_trusted_ca_t:dir { create getattr search read open write add_name remove_name setattr };
 allow docker_helper_t docker_helper_trusted_ca_t:file { create read write open getattr setattr rename unlink };
 allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink };
+
+# Execute restorecon (setfiles_exec_t) without domain transition.
+# This allows docker_helper_t to relabel its own trusted-CA tree while
+# avoiding transition to the privileged setfiles_t domain.
+allow docker_helper_t setfiles_exec_t:file { getattr read open execute execute_no_trans map };
 
 # /sys/fs/selinux/enforce (from live AVC evidence)
 allow docker_helper_t security_t:file { read open getattr };
@@ -394,3 +400,10 @@ allow docker_helper_container_t docker_helper_workspace_t:fifo_file {
 allow docker_helper_container_t docker_helper_trusted_ca_t:dir { getattr search read open };
 allow docker_helper_container_t docker_helper_trusted_ca_t:file { getattr read open };
 allow docker_helper_container_t docker_helper_trusted_ca_t:lnk_file { getattr read };
+
+# systemd (init_t) cleanup of RuntimeDirectory including trusted CA tree
+# on service stop/failure. Cleanup-only permissions: remove directories and
+# unlink files; no read/write of CA content.
+allow init_t docker_helper_trusted_ca_t:dir { write remove_name rmdir };
+allow init_t docker_helper_trusted_ca_t:file { unlink };
+allow init_t docker_helper_trusted_ca_t:lnk_file { unlink };

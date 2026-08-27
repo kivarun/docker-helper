@@ -1679,4 +1679,21 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if strings.Contains(content, "allow docker_helper_container_t docker_helper_runtime_t:") {
 		t.Error("policy must NOT grant container general access to runtime_t")
 	}
+	// setfiles_exec_t for restorecon without transition.
+	if !strings.Contains(content, "type setfiles_exec_t;") {
+		t.Error("policy must require type setfiles_exec_t")
+	}
+	if !strings.Contains(content, "allow docker_helper_t setfiles_exec_t:file { getattr read open execute execute_no_trans map };") {
+		t.Error("policy must grant docker_helper_t setfiles_exec_t execute_no_trans")
+	}
+	// init_t cleanup of trusted CA tree.
+	if !strings.Contains(content, "allow init_t docker_helper_trusted_ca_t:dir { write remove_name rmdir };") {
+		t.Error("policy must grant init_t trusted_ca_t dir cleanup")
+	}
+	if !strings.Contains(content, "allow init_t docker_helper_trusted_ca_t:file { unlink };") {
+		t.Error("policy must grant init_t trusted_ca_t file unlink")
+	}
+	if !strings.Contains(content, "allow init_t docker_helper_trusted_ca_t:lnk_file { unlink };") {
+		t.Error("policy must grant init_t trusted_ca_t lnk_file unlink")
+	}
 }
