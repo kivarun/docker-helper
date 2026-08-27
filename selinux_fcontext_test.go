@@ -145,15 +145,16 @@ func TestSELinuxPolicyInitTAndSystemPermissions(t *testing.T) {
 	}
 	// Regression for the live enforcing AVC:
 	//   scontext=docker_helper_t tcontext=sysctl_net_t tclass=dir denied { search } name=net
-	// The type must be required and only directory search granted (no file access).
+	// The type must be required and directory search granted.
 	if !strings.Contains(content, "type sysctl_net_t;") {
 		t.Error("policy must require type sysctl_net_t;")
 	}
 	if !strings.Contains(content, "allow docker_helper_t sysctl_net_t:dir { search };") {
 		t.Error("policy must grant docker_helper_t sysctl_net_t:dir search")
 	}
-	if strings.Contains(content, "allow docker_helper_t sysctl_net_t:file") {
-		t.Error("policy must NOT grant docker_helper_t sysctl_net_t file access")
+	// sysctl_net_t file read/open for the Go listener (proven in enforcing UAT).
+	if !strings.Contains(content, "allow docker_helper_t sysctl_net_t:file { read open };") {
+		t.Error("policy must grant docker_helper_t sysctl_net_t:file read open")
 	}
 }
 
@@ -1696,7 +1697,7 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(content, "allow init_t docker_helper_trusted_ca_t:lnk_file { unlink };") {
 		t.Error("policy must grant init_t trusted_ca_t lnk_file unlink")
 	}
-	// SELinux configuration access for restorecon.
+	// SELinux configuration access for restorecon (with -m, no mount scan).
 	if !strings.Contains(content, "type selinux_config_t;") {
 		t.Error("policy must require type selinux_config_t")
 	}
@@ -1712,10 +1713,59 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(content, "allow docker_helper_t default_context_t:dir { search };") {
 		t.Error("policy must grant docker_helper_t default_context_t dir search")
 	}
+	if !strings.Contains(content, "allow docker_helper_t default_context_t:file { read open getattr };") {
+		t.Error("policy must grant docker_helper_t default_context_t file read open getattr")
+	}
 	if !strings.Contains(content, "allow docker_helper_t file_context_t:dir { search };") {
 		t.Error("policy must grant docker_helper_t file_context_t dir search")
 	}
-	if !strings.Contains(content, "allow docker_helper_t file_context_t:file { read open };") {
-		t.Error("policy must grant docker_helper_t file_context_t file read open")
+	if !strings.Contains(content, "allow docker_helper_t file_context_t:file { read open getattr };") {
+		t.Error("policy must grant docker_helper_t file_context_t file read open getattr")
+	}
+	// restorecon relabel grants for the trusted CA tree.
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_runtime_t:dir { relabelfrom };") {
+		t.Error("policy must grant docker_helper_t runtime_t dir relabelfrom")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:dir { relabelto };") {
+		t.Error("policy must grant docker_helper_t trusted_ca_t dir relabelto")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_runtime_t:lnk_file { getattr relabelfrom };") {
+		t.Error("policy must grant docker_helper_t runtime_t lnk_file getattr relabelfrom")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { relabelto };") {
+		t.Error("policy must grant docker_helper_t trusted_ca_t lnk_file relabelto")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_runtime_t:file { relabelfrom };") {
+		t.Error("policy must grant docker_helper_t runtime_t file relabelfrom")
+	}
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:file { relabelto };") {
+		t.Error("policy must grant docker_helper_t trusted_ca_t file relabelto")
+	}
+	// sysctl_net_t file read/open for the Go listener (proven in enforcing UAT).
+	if !strings.Contains(content, "allow docker_helper_t sysctl_net_t:file { read open };") {
+		t.Error("policy must grant docker_helper_t sysctl_net_t file read open")
+	}
+	// Absence of the temporary mount-scan grants that were only needed when
+	// restorecon was run without -m.
+	for _, absent := range []string{
+		"device_t:filesystem",
+		"tmpfs_t:filesystem",
+		"devpts_t:filesystem",
+		"pstore_t:filesystem",
+		"tracefs_t:filesystem",
+		"hugetlbfs_t:filesystem",
+		"debugfs_t:filesystem",
+		"debugfs_t:dir",
+		"container_var_lib_t:dir",
+	} {
+		if strings.Contains(content, absent) {
+			t.Errorf("policy must NOT contain temporary mount-scan grant %s", absent)
+		}
+	}
+	if strings.Contains(content, "cgroup_t:filesystem") {
+		t.Error("policy must NOT contain temporary cgroup_t filesystem mount-scan grant")
+	}
+	if strings.Contains(content, "fs_t:filesystem { getattr") {
+		t.Error("policy must NOT contain temporary fs_t filesystem getattr mount-scan grant")
 	}
 }

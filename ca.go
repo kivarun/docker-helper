@@ -624,11 +624,22 @@ func prepareCAFromData(runtimeDir string, caData []byte) (preparedDir string, er
 	return snapshotDir, nil
 }
 
+// trustedCArestorecon runs restorecon over the trusted CA tree. It is a
+// package-level variable so tests can capture the exact invocation without
+// executing a real SELinux policy binary.
+var trustedCArestorecon = func(args ...string) ([]byte, error) {
+	cmd := exec.Command("/usr/sbin/restorecon", args...)
+	return cmd.CombinedOutput()
+}
+
 // restoreconTrustedCATree relabels the trusted CA base directory tree to the
 // dedicated docker_helper_trusted_ca_t type (from the file-context rule).
 // Dynamically created runtime files do not inherit the CA type from the
 // docker_helper_runtime_t parent, so an explicit restorecon is required after
 // materialization. It is a no-op when SELinux is not active.
+//
+// -m disables restorecon's mount-table scan, so it only relabels the named
+// base tree and does not descend into unrelated mounted filesystems.
 func restoreconTrustedCATree(baseDir string) error {
 	active, _, err := selinuxEnabled()
 	if err != nil {
@@ -637,8 +648,8 @@ func restoreconTrustedCATree(baseDir string) error {
 	if !active {
 		return nil
 	}
-	cmd := exec.Command("/usr/sbin/restorecon", "-R", baseDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := trustedCArestorecon("-R", "-m", baseDir)
+	if err != nil {
 		return fmt.Errorf("trusted CA restorecon failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil

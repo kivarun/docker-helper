@@ -1020,3 +1020,78 @@ func TestOpenSSLSubjectHashMultiAttributeRDN(t *testing.T) {
 		t.Errorf("hash = %s, want %s", hash, want)
 	}
 }
+
+func TestTrustedCARestoreconInvokesWithMountScanDisabled(t *testing.T) {
+	origSEL := selinuxEnabled
+	origCmd := trustedCArestorecon
+	defer func() {
+		selinuxEnabled = origSEL
+		trustedCArestorecon = origCmd
+	}()
+	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+
+	var args []string
+	trustedCArestorecon = func(a ...string) ([]byte, error) {
+		args = a
+		return []byte{}, nil
+	}
+
+	base := "/run/docker-helper/trusted-ca"
+	if err := restoreconTrustedCATree(base); err != nil {
+		t.Fatalf("restoreconTrustedCATree failed: %v", err)
+	}
+
+	want := []string{"-R", "-m", base}
+	if len(args) != len(want) {
+		t.Fatalf("restorecon args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("restorecon arg[%d] = %q, want %q", i, args[i], want[i])
+		}
+	}
+}
+
+func TestTrustedCARestoreconSkipsWhenSELinuxInactive(t *testing.T) {
+	origSEL := selinuxEnabled
+	origCmd := trustedCArestorecon
+	defer func() {
+		selinuxEnabled = origSEL
+		trustedCArestorecon = origCmd
+	}()
+	selinuxEnabled = func() (bool, bool, error) { return false, false, nil }
+
+	called := false
+	trustedCArestorecon = func(a ...string) ([]byte, error) {
+		called = true
+		return []byte{}, nil
+	}
+
+	if err := restoreconTrustedCATree("/run/docker-helper/trusted-ca"); err != nil {
+		t.Fatalf("restoreconTrustedCATree failed: %v", err)
+	}
+	if called {
+		t.Error("restorecon must NOT be invoked when SELinux is inactive")
+	}
+}
+
+func TestTrustedCARestoreconErrorPropagates(t *testing.T) {
+	origSEL := selinuxEnabled
+	origCmd := trustedCArestorecon
+	defer func() {
+		selinuxEnabled = origSEL
+		trustedCArestorecon = origCmd
+	}()
+	selinuxEnabled = func() (bool, bool, error) { return true, true, nil }
+	trustedCArestorecon = func(a ...string) ([]byte, error) {
+		return []byte("policy error"), fmt.Errorf("restorecon: denied")
+	}
+
+	err := restoreconTrustedCATree("/run/docker-helper/trusted-ca")
+	if err == nil {
+		t.Fatal("expected error when restorecon fails")
+	}
+	if !strings.Contains(err.Error(), "policy error") {
+		t.Errorf("error should include restorecon output, got: %v", err)
+	}
+}

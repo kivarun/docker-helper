@@ -91,10 +91,10 @@ module docker_helper 1.0;
 
 		role system_r;
 
-		class file { append create execute execute_no_trans getattr ioctl lock open read rename setattr unlink write entrypoint mounton map link };
+		class file { append create execute execute_no_trans getattr ioctl lock open read rename setattr unlink write entrypoint mounton map link relabelfrom relabelto };
 		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton map relabelfrom relabelto lock link unlink rename reparent };
 		class sock_file { append create getattr ioctl read setattr unlink write open rename link lock };
-		class lnk_file { create getattr read unlink write setattr append rename link ioctl lock };
+		class lnk_file { create getattr read unlink write setattr append rename link ioctl lock relabelfrom relabelto };
 		class chr_file { append create getattr ioctl read watch open write };
 		class blk_file { append create getattr ioctl read };
 		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock };
@@ -208,16 +208,30 @@ allow docker_helper_t docker_helper_trusted_ca_t:dir { create getattr search rea
 allow docker_helper_t docker_helper_trusted_ca_t:file { create read write open getattr setattr rename unlink };
 allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink };
 
+# restorecon relabels the trusted CA tree from docker_helper_runtime_t to
+# docker_helper_trusted_ca_t. relabelfrom is on the runtime source types,
+# relabelto on the trusted CA target types. Proven necessary in enforcing UAT
+# with restorecon -R -m.
+allow docker_helper_t docker_helper_runtime_t:dir { relabelfrom };
+allow docker_helper_t docker_helper_trusted_ca_t:dir { relabelto };
+allow docker_helper_t docker_helper_runtime_t:lnk_file { getattr relabelfrom };
+allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { relabelto };
+allow docker_helper_t docker_helper_runtime_t:file { relabelfrom };
+allow docker_helper_t docker_helper_trusted_ca_t:file { relabelto };
+
 # Execute restorecon (setfiles_exec_t) without domain transition.
 # This allows docker_helper_t to relabel its own trusted-CA tree while
 # avoiding transition to the privileged setfiles_t domain.
 allow docker_helper_t setfiles_exec_t:file { getattr read open execute execute_no_trans map };
 
 # SELinux configuration access required for restorecon to read file_contexts.
+# restorecon runs with -m (no mount-table scan), so only the file_contexts
+# files themselves and the default_contexts config are touched.
 allow docker_helper_t selinux_config_t:file { read open getattr };
 allow docker_helper_t default_context_t:dir { search };
+allow docker_helper_t default_context_t:file { read open getattr };
 allow docker_helper_t file_context_t:dir { search };
-allow docker_helper_t file_context_t:file { read open };
+allow docker_helper_t file_context_t:file { read open getattr };
 
 # /sys/fs/selinux/enforce (from live AVC evidence)
 allow docker_helper_t security_t:file { read open getattr };
@@ -288,8 +302,10 @@ allow docker_helper_t net_conf_t:file { read open getattr };
 
 # /proc/sys/net directory search by Docker (from live AVC evidence):
 #   scontext=docker_helper_t tcontext=sysctl_net_t tclass=dir denied { search } name=net
-# Directory search only; no sysctl_net_t file access granted.
 allow docker_helper_t sysctl_net_t:dir { search };
+
+# sysctl_net_t file read/open for the Go listener (proven in enforcing UAT).
+allow docker_helper_t sysctl_net_t:file { read open };
 
 # UDP socket for DNS resolution (proven in enforcing UAT)
 allow docker_helper_t self:udp_socket {
