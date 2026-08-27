@@ -81,6 +81,37 @@ func TestSELinuxPolicyCgroupSearch(t *testing.T) {
 	if !strings.Contains(content, "allow docker_helper_t cgroup_t:dir { search };") {
 		t.Error("policy must grant docker_helper_t cgroup_t:dir search")
 	}
+	// Regression for the live enforcing AVC:
+	//   scontext=docker_helper_t tcontext=cgroup_t tclass=file denied { read } comm="docker" name=cpu.max
+	if !strings.Contains(content, "allow docker_helper_t cgroup_t:file { read };") {
+		t.Error("policy must grant docker_helper_t cgroup_t:file read")
+	}
+}
+
+func TestSELinuxPolicyContainerProcAndChrFile(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// Regression for the live enforcing AVC:
+	//   scontext=docker_helper_container_t tcontext=proc_t tclass=file denied { read } name=filesystems
+	if !strings.Contains(content, "type proc_t;") {
+		t.Error("policy must require type proc_t;")
+	}
+	if !strings.Contains(content, "allow docker_helper_container_t proc_t:file { read };") {
+		t.Error("policy must grant docker_helper_container_t proc_t:file read")
+	}
+	// Regression for the live enforcing AVC:
+	//   scontext=docker_helper_container_t tcontext=container_file_t tclass=chr_file denied { open } paths /dev/tty, /dev/null, /dev/zero
+	// The chr_file class declaration and the container_file_t rule must both carry
+	// open and write so the container can open/write its character devices.
+	if !strings.Contains(content, "class chr_file { append create getattr ioctl read watch open write };") {
+		t.Error("chr_file class declaration must include open and write")
+	}
+	if !strings.Contains(content, "allow docker_helper_container_t container_file_t:chr_file { create getattr read append ioctl watch open write };") {
+		t.Error("container_file_t:chr_file rule must include open and write")
+	}
 }
 
 func TestSELinuxPolicyNoBroadHostTypeGrants(t *testing.T) {

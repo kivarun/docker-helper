@@ -81,6 +81,7 @@ module docker_helper 1.0;
 		type cert_t;
 		type container_file_t;
 		type cgroup_t;
+		type proc_t;
 
 		role system_r;
 
@@ -88,7 +89,7 @@ module docker_helper 1.0;
 		class dir { add_name create getattr ioctl open read remove_name rmdir search setattr write mounton map relabelfrom relabelto lock link unlink rename reparent };
 		class sock_file { append create getattr ioctl read setattr unlink write open rename link lock };
 		class lnk_file { create getattr read unlink write setattr append rename link ioctl lock };
-		class chr_file { append create getattr ioctl read watch };
+		class chr_file { append create getattr ioctl read watch open write };
 		class blk_file { append create getattr ioctl read };
 		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock };
 		class filesystem { mount remount unmount };
@@ -262,6 +263,11 @@ allow docker_helper_t cert_t:file { read open getattr };
 # Search only; no broader cgroup permissions.
 allow docker_helper_t cgroup_t:dir { search };
 
+# cgroup cpu.max read by Docker (from live AVC evidence):
+#   scontext=docker_helper_t tcontext=cgroup_t tclass=file denied { read } comm="docker" name=cpu.max
+# Read only; no broader cgroup permissions.
+allow docker_helper_t cgroup_t:file { read };
+
 # --- docker_helper_container_t: custom container domain ---
 
 # Container transitions are performed by container_runtime_domain (Docker),
@@ -279,9 +285,14 @@ allow docker_helper_container_t container_file_t:dir {
 };
 allow docker_helper_container_t container_file_t:lnk_file { read create getattr unlink write };
 allow docker_helper_container_t container_file_t:sock_file { create getattr read write append ioctl setattr unlink };
-allow docker_helper_container_t container_file_t:chr_file { create getattr read append ioctl watch };
+allow docker_helper_container_t container_file_t:chr_file { create getattr read append ioctl watch open write };
 allow docker_helper_container_t container_file_t:blk_file { create getattr read append ioctl };
 allow docker_helper_container_t container_file_t:fifo_file { create getattr read write append ioctl watch };
+
+# /proc/filesystems read by the container runtime (from live AVC evidence):
+#   scontext=docker_helper_container_t tcontext=proc_t tclass=file denied { read } name=filesystems
+# Read only; no broader proc access.
+allow docker_helper_container_t proc_t:file { read };
 
 # --- Container workspace access ---
 #
