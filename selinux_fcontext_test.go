@@ -157,6 +157,31 @@ func TestSELinuxPolicyInitTAndSystemPermissions(t *testing.T) {
 	}
 }
 
+func TestSELinuxPolicyContainerNetAndEntrypoint(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// Container network egress must come from the standard container-selinux
+	// container_net_domain attribute, not from custom per-socket allow rules.
+	if !strings.Contains(content, "attribute container_net_domain;") {
+		t.Error("policy must require attribute container_net_domain;")
+	}
+	if !strings.Contains(content, "typeattribute docker_helper_container_t container_net_domain;") {
+		t.Error("docker_helper_container_t must be assigned container_net_domain")
+	}
+	// Workspace scripts must be executable as a container ENTRYPOINT.
+	// Regression for: exec /qa/scripts/run_tests.sh: permission denied
+	// The container workspace file rules must include entrypoint.
+	if !strings.Contains(content, "allow docker_helper_container_t user_home_type:file {\n\tread write create getattr setattr lock open ioctl append\n\tunlink rename execute execute_no_trans map link entrypoint\n};") {
+		t.Error("user_home_type:file rule must include entrypoint")
+	}
+	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_workspace_t:file {\n\tread write create getattr setattr lock open ioctl append\n\tunlink rename execute execute_no_trans map link entrypoint\n};") {
+		t.Error("docker_helper_workspace_t:file rule must include entrypoint")
+	}
+}
+
 func TestSELinuxPolicyNoBroadHostTypeGrants(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
 	if err != nil {

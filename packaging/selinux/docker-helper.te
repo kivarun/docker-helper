@@ -65,6 +65,7 @@ module docker_helper 1.0;
 		attribute user_home_type;
 		attribute container_domain;
 		attribute mcs_constrained_type;
+		attribute container_net_domain;
 
 		type security_t;
 		type node_t;
@@ -126,6 +127,7 @@ type docker_helper_workspace_t, file_type;
 # Composes with container-selinux via shared attributes:
 #   container_domain       — generic container confinement rules
 #   mcs_constrained_type   — MCS category isolation
+#   container_net_domain   — standard container network egress rules
 # Container transitions are performed by container_runtime_domain (Docker).
 # Explicit rules below reproduce the minimum container-selinux container
 # domain semantics that this module must provide independently:
@@ -137,6 +139,7 @@ type docker_helper_workspace_t, file_type;
 type docker_helper_container_t, domain;
 typeattribute docker_helper_container_t container_domain;
 typeattribute docker_helper_container_t mcs_constrained_type;
+typeattribute docker_helper_container_t container_net_domain;
 role system_r types docker_helper_container_t;
 
 # --- docker_helper_t: daemon process ---
@@ -314,7 +317,7 @@ allow docker_helper_container_t proc_t:file { read open };
 # user_home_type: regular files — create, read/write, build, execute
 allow docker_helper_container_t user_home_type:file {
 	read write create getattr setattr lock open ioctl append
-	unlink rename execute execute_no_trans map link
+	unlink rename execute execute_no_trans map link entrypoint
 };
 
 # user_home_type: directories — normal POSIX tree management
@@ -341,7 +344,7 @@ allow docker_helper_container_t user_home_type:fifo_file {
 # docker_helper_workspace_t: regular files — create, read/write, build, execute
 allow docker_helper_container_t docker_helper_workspace_t:file {
 	read write create getattr setattr lock open ioctl append
-	unlink rename execute execute_no_trans map link
+	unlink rename execute execute_no_trans map link entrypoint
 };
 
 # docker_helper_workspace_t: directories — normal POSIX tree management
