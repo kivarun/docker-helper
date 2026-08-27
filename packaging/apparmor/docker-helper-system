@@ -155,6 +155,9 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# OpenSSL/CA certificates.
 	/etc/ssl/certs/** r,
 	/etc/pki/tls/certs/** r,
+	# openSUSE trust anchors (administrator-installed CA material).
+	/etc/pki/trust/anchors/ r,
+	/etc/pki/trust/anchors/** r,
 
 	# Network access (for Docker registry pulls, loopback listener).
 	network inet tcp,

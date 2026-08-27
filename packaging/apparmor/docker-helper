@@ -80,6 +80,10 @@ profile @@BINARY_PATH@@ flags=(attach_disconnected,mediate_deleted) {
 	/usr/bin/** r,
 	/bin/** r,
 
+	# openSUSE trust anchors (administrator-installed CA material).
+	/etc/pki/trust/anchors/ r,
+	/etc/pki/trust/anchors/** r,
+
 	# Network access (for registry pulls, etc.).
 	network inet tcp,
 	network inet udp,

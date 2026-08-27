@@ -2440,6 +2440,92 @@ func TestBuildxNoBroadWildcard(t *testing.T) {
 	}
 }
 
+// TestTrustAnchorRulesPresentAndReadOnly verifies both shipped AppArmor
+// profiles grant read access to the standard openSUSE trust-anchor location
+// (/etc/pki/trust/anchors) and that this access is strictly read-only.
+//
+// Trusted CA preparation reads the configured trusted_ca_path from within
+// the confined daemon in both system and user mode, so both profiles must
+// cover the openSUSE location used for administrator-installed CA material.
+func TestTrustAnchorRulesPresentAndReadOnly(t *testing.T) {
+	profiles := map[string]string{
+		"system": "packaging/apparmor/docker-helper-system",
+		"user":   "packaging/apparmor/docker-helper",
+	}
+
+	for name, path := range profiles {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Skipf("profile not found: %v", err)
+			}
+			content := string(data)
+
+			required := []string{
+				"/etc/pki/trust/anchors/ r,",
+				"/etc/pki/trust/anchors/** r,",
+			}
+			for _, rule := range required {
+				if !strings.Contains(content, rule) {
+					t.Errorf("profile missing openSUSE trust-anchor read rule: %s", rule)
+				}
+			}
+
+			// Any trust-anchor rule must be strictly read-only.
+			for _, line := range strings.Split(content, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if !strings.Contains(trimmed, "/etc/pki/trust/anchors") {
+					continue
+				}
+				perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+				perm = strings.TrimSuffix(perm, ",")
+				if !strings.Contains(perm, "r") {
+					t.Errorf("trust-anchor rule must grant read: %s", trimmed)
+				}
+				for _, extra := range []string{"w", "a", "k", "m", "l", "c", "x", "d", "p", "i"} {
+					if strings.Contains(perm, extra) {
+						t.Errorf("trust-anchor rule must be read-only (found %q in %q): %s", extra, perm, trimmed)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestNoBroadPkiAccess verifies neither shipped profile grants broad access
+// to /etc/pki/**. Trusted CA access is scoped to the specific standard CA
+// locations (/etc/pki/tls/certs/**, /etc/pki/trust/anchors/**), never a bare
+// /etc/pki/** wildcard.
+func TestNoBroadPkiAccess(t *testing.T) {
+	profiles := map[string]string{
+		"system": "packaging/apparmor/docker-helper-system",
+		"user":   "packaging/apparmor/docker-helper",
+	}
+
+	for name, path := range profiles {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Skipf("profile not found: %v", err)
+			}
+			content := string(data)
+
+			for _, line := range strings.Split(content, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				if strings.Contains(trimmed, "/etc/pki/**") {
+					t.Errorf("profile must not grant broad /etc/pki/** access: %s", trimmed)
+				}
+			}
+		})
+	}
+}
+
 // --- Confined profile-reload policy regression tests ---
 
 func TestSystemProfileMACAdmin(t *testing.T) {
