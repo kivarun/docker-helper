@@ -493,6 +493,32 @@ func TestCompletionRootHelpFlags(t *testing.T) {
 	}
 }
 
+func TestCompletionRootVersionFlags(t *testing.T) {
+	// docker-helper -<TAB> must also suggest the -v/--version aliases.
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "-"})
+	if len(results) == 0 {
+		t.Error("expected flag completions for root command")
+		return
+	}
+	foundV := false
+	foundVersion := false
+	for _, r := range results {
+		if r == "-v" {
+			foundV = true
+		}
+		if r == "--version" {
+			foundVersion = true
+		}
+	}
+	if !foundV {
+		t.Errorf("expected -v in root flag completions: %v", results)
+	}
+	if !foundVersion {
+		t.Errorf("expected --version in root flag completions: %v", results)
+	}
+}
+
 func TestCompletionPasswordStdinIsBool(t *testing.T) {
 	// --password-stdin is a real bool flag; it must not swallow the next word
 	script := completionScript(t)

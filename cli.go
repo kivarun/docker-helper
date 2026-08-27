@@ -290,6 +290,10 @@ func (c *Command) printHelp(w io.Writer, path []string) {
 	}
 	// Always print -h/--help
 	fmt.Fprintln(w, "  -h, --help  Show help for this command")
+	// Root-level version alias.
+	if c == rootCommand {
+		fmt.Fprintln(w, "  -v, --version  Print version information")
+	}
 	fmt.Fprintln(w)
 
 	// Root command: add hint about help <command>

@@ -451,6 +451,22 @@ func TestHelpNoWorkspaceRoot(t *testing.T) {
 	}
 }
 
+// TestHelpRootVersionFlagDiscoverable verifies root --help advertises the
+// -v/--version alias so the version aliases are discoverable.
+func TestHelpRootVersionFlagDiscoverable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "-v, --version") {
+		t.Errorf("root --help must advertise -v, --version, got:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Print version information") {
+		t.Errorf("root --help must describe the version flag, got:\n%s", stdout.String())
+	}
+}
+
 func TestHelpInitMACLifecycleContract(t *testing.T) {
 	// init help must describe the correct MAC lifecycle contract:
 	// system mode has authorization ceiling + session-creation MAC preparation;

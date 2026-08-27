@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -1141,19 +1142,126 @@ func TestResolveAgentSocketPathFallback(t *testing.T) {
 	}
 }
 
-// TestResolveAgentClientSystemFlag verifies --system selects the system socket
-// regardless of XDG_RUNTIME_DIR / DOCKER_HELPER_SOCKET_PATH.
+// TestResolveAgentClientSystemFlag verifies --system selects the system daemon
+// socket even when DOCKER_HELPER_SOCKET_PATH points elsewhere. It binds a real
+// Unix listener at the system socket path (via the test seam) and drives a pull
+// request through the resolved client's transport to prove the actual dial
+// target, not just the shared baseURL.
 func TestResolveAgentClientSystemFlag(t *testing.T) {
+	tempDir := t.TempDir()
+	socketPath := filepath.Join(tempDir, "system.sock")
+
+	var received int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /pull", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&received, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", socketPath)
+
+	origSystemSocket := agentSystemSocketPath
+	agentSystemSocketPath = socketPath
+	t.Cleanup(func() { agentSystemSocketPath = origSystemSocket })
+
 	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
-	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "/some/other/path.sock")
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", filepath.Join(tempDir, "elsewhere.sock"))
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
 	c, err := resolveAgentClient(agentClientOptions{System: true})
 	if err != nil {
 		t.Fatalf("resolveAgentClient(--system): %v", err)
 	}
-	if c.baseURL != "http://localhost" {
-		t.Errorf("baseURL = %q, want http://localhost", c.baseURL)
+	if _, err := c.pull(pullRequest{Image: "alpine:3.24"}); err != nil {
+		t.Fatalf("pull through --system client: %v", err)
+	}
+	if atomic.LoadInt32(&received) != 1 {
+		t.Errorf("expected request to reach system socket, got %d", atomic.LoadInt32(&received))
+	}
+}
+
+// TestResolveAgentClientEndpointUnixScheme verifies --endpoint unix:///path
+// selects the Unix socket at that path by driving a request through the client
+// transport to a real listener, even when DOCKER_HELPER_SOCKET_PATH points
+// elsewhere.
+func TestResolveAgentClientEndpointUnixScheme(t *testing.T) {
+	tempDir := t.TempDir()
+	endpointSocket := filepath.Join(tempDir, "custom.sock")
+
+	var received int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /pull", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&received, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	listener, err := net.Listen("unix", endpointSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "unix", endpointSocket)
+
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", filepath.Join(tempDir, "elsewhere.sock"))
+
+	c, err := resolveAgentClient(agentClientOptions{Endpoint: "unix://" + endpointSocket})
+	if err != nil {
+		t.Fatalf("resolveAgentClient(--endpoint unix://): %v", err)
+	}
+	if _, err := c.pull(pullRequest{Image: "alpine:3.24"}); err != nil {
+		t.Fatalf("pull through --endpoint unix:// client: %v", err)
+	}
+	if atomic.LoadInt32(&received) != 1 {
+		t.Errorf("expected request to reach endpoint socket, got %d", atomic.LoadInt32(&received))
+	}
+}
+
+// TestResolveAgentClientEndpointHTTP verifies --endpoint http://127.0.0.1:PORT
+// selects the loopback HTTP daemon by driving a request through the client
+// transport to a real TCP listener.
+func TestResolveAgentClientEndpointHTTP(t *testing.T) {
+	var received int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /pull", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&received, 1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	server := &http.Server{Handler: mux}
+	go server.Serve(listener)
+	defer server.Close()
+	waitForDialReady(t, "tcp", listener.Addr().String())
+
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", filepath.Join(t.TempDir(), "elsewhere.sock"))
+
+	c, err := resolveAgentClient(agentClientOptions{Endpoint: fmt.Sprintf("http://127.0.0.1:%d", port)})
+	if err != nil {
+		t.Fatalf("resolveAgentClient(--endpoint http): %v", err)
+	}
+	if _, err := c.pull(pullRequest{Image: "alpine:3.24"}); err != nil {
+		t.Fatalf("pull through --endpoint http client: %v", err)
+	}
+	if atomic.LoadInt32(&received) != 1 {
+		t.Errorf("expected request to reach HTTP listener, got %d", atomic.LoadInt32(&received))
 	}
 }
 

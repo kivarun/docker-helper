@@ -24,6 +24,11 @@ const (
 	agentSocketPath = "/run/docker-helper/docker-helper.sock"
 )
 
+// agentSystemSocketPath is the system daemon socket selected by --system for
+// agent-facing commands. It is a variable so tests can bind a real listener at
+// a controlled path; production always uses the system socket.
+var agentSystemSocketPath = filepath.Join(systemRuntimeDir, "docker-helper.sock")
+
 // agentClientOptions specifies how an agent-facing command connects to a daemon.
 // Agent commands authenticate with the Session token (DOCKER_HELPER_SESSION_TOKEN),
 // never a Principal credential; these options only select the transport endpoint.
@@ -97,7 +102,7 @@ func resolveAgentClient(opts agentClientOptions) (*apiClient, error) {
 		return resolveAgentEndpoint(opts.Endpoint, tokenSource)
 	}
 	if opts.System {
-		return newUnixAPIClient(filepath.Join(systemRuntimeDir, "docker-helper.sock"), tokenSource, nil), nil
+		return newUnixAPIClient(agentSystemSocketPath, tokenSource, nil), nil
 	}
 	return newUnixAPIClient(resolveAgentSocketPath(), tokenSource, nil), nil
 }
