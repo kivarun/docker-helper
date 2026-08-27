@@ -11,6 +11,15 @@ import (
 	"testing"
 )
 
+// mockDetectLSM replaces detectLSM to return the given backend, allowing
+// tests that exercise system-mode handlers to run without a real MAC backend.
+func mockDetectLSM(t *testing.T, backend LSMBackend, err error) {
+	t.Helper()
+	saved := detectLSM
+	detectLSM = func() (LSMBackend, error) { return backend, err }
+	t.Cleanup(func() { detectLSM = saved })
+}
+
 // --- detectLSM matrix ---
 
 func TestDetectLSMMatrix(t *testing.T) {
