@@ -2039,7 +2039,7 @@ func TestAppArmorStaleUnsafeBoundaryPreservedSemantics(t *testing.T) {
 func TestSystemProfileContainsDockerBuildx(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2078,7 +2078,7 @@ func TestSystemProfileContainsDockerBuildx(t *testing.T) {
 func TestSystemProfileDockerInheritedConfinement(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2090,7 +2090,7 @@ func TestSystemProfileDockerInheritedConfinement(t *testing.T) {
 func TestSystemProfileSocketLockFileLocking(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2131,6 +2131,11 @@ func TestSystemProfileDockerBuildProcIntrospection(t *testing.T) {
 	// Own-process cgroup read must be allowed for docker/docker-buildx.
 	if !strings.Contains(content, "owner @{PROC}/@{pid}/cgroup r,") {
 		t.Error("system profile must allow owner /proc/<pid>/cgroup read for docker build")
+	}
+
+	// Own-process mountinfo read must be allowed for docker/docker-buildx.
+	if !strings.Contains(content, "owner @{PROC}/@{pid}/mountinfo r,") {
+		t.Error("system profile must allow owner /proc/<pid>/mountinfo read for docker build")
 	}
 
 	// The single net/core/somaxconn sysctl read must be present for docker.
@@ -2224,10 +2229,143 @@ func TestSystemProfileDockerBuildxLockFileLocking(t *testing.T) {
 	}
 }
 
+// TestSystemProfileDockerBuildResolverReadOnly verifies the resolver inputs
+// added for `docker build` (evidence-driven AppArmor fix). Buildx registry
+// access reads /etc/resolv.conf and /etc/hosts; both must be present and
+// strictly read-only, with no broad /etc/** read and no nameservice
+// abstraction shortcut.
+func TestSystemProfileDockerBuildResolverReadOnly(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
+	}
+	content := string(data)
+
+	required := []string{
+		"/etc/resolv.conf r,",
+		"/etc/hosts r,",
+	}
+	for _, rule := range required {
+		if !strings.Contains(content, rule) {
+			t.Errorf("system profile missing resolver input read rule: %s", rule)
+		}
+	}
+
+	// Any resolver-input rule must be strictly read-only.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/etc/resolv.conf") || strings.Contains(trimmed, "/etc/hosts") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			perm = strings.TrimSuffix(perm, ",")
+			if !strings.Contains(perm, "r") {
+				t.Errorf("resolver-input rule must grant read: %s", trimmed)
+			}
+			for _, extra := range []string{"w", "a", "k", "m", "l", "c", "x", "d", "p", "i"} {
+				if strings.Contains(perm, extra) {
+					t.Errorf("resolver-input rule must be read-only (found %q in %q): %s", extra, perm, trimmed)
+				}
+			}
+		}
+	}
+
+	// No broad /etc/** read rule may exist.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/etc/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "r") {
+				t.Errorf("system profile must not grant broad /etc/** read (found: %s)", trimmed)
+			}
+		}
+	}
+
+	// No nameservice abstraction may be pulled in as a shortcut.
+	if strings.Contains(content, "abstractions/nameservice") {
+		t.Error("system profile must not include a broad nameservice abstraction")
+	}
+}
+
+// TestSystemProfileDockerBuildTokenSeedLock verifies the per-session Docker
+// CLI token-state lock permission added for `docker build` (evidence-driven
+// AppArmor fix). file locking (k) must be granted only to that single lock
+// file, never to the generic /run/docker-helper/** rule or the Docker session
+// directory.
+func TestSystemProfileDockerBuildTokenSeedLock(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
+	}
+	content := string(data)
+
+	// The per-session Docker CLI token-seed lock must have k.
+	if !strings.Contains(content, "/run/docker-helper/sessions/dhs_*/docker/.token_seed.lock k,") {
+		t.Error("system profile must grant k on the per-session Docker CLI .token_seed.lock file")
+	}
+
+	// No rwk may be granted to the Docker session directory.
+	for _, bad := range []string{
+		"/run/docker-helper/sessions/dhs_*/docker/ rwk,",
+		"/run/docker-helper/sessions/dhs_*/docker/** rwk,",
+		"/run/docker-helper/sessions/dhs_*/docker/* rwk,",
+	} {
+		if strings.Contains(content, bad) {
+			t.Errorf("system profile must not grant rwk on the Docker session directory: %s", bad)
+		}
+	}
+
+	// The generic /run/docker-helper/** rule must still NOT include k.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "/run/docker-helper/**") {
+			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+			if strings.Contains(perm, "k") {
+				t.Errorf("system profile must not grant k on /run/docker-helper/** (found: %s)", trimmed)
+			}
+		}
+	}
+}
+
+// TestSystemProfileNoGitExec verifies the build fix does not grant Git
+// execution. Buildx attempted to exec /usr/libexec/git/git, but the local
+// build path continued without it, so Git execution must remain denied.
+func TestSystemProfileNoGitExec(t *testing.T) {
+	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
+	if err != nil {
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
+	}
+	content := string(data)
+
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if !strings.Contains(trimmed, "git") {
+			continue
+		}
+		perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
+		perm = strings.TrimSuffix(perm, ",")
+		for _, execPerm := range []string{"x", "i", "p", "c", "u"} {
+			if strings.Contains(perm, execPerm) {
+				t.Errorf("system profile must not grant git execution (found %q in %q): %s", execPerm, perm, trimmed)
+			}
+		}
+	}
+}
+
 func TestSystemProfileAppArmorLifecycleLockFileLocking(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2251,7 +2389,7 @@ func TestSystemProfileAppArmorLifecycleLockFileLocking(t *testing.T) {
 func TestSystemProfileIncludesManagedBoundaries(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2269,7 +2407,7 @@ func TestSystemProfileIncludesManagedBoundaries(t *testing.T) {
 func TestSystemProfileAppArmorStateSubtreePermissions(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2371,7 +2509,7 @@ func TestRenderFragmentBoundaryTerminology(t *testing.T) {
 func TestUserProfileContainsDockerBuildx(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper")
 	if err != nil {
-		t.Skipf("user profile not found: %v", err)
+		t.Fatalf("cannot read user profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2450,7 +2588,7 @@ func TestBuildxDirectoryRulesHaveRead(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(path)
 			if err != nil {
-				t.Skipf("profile not found: %v", err)
+				t.Fatalf("cannot read profile (repository artifact): %v", err)
 			}
 			content := string(data)
 
@@ -2480,7 +2618,7 @@ func TestBuildxBinaryRulesHaveRix(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(path)
 			if err != nil {
-				t.Skipf("profile not found: %v", err)
+				t.Fatalf("cannot read profile (repository artifact): %v", err)
 			}
 			content := string(data)
 
@@ -2516,7 +2654,7 @@ func TestBuildxNoBroadWildcard(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(path)
 			if err != nil {
-				t.Skipf("profile not found: %v", err)
+				t.Fatalf("cannot read profile (repository artifact): %v", err)
 			}
 			content := string(data)
 
@@ -2567,7 +2705,7 @@ func TestAppArmorProfilesOpenSUSETrustAnchorsReadOnly(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(path)
 			if err != nil {
-				t.Skipf("profile not found: %v", err)
+				t.Fatalf("cannot read profile (repository artifact): %v", err)
 			}
 			content := string(data)
 
@@ -2619,7 +2757,7 @@ func TestAppArmorProfilesNoBroadPKIAccess(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(path)
 			if err != nil {
-				t.Skipf("profile not found: %v", err)
+				t.Fatalf("cannot read profile (repository artifact): %v", err)
 			}
 			content := string(data)
 
@@ -2641,7 +2779,7 @@ func TestAppArmorProfilesNoBroadPKIAccess(t *testing.T) {
 func TestSystemProfileMACAdmin(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2665,7 +2803,7 @@ func TestSystemProfileMACAdmin(t *testing.T) {
 func TestSystemProfileAppArmorReplaceWritable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2678,7 +2816,7 @@ func TestSystemProfileAppArmorReplaceWritable(t *testing.T) {
 func TestSystemProfileAppArmorInterfaceDirReadable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2693,7 +2831,7 @@ func TestSystemProfileAppArmorInterfaceDirReadable(t *testing.T) {
 func TestSystemProfileAppArmorFeaturesReadable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2720,7 +2858,7 @@ func TestSystemProfileAppArmorFeaturesReadable(t *testing.T) {
 func TestSystemProfileParserConfReadable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2733,7 +2871,7 @@ func TestSystemProfileParserConfReadable(t *testing.T) {
 func TestSystemProfileProcMountsReadable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2746,7 +2884,7 @@ func TestSystemProfileProcMountsReadable(t *testing.T) {
 func TestSystemProfileNoGenericSecurityfsWrite(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2776,7 +2914,7 @@ func TestSystemProfileNoGenericSecurityfsWrite(t *testing.T) {
 func TestSystemProfileNoRemoveWritable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2798,7 +2936,7 @@ func TestSystemProfileNoRemoveWritable(t *testing.T) {
 func TestSystemProfileNoLoadWritable(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2820,7 +2958,7 @@ func TestSystemProfileNoLoadWritable(t *testing.T) {
 func TestSystemProfileNoBroadProcAccess(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 
@@ -2842,7 +2980,7 @@ func TestSystemProfileNoBroadProcAccess(t *testing.T) {
 func TestSystemProfileAppArmorReloadComment(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
-		t.Skipf("system profile not found: %v", err)
+		t.Fatalf("cannot read system profile (repository artifact): %v", err)
 	}
 	content := string(data)
 

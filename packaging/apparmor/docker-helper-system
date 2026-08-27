@@ -42,6 +42,11 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# to the existing broad /run/docker-helper/** rule.
 	/run/docker-helper/sessions/dhs_*/docker/buildx/.lock k,
 
+	# Per-session Docker CLI token-state locking.
+	# Again restricted to the single token-seed lock file; no `k` on the
+	# generic runtime tree or the Docker session directory.
+	/run/docker-helper/sessions/dhs_*/docker/.token_seed.lock k,
+
 	# Dynamic AppArmor managed boundaries state (atomic temp + rename).
 	/var/lib/docker-helper/apparmor/ rw,
 	/var/lib/docker-helper/apparmor/* rw,
@@ -136,6 +141,11 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/group r,
 	/etc/nsswitch.conf r,
 	/etc/host.conf r,
+
+	# Resolver inputs used by Buildx registry access.
+	/etc/resolv.conf r,
+	/etc/hosts r,
+
 	/etc/ld.so.cache r,
 	/etc/ld.so.preload r,
 	/etc/ld.so.conf r,
@@ -161,6 +171,9 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	# net/core/somaxconn sysctl read are the only demonstrated build needs.
 	owner @{PROC}/@{pid}/cgroup r,
 	/proc/sys/net/core/somaxconn r,
+
+	# Buildx/Docker own-process mount introspection.
+	owner @{PROC}/@{pid}/mountinfo r,
 
 	/sys/devices/** r,
 
