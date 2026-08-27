@@ -1176,16 +1176,29 @@ func TestResolveAgentClientEndpoint(t *testing.T) {
 	}
 }
 
-// TestResolveAgentClientMutuallyExclusive verifies --system and --endpoint
-// cannot be combined.
-func TestResolveAgentClientMutuallyExclusive(t *testing.T) {
-	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
-	_, err := resolveAgentClient(agentClientOptions{System: true, Endpoint: "/x.sock"})
+// TestValidateAgentEndpointOptionsMutuallyExclusive verifies --system and
+// --endpoint cannot be combined, and that this CLI usage error is raised before
+// any runtime authentication lookup.
+func TestValidateAgentEndpointOptionsMutuallyExclusive(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+	err := validateAgentEndpointOptions(agentClientOptions{System: true, Endpoint: "/x.sock"})
 	if err == nil {
 		t.Fatal("expected mutual-exclusion error")
 	}
 	if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateAgentEndpointOptionsInvalid verifies an invalid --endpoint is
+// reported as a CLI usage error regardless of session token state.
+func TestValidateAgentEndpointOptionsInvalid(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+	if err := validateAgentEndpointOptions(agentClientOptions{Endpoint: "not-a-scheme"}); err == nil {
+		t.Fatal("expected endpoint validation error")
+	}
+	if err := validateAgentEndpointOptions(agentClientOptions{}); err != nil {
+		t.Fatalf("default options should validate: %v", err)
 	}
 }
 
@@ -1227,6 +1240,74 @@ func TestAgentFlagsPresentInHelp(t *testing.T) {
 				t.Errorf("%v --help: missing flag %q", tc.cmd, flag)
 			}
 		}
+	}
+}
+
+// TestAgentCLIMutuallyExclusiveExit2 verifies pull --system --endpoint is a CLI
+// usage error (exit 2) with a mutual-exclusion diagnostic, and that this holds
+// whether or not the session token is present.
+func TestAgentCLIMutuallyExclusiveExit2(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{name: "with token", token: "tok"},
+		{name: "without token", token: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DOCKER_HELPER_SESSION_TOKEN", tc.token)
+			var out, errB bytes.Buffer
+			exitCode := runCommandWithWriters([]string{"pull", "--system", "--endpoint", "/x", "alpine:3.24"}, &out, &errB)
+			if exitCode != 2 {
+				t.Errorf("exit code = %d, want 2", exitCode)
+			}
+			if !strings.Contains(errB.String(), "mutually exclusive") {
+				t.Errorf("stderr = %q, want mutual-exclusion diagnostic", errB.String())
+			}
+		})
+	}
+}
+
+// TestAgentCLIInvalidEndpointExit2 verifies an invalid --endpoint is reported as
+// a CLI argument error (exit 2) even when the session token is missing: the CLI
+// error must win over the missing-token runtime error.
+func TestAgentCLIInvalidEndpointExit2(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+	var out, errB bytes.Buffer
+	exitCode := runCommandWithWriters([]string{"pull", "--endpoint", "not-a-scheme", "alpine:3.24"}, &out, &errB)
+	if exitCode != 2 {
+		t.Errorf("exit code = %d, want 2", exitCode)
+	}
+	if strings.Contains(errB.String(), "DOCKER_HELPER_SESSION_TOKEN") {
+		t.Errorf("stderr = %q, want endpoint validation error (not missing-token)", errB.String())
+	}
+	if !strings.Contains(errB.String(), "endpoint") {
+		t.Errorf("stderr = %q, want endpoint validation diagnostic", errB.String())
+	}
+}
+
+// TestAgentCLIMissingTokenRuntimeError verifies that a valid endpoint selection
+// with a missing session token is a runtime/auth error (exit 1), not a CLI
+// usage error.
+func TestAgentCLIMissingTokenRuntimeError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "system", args: []string{"pull", "--system", "alpine:3.24"}},
+		{name: "endpoint", args: []string{"pull", "--endpoint", "/run/docker-helper/docker-helper.sock", "alpine:3.24"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "")
+			var out, errB bytes.Buffer
+			exitCode := runCommandWithWriters(tc.args, &out, &errB)
+			if exitCode != 1 {
+				t.Errorf("exit code = %d, want 1", exitCode)
+			}
+			if !strings.Contains(errB.String(), "DOCKER_HELPER_SESSION_TOKEN") {
+				t.Errorf("stderr = %q, want missing-token error", errB.String())
+			}
+		})
 	}
 }
 

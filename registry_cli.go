@@ -67,7 +67,7 @@ Examples:
 				if *username == "" || strings.HasPrefix(*username, "-") {
 					return fmt.Errorf("--username is required")
 				}
-				return nil
+				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				var password string

@@ -67,13 +67,26 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// validateAgentEndpointOptions validates the CLI-only --system/--endpoint
+// combination for an agent command. It must run during Invocation.Validate,
+// before any runtime authentication lookup, so a usage error is reported with
+// exit code 2 even when DOCKER_HELPER_SESSION_TOKEN is unset.
+func validateAgentEndpointOptions(opts agentClientOptions) error {
+	if opts.System && opts.Endpoint != "" {
+		return fmt.Errorf("--system and --endpoint are mutually exclusive")
+	}
+	if opts.Endpoint != "" {
+		return validateOperatorEndpoint(opts.Endpoint)
+	}
+	return nil
+}
+
 // resolveAgentClient resolves the agent-facing client for the given endpoint
 // options. The Session token is always read from DOCKER_HELPER_SESSION_TOKEN.
+// CLI usage conditions (mutual exclusion, endpoint format) are expected to have
+// been validated by validateAgentEndpointOptions; this function reports only
+// runtime errors such as a missing session token.
 func resolveAgentClient(opts agentClientOptions) (*apiClient, error) {
-	if opts.System && opts.Endpoint != "" {
-		return nil, fmt.Errorf("--system and --endpoint are mutually exclusive")
-	}
-
 	token := os.Getenv("DOCKER_HELPER_SESSION_TOKEN")
 	if token == "" {
 		return nil, fmt.Errorf("DOCKER_HELPER_SESSION_TOKEN is not set")
@@ -246,6 +259,9 @@ var pullCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint := registerAgentEndpointFlags(fs)
 		return Invocation{
+			Validate: func() error {
+				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
+			},
 			Run: func(stdout, stderr io.Writer) int {
 				image := fs.Arg(0)
 
@@ -308,6 +324,9 @@ var buildCommand = &Command{
 				}
 				if *image == "" {
 					return fmt.Errorf("--image is required")
+				}
+				if err := validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint}); err != nil {
+					return err
 				}
 				return nil
 			},
@@ -402,7 +421,7 @@ var runContainerCommand = &Command{
 				if *image == "" {
 					return fmt.Errorf("--image is required")
 				}
-				return nil
+				return validateAgentEndpointOptions(agentClientOptions{System: *system, Endpoint: *endpoint})
 			},
 			Run: func(stdout, stderr io.Writer) int {
 				// Parse command from remaining args after --
