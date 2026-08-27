@@ -85,6 +85,8 @@ module docker_helper 1.0;
 		type proc_t;
 		type sysctl_net_t;
 		type setfiles_exec_t;
+		type selinux_config_t;
+		type default_context_t;
 
 		role system_r;
 
@@ -209,6 +211,10 @@ allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink }
 # This allows docker_helper_t to relabel its own trusted-CA tree while
 # avoiding transition to the privileged setfiles_t domain.
 allow docker_helper_t setfiles_exec_t:file { getattr read open execute execute_no_trans map };
+
+# SELinux configuration access required for restorecon to read file_contexts.
+allow docker_helper_t selinux_config_t:file { read };
+allow docker_helper_t default_context_t:dir { search };
 
 # /sys/fs/selinux/enforce (from live AVC evidence)
 allow docker_helper_t security_t:file { read open getattr };

@@ -1696,4 +1696,17 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(content, "allow init_t docker_helper_trusted_ca_t:lnk_file { unlink };") {
 		t.Error("policy must grant init_t trusted_ca_t lnk_file unlink")
 	}
+	// SELinux configuration access for restorecon.
+	if !strings.Contains(content, "type selinux_config_t;") {
+		t.Error("policy must require type selinux_config_t")
+	}
+	if !strings.Contains(content, "type default_context_t;") {
+		t.Error("policy must require type default_context_t")
+	}
+	if !strings.Contains(content, "allow docker_helper_t selinux_config_t:file { read };") {
+		t.Error("policy must grant docker_helper_t selinux_config_t read")
+	}
+	if !strings.Contains(content, "allow docker_helper_t default_context_t:dir { search };") {
+		t.Error("policy must grant docker_helper_t default_context_t dir search")
+	}
 }
