@@ -82,17 +82,25 @@ audit_ts() {
   sed -n 's/.*audit(\([0-9][0-9]*\)\.[0-9]*:[0-9]*).*/\1/p' | head -1
 }
 
-# audit_records returns unique kernel audit records (from dmesg, which on
-# GitHub-hosted runners is the reliable source: systemd-journald typically
-# reports "Collecting audit messages is disabled", so journalctl -k has no
-# AppArmor records while the kernel ring buffer does) that match the given
-# grep filter AND fall inside the UAT audit window.
+# audit_records returns unique kernel audit records that match the given
+# grep filter AND fall inside the UAT audit window. It deliberately uses a
+# SINGLE source with fallback — never both — so one kernel audit event can
+# never be counted twice.
+#
+# Preference order:
+#  1. dmesg (kernel ring buffer): authoritative for kernel audit records and
+#     the reliable source on GitHub-hosted runners (systemd-journald there
+#     reports "Collecting audit messages is disabled", so journalctl -k has
+#     no AppArmor records while the ring buffer does);
+#  2. journalctl -k, only when dmesg is unavailable/restricted (empty output,
+#     e.g. kernel.dmesg_restrict=1).
 audit_records() {
   local filter="$1" line ts
-  {
+  if dmesg 2>/dev/null | head -1 | grep -q .; then
     dmesg 2>/dev/null || true
+  else
     journalctl -k --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null
-  } | grep -E "$filter" | while IFS= read -r line; do
+  fi | grep -E "$filter" | while IFS= read -r line; do
     ts="$(printf '%s\n' "$line" | audit_ts)"
     if [ -n "$ts" ] && [ "$ts" -ge "$AA_AUDIT_START_EPOCH" ]; then
       printf '%s\n' "$line"
