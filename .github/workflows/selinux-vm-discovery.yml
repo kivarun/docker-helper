@@ -1,0 +1,29 @@
+name: SELinux VM discovery (PoC)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# DISCOVERY ONLY — proves a real SELinux=enforcing Linux VM can be booted and
+# driven on a GitHub-hosted ubuntu-24.04 public runner (QEMU, KVM or TCG).
+# It does NOT run the docker-helper UAT, does not touch release workflows and
+# makes no production changes. Run manually via workflow_dispatch.
+
+jobs:
+  selinux-vm-discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run SELinux VM discovery
+        run: |
+          scripts/uat-selinux-discovery.sh
