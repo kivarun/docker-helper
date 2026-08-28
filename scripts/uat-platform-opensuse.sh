@@ -28,54 +28,58 @@ platform_name() {
   printf 'openSUSE Tumbleweed'
 }
 
-# platform_preflight fails unless the host matches this platform and AppArmor
-# is the active/expected configuration (AppArmor readiness itself is the MAC
-# adapter's job; here we only pin the distribution identity).
+# platform_preflight fails unless the host is openSUSE Tumbleweed.
 platform_preflight() {
   local id
   id="$(grep -E '^ID=' /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
-  case "$id" in
-    opensuse-tumbleweed|opensuse)
-      ;;
-    *)
-      fail_uat "not openSUSE (os-release ID='$id')"
-      ;;
-  esac
+  [ "$id" = "opensuse-tumbleweed" ] || fail_uat "not openSUSE Tumbleweed (os-release ID='$id')"
 }
 
 # platform_install_deps installs the build/test/runtime toolchain via the
 # native package manager (zypper) and ensures the Docker daemon is running.
+# Required dependencies must fail the step; optional operations are best-effort.
 platform_install_deps() {
-  zypper --non-interactive refresh || true
+  zypper --non-interactive refresh
   zypper --non-interactive install -y \
     musl-gcc checkpolicy policycoreutils \
     apparmor-parser apparmor-utils openssl \
     tar gzip file curl docker
+  # Best-effort: start Docker if not running (do not mask zypper failures).
   systemctl enable --now docker >/dev/null 2>&1 || true
 }
 
 # platform_default_principal returns the OS user mapped to the docker-helper
 # principal when UAT_PRINCIPAL is not set. On a self-hosted runner the invoking
-# (sudo) user is the runner user.
+# (sudo) user is the runner user. This function fails if the result would be
+# root, since the principal UAT must run as a non-root OS identity.
 platform_default_principal() {
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
     printf '%s' "$SUDO_USER"
   else
-    printf '%s' "$(id -un)"
+    local current
+    current="$(id -un)"
+    if [ "$current" = "root" ]; then
+      echo "error: cannot derive non-root principal (SUDO_USER unavailable and running as root)" >&2
+      return 1
+    fi
+    printf '%s' "$current"
   fi
 }
 
 # platform_default_allowed_root returns the global allowed root when
-# UAT_ALLOWED_ROOT is not set: the principal's home directory.
+# UAT_ALLOWED_ROOT is not set: the principal's home directory. This function
+# fails if the home directory does not exist, preventing silent manufacture of
+# a non-existent path.
 platform_default_allowed_root() {
   local p="${1:-}"
   if [ -n "$p" ]; then
     local home
     home="$(getent passwd "$p" 2>/dev/null | cut -d: -f6)"
-    if [ -n "$home" ]; then
+    if [ -n "$home" ] && [ -d "$home" ]; then
       printf '%s' "$home"
       return
     fi
   fi
-  printf '/home/%s' "${p:-runner}"
+  echo "error: cannot determine allowed root for principal '$p' (home directory not found)" >&2
+  return 1
 }

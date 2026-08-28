@@ -48,6 +48,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM="${{ matrix.platform }}" \
+            scripts/uat-blackbox.sh install-deps
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -64,11 +69,6 @@ jobs:
           chmod +x nfpm
           sudo mv nfpm /usr/local/bin/
           nfpm --version | grep -qF "2.47.0"
-
-      - name: Install platform dependencies
-        run: |
-          sudo -E env "PATH=$PATH" UAT_PLATFORM="${{ matrix.platform }}" \
-            scripts/uat-blackbox.sh install-deps
 
       - name: Run black-box UAT
         run: |
@@ -87,6 +87,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -103,10 +107,6 @@ jobs:
           chmod +x nfpm
           sudo mv nfpm /usr/local/bin/
           nfpm --version | grep -qF "2.47.0"
-
-      - name: Install platform dependencies
-        run: |
-          sudo -E env "PATH=$PATH" UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps
 
       - name: Run black-box UAT
         run: |

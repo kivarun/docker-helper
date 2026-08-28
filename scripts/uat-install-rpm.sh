@@ -2,7 +2,7 @@
 #
 # uat-install-rpm.sh — RPM install adapter for the docker-helper black-box
 # UAT. Sourced by scripts/uat-blackbox.sh (the scenario core) when
-# UAT_INSTALL=rpm (openSUSE + AppArmor profile).
+# UAT_INSTALL=rpm.
 #
 # This adapter owns INSTALLATION of an already-produced RPM artifact and
 # proving the installed files came from it. It never builds the artifact
@@ -11,16 +11,17 @@
 #   * install_preflight       — install-time tooling present (rpm);
 #   * install_apply           — verify the recorded artifact hash, rpm -i, then
 #                               init, daemon-reload, enable+start;
-#   * install_verify_artifacts— rpm ownership of binary, systemd unit, AppArmor
-#                               profile (proves the package install path);
+#   * install_verify_artifacts— rpm ownership of binary, systemd unit, and
+#                               shipped MAC artifacts (AppArmor profile and
+#                               SELinux policy module);
 #   * install_verify_version  — installed /usr/bin/docker-helper version matches.
 #
 # It consumes the exact artifact recorded by the artifact adapter
 # (ARTIFACT_PATH / ARTIFACT_SHA256) and never rebuilds it.
 #
 # Package installation and MAC verification stay separate: the RPM %post script
-# loads the AppArmor profile, but confirming the daemon is actually confined is
-# the MAC adapter's job (mac_verify_confinement in the core).
+# may load a MAC policy, but confirming the daemon is actually confined is the
+# MAC adapter's job (mac_verify_confinement in the core).
 #
 # NOTE: the nfpm-built RPM carries Requires on systemd, apparmor-parser,
 # policycoreutils, policycoreutils-python-utils. On openSUSE the latter two
@@ -83,8 +84,8 @@ install_apply() {
   systemctl enable --now docker-helper.service || fail_uat "systemctl enable --now docker-helper failed"
 }
 
-# install_verify_artifacts proves the installed binary/unit/profile came from
-# the docker-helper RPM package install path (rpm ownership).
+# install_verify_artifacts proves the installed binary/unit and shipped MAC
+# artifacts came from the docker-helper RPM package (rpm ownership).
 install_verify_artifacts() {
   if ! rpm -qf --queryformat '%{NAME}\n' /usr/bin/docker-helper 2>/dev/null | grep -qx 'docker-helper'; then
     fail_uat "/usr/bin/docker-helper is not owned by the docker-helper package"
@@ -92,8 +93,12 @@ install_verify_artifacts() {
   if ! rpm -qf --queryformat '%{NAME}\n' /usr/lib/systemd/system/docker-helper.service 2>/dev/null | grep -qx 'docker-helper'; then
     fail_uat "systemd unit is not owned by the docker-helper package"
   fi
+  # Verify shipped MAC artifacts (both AppArmor and SELinux) are owned by package.
   if ! rpm -qf --queryformat '%{NAME}\n' /etc/apparmor.d/docker-helper-system 2>/dev/null | grep -qx 'docker-helper'; then
     fail_uat "AppArmor profile is not owned by the docker-helper package"
+  fi
+  if ! rpm -qf --queryformat '%{NAME}\n' /usr/share/selinux/docker_helper.pp 2>/dev/null | grep -qx 'docker-helper'; then
+    fail_uat "SELinux policy module is not owned by the docker-helper package"
   fi
 }
 

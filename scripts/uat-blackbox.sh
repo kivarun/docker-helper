@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# uat-blackbox.sh — black-box UAT for docker-helper on a full Ubuntu VM (e.g.
-# a GitHub-hosted ubuntu-24.04 runner) with a real Docker daemon and an active
-# MAC adapter (AppArmor by default).
+# uat-blackbox.sh — black-box UAT for docker-helper on a full supported Linux
+# VM with a real Docker daemon and an active MAC adapter (AppArmor by default).
 #
 # The GitHub workflow runs this script as root:
 #     sudo -E env "PATH=$PATH" scripts/uat-blackbox.sh
-# It is also runnable manually on any Ubuntu VM with a rootful Docker daemon.
+# It is also runnable manually on any supported Linux VM with a rootful Docker
+# daemon and the selected platform/MAC adapter.
 #
-# Coverage (generic, independent of artifact type and MAC adapter):
+# Coverage (generic, independent of platform, artifact type and MAC adapter):
 #   1. preflight: Docker, systemd, versions
 #   2. artifact production + system-mode install + confinement
 #   3. operator surface: principal + credential; admin and principal sessions
@@ -126,23 +126,32 @@ done
 
 # install-deps mode: provision the build/test dependencies for this platform
 # and exit. Used by the workflow as a distinct provisioning step (run as root).
+# Exit status is propagated so dependency failure cannot return success.
 if [ "${1:-}" = "install-deps" ]; then
   platform_install_deps
-  exit 0
+  exit $?
 fi
 
 # Platform-aware defaults: an explicit env value wins; otherwise use the
-# platform-provided default (Ubuntu -> runner//home/runner; openSUSE -> the
-# invoking runner user and its home).
+# platform-provided default. Validate that the principal is not root and that
+# the allowed root exists.
 if [ -n "${UAT_PRINCIPAL:-}" ]; then
   PRINCIPAL="$UAT_PRINCIPAL"
 else
   PRINCIPAL="$(platform_default_principal)"
 fi
+if [ "$PRINCIPAL" = "root" ]; then
+  echo "error: UAT_PRINCIPAL resolved to root; this is not allowed" >&2
+  exit 1
+fi
 if [ -n "${UAT_ALLOWED_ROOT:-}" ]; then
   ALLOWED_ROOT="$UAT_ALLOWED_ROOT"
 else
   ALLOWED_ROOT="$(platform_default_allowed_root "$PRINCIPAL")"
+fi
+if [ ! -d "$ALLOWED_ROOT" ]; then
+  echo "error: allowed root '$ALLOWED_ROOT' does not exist" >&2
+  exit 1
 fi
 WS="${UAT_WORKSPACE:-${ALLOWED_ROOT}/uat-workspace}"
 
