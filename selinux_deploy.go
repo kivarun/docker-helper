@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -45,15 +48,62 @@ func relabelDeploymentConfigState() error {
 	return nil
 }
 
+// dockerCLISearchPath is the PATH the daemon resolves "docker" against
+// (systemd service default). Under enforcing SELinux init must relabel the
+// exact executable docker-helper will exec, so it searches the same
+// directories in the same order.
+var dockerCLISearchPath = []string{
+	"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin",
+}
+
+// dockerCLIExecutable returns the exact Docker CLI executable that docker-helper
+// uses to drive the Docker daemon, resolving "docker" the way the daemon does at
+// runtime. It is a package-level variable so tests can inject a stable path
+// without a docker install.
+var dockerCLIExecutable = func() (string, error) {
+	for _, dir := range dockerCLISearchPath {
+		p := filepath.Join(dir, "docker")
+		st, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if st.Mode().IsRegular() && st.Mode()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", errors.New("docker CLI not found in the daemon search path")
+}
+
+// relabelDockerCLI applies the installed fcontext rules to the exact Docker CLI
+// executable so the confined docker_helper_t domain can execute it
+// (execute_no_trans on container_runtime_exec_t). It is the narrow complement
+// to relabelDeploymentConfigState: exact-path restorecon only, never recursive,
+// never a directory, never a broad /usr/bin relabel, and it adds no execute
+// permission to bin_t.
+func relabelDockerCLI() error {
+	path, err := dockerCLIExecutable()
+	if err != nil {
+		return fmt.Errorf("cannot locate docker CLI for SELinux relabel: %w", err)
+	}
+	out, err := deploymentRestorecon("-m", path)
+	if err != nil {
+		return fmt.Errorf("docker CLI relabel failed (restorecon -m %s): %w: %s",
+			path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // applyDeploymentSELinuxRelabel is invoked by system init immediately after
 // the helper-owned config/state directories are created and before the config
 // / admin token are written, so the created files inherit the correct labels
 // and the first daemon start succeeds.
 //
 // Under system mode with enforcing SELinux an inability to perform the relabel
-// is fatal: init must not complete with badly labeled deployment state. For
-// AppArmor system mode and user mode there is no SELinux dependency and no
-// relabel behavior.
+// is fatal: init must not complete with badly labeled deployment state. This
+// covers both the helper-owned config/state trees and the exact Docker CLI
+// executable docker-helper will exec (whose type must already be defined by the
+// distro/container-selinux fcontext rules). For AppArmor system mode and user
+// mode there is no SELinux dependency and no relabel behavior.
 func applyDeploymentSELinuxRelabel(mode DeploymentMode) error {
 	if mode != ModeSystem {
 		return nil
@@ -65,5 +115,8 @@ func applyDeploymentSELinuxRelabel(mode DeploymentMode) error {
 	if backend != LSMSELinux {
 		return nil
 	}
-	return relabelDeploymentConfigState()
+	if err := relabelDeploymentConfigState(); err != nil {
+		return err
+	}
+	return relabelDockerCLI()
 }

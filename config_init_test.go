@@ -659,14 +659,19 @@ func setupInitSystemMode(t *testing.T) string {
 
 // TestInitSystemSELinuxRelabelsDeploymentPaths verifies that system init under
 // enforcing SELinux applies the deployment relabel to exactly the helper-owned
-// config/state trees, before the admin token is created, and never touches the
-// runtime tree or a Session/workspace path.
+// config/state trees and the exact Docker CLI executable, before the admin
+// token is created, and never touches the runtime tree or a Session/workspace
+// path.
 func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
 	dir := setupInitSystemMode(t)
 
 	origLSM := detectLSM
 	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
 	defer func() { detectLSM = origLSM }()
+
+	origDockerCLI := dockerCLIExecutable
+	dockerCLIExecutable = func() (string, error) { return "/usr/bin/docker", nil }
+	defer func() { dockerCLIExecutable = origDockerCLI }()
 
 	origRC := deploymentRestorecon
 	var calls [][]string
@@ -688,7 +693,10 @@ func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
 		t.Fatalf("initCore failed: %v", err)
 	}
 
-	want := [][]string{{"-R", "-m", "/etc/docker-helper", "/var/lib/docker-helper"}}
+	want := [][]string{
+		{"-R", "-m", "/etc/docker-helper", "/var/lib/docker-helper"},
+		{"-m", "/usr/bin/docker"},
+	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("deployment restorecon calls = %v, want %v", calls, want)
 	}
@@ -704,6 +712,124 @@ func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
 				t.Errorf("system init must not prepare Session/workspace MAC state (relabeled workspace %q)", a)
 			}
 		}
+	}
+}
+
+// TestInitSystemSELinuxDockerCLIRelabelIsExactPath verifies that the Docker CLI
+// relabel is an exact-path restorecon: a single file path with no -R (never a
+// recursive /usr/bin relabel) and no directory argument.
+func TestInitSystemSELinuxDockerCLIRelabelIsExactPath(t *testing.T) {
+	_ = setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+	defer func() { detectLSM = origLSM }()
+
+	origDockerCLI := dockerCLIExecutable
+	dockerCLIExecutable = func() (string, error) { return "/usr/local/bin/docker", nil }
+	defer func() { dockerCLIExecutable = origDockerCLI }()
+
+	var dockerCalls [][]string
+	origRC := deploymentRestorecon
+	deploymentRestorecon = func(args ...string) ([]byte, error) {
+		if len(args) == 2 && args[1] == "/usr/local/bin/docker" {
+			dockerCalls = append(dockerCalls, args)
+		}
+		return nil, nil
+	}
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	if _, err := initCore(rootDir, &stdout, &stderr); err != nil {
+		t.Fatalf("initCore failed: %v", err)
+	}
+
+	if len(dockerCalls) != 1 {
+		t.Fatalf("docker CLI must be relabeled exactly once, got %v", dockerCalls)
+	}
+	args := dockerCalls[0]
+	if strings.Join(args, " ") != "-m /usr/local/bin/docker" {
+		t.Errorf("docker CLI restorecon must be exact-path (-m <file>), got %v", args)
+	}
+	for _, a := range args {
+		if a == "-R" {
+			t.Error("docker CLI relabel must never be recursive (-R)")
+		}
+		if strings.HasPrefix(a, "/usr/bin/") || a == "/usr/bin" {
+			t.Error("docker CLI relabel must never target /usr/bin broadly")
+		}
+	}
+}
+
+// TestInitSystemSELinuxDockerCLIRelabelFailureFatal verifies that a Docker CLI
+// relabel failure under enforcing SELinux system mode makes init fail and
+// leaves no partial initialization (no admin token).
+func TestInitSystemSELinuxDockerCLIRelabelFailureFatal(t *testing.T) {
+	dir := setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+	defer func() { detectLSM = origLSM }()
+
+	origDockerCLI := dockerCLIExecutable
+	dockerCLIExecutable = func() (string, error) { return "/usr/bin/docker", nil }
+	defer func() { dockerCLIExecutable = origDockerCLI }()
+
+	origRC := deploymentRestorecon
+	call := 0
+	deploymentRestorecon = func(args ...string) ([]byte, error) {
+		call++
+		if call == 2 {
+			return []byte("restorecon: permission denied"), errors.New("restorecon exit status 1")
+		}
+		return nil, nil
+	}
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	_, err := initCore(rootDir, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected init to fail when the Docker CLI relabel fails")
+	}
+	if !strings.Contains(err.Error(), "docker CLI relabel failed") {
+		t.Errorf("expected docker CLI relabel error, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "admin.token")); !os.IsNotExist(statErr) {
+		t.Error("admin.token must not be created when the Docker CLI relabel fails (no partial init)")
+	}
+}
+
+// TestInitSystemSELinuxDockerCLINotFoundFatal verifies that init fails
+// explicitly when the Docker CLI executable cannot be located under enforcing
+// SELinux system mode (the relabel is required and cannot be skipped).
+func TestInitSystemSELinuxDockerCLINotFoundFatal(t *testing.T) {
+	dir := setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+	defer func() { detectLSM = origLSM }()
+
+	origDockerCLI := dockerCLIExecutable
+	dockerCLIExecutable = func() (string, error) { return "", errors.New("no docker CLI") }
+	defer func() { dockerCLIExecutable = origDockerCLI }()
+
+	origRC := deploymentRestorecon
+	deploymentRestorecon = func(args ...string) ([]byte, error) { return nil, nil }
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	_, err := initCore(rootDir, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected init to fail when the Docker CLI cannot be located")
+	}
+	if !strings.Contains(err.Error(), "cannot locate docker CLI") {
+		t.Errorf("expected docker CLI location error, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "admin.token")); !os.IsNotExist(statErr) {
+		t.Error("admin.token must not be created when the Docker CLI cannot be located (no partial init)")
 	}
 }
 
