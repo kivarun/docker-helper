@@ -78,34 +78,38 @@ fail_uat() {
 
 # ---- AppArmor audit helpers -------------------------------------------------
 
+# audit_ts extracts the epoch from a kernel audit(...) prefix, or prints
+# nothing when the line has no audit timestamp.
+audit_ts() {
+  sed -n 's/.*audit(\([0-9][0-9]*\)\.[0-9]*:[0-9]*).*/\1/p' | head -1
+}
+
+# audit_records returns unique kernel audit records (from dmesg, which on
+# GitHub-hosted runners is the reliable source: systemd-journald typically
+# reports "Collecting audit messages is disabled", so journalctl -k has no
+# AppArmor records while the kernel ring buffer does) that match the given
+# grep filter AND fall inside the UAT audit window.
+audit_records() {
+  local filter="$1" line ts
+  {
+    dmesg 2>/dev/null || true
+    journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null
+  } | grep -E "$filter" | while IFS= read -r line; do
+    ts="$(printf '%s\n' "$line" | audit_ts)"
+    if [ -n "$ts" ] && [ "$ts" -ge "$AUDIT_START_EPOCH" ]; then
+      printf '%s\n' "$line"
+    fi
+  done | sort -u
+}
+
 # collect_denials prints unique fresh kernel audit records that mention an
-# AppArmor DENIED event under profile docker-helper-system. Kernel audit
-# records go to systemd-journald's kernel log even without auditd installed,
-# so journalctl -k --since covers the whole UAT window reliably on GitHub
-# hosted runners.
+# AppArmor DENIED event under profile docker-helper-system.
 collect_denials() {
-  local raw
-  raw="$(journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null)"
-  if [ -z "$raw" ]; then
-    # journald may not be capturing kernel audit records on the runner; fall
-    # back to the kernel ring buffer (whole buffer, then content-filtered).
-    raw="$(dmesg 2>/dev/null || true)"
-  fi
-  printf '%s\n' "$raw" \
-    | grep -E 'apparmor="DENIED"' \
-    | grep -F 'profile="docker-helper-system"' \
-    | sort -u
+  audit_records 'apparmor="DENIED"' | grep -F 'profile="docker-helper-system"'
 }
 
 collect_profile_records() {
-  local raw
-  raw="$(journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null)"
-  if [ -z "$raw" ]; then
-    raw="$(dmesg 2>/dev/null || true)"
-  fi
-  printf '%s\n' "$raw" \
-    | grep -F 'profile="docker-helper-system"' \
-    | sort -u
+  audit_records 'apparmor=' | grep -F 'profile="docker-helper-system"'
 }
 
 # is_allowlisted_deny classifies a single deny record against the narrow
@@ -328,7 +332,7 @@ docker-helper principal create --system "$PRINCIPAL" >/dev/null \
 docker-helper principal allowed-root add --system "$PRINCIPAL" "$ALLOWED_ROOT" \
   || fail_uat "principal allowed-root add failed"
 
-CRED_OUT="$(docker-helper credential create --system "$PRINCIPAL" --name uat-default)" \
+CRED_OUT="$(docker-helper credential create --system --name uat-default "$PRINCIPAL")" \
   || fail_uat "credential create failed"
 CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
 [ -n "$CRED_TOKEN" ] || fail_uat "could not parse credential token"
