@@ -317,17 +317,17 @@ run_guest_uat "guest install-deps" \
 # The docker_helper.pp policy module requires container-selinux attributes
 # (container_domain, mcs_constrained_type, container_net_domain) and types
 # (container_runtime_t, container_file_t, ...). install-deps pulls container-
-# selinux in as a dependency of docker, but the module is not guaranteed to be
-# loaded (its %posttrans install can be skipped/failed). Verify it is loaded
-# before the UAT installs the docker_helper module, so a missing prerequisite
-# is evidence, not a hidden rpm %post failure. If not loaded, load the
-# distro-shipped container-selinux module (a prerequisite for the UAT, not a
-# policy widening) and re-verify.
-log "verify container-selinux policy module is loaded (docker_helper.pp prerequisite)"
-if vm_ssh "semodule -l 2>/dev/null | grep -q '^container'"; then
-  log "container-selinux module loaded"
+# selinux in as a dependency of docker and its %posttrans loads the module.
+# Presence is checked against the semanage active store (deterministic
+# filesystem truth; `semodule -l` output is unreliable for detection on this
+# system even though the module is present). If absent, the distro-shipped
+# container-selinux module is loaded (a prerequisite for the UAT, not a policy
+# widening) and the store is re-checked.
+log "verify container-selinux policy module is present (docker_helper.pp prerequisite)"
+if vm_ssh "ls /etc/selinux/targeted/modules/active/modules/ 2>/dev/null | grep -q '^container\.pp\$'"; then
+  log "container-selinux module present in the active store"
 else
-  log "container-selinux module not loaded; loading distro-shipped module (prerequisite)"
+  log "container-selinux module not in the active store; loading distro-shipped module (prerequisite)"
   vm_ssh 'sudo bash -s' <<'RMT'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -335,7 +335,7 @@ PP="$(rpm -ql container-selinux 2>/dev/null | grep -E '\.pp(\.bz2)?$' | head -1 
 if [ -z "$PP" ] || [ ! -f "$PP" ]; then
   echo "error: container-selinux module file not found" >&2
   echo "installed: $(rpm -q container-selinux 2>/dev/null || echo 'container-selinux NOT INSTALLED')" >&2
-  rpm -ql container-selinux 2>/dev/null | grep -i 'selinux\|\.pp' | head -30 || true
+  rpm -ql container-selinux 2>/dev/null | grep -iE '\.pp|selinux' | head -30 || true
   exit 1
 fi
 echo "loading $PP"
@@ -345,12 +345,12 @@ if ! semodule -i "$PP"; then
 fi
 echo "loaded container-selinux module via semodule -i"
 RMT
-  if vm_ssh "semodule -l 2>/dev/null | grep -q '^container'"; then
-    log "container-selinux module loaded (after explicit load)"
+  if vm_ssh "ls /etc/selinux/targeted/modules/active/modules/ 2>/dev/null | grep -q '^container\.pp\$'"; then
+    log "container-selinux module present in the active store (after explicit load)"
   else
-    log "semodule -l container modules:"
-    vm_ssh "semodule -l 2>/dev/null | grep -i container || echo '(none)'"
-    fail "container-selinux module is NOT loaded; docker_helper.pp cannot be installed"
+    log "active store container modules:"
+    vm_ssh "ls /etc/selinux/targeted/modules/active/modules/ 2>/dev/null | grep -i container || echo '(none)'"
+    fail "container-selinux module is NOT present; docker_helper.pp cannot be installed"
   fi
 fi
 
