@@ -61,9 +61,7 @@ USER="opc"
 SSH_OPTS="-i id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR"
 vm_ssh() { ssh $SSH_OPTS -p 2222 "$USER"@127.0.0.1 "$@"; }
 
-IMG_BASE_URL="https://download.opensuse.org/tumbleweed/appliances"
 IMG_NAME="openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2"
-IMG_URL="$IMG_BASE_URL/$IMG_NAME"
 
 cleanup() {
   if [ -f qemu.pid ]; then
@@ -130,16 +128,39 @@ fi
 
 # ---------------------------------------------------------------------------
 # 3. Official cloud image + checksum + grow (cloud images expect to be grown)
+#    download.opensuse.org redirects to a geo-picked mirror that can be dead;
+#    fall back over a small set of direct mirrors so a single bad mirror never
+#    hangs the run (every attempt has a 10s connect cap).
 # ---------------------------------------------------------------------------
 log "== 3. download official Tumbleweed Cloud image =="
 T_DL_START="$(date +%s)"
-curl -fL --connect-timeout 10 --max-time 600 --retry 3 --retry-delay 2 -o "$IMG_NAME" "$IMG_URL"
+fetch_or_fail() {
+  local name="$1"; shift
+  local url
+  for url in "$@"; do
+    log "  trying $url"
+    if curl -fL --connect-timeout 10 --max-time 600 --retry 2 --retry-delay 2 -o "$name" "$url"; then
+      return 0
+    fi
+  done
+  return 1
+}
+IMG_DIR="tumbleweed/appliances/$IMG_NAME"
+fetch_or_fail "$IMG_NAME" \
+  "https://download.opensuse.org/$IMG_DIR" \
+  "https://ftp.fau.de/opensuse/$IMG_DIR" \
+  "https://mirror.library.ucy.ac.cy/linux/opensuse/$IMG_DIR" \
+  || fail "image download failed from all mirrors"
 T_DL_END="$(date +%s)"
 DL_TIME=$((T_DL_END - T_DL_START))
 log "downloaded: $IMG_NAME ($(du -h "$IMG_NAME" | cut -f1)) in ${DL_TIME}s"
 log "RESULT download_time=${DL_TIME}s"
 
-curl -fsSL --connect-timeout 10 --max-time 60 -o "$IMG_NAME.sha256" "$IMG_URL.sha256"
+fetch_or_fail "$IMG_NAME.sha256" \
+  "https://download.opensuse.org/$IMG_DIR.sha256" \
+  "https://ftp.fau.de/opensuse/$IMG_DIR.sha256" \
+  "https://mirror.library.ucy.ac.cy/linux/opensuse/$IMG_DIR.sha256" \
+  || fail "checksum download failed from all mirrors"
 EXPECTED="$(awk '{print $1}' "$IMG_NAME.sha256")"
 [ -n "$EXPECTED" ] || fail "could not parse expected SHA-256 from .sha256"
 ACTUAL="$(sha256sum "$IMG_NAME" | awk '{print $1}')"
