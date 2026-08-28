@@ -30,13 +30,18 @@ fail() { printf '[discovery] FAILED: %s\n' "$*" >&2; exit 1; }
 
 SSH_OPTS="-i id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o LogLevel=ERROR"
 
+# SUDO is set to "sudo -n" only when KVM must be accessed as root (hosted
+# runners: /dev/kvm is 0660 root:kvm and the runner user is not in kvm group).
+# Empty otherwise, so commands run as the invoking user.
+SUDO=""
+
 IMG_BASE_URL="https://dl.rockylinux.org/pub/rocky/9/images/x86_64"
 IMG_NAME="Rocky-9-GenericCloud-Base.latest.x86_64.qcow2"
 IMG_URL="$IMG_BASE_URL/$IMG_NAME"
 
 cleanup() {
   if [ -f qemu.pid ]; then
-    kill "$(cat qemu.pid)" 2>/dev/null || true
+    $SUDO kill "$(cat qemu.pid)" 2>/dev/null || true
   fi
   rm -rf "$WORKDIR"
 }
@@ -60,6 +65,12 @@ if [ -e /dev/kvm ]; then
 else
   log "/dev/kvm: ABSENT"
 fi
+log "id: $(id)"
+if id -nG | tr ' ' '\n' | grep -qx kvm; then
+  log "kvm group: member"
+else
+  log "kvm group: NOT a member"
+fi
 
 CPUFLAGS="$(grep -m1 '^flags' /proc/cpuinfo | grep -oE '\b(vmx|svm)\b' | sort -u | tr '\n' ' ')"
 log "cpu virt flags: ${CPUFLAGS:-<none>}"
@@ -80,6 +91,23 @@ log "RESULT accelerator=$ACCEL"
 
 CPU_OPTS="-cpu max"
 [ "$ACCEL" = "kvm" ] && CPU_OPTS="-cpu host"
+
+# On GitHub-hosted runners /dev/kvm is typically 0660 root:kvm and the runner
+# user is not in the kvm group. If the user cannot open it directly, run qemu
+# under passwordless sudo so KVM is still used (explicit, not hidden).
+if [ "$ACCEL" = "kvm" ]; then
+  if exec 3< /dev/kvm 2>/dev/null; then
+    exec 3<&- 2>/dev/null || true
+    log "kvm access: direct (runner user can open /dev/kvm)"
+    KVM_ACCESS="direct"
+  else
+    log "kvm access: restricted (runner user cannot open /dev/kvm)"
+    log "will run qemu via passwordless sudo to use KVM"
+    SUDO="sudo -n"
+    KVM_ACCESS="sudo"
+  fi
+  log "RESULT kvm_access=$KVM_ACCESS"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Official cloud image (no custom image build)
@@ -137,8 +165,8 @@ ls -l seed.iso
 # ---------------------------------------------------------------------------
 # 5. Boot the VM
 # ---------------------------------------------------------------------------
-log "== 5. boot VM (accelerator=$ACCEL, $CPU_OPTS) =="
-qemu-system-x86_64 \
+log "== 5. boot VM (accelerator=$ACCEL, $CPU_OPTS${SUDO:+ via sudo}) =="
+$SUDO qemu-system-x86_64 \
   -machine "accel=$ACCEL" \
   $CPU_OPTS \
   -smp 2 -m 2048 \
@@ -153,8 +181,8 @@ qemu-system-x86_64 \
 sleep 2
 [ -s qemu.pid ] || fail "qemu did not start (no pidfile)"
 QEMU_PID="$(cat qemu.pid)"
-kill -0 "$QEMU_PID" 2>/dev/null || fail "qemu process exited early (pid $QEMU_PID)"
-log "qemu running: pid=$QEMU_PID accelerator=$ACCEL"
+ps -p "$QEMU_PID" >/dev/null 2>&1 || fail "qemu process exited early (pid $QEMU_PID)"
+log "qemu running: pid=$QEMU_PID accelerator=$ACCEL${SUDO:+ (as root via sudo)}"
 
 # ---------------------------------------------------------------------------
 # 6. Wait for SSH
@@ -262,6 +290,7 @@ log "RESULT total_time=${TOTAL}s"
 echo
 echo "======== DISCOVERY SUMMARY ========"
 echo "accelerator:   $ACCEL"
+echo "kvm access:    ${KVM_ACCESS:-n/a (TCG)}"
 echo "image:         $IMG_NAME"
 echo "download:      ${DL_TIME}s"
 echo "boot -> ssh:   ${BOOT_TIME}s"
