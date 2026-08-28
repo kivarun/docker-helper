@@ -176,43 +176,6 @@ info "distro:       $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2
 # MAC backend availability (AppArmor LSM enabled, parser present, ...).
 backend_preflight
 
-# Docker daemon DNS configuration.
-#
-# GitHub-hosted Ubuntu runners run systemd-resolved: /etc/resolv.conf is a
-# stub that points at the systemd-resolved loopback (127.0.0.53 / ::1).
-# BuildKit copies the host resolv.conf into build containers, where those
-# loopback addresses have no listener, so `docker build` DNS resolution fails
-# with e.g. "lookup auth.docker.io on [::1]:53: read: connection refused".
-# This is the well-known buildkit/systemd-resolved failure mode (moby/buildkit
-# #5009 class), NOT a docker-helper or MAC-policy defect.
-#
-# The standard, documented remedy is to give the daemon explicit public
-# resolvers in /etc/docker/daemon.json and restart it. We do that here so the
-# build phase has working container DNS. This is environment setup for the
-# CI runner — it does not change docker-helper policy or the shipped MAC
-# profile, and it does not mask any failure under test.
-if [ ! -f /etc/docker/daemon.json ] || ! grep -q '"dns"' /etc/docker/daemon.json 2>/dev/null; then
-  say "phase 1: configure Docker daemon DNS for build containers (systemd-resolved workaround)"
-  cp -a /etc/docker/daemon.json /etc/docker/daemon.json.uat-bak 2>/dev/null || true
-  python3 - <<'PY'
-import json, os
-p = "/etc/docker/daemon.json"
-cfg = {}
-if os.path.exists(p):
-    try:
-        with open(p) as f:
-            cfg = json.load(f)
-    except Exception:
-        cfg = {}
-cfg["dns"] = ["1.1.1.1", "8.8.8.8"]
-with open(p, "w") as f:
-    json.dump(cfg, f, indent=2)
-PY
-  systemctl restart docker || fail_uat "cannot restart Docker daemon after DNS configuration"
-  docker info >/dev/null 2>&1 || fail_uat "Docker daemon not reachable after DNS configuration"
-  info "Docker daemon DNS set to public resolvers"
-fi
-
 # ==============================================================================
 # Phase 2: package build + system-mode installation
 # ==============================================================================
