@@ -64,7 +64,12 @@ if [ "$selinux_active" = "true" ]; then
     restorecon /usr/bin/docker-helper || true
     restorecon -R /etc/docker-helper 2>/dev/null || true
     restorecon -R /var/lib/docker-helper 2>/dev/null || true
-    restorecon -R /run/docker-helper 2>/dev/null || true
+    # Relabel only the helper-owned /run/docker-helper dir itself to
+    # docker_helper_runtime_t. Never recurse into /run/docker-helper/mounts:
+    # those entries are bind-mount aliases of the real workspace inodes, and a
+    # recursive relabel through them would relabel the actual workspace files
+    # to docker_helper_runtime_t, corrupting the SELinux workspace model.
+    restorecon /run/docker-helper 2>/dev/null || true
   fi
 fi
 

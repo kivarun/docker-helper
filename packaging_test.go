@@ -2893,6 +2893,26 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	}
 }
 
+// TestRPMPostinstallNoRecursiveRuntimeRestorecon guards against a regression
+// where the RPM postinstall recursively restorecon's the /run/docker-helper
+// runtime tree. The mount-pin namespace under /run/docker-helper/mounts holds
+// bind-mount aliases of the real workspace inodes; a recursive relabel through
+// them would relabel the actual workspace files to docker_helper_runtime_t,
+// corrupting the SELinux workspace model. The postinstall must only relabel
+// the helper-owned /run/docker-helper dir itself (non-recursively), never walk
+// the mounts namespace.
+func TestRPMPostinstallNoRecursiveRuntimeRestorecon(t *testing.T) {
+	data, err := os.ReadFile("packaging/scripts/rpm/postinstall.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	if strings.Contains(content, "restorecon -R /run/docker-helper") {
+		t.Error("rpm postinstall must not recursively restorecon /run/docker-helper (would walk mount-pin aliases and corrupt workspace SELinux labels)")
+	}
+}
+
 // TestRPMSelinuxDependencies verifies that the RPM depends on packages
 // providing semodule and restorecon (policycoreutils on openSUSE).
 func TestRPMSelinuxDependencies(t *testing.T) {
