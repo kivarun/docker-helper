@@ -175,8 +175,10 @@ for p in selinux-policy-targeted policycoreutils selinux-tools policycoreutils-p
   rpm -q "$p" >/dev/null 2>&1 || { NEED=1; log "missing: $p"; }
 done
 if [ "$NEED" = 1 ]; then
-  zypper --non-interactive refresh || true
-  zypper --non-interactive install -y \
+  # Tighten the zypper per-mirror timeout (default 60s) so a dead/stalled
+  # openSUSE mirror costs seconds before zypper tries the next one.
+  zypper --non-interactive --connect-timeout 10 --timeout 30 refresh || true
+  zypper --non-interactive --connect-timeout 10 --timeout 30 install -y \
     selinux-policy-targeted policycoreutils selinux-tools policycoreutils-python-utils
 fi
 log "SELinux/AppArmor-related packages:"
