@@ -12,7 +12,7 @@ permissions:
 # an independent workflow so it can stabilize before being promoted. See
 # scripts/uat-blackbox.sh for the full coverage list and rationale.
 #
-# Explicit profile matrix (no Cartesian product of meaningless combinations).
+# Explicit profile set (no Cartesian product of meaningless combinations).
 # Each profile pins platform, artifact/install type and MAC adapter:
 #
 #   platform  install   MAC       runner
@@ -29,11 +29,10 @@ permissions:
 # adapter's install-deps step before the UAT.
 
 jobs:
+  # Ubuntu profiles (hosted runners) run on push and dispatch.
   uat-blackbox:
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    # Ubuntu runs on push + dispatch; openSUSE (self-hosted) only on dispatch.
-    if: ${{ matrix.platform == 'ubuntu' || github.event_name == 'workflow_dispatch' }}
 
     strategy:
       fail-fast: false
@@ -42,15 +41,9 @@ jobs:
           - platform: ubuntu
             install: deb
             mac: apparmor
-            runner: ubuntu-24.04
           - platform: ubuntu
             install: tarball
             mac: apparmor
-            runner: ubuntu-24.04
-          - platform: opensuse
-            install: rpm
-            mac: apparmor
-            runner: opensuse-apparmor
 
     steps:
       - uses: actions/checkout@v7
@@ -83,3 +76,41 @@ jobs:
             UAT_PLATFORM="${{ matrix.platform }}" \
             UAT_INSTALL="${{ matrix.install }}" \
             UAT_MAC="${{ matrix.mac }}" scripts/uat-blackbox.sh
+
+  # openSUSE profile (self-hosted runner) runs only on manual dispatch, so a
+  # push never queues forever waiting for a runner that may not be registered.
+  uat-blackbox-opensuse:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: opensuse-apparmor
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nFPM (pinned)
+        run: |
+          NFPM_VERSION=2.47.0
+          NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
+          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$NFPM_TARBALL" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
+          echo "${NFPM_SHA256}  ${NFPM_TARBALL}" | sha256sum --check -
+          tar xzf "$NFPM_TARBALL" nfpm
+          chmod +x nfpm
+          sudo mv nfpm /usr/local/bin/
+          nfpm --version | grep -qF "2.47.0"
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps
+
+      - name: Run black-box UAT
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+            UAT_PLATFORM=opensuse \
+            UAT_INSTALL=rpm \
+            UAT_MAC=apparmor scripts/uat-blackbox.sh
