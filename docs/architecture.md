@@ -719,7 +719,12 @@ own deployment state: the helper-owned `/etc/docker-helper/**` (config) and
 `/var/lib/docker-helper/**` (state) trees are relabeled to
 `docker_helper_config_t` / `docker_helper_state_t` immediately after they are
 created and before the admin token is written, so the first daemon start can
-open its database. A relabel failure aborts init (no partial initialization).
+open its database. Init also runs an exact-path restorecon on the Docker CLI
+executable the daemon will exec (resolved over the same PATH the service uses),
+so the confined `docker_helper_t` domain can execute it with the
+`container_runtime_exec_t` type the distro/container-selinux fcontext rules
+already define — never a recursive `/usr/bin` relabel and never a `bin_t`
+execute grant. A relabel failure aborts init (no partial initialization).
 AppArmor system mode and user mode perform no SELinux relabel.
 
 Adding `/opt` as a global allowed root must never imply recursive relabeling
