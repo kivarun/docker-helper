@@ -2,55 +2,64 @@
 #
 # uat-blackbox.sh — black-box UAT for docker-helper on a full Ubuntu VM (e.g.
 # a GitHub-hosted ubuntu-24.04 runner) with a real Docker daemon and an active
-# MAC backend (AppArmor by default).
+# MAC adapter (AppArmor by default).
 #
 # The GitHub workflow runs this script as root:
 #     sudo -E env "PATH=$PATH" scripts/uat-blackbox.sh
 # It is also runnable manually on any Ubuntu VM with a rootful Docker daemon.
 #
-# Coverage (generic, install-backend-independent and MAC-backend-independent):
+# Coverage (generic, independent of artifact type and MAC adapter):
 #   1. preflight: Docker, systemd, versions
-#   2. artifact build + system-mode install + confinement
+#   2. artifact production + system-mode install + confinement
 #   3. operator surface: principal + credential; admin and principal sessions
 #   4. pull + run (uid/gid/workdir + container exit-code propagation)
 #   5. workspace mounts: RW write, RO read, RO write rejected, no host leak
 #   6. docker build via docker-helper (Buildx path)
 #   7. self-contained trusted-CA E2E: ephemeral CA + local HTTPS endpoint
-#   8. backend audit check of fresh confinement denies (allowlist)
+#   8. MAC audit check of fresh confinement denies (allowlist)
 #
 # All docker-helper operations go through the docker-helper CLI. The real
 # Docker CLI is used ONLY for the preflight reachability check and to discover
 # the Docker bridge gateway for the HTTPS harness — never as a substitute for
 # a docker-helper operation under test.
 #
-# Two pluggable layers are loaded below, mirroring the architecture:
+# Three pluggable adapters are loaded below, mirroring the architecture:
 #
-#   install backend  -> scripts/uat-install-<name>.sh  (UAT_INSTALL, default deb)
-#                        owns artifact production, installation, and proof that
-#                        the installed binary/unit/profile came from that
-#                        install path. Choices: deb (Debian package),
-#                        tarball-system (release tar.gz system install).
+#   artifact adapter -> scripts/uat-artifact-<name>.sh  (UAT_INSTALL, default deb)
+#                        owns artifact PRODUCTION only: one upstream build step
+#                        yielding an exact, immutable artifact whose path and
+#                        SHA-256 (ARTIFACT_PATH / ARTIFACT_SHA256) are recorded.
+#                        Choices: deb (Debian package), tarball (release tar.gz).
+#        |
+#        v  exact immutable artifact
+#   install adapter  -> scripts/uat-install-<name>.sh
+#                        consumes the recorded artifact (never rebuilds) and
+#                        installs it, then proves the installed binary/unit/
+#                        profile came from that artifact.
 #        |
 #        v
 #   common system black-box scenario  (this file, phases 3-7)
 #        |
 #        v
-#   MAC backend      -> scripts/uat-backend-<name>.sh  (UAT_BACKEND, default apparmor)
+#   MAC adapter       -> scripts/uat-mac-<name>.sh  (UAT_MAC, default apparmor)
 #                        owns confinement verification, audit-window tracking,
 #                        deny inspection and diagnostics.
 #
-# The generic scenario is written once and shared by every install backend, so
-# the .deb and tar.gz system-mode UATs run identical functional coverage.
+# The generic scenario is written once and shared by every artifact/install
+# pair, so the .deb and tar.gz system UATs run identical functional coverage.
+#
+# Canonical vocabulary: artifact (production), install (consumption),
+# MAC (confinement/audit), scenario (runtime/authorization/functionality).
 #
 # Environment overrides:
-#   UAT_INSTALL       install backend to exercise (default deb)
+#   UAT_INSTALL       artifact+install adapter pair to exercise (default deb)
+#   UAT_MAC           MAC adapter to exercise (default apparmor)
 #   UAT_VERSION       version string (default 2.0.0-uat)
 #   UAT_ALLOWED_ROOT  global allowed root (default /home/runner)
 #   UAT_WORKSPACE     session workspace (default $UAT_ALLOWED_ROOT/uat-workspace)
 #   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default runner)
 #   UAT_TLS_PORT      port for the local HTTPS endpoint (default 8443)
 #   UAT_KEEP          if set, skip best-effort cleanup (debugging)
-#   UAT_BACKEND       MAC backend to exercise (default apparmor)
 
 set -uo pipefail
 
@@ -61,7 +70,7 @@ PRINCIPAL="${UAT_PRINCIPAL:-runner}"
 TLS_PORT="${UAT_TLS_PORT:-8443}"
 KEEP="${UAT_KEEP:-}"
 INSTALL="${UAT_INSTALL:-deb}"
-BACKEND="${UAT_BACKEND:-apparmor}"
+MAC="${UAT_MAC:-apparmor}"
 DEBUG="${UAT_DEBUG:-}"
 if [ -n "$DEBUG" ]; then
   # Verbose command tracing. set -v (NOT set -x) is used deliberately: -x
@@ -78,46 +87,69 @@ cd "$REPO_ROOT" || exit 1
 say()  { printf '\n[UAT] %s\n' "$*"; }
 info() { printf '[UAT] %s\n' "$*"; }
 
-# Load the MAC backend layer.
-BACKEND_FILE="$REPO_ROOT/scripts/uat-backend-$BACKEND.sh"
-if [ ! -f "$BACKEND_FILE" ]; then
-  echo "error: unknown UAT backend '$BACKEND' (no $BACKEND_FILE)" >&2
+# redact_tokens masks bearer-token values (admin/session/credential tokens:
+# dht_/dhc_) in a captured stream so they never reach the CI log. Session
+# IDs (dhs_) are not bearer secrets and are left intact.
+redact_tokens() {
+  sed -E \
+    -e 's/dht_[A-Za-z0-9_-]+/<redacted-token>/g' \
+    -e 's/dhc_[A-Za-z0-9_-]+/<redacted-token>/g'
+}
+
+# Load the MAC adapter.
+MAC_FILE="$REPO_ROOT/scripts/uat-mac-$MAC.sh"
+if [ ! -f "$MAC_FILE" ]; then
+  echo "error: unknown UAT MAC adapter '$MAC' (no $MAC_FILE)" >&2
   exit 1
 fi
-# shellcheck source=scripts/uat-backend-apparmor.sh
-source "$BACKEND_FILE"
+# shellcheck source=scripts/uat-mac-apparmor.sh
+source "$MAC_FILE"
 
-# Every backend must implement the contract below. Verify it now so a
-# misbehaving backend fails loudly instead of deep inside a phase.
-for fn in backend_name backend_audit_start backend_preflight \
-  backend_reset_policy backend_verify_confinement \
-  backend_audit_check backend_diagnostics; do
+# Every MAC adapter must implement the contract below. Verify it now so a
+# misbehaving adapter fails loudly instead of deep inside a phase.
+for fn in mac_name mac_audit_start mac_preflight mac_reset_policy \
+  mac_verify_confinement mac_audit_check mac_diagnostics; do
   if ! declare -F "$fn" >/dev/null 2>&1; then
-    echo "error: UAT backend '$BACKEND' is missing required function $fn" >&2
+    echo "error: UAT MAC adapter '$MAC' is missing required function $fn" >&2
     exit 1
   fi
 done
 
-# Load the install backend layer.
+# Load the artifact adapter (production only).
+ARTIFACT_FILE="$REPO_ROOT/scripts/uat-artifact-$INSTALL.sh"
+if [ ! -f "$ARTIFACT_FILE" ]; then
+  echo "error: unknown UAT artifact adapter '$INSTALL' (no $ARTIFACT_FILE)" >&2
+  exit 1
+fi
+# shellcheck source=scripts/uat-artifact-deb.sh
+source "$ARTIFACT_FILE"  # uat-artifact-$INSTALL.sh (deb or tarball)
+for fn in artifact_name artifact_preflight artifact_build; do
+  if ! declare -F "$fn" >/dev/null 2>&1; then
+    echo "error: UAT artifact adapter '$INSTALL' is missing required function $fn" >&2
+    exit 1
+  fi
+done
+
+# Load the install adapter (consumption only).
 INSTALL_FILE="$REPO_ROOT/scripts/uat-install-$INSTALL.sh"
 if [ ! -f "$INSTALL_FILE" ]; then
-  echo "error: unknown UAT install backend '$INSTALL' (no $INSTALL_FILE)" >&2
+  echo "error: unknown UAT install adapter '$INSTALL' (no $INSTALL_FILE)" >&2
   exit 1
 fi
 # shellcheck source=scripts/uat-install-deb.sh
-source "$INSTALL_FILE"  # uat-install-$INSTALL.sh (deb or tarball-system)
-# Every install backend must implement the contract below.
-for fn in install_name install_preflight install_build install_install \
+source "$INSTALL_FILE"  # uat-install-$INSTALL.sh (deb or tarball)
+for fn in install_name install_preflight install_apply \
   install_verify_artifacts install_verify_version; do
   if ! declare -F "$fn" >/dev/null 2>&1; then
-    echo "error: UAT install backend '$INSTALL' is missing required function $fn" >&2
+    echo "error: UAT install adapter '$INSTALL' is missing required function $fn" >&2
     exit 1
   fi
 done
 
-# The backend records its audit-window start BEFORE any docker-helper activity
-# so that only fresh confinement events from this UAT run are inspected.
-backend_audit_start
+# The MAC adapter records its audit-window start BEFORE any docker-helper
+# activity so that only fresh confinement events from this UAT run are
+# inspected.
+mac_audit_start
 
 DIAG_PRINTED=0
 SERVER_PID=""
@@ -135,6 +167,15 @@ fail_uat() {
   exit 1
 }
 
+# fail_uat_status is like fail_uat but exits with a caller-supplied status so a
+# failed sub-command's exit status is preserved (used by install adapters).
+fail_uat_status() {
+  local msg="$1" status="$2"
+  printf '\n[UAT] FAILED: %s (status %s)\n' "$msg" "$status" >&2
+  print_diagnostics
+  exit "$status"
+}
+
 # ---- Diagnostics ------------------------------------------------------------
 
 print_diagnostics() {
@@ -148,8 +189,8 @@ print_diagnostics() {
   systemctl status docker-helper.service --no-pager 2>&1 || true
   echo "--- journalctl -u docker-helper (last 200) ---"
   journalctl -u docker-helper.service -n 200 --no-pager 2>&1 || true
-  echo "--- backend diagnostics ($(backend_name)) ---"
-  backend_diagnostics
+  echo "--- MAC diagnostics ($(mac_name)) ---"
+  mac_diagnostics
   echo "================ END DIAGNOSTICS ================"
 }
 
@@ -203,35 +244,41 @@ info "systemd:      $(systemctl --version 2>/dev/null | head -1 || true)"
 info "kernel:       $(uname -r)"
 info "distro:       $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
 info "install:      $(install_name)"
-info "mac backend:  $(backend_name)"
+info "mac:          $(mac_name)"
 
-# MAC backend availability (AppArmor LSM enabled, parser present, ...).
-backend_preflight
+# MAC adapter availability (AppArmor LSM enabled, parser present, ...).
+mac_preflight
 
-# Install backend prerequisites (build tooling required for this artifact).
+# Artifact adapter prerequisites (build tooling for this artifact type).
+artifact_preflight
+
+# Install adapter prerequisites (install-time tooling).
 install_preflight
 
 # ==============================================================================
-# Phase 2: artifact build + system-mode installation + confinement
+# Phase 2: artifact production + system-mode installation + confinement
 # ==============================================================================
 
-say "phase 2: build + install via $(install_name)"
+say "phase 2: produce + install via $(install_name)"
 
 # Idempotency for re-runs on a persistent VM: stop/disable any prior service,
 # unload any previously loaded shipped policy, and remove docker-helper-owned
-# state so init has a clean slate. This reset is common to every install
-# backend.
+# state so init has a clean slate. This reset is common to every case.
 systemctl stop docker-helper.service >/dev/null 2>&1 || true
 systemctl disable docker-helper.service >/dev/null 2>&1 || true
-backend_reset_policy
+mac_reset_policy
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
-# Produce the release artifact (one upstream build step) and install it.
-install_build
-install_install
+# Artifact production is a DISTINCT phase: build once, record the exact
+# immutable artifact (path + SHA-256), then hand it to the install adapter.
+say "phase 2: artifact production via $(artifact_name)"
+artifact_build
 
-# The service must be active AND confined by the backend, using the
-# install-backend-installed binary/policy/unit.
+# Installation consumes the exact recorded artifact (never rebuilds it).
+install_apply
+
+# The service must be active AND confined by the MAC adapter, using the
+# install-adapter-installed binary/policy/unit.
 systemctl is-active --quiet docker-helper.service || fail_uat "docker-helper service is not active"
 DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
 [ -n "$DH_PID" ] && [ "$DH_PID" != "0" ] || fail_uat "daemon MainPID is empty/zero"
@@ -241,12 +288,12 @@ EXE="$(readlink -f "/proc/$DH_PID/exe" 2>/dev/null || true)"
   || fail_uat "daemon binary is not the installed /usr/bin/docker-helper: got '$EXE'"
 
 # Prove the installed binary/unit/profile came from this install path (for
-# tarball-system: the extracted bundle, with no package-manager involvement).
+# tarball: the extracted bundle, with no package-manager involvement).
 install_verify_artifacts
 install_verify_version
 
-# Backend-specific confinement check (same profile name, same enforce mode).
-backend_verify_confinement "$DH_PID"
+# MAC-specific confinement check (same profile name, same enforce mode).
+mac_verify_confinement "$DH_PID"
 
 info "service active: pid=$DH_PID binary=$EXE install=$(install_name)"
 
@@ -452,10 +499,10 @@ printf '%s\n' "$TLS_OUT" | grep -q 'TLS-OK' \
 info "trusted-CA E2E passed (no --cacert/--capath/-k, no manual CA env overrides)"
 
 # ==============================================================================
-# Phase 8: backend audit check
+# Phase 8: MAC audit check
 # ==============================================================================
 
-backend_audit_check
+mac_audit_check
 
 # ==============================================================================
 # Summary
@@ -463,12 +510,13 @@ backend_audit_check
 
 say "UAT PASSED"
 info "preflight ......................... ok"
+info "artifact ($(artifact_name)) .......... ok"
 info "install ($(install_name)) + confine .. ok"
 info "principal/credential + sessions .. ok"
 info "pull/run/identity/exit-code ...... ok"
 info "workspace mounts ................. ok"
 info "docker build ..................... ok"
 info "trusted-CA E2E ................... ok"
-info "backend audit ($(backend_name)) .. ok"
+info "MAC audit ($(mac_name)) .......... ok"
 
 exit 0

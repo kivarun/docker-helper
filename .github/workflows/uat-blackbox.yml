@@ -12,11 +12,11 @@ permissions:
 # an independent workflow so it can stabilize before being promoted. See
 # scripts/uat-blackbox.sh for the full coverage list and rationale.
 #
-# The same install-agnostic black-box scenario is run once per install backend
-# (UAT_INSTALL): the Debian package (.deb) and the release tarball system-mode
-# install (tar.gz). Both run on the MAC backend selected by UAT_BACKEND
-# (AppArmor). The functional coverage is identical across install backends;
-# only artifact production/installation differs (see uat-install-*.sh).
+# The same scenario is run once per artifact/install pair (UAT_INSTALL): the
+# Debian package (.deb) and the release tarball (tar.gz). Both run on the MAC
+# adapter selected by UAT_MAC (AppArmor). The functional coverage is identical
+# across pairs; only artifact production and installation differ
+# (uat-artifact-*.sh / uat-install-*.sh).
 
 jobs:
   uat-blackbox:
@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        install: [deb, tarball-system]
+        install: [deb, tarball]
 
     steps:
       - uses: actions/checkout@v7
@@ -57,4 +57,4 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
             UAT_INSTALL="${{ matrix.install }}" \
-            UAT_BACKEND="${UAT_BACKEND:-apparmor}" scripts/uat-blackbox.sh
+            UAT_MAC="${UAT_MAC:-apparmor}" scripts/uat-blackbox.sh

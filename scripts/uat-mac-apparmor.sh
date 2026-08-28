@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# uat-backend-apparmor.sh — AppArmor backend layer for the docker-helper
-# black-box UAT. Sourced by scripts/uat-blackbox.sh (the backend-agnostic
-# core) when UAT_BACKEND=apparmor.
+# uat-mac-apparmor.sh — AppArmor MAC adapter for the docker-helper black-box
+# UAT. Sourced by scripts/uat-blackbox.sh (the scenario core) when
+# UAT_MAC=apparmor.
 #
-# This layer owns everything that is specific to AppArmor confinement of the
+# This adapter owns everything that is specific to AppArmor confinement of the
 # docker-helper system service:
 #   * verifying the AppArmor LSM and apparmor_parser are available;
 #   * establishing the kernel-audit window for this UAT run;
@@ -17,50 +17,50 @@
 #   * emitting AppArmor-specific diagnostics on failure.
 #
 # Proof that the installed AppArmor profile artifact came from a given install
-# path (deb package vs release tarball) is owned by the install backend layer
+# path (deb package vs release tarball) is owned by the install adapter
 # (uat-install-<name>.sh), not here.
 #
 # The AppArmor policy itself is NOT widened here to silence audit records;
 # the allowlist below merely tolerates already-demonstrated benign probes.
 #
-# The generic core defines: say, info, fail_uat, print_diagnostics, REPO_ROOT.
+# The scenario core defines: say, info, fail_uat, print_diagnostics, REPO_ROOT.
 
-# backend_name prints the backend label used in UAT output.
-backend_name() {
+# mac_name prints the MAC adapter label used in UAT output.
+mac_name() {
   printf 'AppArmor'
 }
 
-# backend_audit_start records the start of the kernel-audit window. It must be
+# mac_audit_start records the start of the kernel-audit window. It must be
 # called before ANY docker-helper activity so that only fresh events from this
 # UAT window are inspected at the end.
-backend_audit_start() {
+mac_audit_start() {
   AA_AUDIT_START_EPOCH="$(date +%s)"
   AA_AUDIT_START_ISO="$(date -Iseconds)"
 }
 
-# backend_preflight fails the UAT unless the AppArmor LSM and the parser are
+# mac_preflight fails the UAT unless the AppArmor LSM and the parser are
 # available on this host.
-backend_preflight() {
+mac_preflight() {
   if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" != "Y" ]; then
     fail_uat "AppArmor LSM is not enabled on this kernel"
   fi
   if ! command -v apparmor_parser >/dev/null 2>&1; then
     fail_uat "apparmor_parser not found"
   fi
-  info "backend: $(backend_name) (parser $(apparmor_parser --version 2>&1 | head -1 || true))"
+  info "mac: $(mac_name) (parser $(apparmor_parser --version 2>&1 | head -1 || true))"
   info "audit window: $AA_AUDIT_START_ISO (epoch $AA_AUDIT_START_EPOCH)"
 }
 
-# backend_reset_policy unloads any previously loaded shipped profile so a
-# re-run on a persistent VM starts from a clean slate (phase 2 idempotency).
-backend_reset_policy() {
+# mac_reset_policy unloads any previously loaded shipped profile so a re-run
+# on a persistent VM starts from a clean slate (phase 2 idempotency).
+mac_reset_policy() {
   apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null || true
 }
 
-# backend_verify_confinement PID fails unless the daemon process is confined
-# by docker-helper-system in enforce mode (not unconfined) and the profile is
+# mac_verify_confinement PID fails unless the daemon process is confined by
+# docker-helper-system in enforce mode (not unconfined) and the profile is
 # loaded. Called after the service is active.
-backend_verify_confinement() {
+mac_verify_confinement() {
   local pid="$1" attr
   attr="$(cat "/proc/$pid/attr/current" 2>/dev/null || true)"
   [ "$attr" = "docker-helper-system (enforce)" ] \
@@ -158,15 +158,15 @@ is_allowlisted_deny() {
   return 1
 }
 
-# backend_audit_check inspects only fresh DENIED records from this UAT window
-# under profile docker-helper-system. Any record that is not on the narrow
-# allowlist fails the UAT and prints the exact records.
-backend_audit_check() {
-  say "$(backend_name) audit check (fresh DENIED records for docker-helper-system)"
+# mac_audit_check inspects only fresh DENIED records from this UAT window under
+# profile docker-helper-system. Any record that is not on the narrow allowlist
+# fails the UAT and prints the exact records.
+mac_audit_check() {
+  say "$(mac_name) audit check (fresh DENIED records for docker-helper-system)"
   local denials
   denials="$(collect_denials)"
   if [ -z "$denials" ]; then
-    info "no fresh $(backend_name) DENIED records for docker-helper-system in this window"
+    info "no fresh $(mac_name) DENIED records for docker-helper-system in this window"
     info "(if unexpected, check that kernel audit logging is active on the runner)"
     return 0
   fi
@@ -182,15 +182,15 @@ backend_audit_check() {
   done <<< "$denials"
 
   if [ -n "$unexpected" ]; then
-    printf '\n[UAT] UNEXPECTED %s DENIED records:\n' "$(backend_name)" >&2
+    printf '\n[UAT] UNEXPECTED %s DENIED records:\n' "$(mac_name)" >&2
     printf '%s' "$unexpected" >&2
-    fail_uat "unexpected $(backend_name) denials under docker-helper-system"
+    fail_uat "unexpected $(mac_name) denials under docker-helper-system"
   fi
-  info "$(backend_name) audit check passed (allowlisted=$allowlisted unexpected=0)"
+  info "$(mac_name) audit check passed (allowlisted=$allowlisted unexpected=0)"
 }
 
-# backend_diagnostics appends AppArmor-specific evidence to print_diagnostics.
-backend_diagnostics() {
+# mac_diagnostics appends AppArmor-specific evidence to print_diagnostics.
+mac_diagnostics() {
   echo "--- AppArmor status (aa-status) ---"
   aa-status 2>&1 | head -40 || true
   echo "--- docker-helper-system process confinement ---"

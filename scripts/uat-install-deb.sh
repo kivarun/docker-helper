@@ -1,71 +1,68 @@
 #!/usr/bin/env bash
 #
-# uat-install-deb.sh — Debian-package install backend for the docker-helper
-# black-box UAT. Sourced by scripts/uat-blackbox.sh (the install-agnostic
-# core) when UAT_INSTALL=deb.
+# uat-install-deb.sh — Debian-package install adapter for the docker-helper
+# black-box UAT. Sourced by scripts/uat-blackbox.sh (the scenario core) when
+# UAT_INSTALL=deb.
 #
-# This layer owns everything that is specific to producing and installing the
-# Debian package artifact and proving the installed files came from it:
-#   * install_preflight       — build tooling present (nfpm, SELinux module tools);
-#   * install_build           — one upstream build step producing dist/*.deb;
-#   * install_install         — dpkg -i, then init, daemon-reload, enable+start;
+# This adapter owns INSTALLATION of an already-produced .deb artifact and
+# proving the installed files came from it. It never builds the artifact
+# (that is the artifact adapter's job: uat-artifact-deb.sh).
+#
+#   * install_preflight       — install-time tooling present (dpkg);
+#   * install_apply           — verify the recorded artifact hash, dpkg -i, then
+#                               init, daemon-reload, enable+start;
 #   * install_verify_artifacts— dpkg ownership of binary, systemd unit, AppArmor
 #                               profile (proves the package install path);
 #   * install_verify_version  — installed /usr/bin/docker-helper version matches.
 #
-# It does NOT own the generic functional scenario (that is the core) nor the
-# MAC confinement/audit checks (that is the MAC backend layer).
+# It consumes the exact artifact recorded by the artifact adapter
+# (ARTIFACT_PATH / ARTIFACT_SHA256) and never rebuilds it.
 #
-# The core defines: VERSION, ALLOWED_ROOT, REPO_ROOT, say, info, fail_uat.
+# It does NOT own the generic functional scenario (that is the core) nor the
+# MAC confinement/audit checks (that is the MAC adapter).
+#
+# The core defines: VERSION, ALLOWED_ROOT, REPO_ROOT, say, info, fail_uat,
+# fail_uat_status, redact_tokens.
 
-# install_name prints the install backend label used in UAT output.
+# install_name prints the install adapter label used in UAT output.
 install_name() {
   printf 'Debian package (.deb)'
 }
 
-# install_preflight fails unless the build/install tooling for this backend is
-# present.
+# install_preflight fails unless the install-time tooling is present. Build
+# tooling is owned by the artifact adapter.
 install_preflight() {
-  if ! command -v nfpm >/dev/null 2>&1; then
-    fail_uat "nfpm not found on PATH (the workflow must install the pinned nfpm)"
-  fi
-  # build-packages.sh also builds the SELinux policy module (checkmodule +
-  # semodule_package), so those tools are required on the build host.
-  if ! command -v checkmodule >/dev/null 2>&1; then
-    fail_uat "checkmodule not found (build-packages.sh builds the SELinux module)"
-  fi
-  if ! command -v semodule_package >/dev/null 2>&1; then
-    fail_uat "semodule_package not found (build-packages.sh builds the SELinux module)"
+  if ! command -v dpkg >/dev/null 2>&1; then
+    fail_uat "dpkg not found"
   fi
 }
 
-# install_build produces the Debian package via the repository packaging path
-# (one upstream build step; the artifact is not rebuilt downstream).
-install_build() {
-  rm -rf dist
-  ./build-packages.sh "$VERSION" || fail_uat "./build-packages.sh $VERSION failed"
-  DEB="$(ls dist/*.deb 2>/dev/null | head -1)"
-  [ -n "$DEB" ] || fail_uat "no .deb produced under dist/"
-  info "built $DEB"
-}
+# install_apply installs the exact recorded .deb and initializes/starts the
+# confined system service. The admin token emitted by init is captured and
+# redacted so it never reaches the CI log; on failure the init exit status is
+# preserved.
+install_apply() {
+  [ -n "$ARTIFACT_PATH" ] || fail_uat "no .deb artifact recorded (artifact_build must run first)"
+  [ -f "$ARTIFACT_PATH" ] || fail_uat "recorded .deb missing: $ARTIFACT_PATH"
 
-# install_install performs the actual system-mode installation from the
-# artifact, including the init step that is part of this install path.
-install_install() {
-  local deb
-  deb="$(ls dist/*.deb 2>/dev/null | head -1)"
-  [ -n "$deb" ] || fail_uat "no .deb produced under dist/"
+  # Re-assert the exact-byte identity recorded at production time.
+  local now_sha
+  now_sha="$(sha256sum "$ARTIFACT_PATH" | awk '{print $1}')"
+  [ "$now_sha" = "$ARTIFACT_SHA256" ] \
+    || fail_uat ".deb changed since build (expected $ARTIFACT_SHA256, got $now_sha)"
 
-  info "installing $deb"
-  dpkg -i "$deb" || fail_uat "dpkg -i failed"
+  info "installing $ARTIFACT_PATH"
+  dpkg -i "$ARTIFACT_PATH" || fail_uat "dpkg -i failed"
 
   # System init writes config + admin token (root reads admin.token later).
   say "phase 2: initialize and start the confined system service"
   [ -d "$ALLOWED_ROOT" ] || fail_uat "allowed root does not exist: $ALLOWED_ROOT"
-  INIT_OUT="$(docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)" || {
-    printf '%s\n' "$INIT_OUT" | grep -v -E '^Admin token:|^dht_' >&2
-    fail_uat "docker-helper init failed"
-  }
+  INIT_OUT="$(docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)"
+  INIT_EC=$?
+  if [ "$INIT_EC" -ne 0 ]; then
+    printf '%s\n' "$INIT_OUT" | redact_tokens >&2
+    fail_uat_status "docker-helper init failed" "$INIT_EC"
+  fi
 
   systemctl daemon-reload || fail_uat "systemctl daemon-reload failed"
   systemctl enable --now docker-helper.service || fail_uat "systemctl enable --now docker-helper failed"

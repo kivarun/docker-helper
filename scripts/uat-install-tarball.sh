@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 #
-# uat-install-tarball.sh — release-tar.gz system-mode install backend for the
-# docker-helper black-box UAT. Sourced by scripts/uat-blackbox.sh (the
-# install-agnostic core) when UAT_INSTALL=tarball-system.
+# uat-install-tarball.sh — release-tar.gz install adapter for the docker-helper
+# black-box UAT. Sourced by scripts/uat-blackbox.sh (the scenario core) when
+# UAT_INSTALL=tarball.
 #
-# This layer owns everything that is specific to producing and installing the
-# release tarball artifact via the shipped install-system.sh path, and proving
-# the installed files came from that exact artifact:
-#   * install_preflight       — tooling present (tar, gzip, file for static check);
-#   * install_build           — one upstream build step (build-bundle.sh VERSION)
-#                               producing dist/docker-helper-<ver>-linux-amd64.tar.gz;
-#   * install_install         — extract the EXACT artifact, verify it, then run
+# This adapter owns INSTALLATION of an already-produced release tar.gz via the
+# shipped install-system.sh path, and proving the installed files came from
+# that exact artifact. It never builds the artifact (that is the artifact
+# adapter's job: uat-artifact-tarball.sh).
+#
+#   * install_preflight       — install-time tooling present (tar, gzip);
+#   * install_apply           — verify the recorded artifact hash, extract the
+#                               EXACT artifact, verify it, then run
 #                               ./install-system.sh --yes --allowed-root <root>
 #                               non-interactively (init is part of that path);
 #   * install_verify_artifacts— installed /usr/bin/docker-helper, systemd unit and
@@ -18,27 +19,25 @@
 #                               and no package manager owns them;
 #   * install_verify_version  — installed /usr/bin/docker-helper version matches.
 #
-# Release-artifact discipline: build-bundle.sh is the single upstream build
-# step; the tarball is built once here and the EXACT file (same path, same
-# SHA-256) is what install-system.sh consumes. It is never rebuilt downstream.
-# Within this single job there is no cross-step transfer, so the hash recorded
-# at build time is re-asserted against the file that is installed.
+# It consumes the exact artifact recorded by the artifact adapter
+# (ARTIFACT_PATH / ARTIFACT_SHA256) and never rebuilds it.
 #
-# The core defines: VERSION, ALLOWED_ROOT, REPO_ROOT, say, info, fail_uat.
-# The core also runs as root (id -u == 0), so install-system.sh is invoked
-# directly — the equivalent of the documented `sudo ./install-system.sh`.
+# The core runs as root (id -u == 0), so install-system.sh is invoked directly
+# — the equivalent of the documented `sudo ./install-system.sh`.
+#
+# The core defines: VERSION, ALLOWED_ROOT, REPO_ROOT, say, info, fail_uat,
+# fail_uat_status, redact_tokens.
 
 # Module-level state shared between the install steps.
-TARBALL=""
-TARBALL_SHA256=""
 BUNDLE_DIR=""
 
-# install_name prints the install backend label used in UAT output.
+# install_name prints the install adapter label used in UAT output.
 install_name() {
-  printf 'release tarball (tar.gz) system install'
+  printf 'release tarball (tar.gz)'
 }
 
-# install_preflight fails unless the tooling for this backend is present.
+# install_preflight fails unless the install-time tooling is present. Build
+# tooling is owned by the artifact adapter.
 install_preflight() {
   if ! command -v tar >/dev/null 2>&1; then
     fail_uat "tar not found"
@@ -46,39 +45,22 @@ install_preflight() {
   if ! command -v gzip >/dev/null 2>&1; then
     fail_uat "gzip not found"
   fi
-  # build-bundle.sh requires `file` to confirm static linking.
-  if ! command -v file >/dev/null 2>&1; then
-    fail_uat "file not found (build-bundle.sh confirms static linking)"
-  fi
-  if ! command -v sha256sum >/dev/null 2>&1; then
-    fail_uat "sha256sum not found"
-  fi
 }
 
-# install_build produces the release tarball via the single upstream build step
-# and records its SHA-256 for exact-byte accountability.
-install_build() {
-  rm -rf dist
-  ./build-bundle.sh "$VERSION" || fail_uat "./build-bundle.sh $VERSION failed"
+# install_apply extracts the exact recorded artifact, runs the tarball-specific
+# pre-install checks, then installs system mode non-interactively. installer
+# output is captured and redacted so the admin token (printed by init inside
+# install-system.sh --yes) never reaches the CI log; on failure the installer's
+# exact exit status is preserved while masked diagnostics are printed.
+install_apply() {
+  [ -n "$ARTIFACT_PATH" ] || fail_uat "no tarball artifact recorded (artifact_build must run first)"
+  [ -f "$ARTIFACT_PATH" ] || fail_uat "release tarball missing: $ARTIFACT_PATH"
 
-  TARBALL="dist/docker-helper-${VERSION}-linux-amd64.tar.gz"
-  [ -f "$TARBALL" ] || fail_uat "release tarball not produced: $TARBALL"
-  TARBALL_SHA256="$(sha256sum "$TARBALL" | awk '{print $1}')"
-  [ -n "$TARBALL_SHA256" ] || fail_uat "could not compute tarball SHA-256"
-  info "tarball: $TARBALL"
-  info "sha256:  $TARBALL_SHA256"
-}
-
-# install_install extracts the exact artifact, runs the tarball-specific
-# pre-install checks, then installs system mode non-interactively. Any installer
-# failure aborts the UAT immediately via fail_uat (which preserves the failure
-# status while dumping diagnostics).
-install_install() {
-  [ -f "$TARBALL" ] || fail_uat "tarball missing before install: $TARBALL"
+  # Re-assert the exact-byte identity recorded at production time.
   local now_sha
-  now_sha="$(sha256sum "$TARBALL" | awk '{print $1}')"
-  [ "$now_sha" = "$TARBALL_SHA256" ] \
-    || fail_uat "tarball changed since build (expected $TARBALL_SHA256, got $now_sha)"
+  now_sha="$(sha256sum "$ARTIFACT_PATH" | awk '{print $1}')"
+  [ "$now_sha" = "$ARTIFACT_SHA256" ] \
+    || fail_uat "tarball changed since build (expected $ARTIFACT_SHA256, got $now_sha)"
 
   local extract_root
   extract_root="$(mktemp -d /tmp/uat-bundle.XXXXXX)" \
@@ -86,8 +68,8 @@ install_install() {
   BUNDLE_DIR="$extract_root/docker-helper-${VERSION}-linux-amd64"
 
   # 1. The archive must extract successfully.
-  tar xzf "$TARBALL" -C "$extract_root" \
-    || fail_uat "tar extraction of $TARBALL failed"
+  tar xzf "$ARTIFACT_PATH" -C "$extract_root" \
+    || fail_uat "tar extraction of $ARTIFACT_PATH failed"
 
   # 2. The expected top-level directory must exist.
   [ -d "$BUNDLE_DIR" ] \
@@ -107,8 +89,14 @@ install_install() {
   #    performed inside install-system.sh --yes (the real user path).
   say "phase 2: install-system.sh --yes (system mode) from extracted bundle"
   [ -d "$ALLOWED_ROOT" ] || fail_uat "allowed root does not exist: $ALLOWED_ROOT"
-  ( cd "$BUNDLE_DIR" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT" ) \
-    || fail_uat "install-system.sh failed (installer returned nonzero; see diagnostics)"
+  INSTALL_OUT="$( (cd "$BUNDLE_DIR" && ./install-system.sh --yes --allowed-root "$ALLOWED_ROOT") 2>&1 )"
+  INSTALL_EC=$?
+  if [ "$INSTALL_EC" -ne 0 ]; then
+    printf '%s\n' "$INSTALL_OUT" | redact_tokens >&2
+    fail_uat_status "install-system.sh failed" "$INSTALL_EC"
+  fi
+  # On success, show the installer progress with bearer tokens redacted.
+  printf '%s\n' "$INSTALL_OUT" | redact_tokens
 }
 
 # install_verify_artifacts proves the installed binary/unit/profile came from
