@@ -141,6 +141,15 @@ is_allowlisted_deny() {
     && echo "$line" | grep -q 'comm="docker"'; then
     return 0
   fi
+  # docker-buildx enumerates candidate system TLS root directories. On Ubuntu
+  # /etc/ssl/certs is a real directory (vs openSUSE where the paths resolve
+  # elsewhere); the denied read of the directory itself is a benign best-effort
+  # probe — the build and TLS E2E succeed without it, so it is not granted.
+  if echo "$line" | grep -q 'operation="open"' \
+    && echo "$line" | grep -q 'name="/etc/ssl/certs/"' \
+    && echo "$line" | grep -q 'comm="docker-buildx"'; then
+    return 0
+  fi
   return 1
 }
 
