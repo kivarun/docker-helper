@@ -16,13 +16,16 @@ The design does not add a general agent control plane, recursive delegation, or
 agent-specific behavior to the daemon.
 
 Release 2.1 adds one ownership and delegation level between Principal and
-Session. It may also package routine Principal, Launcher, credential, and
-Session sequences as narrow automation pipelines.
+Session. It also defines default-driven control-plane flows for routine
+Principal, Launcher, credential, and Session operations. These flows use
+explicitly documented defaults and implicit owner resolution to keep common
+paths short; they are not a workflow engine, scheduler, persisted pipeline, or
+separate automation subsystem.
 
-The pipelines orchestrate the same public operations and ownership rules. They
-do not add managed-container lifecycle, desired state, restart policy,
-interactive exec, networking, port publishing, or resource-limit semantics;
-those remain Release 3 work.
+The flows compose the same public operations and ownership rules. They do not
+add managed-container lifecycle, desired state, restart policy, interactive
+exec, networking, port publishing, or resource-limit semantics; those remain
+Release 3 work.
 
 ## Problem in the Release 2.0 model
 
@@ -106,6 +109,11 @@ created_by: Admin | Principal | Launcher
 Authorization and cleanup use the owner. Audit records preserve the creator.
 No authorization decision depends on `created_by`.
 
+Session creation is the primary default-driven control-plane flow. Omitting a
+routine selector means resolving it from the authenticated caller and the
+specified defaults; it does not create stored workflow state or a separate
+execution path.
+
 Launcher selection follows the caller:
 
 - a Launcher credential selects its own Launcher implicitly;
@@ -114,6 +122,11 @@ Launcher selection follows the caller:
 - an admin token must identify a target Launcher, or use an explicit Principal
   selector that resolves that Principal's `default` Launcher;
 - a Session token cannot create another Session.
+
+An explicit Launcher selector overrides default resolution when the caller is
+authorized to use it. The resolved request must then use the same authorization,
+validation, ownership, audit, and lifecycle paths as an explicitly specified
+request; convenience defaults must not duplicate policy decisions.
 
 There are no new admin-owned or principal-owned sessions. Admin and Principal
 callers act on behalf of a Launcher.
@@ -457,6 +470,6 @@ This proposal belongs to Release 2.1 planning. Release 2.0 retains its current
 Principal-scoped credential and Session contract through UAT and release.
 
 Before implementation, the Release 2.1 plan must turn this concept into binding
-CLI, HTTP, migration, lifecycle, pipeline, and compatibility contracts.
-Implementation must replace the Release 2.0 ownership path rather than layer a
-second authorization or cleanup mechanism beside it.
+CLI, HTTP, migration, lifecycle, default-resolution, and compatibility
+contracts. Implementation must replace the Release 2.0 ownership path rather
+than layer a second authorization or cleanup mechanism beside it.

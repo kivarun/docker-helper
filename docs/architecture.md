@@ -104,7 +104,7 @@ One handler/API/auth policy on both transports. Transport does not
 determine identity or authorization.
 
 Release 2 transports are local only. Non-loopback listeners, TLS, and remote
-execution are deferred to Release 3.
+execution are deferred to Release 4 or later and remain use-case driven.
 
 The launcher creates a session and passes the client token to the agent.
 It is not a mandatory daemon or control plane component.
@@ -1806,8 +1806,9 @@ docker-helper applies a fixed security policy when running containers:
 Items discussed but not yet implemented:
 
 - OpenCode custom tool integration (client-side);
-- Release 2.1 delegated Launcher ownership and narrow automation pipelines as
-  specified in [`release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md);
+- Release 2.1 delegated Launcher ownership and default-driven control-plane
+  flows as specified in
+  [`release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md);
 - Release 3 managed-container lifecycle, interactive exec, per-Session
   networking, narrow publishing, and resource limits;
 - remote transport and execution contract in Release 4 or later, driven by

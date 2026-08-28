@@ -330,7 +330,7 @@ Explicitly outside Release 2:
 
 ## 2.1
 
-### Main goal: delegated Launcher ownership and routine automation
+### Main goal: delegated Launcher ownership and default-driven control-plane flows
 
 Release 2.1 is a short, incremental control-plane release after 2.0. It adds
 one stable ownership and delegation level between Principal and Session:
@@ -344,11 +344,21 @@ one stable ownership and delegation level between Principal and Session:
 - existing Session, operation, runtime, and MAC lifecycle owners are extended
   rather than duplicated.
 
-Release 2.1 may also package routine Principal, Launcher, credential, and
-Session sequences as narrow automation pipelines. The pipelines compose the
-same public API operations and ownership rules; they do not add desired state,
-managed-container lifecycle, restart policy, interactive exec, networking,
-port publishing, or resource-limit semantics.
+Release 2.1 also provides default-driven control-plane flows for common
+Principal, Launcher, credential, and Session operations. These flows are
+deterministic compositions of the same public operations and ownership rules:
+documented defaults and implicit owner resolution remove routine choices, but
+they do not create a workflow engine, scheduler, persisted pipeline, or
+separate automation subsystem.
+
+For example, Session creation authenticated by a Principal credential resolves
+that Principal's `default` Launcher when no Launcher is selected explicitly; an
+admin can name a Principal and resolve that Principal's `default` Launcher.
+Explicit authorized selectors remain available when the default is not desired.
+
+These flows do not add desired state, managed-container lifecycle, restart
+policy, interactive exec, networking, port publishing, or resource-limit
+semantics.
 
 The binding concept, migration direction, and expected CLI/HTTP/database/test
 work are recorded in
