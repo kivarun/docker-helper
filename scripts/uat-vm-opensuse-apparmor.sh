@@ -428,7 +428,7 @@ reboot_vm() {
 log "== 8. STAGE 3: reboot into AppArmor and prove it =="
 reboot_vm "apply AppArmor cmdline (security=apparmor apparmor=1 selinux=0)"
 
-PROOF="$(vm_ssh 'bash -s' <<'RMT'
+PROOF="$(vm_ssh 'sudo bash -s' <<'RMT'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 echo "CMDLINE_VAL=$(cat /proc/cmdline)"
