@@ -40,18 +40,22 @@ platform_preflight() {
 # and the common black-box scenario. Build-only dependencies (musl-gcc,
 # checkpolicy, SELinux policy build tools) are deliberately NOT installed here:
 # the openSUSE profile consumes a prebuilt RPM produced on the hosted Ubuntu
-# build job, so no build toolchain is required on this host. policycoreutils /
-# policycoreutils-python-utils ARE installed because the RPM declares them as
-# runtime Requires for the SELinux backend (see packaging/nfpm.yaml); they are
-# not build tooling. Required provisioning steps (zypper refresh/install)
-# explicitly propagate failure; the Docker enable/start is deliberately
-# best-effort because the common UAT preflight will later prove whether Docker
-# actually works.
+# build job, so no build toolchain is required on this host.
+# apparmor-abstractions provides the #include <tunables/global> and
+# <abstractions/base> sources referenced by the shipped docker-helper-system
+# profile on openSUSE (apparmor-parser/apparmor-utils alone are insufficient).
+# policycoreutils / policycoreutils-python-utils are installed because the RPM
+# declares them as runtime Requires for the SELinux backend (see
+# packaging/nfpm.yaml); neither is build tooling. Required provisioning steps
+# (zypper refresh/install) explicitly propagate failure; the Docker
+# enable/start is deliberately best-effort because the common UAT preflight
+# will later prove whether Docker actually works.
 platform_install_deps() {
   zypper --non-interactive refresh || return $?
 
   zypper --non-interactive install -y \
     apparmor-parser apparmor-utils openssl \
+    apparmor-abstractions \
     policycoreutils policycoreutils-python-utils \
     tar gzip file curl docker \
     || return $?

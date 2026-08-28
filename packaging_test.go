@@ -2968,6 +2968,7 @@ func TestRPMBackendDependencies(t *testing.T) {
 	required := []string{
 		"systemd",
 		"apparmor-parser",
+		"apparmor-abstractions",
 		"policycoreutils",
 		"policycoreutils-python-utils",
 	}
@@ -3146,6 +3147,9 @@ func verifyRPMPackage(t *testing.T, rpmPath, rpmFile string) {
 	}
 	if !strings.Contains(requires, "apparmor-parser") {
 		t.Error("RPM Requires must include apparmor-parser")
+	}
+	if !strings.Contains(requires, "apparmor-abstractions") {
+		t.Error("RPM Requires must include apparmor-abstractions")
 	}
 	// Check for docker dependency (various package names).
 	for _, dep := range []string{"docker.io", "docker-ce", "docker-" + "community"} {

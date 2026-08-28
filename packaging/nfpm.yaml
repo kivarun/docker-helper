@@ -19,6 +19,7 @@ overrides:
     depends:
       - systemd
       - apparmor-parser
+      - apparmor-abstractions
       - policycoreutils
       - policycoreutils-python-utils
     scripts:
