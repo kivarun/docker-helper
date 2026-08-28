@@ -44,6 +44,4 @@ jobs:
 
       - name: Run black-box UAT
         run: |
-          # UAT_DEBUG forced on for this debug iteration; revert to passthrough
-          # after the failure has been diagnosed.
-          sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" UAT_DEBUG=1 scripts/uat-blackbox.sh
+          sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" scripts/uat-blackbox.sh
