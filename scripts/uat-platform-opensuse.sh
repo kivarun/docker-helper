@@ -40,15 +40,19 @@ platform_preflight() {
 # and the common black-box scenario. Build-only dependencies (musl-gcc,
 # checkpolicy, SELinux policy build tools) are deliberately NOT installed here:
 # the openSUSE profile consumes a prebuilt RPM produced on the hosted Ubuntu
-# build job, so no build toolchain is required on this host. Required
-# provisioning steps (zypper refresh/install) explicitly propagate failure; the
-# Docker enable/start is deliberately best-effort because the common UAT
-# preflight will later prove whether Docker actually works.
+# build job, so no build toolchain is required on this host. policycoreutils /
+# policycoreutils-python-utils ARE installed because the RPM declares them as
+# runtime Requires for the SELinux backend (see packaging/nfpm.yaml); they are
+# not build tooling. Required provisioning steps (zypper refresh/install)
+# explicitly propagate failure; the Docker enable/start is deliberately
+# best-effort because the common UAT preflight will later prove whether Docker
+# actually works.
 platform_install_deps() {
   zypper --non-interactive refresh || return $?
 
   zypper --non-interactive install -y \
     apparmor-parser apparmor-utils openssl \
+    policycoreutils policycoreutils-python-utils \
     tar gzip file curl docker \
     || return $?
 
