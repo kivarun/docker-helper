@@ -133,11 +133,11 @@ is_allowlisted_deny() {
   fi
   # docker CLI binds an abstract unix socket for the buildx plugin bridge.
   # Best-effort probe: the build proceeds when the bind is denied, and the
-  # audit record carries comm="docker" with addr="@docker_cli_...".
+  # audit record carries comm="docker" with addr="@docker_cli_<hex>".
   if echo "$line" | grep -q 'operation="bind"' \
     && echo "$line" | grep -q 'class="net"' \
     && echo "$line" | grep -q 'family="unix"' \
-    && echo "$line" | grep -q 'addr="@docker_cli_"' \
+    && echo "$line" | grep -q 'addr="@docker_cli_' \
     && echo "$line" | grep -q 'comm="docker"'; then
     return 0
   fi
