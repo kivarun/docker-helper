@@ -44,4 +44,5 @@ jobs:
 
       - name: Run black-box UAT
         run: |
-          sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" scripts/uat-blackbox.sh
+          sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+            UAT_BACKEND="${UAT_BACKEND:-apparmor}" scripts/uat-blackbox.sh

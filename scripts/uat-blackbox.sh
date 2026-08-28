@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
 #
-# uat-blackbox.sh — black-box UAT for docker-helper on a full Ubuntu VM
-# (e.g. a GitHub-hosted ubuntu-24.04 runner) with a real Docker daemon and
-# active AppArmor confinement.
+# uat-blackbox.sh — backend-agnostic black-box UAT for docker-helper on a
+# full Ubuntu VM (e.g. a GitHub-hosted ubuntu-24.04 runner) with a real
+# Docker daemon and an active MAC backend (AppArmor by default).
 #
 # The GitHub workflow runs this script as root:
 #     sudo -E env "PATH=$PATH" scripts/uat-blackbox.sh
 # It is also runnable manually on any Ubuntu VM with a rootful Docker daemon.
 #
-# Coverage:
-#   1. preflight: Docker, systemd, AppArmor, versions, audit start point
-#   2. package build + system-mode install, confinement verification
+# Coverage (generic, backend-independent):
+#   1. preflight: Docker, systemd, versions
+#   2. package build + system-mode install
 #   3. operator surface: principal + credential; admin and principal sessions
 #   4. pull + run (uid/gid/workdir + container exit-code propagation)
 #   5. workspace mounts: RW write, RO read, RO write rejected, no host leak
-#   6. docker build via docker-helper (Buildx path under AppArmor)
+#   6. docker build via docker-helper (Buildx path)
 #   7. self-contained trusted-CA E2E: ephemeral CA + local HTTPS endpoint
-#   8. AppArmor audit check of fresh docker-helper-system denies (allowlist)
+#   8. backend audit check of fresh confinement denies (allowlist)
 #
 # All docker-helper operations go through the docker-helper CLI. The real
 # Docker CLI is used ONLY for the preflight reachability check and to discover
 # the Docker bridge gateway for the HTTPS harness — never as a substitute for
 # a docker-helper operation under test.
+#
+# MAC-backend orchestration lives in scripts/uat-backend-<name>.sh (selected
+# by UAT_BACKEND, default apparmor). That layer owns backend-specific
+# preflight, confinement verification, audit-window tracking, deny inspection
+# and diagnostics; this core is backend-agnostic.
 #
 # Environment overrides:
 #   UAT_VERSION       package version string (default 2.0.0-uat)
@@ -30,6 +35,7 @@
 #   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default runner)
 #   UAT_TLS_PORT      port for the local HTTPS endpoint (default 8443)
 #   UAT_KEEP          if set, skip best-effort cleanup (debugging)
+#   UAT_BACKEND       MAC backend to exercise (default apparmor)
 
 set -uo pipefail
 
@@ -39,6 +45,7 @@ WS="${UAT_WORKSPACE:-${ALLOWED_ROOT}/uat-workspace}"
 PRINCIPAL="${UAT_PRINCIPAL:-runner}"
 TLS_PORT="${UAT_TLS_PORT:-8443}"
 KEEP="${UAT_KEEP:-}"
+BACKEND="${UAT_BACKEND:-apparmor}"
 DEBUG="${UAT_DEBUG:-}"
 if [ -n "$DEBUG" ]; then
   # Verbose command tracing. set -v (NOT set -x) is used deliberately: -x
@@ -52,10 +59,32 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 cd "$REPO_ROOT" || exit 1
 
-# Audit start point — recorded before ANY docker-helper activity so that only
-# fresh events from this UAT window are inspected at the end.
-AUDIT_START_EPOCH="$(date +%s)"
-AUDIT_START_ISO="$(date -Iseconds)"
+say()  { printf '\n[UAT] %s\n' "$*"; }
+info() { printf '[UAT] %s\n' "$*"; }
+
+# Load the MAC backend layer.
+BACKEND_FILE="$REPO_ROOT/scripts/uat-backend-$BACKEND.sh"
+if [ ! -f "$BACKEND_FILE" ]; then
+  echo "error: unknown UAT backend '$BACKEND' (no $BACKEND_FILE)" >&2
+  exit 1
+fi
+# shellcheck source=scripts/uat-backend-apparmor.sh
+source "$BACKEND_FILE"
+
+# Every backend must implement the contract below. Verify it now so a
+# misbehaving backend fails loudly instead of deep inside a phase.
+for fn in backend_name backend_audit_start backend_preflight \
+  backend_reset_policy backend_verify_policy_packaged backend_verify_confinement \
+  backend_audit_check backend_diagnostics; do
+  if ! declare -F "$fn" >/dev/null 2>&1; then
+    echo "error: UAT backend '$BACKEND' is missing required function $fn" >&2
+    exit 1
+  fi
+done
+
+# The backend records its audit-window start BEFORE any docker-helper activity
+# so that only fresh confinement events from this UAT run are inspected.
+backend_audit_start
 
 DIAG_PRINTED=0
 SERVER_PID=""
@@ -63,9 +92,6 @@ SESSION_ADMIN_ID=""
 SESSION_PRINC_ID=""
 CRED_FILE="/tmp/uat-credential.token"
 unset DOCKER_HELPER_SESSION_TOKEN
-
-say()  { printf '\n[UAT] %s\n' "$*"; }
-info() { printf '[UAT] %s\n' "$*"; }
 
 # fail_uat prints a labelled failure, dumps diagnostics, exits 1. Diagnostics
 # are printed BEFORE the EXIT trap runs cleanup so the original failure is
@@ -76,111 +102,6 @@ fail_uat() {
   exit 1
 }
 
-# ---- AppArmor audit helpers -------------------------------------------------
-
-# audit_ts extracts the epoch from a kernel audit(...) prefix, or prints
-# nothing when the line has no audit timestamp.
-audit_ts() {
-  sed -n 's/.*audit(\([0-9][0-9]*\)\.[0-9]*:[0-9]*).*/\1/p' | head -1
-}
-
-# audit_records returns unique kernel audit records (from dmesg, which on
-# GitHub-hosted runners is the reliable source: systemd-journald typically
-# reports "Collecting audit messages is disabled", so journalctl -k has no
-# AppArmor records while the kernel ring buffer does) that match the given
-# grep filter AND fall inside the UAT audit window.
-audit_records() {
-  local filter="$1" line ts
-  {
-    dmesg 2>/dev/null || true
-    journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null
-  } | grep -E "$filter" | while IFS= read -r line; do
-    ts="$(printf '%s\n' "$line" | audit_ts)"
-    if [ -n "$ts" ] && [ "$ts" -ge "$AUDIT_START_EPOCH" ]; then
-      printf '%s\n' "$line"
-    fi
-  done | sort -u
-}
-
-# collect_denials prints unique fresh kernel audit records that mention an
-# AppArmor DENIED event under profile docker-helper-system.
-collect_denials() {
-  audit_records 'apparmor="DENIED"' | grep -F 'profile="docker-helper-system"'
-}
-
-collect_profile_records() {
-  audit_records 'apparmor=' | grep -F 'profile="docker-helper-system"'
-}
-
-# is_allowlisted_deny classifies a single deny record against the narrow
-# allowlist of demonstrated benign probes. Everything else is unexpected.
-# All entries come from demonstrated UAT runs (openSUSE manual + GitHub
-# runner); the AppArmor policy is NOT widened to silence them — they are
-# merely tolerated here.
-is_allowlisted_deny() {
-  local line="$1"
-  # docker CLI reads its own cgroup cpu.max (best-effort probe, benign).
-  if echo "$line" | grep -q 'name="/sys/fs/cgroup/system.slice/docker-helper.service/cpu.max"'; then
-    return 0
-  fi
-  # docker-buildx probes for git(1) (exec deny, benign best-effort probe).
-  # The path is distro-specific: /usr/libexec/git/git on openSUSE,
-  # /usr/bin/git on Ubuntu.
-  if echo "$line" | grep -q 'operation="exec"' \
-    && echo "$line" | grep -qE 'name="/(usr/libexec/git|usr/bin)/git"' \
-    && echo "$line" | grep -q 'comm="docker-buildx"'; then
-    return 0
-  fi
-  # docker CLI binds an abstract unix socket for the buildx plugin bridge.
-  # Best-effort probe: the build proceeds when the bind is denied, and the
-  # audit record carries comm="docker" with addr="@docker_cli_<hex>".
-  if echo "$line" | grep -q 'operation="bind"' \
-    && echo "$line" | grep -q 'class="net"' \
-    && echo "$line" | grep -q 'family="unix"' \
-    && echo "$line" | grep -q 'addr="@docker_cli_' \
-    && echo "$line" | grep -q 'comm="docker"'; then
-    return 0
-  fi
-  # docker-buildx enumerates candidate system TLS root directories. On Ubuntu
-  # /etc/ssl/certs is a real directory (vs openSUSE where the paths resolve
-  # elsewhere); the denied read of the directory itself is a benign best-effort
-  # probe — the build and TLS E2E succeed without it, so it is not granted.
-  if echo "$line" | grep -q 'operation="open"' \
-    && echo "$line" | grep -q 'name="/etc/ssl/certs/"' \
-    && echo "$line" | grep -q 'comm="docker-buildx"'; then
-    return 0
-  fi
-  return 1
-}
-
-apparmor_audit_check() {
-  say "AppArmor audit check (fresh DENIED records for docker-helper-system)"
-  local denials
-  denials="$(collect_denials)"
-  if [ -z "$denials" ]; then
-    info "no fresh AppArmor DENIED records for docker-helper-system in this window"
-    info "(if unexpected, check that kernel audit logging is active on the runner)"
-    return 0
-  fi
-
-  local unexpected="" allowlisted=0 line
-  while IFS= read -r line; do
-    if is_allowlisted_deny "$line"; then
-      allowlisted=$((allowlisted + 1))
-      info "allowlisted benign deny: $line"
-    else
-      unexpected+="$line"$'\n'
-    fi
-  done <<< "$denials"
-
-  if [ -n "$unexpected" ]; then
-    printf '\n[UAT] UNEXPECTED AppArmor DENIED records:\n' >&2
-    printf '%s' "$unexpected" >&2
-    fail_uat "unexpected AppArmor denials under docker-helper-system"
-  fi
-  info "AppArmor audit check passed (allowlisted=$allowlisted unexpected=0)"
-}
-
 # ---- Diagnostics ------------------------------------------------------------
 
 print_diagnostics() {
@@ -188,28 +109,14 @@ print_diagnostics() {
   DIAG_PRINTED=1
   echo
   echo "================ UAT DIAGNOSTICS ================"
-  echo "--- audit window: epoch=$AUDIT_START_EPOCH iso=$AUDIT_START_ISO ---"
   echo "--- docker-helper version ---"
   /usr/bin/docker-helper version 2>&1 || true
   echo "--- systemctl status docker-helper ---"
   systemctl status docker-helper.service --no-pager 2>&1 || true
   echo "--- journalctl -u docker-helper (last 200) ---"
   journalctl -u docker-helper.service -n 200 --no-pager 2>&1 || true
-  echo "--- AppArmor status (aa-status) ---"
-  aa-status 2>&1 | head -40 || true
-  echo "--- docker-helper-system process confinement ---"
-  local dh_pid
-  dh_pid="$(systemctl show -p MainPID --value docker-helper.service 2>/dev/null || true)"
-  if [ -n "$dh_pid" ] && [ "$dh_pid" != "0" ]; then
-    printf 'attr/current: '; cat "/proc/$dh_pid/attr/current" 2>&1 || true
-    printf 'exe:          '; readlink -f "/proc/$dh_pid/exe" 2>&1 || true
-  else
-    echo "daemon MainPID is empty/zero"
-  fi
-  echo "--- fresh docker-helper-system audit records ---"
-  collect_profile_records 2>&1 | head -60 || true
-  echo "--- kernel deny tail (dmesg) ---"
-  dmesg 2>/dev/null | tail -40 || true
+  echo "--- backend diagnostics ($(backend_name)) ---"
+  backend_diagnostics
   echo "================ END DIAGNOSTICS ================"
 }
 
@@ -240,7 +147,7 @@ trap cleanup EXIT
 # Phase 1: environment / preflight
 # ==============================================================================
 
-say "phase 1: preflight (Docker, systemd, AppArmor, versions)"
+say "phase 1: preflight (Docker, systemd, versions)"
 if [ "$(id -u)" -ne 0 ]; then
   echo "error: this UAT must run as root (sudo scripts/uat-blackbox.sh)" >&2
   exit 1
@@ -254,12 +161,6 @@ fi
 if ! docker info >/dev/null 2>&1; then
   fail_uat "cannot reach the Docker daemon (docker info failed)"
 fi
-if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" != "Y" ]; then
-  fail_uat "AppArmor LSM is not enabled on this kernel"
-fi
-if ! command -v apparmor_parser >/dev/null 2>&1; then
-  fail_uat "apparmor_parser not found"
-fi
 if ! command -v openssl >/dev/null 2>&1; then
   fail_uat "openssl not found"
 fi
@@ -271,8 +172,9 @@ info "docker:       $(docker --version 2>/dev/null || true)"
 info "systemd:      $(systemctl --version 2>/dev/null | head -1 || true)"
 info "kernel:       $(uname -r)"
 info "distro:       $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
-info "apparmor:     enabled (parser $(apparmor_parser --version 2>&1 | head -1 || true))"
-info "audit window: $AUDIT_START_ISO (epoch $AUDIT_START_EPOCH)"
+
+# MAC backend availability (AppArmor LSM enabled, parser present, ...).
+backend_preflight
 
 # Docker daemon DNS configuration.
 #
@@ -282,13 +184,13 @@ info "audit window: $AUDIT_START_ISO (epoch $AUDIT_START_EPOCH)"
 # loopback addresses have no listener, so `docker build` DNS resolution fails
 # with e.g. "lookup auth.docker.io on [::1]:53: read: connection refused".
 # This is the well-known buildkit/systemd-resolved failure mode (moby/buildkit
-# #5009 class), NOT an AppArmor or docker-helper defect.
+# #5009 class), NOT a docker-helper or MAC-policy defect.
 #
 # The standard, documented remedy is to give the daemon explicit public
 # resolvers in /etc/docker/daemon.json and restart it. We do that here so the
 # build phase has working container DNS. This is environment setup for the
-# CI runner — it does not change docker-helper policy or the AppArmor profile,
-# and it does not mask any failure under test.
+# CI runner — it does not change docker-helper policy or the shipped MAC
+# profile, and it does not mask any failure under test.
 if [ ! -f /etc/docker/daemon.json ] || ! grep -q '"dns"' /etc/docker/daemon.json 2>/dev/null; then
   say "phase 1: configure Docker daemon DNS for build containers (systemd-resolved workaround)"
   cp -a /etc/docker/daemon.json /etc/docker/daemon.json.uat-bak 2>/dev/null || true
@@ -317,11 +219,12 @@ fi
 
 say "phase 2: build the Debian package with the repository packaging path"
 
-# Idempotency for re-runs on a persistent VM: stop/disable any prior service
-# and remove docker-helper-owned state so init has a clean slate.
+# Idempotency for re-runs on a persistent VM: stop/disable any prior service,
+# unload any previously loaded shipped policy, and remove docker-helper-owned
+# state so init has a clean slate.
 systemctl stop docker-helper.service >/dev/null 2>&1 || true
 systemctl disable docker-helper.service >/dev/null 2>&1 || true
-apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null || true
+backend_reset_policy
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
 rm -rf dist
@@ -344,15 +247,11 @@ INIT_OUT="$(docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)" || {
 systemctl daemon-reload
 systemctl enable --now docker-helper.service || fail_uat "systemctl enable --now docker-helper failed"
 
-# The service must be active AND the process confined by docker-helper-system
-# (not unconfined), using the package-installed binary/profile/unit.
+# The service must be active AND confined by the backend, using the
+# package-installed binary/policy/unit.
 systemctl is-active --quiet docker-helper.service || fail_uat "docker-helper service is not active"
 DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
 [ -n "$DH_PID" ] && [ "$DH_PID" != "0" ] || fail_uat "daemon MainPID is empty/zero"
-
-ATTR="$(cat "/proc/$DH_PID/attr/current" 2>/dev/null || true)"
-[ "$ATTR" = "docker-helper-system (enforce)" ] \
-  || fail_uat "daemon is not confined in docker-helper-system (enforce): got '$ATTR'"
 
 EXE="$(readlink -f "/proc/$DH_PID/exe" 2>/dev/null || true)"
 [ "$EXE" = "/usr/bin/docker-helper" ] \
@@ -360,18 +259,17 @@ EXE="$(readlink -f "/proc/$DH_PID/exe" 2>/dev/null || true)"
 
 dpkg -S /usr/bin/docker-helper >/dev/null 2>&1 \
   || fail_uat "/usr/bin/docker-helper is not owned by the docker-helper package"
-dpkg -S /etc/apparmor.d/docker-helper-system >/dev/null 2>&1 \
-  || fail_uat "AppArmor profile is not owned by the docker-helper package"
 dpkg -S /usr/lib/systemd/system/docker-helper.service >/dev/null 2>&1 \
   || fail_uat "systemd unit is not owned by the docker-helper package"
 
-aa-status 2>/dev/null | grep -q 'docker-helper-system' \
-  || fail_uat "docker-helper-system profile is not loaded"
+# Backend-specific confinement + shipped-policy ownership checks.
+backend_verify_policy_packaged
+backend_verify_confinement "$DH_PID"
 
 [ "$(/usr/bin/docker-helper version)" = "$VERSION" ] \
   || fail_uat "installed binary version mismatch (expected $VERSION)"
 
-info "confinement verified: pid=$DH_PID profile=$ATTR binary=$EXE"
+info "service active: pid=$DH_PID binary=$EXE"
 
 # ==============================================================================
 # Phase 3: operator surface (principal + credential) and sessions
@@ -485,7 +383,7 @@ info "mount behavior ok"
 # Phase 6: docker build via docker-helper
 # ==============================================================================
 
-say "phase 6: docker build via docker-helper (Buildx path under AppArmor)"
+say "phase 6: docker build via docker-helper (Buildx path)"
 cat > "$WS/buildctx/Dockerfile" <<'EOF'
 FROM alpine:3.24
 RUN apk add --no-cache curl ca-certificates
@@ -575,10 +473,10 @@ printf '%s\n' "$TLS_OUT" | grep -q 'TLS-OK' \
 info "trusted-CA E2E passed (no --cacert/--capath/-k, no manual CA env overrides)"
 
 # ==============================================================================
-# Phase 8: AppArmor audit check
+# Phase 8: backend audit check
 # ==============================================================================
 
-apparmor_audit_check
+backend_audit_check
 
 # ==============================================================================
 # Summary
@@ -592,6 +490,6 @@ info "pull/run/identity/exit-code ...... ok"
 info "workspace mounts ................. ok"
 info "docker build ..................... ok"
 info "trusted-CA E2E ................... ok"
-info "AppArmor audit ................... ok"
+info "backend audit ($(backend_name)) .. ok"
 
 exit 0
