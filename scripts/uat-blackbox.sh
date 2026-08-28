@@ -39,6 +39,14 @@ WS="${UAT_WORKSPACE:-${ALLOWED_ROOT}/uat-workspace}"
 PRINCIPAL="${UAT_PRINCIPAL:-runner}"
 TLS_PORT="${UAT_TLS_PORT:-8443}"
 KEEP="${UAT_KEEP:-}"
+DEBUG="${UAT_DEBUG:-}"
+if [ -n "$DEBUG" ]; then
+  # Verbose command tracing. set -v (NOT set -x) is used deliberately: -x
+  # echoes expanded command-substitution values and would leak session/admin/
+  # credential tokens into the workflow log. -v echoes only the literal input
+  # lines, which contain no token values.
+  set -v
+fi
 
 # Repo root: script lives in scripts/.
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)" || exit 1
@@ -76,14 +84,26 @@ fail_uat() {
 # so journalctl -k --since covers the whole UAT window reliably on GitHub
 # hosted runners.
 collect_denials() {
-  journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null \
+  local raw
+  raw="$(journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null)"
+  if [ -z "$raw" ]; then
+    # journald may not be capturing kernel audit records on the runner; fall
+    # back to the kernel ring buffer (whole buffer, then content-filtered).
+    raw="$(dmesg 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$raw" \
     | grep -E 'apparmor="DENIED"' \
     | grep -F 'profile="docker-helper-system"' \
     | sort -u
 }
 
 collect_profile_records() {
-  journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null \
+  local raw
+  raw="$(journalctl -k --since "@${AUDIT_START_EPOCH}" --no-pager 2>/dev/null)"
+  if [ -z "$raw" ]; then
+    raw="$(dmesg 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$raw" \
     | grep -F 'profile="docker-helper-system"' \
     | sort -u
 }
