@@ -94,9 +94,9 @@ redact() {
     -e 's/dhc_[A-Za-z0-9_-]+/<redacted-token>/g'
 }
 
-# json_field extracts a string field from the given JSON document.
-json_field() { # json field
-  printf '%s' "$1" | grep -oP "\"$2\": \"\K[^\"]+" | head -1
+# json_field extracts a string field from a JSON document read on stdin.
+json_field() { # field
+  grep -oP "\"$1\": \"\K[^\"]+" | head -1
 }
 
 # dh is the docker-helper CLI used by the regressions (system mode).
