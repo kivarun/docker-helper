@@ -1784,7 +1784,7 @@ docker-helper applies a fixed security policy when running containers:
 - deterministic Docker command generation;
 - Docker CLI instead of exposing docker.sock.
 
-## Non-goals
+## Non-goals of the current implementation
 
 - container orchestration;
 - Kubernetes integration;
@@ -1806,6 +1806,11 @@ docker-helper applies a fixed security policy when running containers:
 Items discussed but not yet implemented:
 
 - OpenCode custom tool integration (client-side);
-- remote transport and execution contract (Release 3);
+- Release 2.1 delegated Launcher ownership and narrow automation pipelines as
+  specified in [`release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md);
+- Release 3 managed-container lifecycle, interactive exec, per-Session
+  networking, narrow publishing, and resource limits;
+- remote transport and execution contract in Release 4 or later, driven by
+  concrete use cases;
 - stronger privilege separation if operational evidence justifies it;
 - strict SELinux workspace storage based on dedicated/relabelled locations.

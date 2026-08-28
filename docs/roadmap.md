@@ -304,7 +304,8 @@ Implemented contract:
   are post-Release-2.
 
 Release 2 remains local. Non-loopback listeners, TLS, uploaded build contexts,
-and remote image-only runs are deferred to Release 3.
+and remote image-only runs are deferred to Release 4 or later and remain
+use-case driven.
 
 Outstanding work is stabilization and release acceptance, not capability
 expansion: finish the naming and abstraction cleanup identified by the
@@ -327,31 +328,66 @@ Explicitly outside Release 2:
   deleted;
 - dedicated unprivileged service-account architecture.
 
+## 2.1
+
+### Main goal: delegated Launcher ownership and routine automation
+
+Release 2.1 is a short, incremental control-plane release after 2.0. It adds
+one stable ownership and delegation level between Principal and Session:
+
+- a Principal remains the OS execution identity and authorization ceiling;
+- a Launcher becomes the stable Session/runtime owner beneath one Principal;
+- Principal and Launcher credentials remain rotatable authentication keys, not
+  resource owners;
+- Launcher scope inherits or narrows Principal allowed roots without owning MAC
+  state;
+- existing Session, operation, runtime, and MAC lifecycle owners are extended
+  rather than duplicated.
+
+Release 2.1 may also package routine Principal, Launcher, credential, and
+Session sequences as narrow automation pipelines. The pipelines compose the
+same public API operations and ownership rules; they do not add desired state,
+managed-container lifecycle, restart policy, interactive exec, networking,
+port publishing, or resource-limit semantics.
+
+The binding concept, migration direction, and expected CLI/HTTP/database/test
+work are recorded in
+[`docs/release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md).
+
 ## 3.0
 
-### Main goal: remote execution
+### Main goal: managed-container runtime
 
-Release 3 is the earliest stage for non-loopback and remote capabilities:
+Release 3 is reserved for the larger runtime architecture:
+
+- managed containers with explicit create, start, stop, restart, inspect, and
+  logs operations;
+- interactive exec over WebSocket;
+- non-interactive exec through the existing operation status/log model;
+- per-Session networking;
+- narrow Launcher-governed port publishing for deliberate external exposure;
+- explicit CPU, memory, and related resource limits.
+
+A managed container is not desired state. Release 3 does not add automatic
+recovery, reconciliation, or restart-policy semantics.
+
+Begin Release 3 with binding lifecycle, ownership, API, failure, cleanup, and
+compatibility contracts. Do not let implementation convenience create a second
+runtime owner beside the existing Session/operation lifecycle.
+
+## 4.0 / use-case driven
+
+Remote capabilities remain a later, separate architecture problem:
 
 - explicit TLS identity and non-loopback transport policy;
 - uploaded or streamed build contexts;
 - image-only remote runs before mutable workspace synchronization;
 - mutable remote workspace delivery only when a concrete use case justifies it;
 - multiple contexts, target selection, and optional routing;
-- cancellation and recovery across interrupted uploads/connections;
-- durable operation state where demonstrated by use;
-- host port publishing only under explicit server-side policy.
+- cancellation and recovery across interrupted uploads or connections;
+- durable operation state where demonstrated by use.
 
-Release 3 planning includes a proposed delegated Launcher model between a
-Principal and its Sessions. Launcher becomes the stable Session/runtime owner;
-credentials remain rotatable authentication keys, and Launcher roots add an
-optional authorization ceiling without owning MAC state. The agreed concept,
-security trade-offs, defaults, and expected CLI/HTTP/database/test changes are
-recorded in
-[`docs/release-3-launcher-delegation.md`](release-3-launcher-delegation.md).
-
-Keep Release 3 use-case driven; do not predesign these APIs during Release 2
-stabilization.
+Do not let remote transport dictate the local Launcher ownership model.
 
 ## Architectural constraints
 

@@ -1,10 +1,11 @@
-# Release 3 launcher delegation concept
+# Release 2.1 launcher delegation concept
 
 ## Status and scope
 
-This document records the proposed Release 3 authorization and ownership model
-for delegated launchers. It is a design input, not the current Release 2
-contract and not an implementation plan.
+This document records the proposed Release 2.1 authorization and ownership
+model for delegated Launchers. It is a design input for the first minor release
+after 2.0, not part of the Release 2.0 contract and not yet an implementation
+plan.
 
 The proposal addresses a demonstrated use case: give an agent enough authority
 to create Docker Helper sessions for child agents without granting the agent
@@ -14,11 +15,21 @@ owner of long-lived resources.
 The design does not add a general agent control plane, recursive delegation, or
 agent-specific behavior to the daemon.
 
-## Problem in the Release 2 model
+Release 2.1 adds one ownership and delegation level between Principal and
+Session. It may also package routine Principal, Launcher, credential, and
+Session sequences as narrow automation pipelines.
 
-Release 2 credentials authenticate a principal. Multiple credentials for the
-same principal differ by ID, name, and revocation state, but receive the same
-principal-wide allowed roots and principal-wide session-management authority.
+The pipelines orchestrate the same public operations and ownership rules. They
+do not add managed-container lifecycle, desired state, restart policy,
+interactive exec, networking, port publishing, or resource-limit semantics;
+those remain Release 3 work.
+
+## Problem in the Release 2.0 model
+
+Release 2.0 Principal credentials authenticate a Principal. Multiple
+credentials for the same Principal differ by ID, name, and revocation state,
+but receive the same Principal-wide allowed roots and Principal-wide
+Session-management authority.
 
 The credential row currently mixes two concepts:
 
@@ -163,7 +174,7 @@ while retaining separate Session namespaces and cleanup boundaries. Use
 ## Credential lifecycle
 
 The admin token remains the root capability and does not identify a Principal.
-Release 2 principal credentials remain Principal credentials in the new model;
+Release 2.0 Principal credentials remain Principal credentials in the new model;
 they must not be silently reclassified as Launcher credentials.
 
 Every Credential is a technical key with:
@@ -391,14 +402,14 @@ Lifecycle semantics are:
 
 ## Migration direction
 
-Release 2 credentials already authenticate Principals. Migration preserves
+Release 2.0 credentials already authenticate Principals. Migration preserves
 their IDs, names, and token hashes as Principal credentials. They remain a
 multi-credential Principal lifecycle and are not reassigned to Launchers.
 
 Existing Principal-owned Sessions may be assigned to an automatically created
 `default` Launcher for that Principal. Existing admin-created Sessions without
 a Principal cannot be attributed to a valid ownership chain and should be
-invalidated during the Release 3 transition.
+invalidated during the Release 2.1 transition.
 
 User-mode migration may bind legacy local Sessions to the real daemon-owner OS
 identity and its default Launcher. It must not invent a synthetic cross-user
@@ -429,7 +440,7 @@ Required coverage includes:
   credential rotation without ownership change or Session revocation;
 - Launcher and Principal disable/delete cleanup boundaries;
 - container ownership labels and checked cleanup;
-- migration of Release 2 credentials as Principal credentials;
+- migration of Release 2.0 credentials as Principal credentials;
 - migration or invalidation of legacy Sessions according to attributable
   ownership;
 - CLI prompt/default behavior and mandatory non-interactive choice;
@@ -442,10 +453,10 @@ without reimplementing policy decisions in fixtures.
 
 ## Release boundary
 
-This proposal belongs to Release 3 planning. Release 2 retains its current
+This proposal belongs to Release 2.1 planning. Release 2.0 retains its current
 Principal-scoped credential and Session contract through UAT and release.
 
-Before implementation, the Release 3 plan must turn this concept into binding
-CLI, HTTP, migration, lifecycle, and compatibility contracts. Implementation
-must replace the Release 2 ownership path rather than layer a second
-authorization or cleanup mechanism beside it.
+Before implementation, the Release 2.1 plan must turn this concept into binding
+CLI, HTTP, migration, lifecycle, pipeline, and compatibility contracts.
+Implementation must replace the Release 2.0 ownership path rather than layer a
+second authorization or cleanup mechanism beside it.
