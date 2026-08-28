@@ -257,6 +257,7 @@ fi
 log "== STAGE 1 acceptance =="
 STAGE1="$(vm_ssh 'bash -s' <<'RMT'
 set -e
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 echo "=== uname -a ==="; uname -a
 echo "=== /etc/os-release ==="; cat /etc/os-release
 echo "=== systemd ==="
@@ -271,7 +272,7 @@ echo "=== firstboot units ==="
 systemctl list-unit-files 2>/dev/null | grep -Ei 'firstboot|jeos' || echo "(no firstboot units)"
 echo "STAGE1-DONE"
 RMT
-)"
+)" || true
 printf '%s\n' "$STAGE1"
 echo "$STAGE1" | grep -q "STAGE1-DONE" || fail "STAGE 1 acceptance script did not complete"
 echo "$STAGE1" | grep -qi 'opensuse-tumbleweed' || fail "os-release does not identify openSUSE Tumbleweed"
@@ -292,6 +293,7 @@ fi
 log "== 7. STAGE 1.5: initial MAC / SELinux state =="
 STATE="$(vm_ssh 'bash -s' <<'RMT'
 set -e
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 echo "=== /sys/kernel/security/lsm ==="; cat /sys/kernel/security/lsm
 echo "=== /proc/cmdline ==="; cat /proc/cmdline
 echo "=== aa-status ==="; (command -v aa-status >/dev/null && aa-status) || echo "(aa-status absent)"
@@ -301,7 +303,7 @@ echo "=== selinux/enforce ==="; cat /sys/fs/selinux/enforce 2>/dev/null || echo 
 echo "=== SELinux/AppArmor packages ==="; rpm -qa | grep -Ei 'selinux|policycoreutils|libselinux|libsepol|libsemanage|apparmor' || echo "(none)"
 echo "STATE-DONE"
 RMT
-)"
+)" || true
 printf '%s\n' "$STATE"
 echo "$STATE" | grep -q "STATE-DONE" || fail "state discovery did not complete"
 
@@ -332,6 +334,7 @@ log "RESULT need_relabel=$NEED_RELABEL"
 
 STAGE2="$(vm_ssh "sudo bash -s $FINAL_MODE" <<'RMT'
 set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 log(){ echo "[vm] $*"; }
 MODE="$1"
 log "target SELinux mode for this boot: $MODE"
@@ -447,7 +450,7 @@ echo "=== current /proc/cmdline (pre-reboot, informational) ==="
 cat /proc/cmdline
 echo "STAGE2-DONE"
 RMT
-)"
+)" || true
 printf '%s\n' "$STAGE2"
 echo "$STAGE2" | grep -q "STAGE2-DONE" || fail "STAGE 2 script did not complete"
 log "RESULT selinux_packages=$(printf '%s\n' "$STAGE2" | grep -oE 'selinux-policy-targeted-[^ ]+|policycoreutils-[^ ]+|selinux-tools-[^ ]+' | sort -u | tr '\n' ' ')"
@@ -488,6 +491,7 @@ reboot #$REBOOT_N (${reason}): down+up in ${dt}s"
 probe_state() {
   vm_ssh 'bash -s' <<'RMT'
 set -e
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 echo "=== /proc/cmdline ==="; cat /proc/cmdline
 echo "=== /sys/kernel/security/lsm ==="; cat /sys/kernel/security/lsm
 echo "=== sestatus ==="; (command -v sestatus >/dev/null && sestatus) || echo "(sestatus absent)"
@@ -501,7 +505,7 @@ RMT
 if [ "$NEED_RELABEL" = "yes" ]; then
   # Reboot 1: SELinux active, permissive (relabel phase)
   reboot_vm "SELinux active in permissive mode (relabel phase)"
-  P1="$(probe_state)"
+  P1="$(probe_state)" || true
   printf '%s\n' "$P1"
   echo "$P1" | grep -q "PROBE-DONE" || fail "permissive-phase probe did not complete"
   LSM_P1="$(printf '%s\n' "$P1" | grep -A1 '=== /sys/kernel/security/lsm ===' | tail -1)"
@@ -514,6 +518,7 @@ if [ "$NEED_RELABEL" = "yes" ]; then
   log "running full relabel (fixfiles -F restore) while SELinux is active"
   RELABEL="$(vm_ssh 'sudo bash -s' <<'RMT'
 set -e
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 echo "=== fixfiles -F restore (full relabel) ==="
 fixfiles -F restore 2>&1 | tail -30
 echo "=== sample labels ==="
@@ -522,7 +527,7 @@ for p in / /etc /var /usr /home; do
 done
 echo "RELABEL-DONE"
 RMT
-)"
+)" || true
   printf '%s\n' "$RELABEL"
   echo "$RELABEL" | grep -q "RELABEL-DONE" || fail "relabel did not complete"
   log "relabel complete"
@@ -531,6 +536,7 @@ RMT
   log "flipping to enforcing for the final boot"
   vm_ssh 'sudo bash -s' <<'RMT'
 set -e
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config
 if [ -f /etc/kernel/cmdline ]; then
   grep -qw enforcing=1 /etc/kernel/cmdline || printf ' enforcing=1' >> /etc/kernel/cmdline
@@ -557,6 +563,7 @@ fi
 log "== 10. final acceptance =="
 ACCEPT="$(vm_ssh 'bash -s' <<'RMT'
 set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 echo "=== /etc/os-release ==="; cat /etc/os-release
 echo "=== /proc/cmdline ==="; cat /proc/cmdline
 echo "=== /sys/kernel/security/lsm ==="; cat /sys/kernel/security/lsm
@@ -581,7 +588,7 @@ else
 fi
 echo "ACCEPTANCE-DONE"
 RMT
-)"
+)" || true
 printf '%s\n' "$ACCEPT"
 echo "$ACCEPT" | grep -q "ACCEPTANCE-DONE" || fail "acceptance script did not complete"
 
