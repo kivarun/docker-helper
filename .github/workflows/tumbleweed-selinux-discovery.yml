@@ -1,0 +1,30 @@
+name: Tumbleweed SELinux VM discovery (PoC)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# DISCOVERY ONLY — boot the official openSUSE Tumbleweed Minimal-VM Cloud
+# qcow2 unattended on a GitHub-hosted ubuntu-24.04 runner (QEMU, KVM or TCG),
+# switch it to genuine SELinux enforcing, and prove SELinux is the active LSM
+# after a reboot. It does NOT run the docker-helper UAT, does not touch release
+# workflows and makes no production changes. Run manually via workflow_dispatch.
+
+jobs:
+  tumbleweed-selinux-discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Run Tumbleweed SELinux discovery
+        run: |
+          scripts/uat-tumbleweed-selinux-discovery.sh
