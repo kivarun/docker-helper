@@ -50,7 +50,25 @@ platform_preflight() {
 # (zypper refresh/install) explicitly propagate failure; the Docker
 # enable/start is deliberately best-effort because the common UAT preflight
 # will later prove whether Docker actually works.
+#
+# Tune libzypp network timeouts so a dead/stalled openSUSE mirror costs seconds,
+# not the 60s default, before zypper tries the next mirror. zypper's CLI
+# --connect-timeout flag is not accepted on this Tumbleweed image; zypp.conf is
+# the supported knob (zypper.conf(5)). Only download.connect_timeout is lowered;
+# download.transfer_timeout stays at its 180s default so large packages are not
+# aborted mid-download. zypp.conf semantics: the last value for a key wins.
+zypp_connect_timeout() {
+  local conf=/etc/zypp/zypp.conf
+  [ -f "$conf" ] || return 0
+  if grep -q '^[[:space:]]*#*[[:space:]]*download\.connect_timeout' "$conf"; then
+    sed -i -E 's/^[[:space:]]*#*[[:space:]]*download\.connect_timeout([[:space:]=]+).*/download.connect_timeout = 15/' "$conf"
+  else
+    printf '\ndownload.connect_timeout = 15\n' >> "$conf"
+  fi
+}
+
 platform_install_deps() {
+  zypp_connect_timeout
   zypper --non-interactive refresh || return $?
 
   zypper --non-interactive install -y \
