@@ -19,14 +19,18 @@ permissions:
 #   ubuntu    deb       apparmor  ubuntu-24.04                 (hosted)
 #   ubuntu    tarball   apparmor  ubuntu-24.04                 (hosted)
 #   opensuse  rpm       apparmor  ubuntu-24.04 -> QEMU/KVM Tumbleweed VM
+#   opensuse  rpm       selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM
 #
-# The openSUSE profile boots the official openSUSE Tumbleweed Cloud qcow2 on a
+# The openSUSE profiles boot the official openSUSE Tumbleweed Cloud qcow2 on a
 # GitHub-hosted ubuntu-24.04 runner (QEMU/KVM; see
-# scripts/uat-vm-opensuse-apparmor.sh), switches the guest to AppArmor
-# enforcing (SELinux disabled) and runs the existing openSUSE/AppArmor
-# black-box UAT inside the guest. It is gated to workflow_dispatch so a push
-# to main does not spin up a heavy VM job on every commit; dispatch runs all
-# three profiles.
+# scripts/uat-vm-opensuse-apparmor.sh and scripts/uat-vm-opensuse-selinux.sh),
+# activate the selected MAC backend (AppArmor enforcing with SELinux disabled,
+# or SELinux enforcing/targeted with AppArmor inactive) and run the existing
+# openSUSE black-box UAT inside the guest. The SELinux profile additionally
+# runs the mount-pin / RPM postinstall regression
+# (scripts/uat-selinux-mount-pin-regression.sh). Both are gated to
+# workflow_dispatch so a push to main does not spin up heavy VM jobs on every
+# commit; dispatch runs all profiles.
 #
 # openSUSE does NOT build the RPM: a hosted Ubuntu job (uat-rpm-build) builds
 # the exact RPM once and uploads the RPM + its SHA-256 as a workflow artifact.
@@ -203,3 +207,54 @@ jobs:
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
           UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
           scripts/uat-vm-opensuse-apparmor.sh
+
+  # openSUSE Tumbleweed SELinux profile: a GitHub-hosted ubuntu-24.04 runner
+  # boots the official Tumbleweed Cloud VM (QEMU/KVM), keeps SELinux enforcing /
+  # targeted active (AppArmor inactive) and runs the existing openSUSE/SELinux
+  # black-box UAT inside the guest (scripts/uat-vm-opensuse-selinux.sh),
+  # followed by the SELinux mount-pin / RPM postinstall regression
+  # (scripts/uat-selinux-mount-pin-regression.sh). Gated to manual dispatch
+  # (like the RPM producer and the AppArmor VM job). Consumes the exact RPM
+  # built by the hosted uat-rpm-build job via the generic prebuilt-artifact mode
+  # (UAT_ARTIFACT_PATH / UAT_ARTIFACT_SHA256), with the expected SHA-256 read
+  # from the build job's checksum file, never recomputed-and-trusted on
+  # openSUSE. No build toolchain is installed here.
+  uat-blackbox-opensuse-selinux:
+    if: github.event_name == 'workflow_dispatch'
+    needs: uat-rpm-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download RPM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-helper-rpm
+          path: /tmp/docker-helper-rpm
+
+      - name: Read expected RPM checksum (from build job)
+        run: |
+          set -euo pipefail
+          SHA="$(awk '{print $1}' /tmp/docker-helper-rpm/artifact.sha256)"
+          RPM="/tmp/docker-helper-rpm/$(awk '{print $2}' /tmp/docker-helper-rpm/artifact.sha256)"
+          [ -n "$SHA" ] || { echo "error: empty RPM SHA-256 from artifact" >&2; exit 1; }
+          [ -f "$RPM" ] || { echo "error: downloaded RPM missing: $RPM" >&2; exit 1; }
+          echo "UAT_RPM=$RPM" >> "$GITHUB_ENV"
+          echo "UAT_RPM_SHA256=$SHA" >> "$GITHUB_ENV"
+
+      - name: Run openSUSE/SELinux black-box UAT in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_RPM="$UAT_RPM" \
+          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+          UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+          scripts/uat-vm-opensuse-selinux.sh

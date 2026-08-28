@@ -13,13 +13,13 @@
 #     from the invoking (sudo) user inside the VM guest).
 #
 # It does NOT own artifact production, installation, the common scenario, or
-# MAC confinement/audit (those are separate adapters). AppArmor confinement is
+# MAC confinement/audit (those are separate adapters). MAC confinement is
 # deliberately NOT here — it belongs to the MAC adapter.
 #
 # This adapter describes an already-working openSUSE Tumbleweed system; making
-# the guest one (booting the Tumbleweed Cloud VM and switching it to AppArmor
-# enforcing) is owned by the VM harness
-# (scripts/uat-vm-opensuse-apparmor.sh).
+# the guest one (booting the Tumbleweed Cloud VM and activating the selected
+# MAC backend) is owned by the MAC-specific VM orchestration
+# (scripts/uat-vm-opensuse-apparmor.sh / scripts/uat-vm-opensuse-selinux.sh).
 #
 # The scenario core defines: fail_uat. It runs this adapter as root.
 
@@ -36,7 +36,7 @@ platform_preflight() {
 }
 
 # platform_install_deps provisions ONLY the runtime/test/install dependencies
-# needed by the openSUSE UAT: Docker/runtime, RPM install, AppArmor confinement
+# needed by the openSUSE UAT: Docker/runtime, RPM install, MAC backend tooling
 # and the common black-box scenario. Build-only dependencies (musl-gcc,
 # checkpolicy, SELinux policy build tools) are deliberately NOT installed here:
 # the openSUSE profile consumes a prebuilt RPM produced on the hosted Ubuntu
