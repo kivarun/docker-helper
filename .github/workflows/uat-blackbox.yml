@@ -39,9 +39,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {platform: ubuntu, install: deb, mac: apparmor, runner: ubuntu-24.04}
-          - {platform: ubuntu, install: tarball, mac: apparmor, runner: ubuntu-24.04}
-          - {platform: opensuse, install: rpm, mac: apparmor, runner: opensuse-apparmor}
+          - platform: ubuntu
+            install: deb
+            mac: apparmor
+            runner: ubuntu-24.04
+          - platform: ubuntu
+            install: tarball
+            mac: apparmor
+            runner: ubuntu-24.04
+          - platform: opensuse
+            install: rpm
+            mac: apparmor
+            runner: opensuse-apparmor
 
     steps:
       - uses: actions/checkout@v7
