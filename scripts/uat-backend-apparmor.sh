@@ -88,12 +88,13 @@ audit_ts() {
 # never be counted twice.
 #
 # Preference order:
-#  1. dmesg (kernel ring buffer): authoritative for kernel audit records and
-#     the reliable source on GitHub-hosted runners (systemd-journald there
-#     reports "Collecting audit messages is disabled", so journalctl -k has
-#     no AppArmor records while the ring buffer does);
-#  2. journalctl -k, only when dmesg is unavailable/restricted (empty output,
-#     e.g. kernel.dmesg_restrict=1).
+#  1. dmesg (kernel ring buffer): authoritative for kernel audit records;
+#  2. journalctl -k, only when dmesg yields no output (unreadable/restricted
+#     or empty ring buffer, e.g. kernel.dmesg_restrict=1).
+# On GitHub-hosted runners either source may carry the records; the exact
+# one that works per runner instance varies, so the fallback exists and is
+# exercised. What must never happen is merging both sources (which counts
+# each kernel event twice).
 audit_records() {
   local filter="$1" line ts
   if dmesg 2>/dev/null | head -1 | grep -q .; then
