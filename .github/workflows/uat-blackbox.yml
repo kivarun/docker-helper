@@ -21,6 +21,19 @@ permissions:
 #   opensuse  rpm       apparmor  ubuntu-24.04 -> QEMU/KVM Tumbleweed VM
 #   opensuse  rpm       selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM
 #
+# Plus, on workflow_dispatch only:
+#   ubuntu    deb       apparmor  ubuntu-24.04                 (hosted)
+#     uat-regressions-ubuntu — Release-2 targeted regression groups 3-9 via
+#     the self-contained collect-all runner
+#     (scripts/uat-regressions-runner-ubuntu.sh); independent of the common
+#     black-box UAT.
+#
+# The openSUSE/SELinux profile additionally runs the Phase-A2 docker socket
+# micro-proof (scripts/uat-socket-microproof.sh) and the Release-2 SELinux
+# targeted regression groups 1-2 (scripts/uat-regressions-runner-selinux.sh),
+# all with collect-all semantics: a failure in one stage never prevents the
+# remaining stages.
+#
 # The openSUSE profiles boot the official openSUSE Tumbleweed Cloud qcow2 on a
 # GitHub-hosted ubuntu-24.04 runner (QEMU/KVM; see
 # scripts/uat-vm-opensuse-apparmor.sh and scripts/uat-vm-opensuse-selinux.sh),
@@ -157,6 +170,49 @@ jobs:
           name: docker-helper-rpm
           path: staging
           if-no-files-found: error
+
+  # Hosted Ubuntu job that runs the Release-2 targeted regression groups 3-9
+  # (Ubuntu / DEB / AppArmor) through the collect-all runner
+  # (scripts/uat-regressions-runner-ubuntu.sh). The runner is self-contained:
+  # it builds and installs the docker-helper .deb (same build + install path as
+  # the black-box UAT) and runs every regression, recording PASS/FAIL/BLOCKED
+  # per group, so it does NOT depend on the common black-box UAT reaching its
+  # final phase. A failure in one group never stops the others. Gated to
+  # workflow_dispatch (like the RPM producer and the VM jobs).
+  uat-regressions-ubuntu:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nFPM (pinned)
+        run: |
+          NFPM_VERSION=2.47.0
+          NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
+          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$NFPM_TARBALL" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
+          echo "${NFPM_SHA256}  ${NFPM_TARBALL}" | sha256sum --check -
+          tar xzf "$NFPM_TARBALL" nfpm
+          chmod +x nfpm
+          sudo mv nfpm /usr/local/bin/
+          nfpm --version | grep -qF "2.47.0"
+
+      - name: Run targeted Release-2 regressions (3-9, collect-all)
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+            UAT_ALLOWED_ROOT=/home scripts/uat-regressions-runner-ubuntu.sh
 
   # openSUSE Tumbleweed profile: a GitHub-hosted ubuntu-24.04 runner boots the
   # official Tumbleweed Cloud VM (QEMU/KVM), switches the guest to AppArmor
