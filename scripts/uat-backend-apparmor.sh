@@ -88,25 +88,27 @@ audit_ts() {
 # never be counted twice.
 #
 # Preference order:
-#  1. dmesg (kernel ring buffer): authoritative for kernel audit records;
+#  1. dmesg (kernel ring buffer), preferred when it is readable and non-empty;
 #  2. journalctl -k, only when dmesg yields no output (unreadable/restricted
 #     or empty ring buffer, e.g. kernel.dmesg_restrict=1).
-# On GitHub-hosted runners either source may carry the records; the exact
-# one that works per runner instance varies, so the fallback exists and is
-# exercised. What must never happen is merging both sources (which counts
-# each kernel event twice).
+#
+# dmesg is read exactly once into a variable and its availability is decided
+# from that single read. This avoids probing dmesg through a pipeline with an
+# early-closing reader (e.g. `head`), which under pipefail could SIGPIPE a
+# readable, non-empty dmesg and incorrectly fall back to journalctl.
 audit_records() {
-  local filter="$1" line ts
-  if dmesg 2>/dev/null | head -1 | grep -q .; then
-    dmesg 2>/dev/null || true
-  else
-    journalctl -k --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null
-  fi | grep -E "$filter" | while IFS= read -r line; do
-    ts="$(printf '%s\n' "$line" | audit_ts)"
-    if [ -n "$ts" ] && [ "$ts" -ge "$AA_AUDIT_START_EPOCH" ]; then
-      printf '%s\n' "$line"
-    fi
-  done | sort -u
+  local filter="$1" line ts raw
+  raw="$(dmesg 2>/dev/null || true)"
+  if [ -z "$raw" ]; then
+    raw="$(journalctl -k --since "@${AA_AUDIT_START_EPOCH}" --no-pager 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$raw" \
+    | grep -E "$filter" | while IFS= read -r line; do
+      ts="$(printf '%s\n' "$line" | audit_ts)"
+      if [ -n "$ts" ] && [ "$ts" -ge "$AA_AUDIT_START_EPOCH" ]; then
+        printf '%s\n' "$line"
+      fi
+    done | sort -u
 }
 
 # collect_denials prints unique fresh kernel audit records that mention an
