@@ -50,15 +50,10 @@ platform_preflight() {
 # (zypper refresh/install) explicitly propagate failure; the Docker
 # enable/start is deliberately best-effort because the common UAT preflight
 # will later prove whether Docker actually works.
-#
-# zypper timeouts: the openSUSE mirrors are flaky under load and the zypper
-# default per-mirror download timeout is 60s. Tighten it so a dead/stalled
-# mirror costs seconds, not a minute, before zypper tries the next mirror.
-ZYPPER_OPTS="--non-interactive --connect-timeout 10 --timeout 30"
 platform_install_deps() {
-  $ZYPPER_OPTS refresh || return $?
+  zypper --non-interactive refresh || return $?
 
-  $ZYPPER_OPTS install -y \
+  zypper --non-interactive install -y \
     apparmor-parser apparmor-utils openssl \
     apparmor-abstractions \
     policycoreutils policycoreutils-python-utils \
