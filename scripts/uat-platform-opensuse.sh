@@ -35,16 +35,19 @@ platform_preflight() {
   [ "$id" = "opensuse-tumbleweed" ] || fail_uat "not openSUSE Tumbleweed (os-release ID='$id')"
 }
 
-# platform_install_deps installs the build/test/runtime toolchain via the
-# native package manager (zypper) and ensures the Docker daemon is running.
-# Required provisioning steps (zypper refresh/install) explicitly propagate
-# failure; the Docker enable/start is deliberately best-effort because the
-# common UAT preflight will later prove whether Docker actually works.
+# platform_install_deps provisions ONLY the runtime/test/install dependencies
+# needed by the openSUSE UAT: Docker/runtime, RPM install, AppArmor confinement
+# and the common black-box scenario. Build-only dependencies (musl-gcc,
+# checkpolicy, SELinux policy build tools) are deliberately NOT installed here:
+# the openSUSE profile consumes a prebuilt RPM produced on the hosted Ubuntu
+# build job, so no build toolchain is required on this host. Required
+# provisioning steps (zypper refresh/install) explicitly propagate failure; the
+# Docker enable/start is deliberately best-effort because the common UAT
+# preflight will later prove whether Docker actually works.
 platform_install_deps() {
   zypper --non-interactive refresh || return $?
 
   zypper --non-interactive install -y \
-    musl-gcc checkpolicy policycoreutils \
     apparmor-parser apparmor-utils openssl \
     tar gzip file curl docker \
     || return $?

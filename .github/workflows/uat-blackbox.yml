@@ -25,8 +25,18 @@ permissions:
 # workflow_dispatch so a push to main does not queue forever while no such
 # runner is registered; once registered, dispatch runs all three profiles.
 #
+# openSUSE does NOT build the RPM: a hosted Ubuntu job (uat-rpm-build) builds
+# the exact RPM once and uploads the RPM + its SHA-256 as a workflow artifact.
+# The self-hosted openSUSE job downloads the exact bytes and the expected
+# checksum (produced by the build job, never recomputed-and-trusted on
+# openSUSE) and hands them to the UAT as UAT_ARTIFACT_PATH / UAT_ARTIFACT_SHA256.
+# The UAT verifies the exact SHA-256 before installing. Build once -> upload
+# exact RPM -> openSUSE downloads exact bytes -> install/test that RPM.
+#
 # Dependency installation is platform-owned: each profile runs the platform
-# adapter's install-deps step before the UAT.
+# adapter's install-deps step before the UAT. The openSUSE install-deps step
+# provisions only runtime/test/install dependencies (no musl-gcc, checkpolicy
+# or other build-only tooling), because the openSUSE host never builds.
 
 jobs:
   # Ubuntu profiles (hosted runners) run on push and dispatch.
@@ -77,19 +87,25 @@ jobs:
             UAT_INSTALL="${{ matrix.install }}" \
             UAT_MAC="${{ matrix.mac }}" scripts/uat-blackbox.sh
 
-  # openSUSE profile (self-hosted runner) runs only on manual dispatch, so a
-  # push never queues forever waiting for a runner that may not be registered.
-  uat-blackbox-opensuse:
+  # Hosted Ubuntu job that builds the RPM EXACTLY ONCE for the openSUSE UAT and
+  # uploads the exact bytes + expected SHA-256 as a workflow artifact. It is
+  # gated to workflow_dispatch because its only consumer is the gated openSUSE
+  # job. This job carries the full build toolchain (Go, nfpm, musl-gcc,
+  # checkpolicy, semodule-utils) so the self-hosted openSUSE runner needs none.
+  uat-rpm-build:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: opensuse-apparmor
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
 
-      - name: Install platform dependencies
+      - name: Install build dependencies
         run: |
-          sudo -E env "PATH=$PATH" UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
 
       - uses: actions/setup-go@v7
         with:
@@ -108,9 +124,76 @@ jobs:
           sudo mv nfpm /usr/local/bin/
           nfpm --version | grep -qF "2.47.0"
 
-      - name: Run black-box UAT
+      - name: Build RPM (canonical build-packages.sh)
+        run: |
+          ./build-packages.sh "${UAT_VERSION:-2.0.0-uat}"
+
+      - name: Verify exactly one RPM and stage artifact + checksum
+        run: |
+          set -euo pipefail
+          COUNT="$(ls dist/*.rpm 2>/dev/null | wc -l)"
+          if [ "$COUNT" -ne 1 ]; then
+            echo "error: expected exactly one dist/*.rpm, found $COUNT" >&2
+            exit 1
+          fi
+          RPM="$(ls dist/*.rpm 2>/dev/null | head -1)"
+          SHA="$(sha256sum "$RPM" | awk '{print $1}')"
+          mkdir -p staging
+          cp "$RPM" staging/
+          printf '%s  %s\n' "$SHA" "$(basename "$RPM")" > staging/artifact.sha256
+          echo "artifact: $(basename "$RPM")"
+          echo "sha256:   $SHA"
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-helper-rpm
+          path: staging
+          if-no-files-found: error
+
+  # openSUSE profile (self-hosted runner) runs only on manual dispatch, so a
+  # push never queues forever waiting for a runner that may not be registered.
+  # It consumes the RPM built by the hosted uat-rpm-build job via the generic
+  # prebuilt-artifact mode (UAT_ARTIFACT_PATH / UAT_ARTIFACT_SHA256): the
+  # expected SHA-256 is read from the checksum file produced by the build job,
+  # never recomputed-and-trusted on openSUSE. No build toolchain (Go, nfpm,
+  # musl-gcc, checkpolicy) is installed here.
+  uat-blackbox-opensuse:
+    if: github.event_name == 'workflow_dispatch'
+    needs: uat-rpm-build
+    runs-on: opensuse-apparmor
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download RPM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-helper-rpm
+          path: /tmp/docker-helper-rpm
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps
+
+      - name: Read expected RPM checksum (from build job)
+        run: |
+          set -euo pipefail
+          SHA="$(awk '{print $1}' /tmp/docker-helper-rpm/artifact.sha256)"
+          RPM="/tmp/docker-helper-rpm/$(awk '{print $2}' /tmp/docker-helper-rpm/artifact.sha256)"
+          [ -n "$SHA" ] || { echo "error: empty RPM SHA-256 from artifact" >&2; exit 1; }
+          [ -f "$RPM" ] || { echo "error: downloaded RPM missing: $RPM" >&2; exit 1; }
+          echo "RPM_PATH=$RPM" >> "$GITHUB_ENV"
+          echo "RPM_SHA256=$SHA" >> "$GITHUB_ENV"
+
+      - name: Run black-box UAT (prebuilt RPM)
         run: |
           sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
             UAT_PLATFORM=opensuse \
             UAT_INSTALL=rpm \
-            UAT_MAC=apparmor scripts/uat-blackbox.sh
+            UAT_MAC=apparmor \
+            UAT_ARTIFACT_PATH="$RPM_PATH" \
+            UAT_ARTIFACT_SHA256="$RPM_SHA256" scripts/uat-blackbox.sh

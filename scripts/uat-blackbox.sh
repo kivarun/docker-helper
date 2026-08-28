@@ -33,11 +33,15 @@
 #        |
 #        v
 #   artifact adapter -> scripts/uat-artifact-<name>.sh  (UAT_INSTALL, default deb)
-#                        owns artifact PRODUCTION only: one upstream build step
+#                        owns artifact PRODUCTION when the artifact is built
+#                        locally on the UAT host: one upstream build step
 #                        yielding an exact, immutable artifact whose path and
 #                        SHA-256 (ARTIFACT_PATH / ARTIFACT_SHA256) are recorded.
 #                        Choices: deb (Debian), tarball (release tar.gz),
 #                        rpm (RPM package).
+#                        When UAT_ARTIFACT_PATH is set, production is skipped:
+#                        the caller hands over an externally produced immutable
+#                        artifact directly to the install boundary (see below).
 #        |
 #        v  exact immutable artifact
 #   install adapter  -> scripts/uat-install-<name>.sh
@@ -73,6 +77,19 @@
 #   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default: platform-provided)
 #   UAT_TLS_PORT      port for the local HTTPS endpoint (default 8443)
 #   UAT_KEEP          if set, skip best-effort cleanup (debugging)
+#   UAT_ARTIFACT_PATH if set, use this prebuilt artifact instead of running the
+#                     artifact adapter's production step. The file must exist,
+#                     be a regular file, and match UAT_ARTIFACT_SHA256 exactly.
+#                     This is the generic artifact-acquisition boundary for
+#                     install adapters: an externally produced immutable
+#                     artifact is handed directly to the install boundary, so
+#                     artifact build prerequisites are NOT checked and
+#                     artifact_build is NOT called. ARTIFACT_PATH / ARTIFACT_SHA256
+#                     are then set from these inputs and the install adapter
+#                     proceeds unchanged.
+#   UAT_ARTIFACT_SHA256  required when UAT_ARTIFACT_PATH is set: the expected
+#                     SHA-256 of the prebuilt artifact. It is verified strictly
+#                     (never recomputed-and-trusted) before install.
 
 set -uo pipefail
 
@@ -83,6 +100,12 @@ INSTALL="${UAT_INSTALL:-deb}"
 MAC="${UAT_MAC:-apparmor}"
 PLATFORM="${UAT_PLATFORM:-ubuntu}"
 DEBUG="${UAT_DEBUG:-}"
+# Prebuilt-artifact mode: when UAT_ARTIFACT_PATH is set, the artifact adapter's
+# production step is skipped and an externally produced immutable artifact is
+# handed directly to the install boundary. UAT_ARTIFACT_SHA256 is mandatory and
+# verified strictly in phase 2 (never recomputed-and-trusted).
+UAT_ARTIFACT_PATH_IN="${UAT_ARTIFACT_PATH:-}"
+UAT_ARTIFACT_SHA256_IN="${UAT_ARTIFACT_SHA256:-}"
 if [ -n "$DEBUG" ]; then
   # Verbose command tracing. set -v (NOT set -x) is used deliberately: -x
   # echoes expanded command-substitution values and would leak session/admin/
@@ -318,8 +341,12 @@ platform_preflight
 # MAC adapter availability (AppArmor LSM enabled, parser present, ...).
 mac_preflight
 
-# Artifact adapter prerequisites (build tooling for this artifact type).
-artifact_preflight
+# Artifact adapter prerequisites (build tooling for this artifact type). In
+# prebuilt-artifact mode these are not needed: the artifact is produced
+# externally and handed straight to the install boundary.
+if [ -z "$UAT_ARTIFACT_PATH_IN" ]; then
+  artifact_preflight
+fi
 
 # Install adapter prerequisites (install-time tooling).
 install_preflight
@@ -340,8 +367,27 @@ rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
 # Artifact production is a DISTINCT phase: build once, record the exact
 # immutable artifact (path + SHA-256), then hand it to the install adapter.
-say "phase 2: artifact production via $(artifact_name)"
-artifact_build
+# In prebuilt-artifact mode production is skipped entirely: the caller's
+# externally produced artifact (path + expected SHA-256) is validated strictly
+# and recorded for the install adapter. Both paths land on the same exact
+# artifact boundary (ARTIFACT_PATH / ARTIFACT_SHA256) that install consumes.
+if [ -n "$UAT_ARTIFACT_PATH_IN" ]; then
+  say "phase 2: use prebuilt artifact for $(install_name)"
+  [ -n "$UAT_ARTIFACT_SHA256_IN" ] \
+    || fail_uat "UAT_ARTIFACT_SHA256 is required when UAT_ARTIFACT_PATH is set"
+  [ -f "$UAT_ARTIFACT_PATH_IN" ] \
+    || fail_uat "UAT_ARTIFACT_PATH is not a regular file: $UAT_ARTIFACT_PATH_IN"
+  now_sha="$(sha256sum "$UAT_ARTIFACT_PATH_IN" | awk '{print $1}')"
+  [ "$now_sha" = "$UAT_ARTIFACT_SHA256_IN" ] \
+    || fail_uat "prebuilt artifact SHA-256 mismatch (expected $UAT_ARTIFACT_SHA256_IN, got $now_sha)"
+  ARTIFACT_PATH="$UAT_ARTIFACT_PATH_IN"
+  ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256_IN"
+  info "prebuilt artifact: $ARTIFACT_PATH"
+  info "sha256 (verified): $ARTIFACT_SHA256"
+else
+  say "phase 2: artifact production via $(artifact_name)"
+  artifact_build
+fi
 
 # Installation consumes the exact recorded artifact (never rebuilds it).
 install_apply
