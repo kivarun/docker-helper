@@ -353,11 +353,11 @@ func (m *appArmorProfileManager) writeFragment(boundaries []string) error {
 }
 
 func (m *appArmorProfileManager) reloadProfile() error {
-	return m.runParser(m.parserPath, []string{"--replace", "--skip-read-cache", m.mainProfilePath})
+	return m.runParser(m.parserPath, []string{"--replace", "--skip-cache", m.mainProfilePath})
 }
 
 func (m *appArmorProfileManager) validateProfile() error {
-	return m.runParser(m.parserPath, []string{"--skip-kernel-load", "--skip-read-cache", m.mainProfilePath})
+	return m.runParser(m.parserPath, []string{"--skip-kernel-load", "--skip-cache", m.mainProfilePath})
 }
 
 type fragmentSnapshot struct {

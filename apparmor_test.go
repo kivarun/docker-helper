@@ -608,14 +608,14 @@ func TestAppArmorParserInvocation(t *testing.T) {
 				_, err := mgr.addManagedBoundary(testDir)
 				return err
 			},
-			wantArgs: []string{"--replace", "--skip-read-cache"},
+			wantArgs: []string{"--replace", "--skip-cache"},
 		},
 		{
 			name: "validate on check",
 			op: func(mgr *appArmorProfileManager, testDir string) error {
 				return mgr.check()
 			},
-			wantArgs: []string{"--skip-kernel-load", "--skip-read-cache"},
+			wantArgs: []string{"--skip-kernel-load", "--skip-cache"},
 		},
 	}
 
