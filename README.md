@@ -22,6 +22,35 @@ process running as the same host user.
 
 Full architecture and detailed API documentation: [docs/architecture.md](docs/architecture.md)
 
+## Table of contents
+
+- [Deployment modes](#deployment-modes)
+- [Authentication model](#authentication-model)
+- [Prerequisites](#prerequisites)
+- [Docker access](#docker-access)
+- [Installation](#installation)
+  - [Quick start: user mode](#quick-start-user-mode)
+  - [Quick start: system mode](#quick-start-system-mode)
+  - [Package installation](#package-installation)
+- [Getting started](#getting-started)
+- [Session management](#session-management)
+- [Operator CLI](#operator-cli)
+- [Bash completion](#bash-completion)
+- [Client interfaces](#client-interfaces)
+- [Using the HTTP API](#using-the-http-api)
+- [Security](#security)
+- [Logging](#logging)
+- [Agent instructions](#agent-instructions)
+- [Mandatory access control (system mode)](#mandatory-access-control-system-mode)
+  - [AppArmor](#apparmor)
+  - [SELinux](#selinux)
+- [Workspace root policy](#workspace-root-policy)
+- [System mode: provisioning a principal](#system-mode-provisioning-a-principal)
+- [Documentation](#documentation)
+- [Release artifacts](#release-artifacts)
+- [License](#license)
+- [More information](#more-information)
+
 ## Deployment modes
 
 docker-helper supports two deployment modes determined by the effective
