@@ -143,7 +143,13 @@ profile docker-helper-system flags=(attach_disconnected,mediate_deleted) {
 	/etc/host.conf r,
 
 	# Resolver inputs used by Buildx registry access.
+	# On systemd-resolved hosts (e.g. Ubuntu 24.04) /etc/resolv.conf is a
+	# symlink to /run/systemd/resolve/stub-resolv.conf; AppArmor mediates the
+	# resolved targets, so that must be readable too. Without it the confined
+	# docker-buildx cannot read the resolver config and `docker build` DNS
+	# resolution falls back to the local loopback and fails.
 	/etc/resolv.conf r,
+	/run/systemd/resolve/stub-resolv.conf r,
 	/etc/hosts r,
 
 	/etc/ld.so.cache r,

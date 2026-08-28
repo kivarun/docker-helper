@@ -2233,7 +2233,11 @@ func TestSystemProfileDockerBuildxLockFileLocking(t *testing.T) {
 // added for `docker build` (evidence-driven AppArmor fix). Buildx registry
 // access reads /etc/resolv.conf and /etc/hosts; both must be present and
 // strictly read-only, with no broad /etc/** read and no nameservice
-// abstraction shortcut.
+// abstraction shortcut. On systemd-resolved hosts /etc/resolv.conf is a
+// symlink to /run/systemd/resolve/stub-resolv.conf; AppArmor mediates the
+// resolved target, so that must be readable too (otherwise the confined
+// docker-buildx cannot read the resolver config and `docker build` DNS falls
+// back to the loopback and fails).
 func TestSystemProfileDockerBuildResolverReadOnly(t *testing.T) {
 	data, err := os.ReadFile("packaging/apparmor/docker-helper-system")
 	if err != nil {
@@ -2243,6 +2247,7 @@ func TestSystemProfileDockerBuildResolverReadOnly(t *testing.T) {
 
 	required := []string{
 		"/etc/resolv.conf r,",
+		"/run/systemd/resolve/stub-resolv.conf r,",
 		"/etc/hosts r,",
 	}
 	for _, rule := range required {
@@ -2257,7 +2262,7 @@ func TestSystemProfileDockerBuildResolverReadOnly(t *testing.T) {
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.Contains(trimmed, "/etc/resolv.conf") || strings.Contains(trimmed, "/etc/hosts") {
+		if strings.Contains(trimmed, "/etc/resolv.conf") || strings.Contains(trimmed, "stub-resolv.conf") || strings.Contains(trimmed, "/etc/hosts") {
 			perm := trimmed[strings.LastIndex(trimmed, " ")+1:]
 			perm = strings.TrimSuffix(perm, ",")
 			if !strings.Contains(perm, "r") {
