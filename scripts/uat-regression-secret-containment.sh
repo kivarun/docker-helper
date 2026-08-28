@@ -102,7 +102,7 @@ else
 fi
 
 # --- config show --json redaction contract --------------------------------------
-CONFIG_JSON="$(dh config show --json 2>/dev/null)"
+CONFIG_JSON="$(dh config show 2>/dev/null)"
 if printf '%s' "$CONFIG_JSON" | grep -q '<redacted>' \
    && ! printf '%s' "$CONFIG_JSON" | grep -qF "$ADMIN_TOKEN"; then
   reg_ok "config show --json redacts the admin token value"
