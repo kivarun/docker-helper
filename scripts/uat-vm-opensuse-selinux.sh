@@ -314,8 +314,39 @@ run_guest_uat() {
     local ec=$?
     guest_evidence || true
     vm_serial_tail
+    # TEMPORARY root-cause proof: relabel helper-owned config/state and restart
+    # the daemon to prove whether the wrong SELinux labels are the direct cause
+    # of the SQLite CANTOPEN. Removed after the evidence is captured.
+    root_cause_proof || true
     fail "$desc failed (exit $ec)"
   fi
+}
+
+# TEMPORARY: root-cause proof for the clean-install SELinux daemon-start
+# failure. Reproduces the failed state (after the UAT install + init) and runs
+# the exact proof sequence from the task: matchpathcon, ls -Zd, restorecon,
+# ls -Zd, systemctl restart, is-active. Diagnostic only; removed afterwards.
+root_cause_proof() {
+  log "TEMPORARY root-cause proof (restorecon relabel + daemon restart)"
+  vm_ssh 'sudo bash -s' <<'RMT' || true
+set -uo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+echo "=== PROOF matchpathcon ==="
+matchpathcon /etc/docker-helper /var/lib/docker-helper 2>&1 || true
+echo "=== PROOF labels BEFORE restorecon ==="
+ls -Zd /etc/docker-helper /var/lib/docker-helper 2>&1 || true
+echo "=== PROOF restorecon -Rv /etc/docker-helper /var/lib/docker-helper ==="
+restorecon -Rv /etc/docker-helper /var/lib/docker-helper 2>&1 || true
+echo "=== PROOF labels AFTER restorecon ==="
+ls -Zd /etc/docker-helper /var/lib/docker-helper 2>&1 || true
+echo "=== PROOF systemctl restart docker-helper ==="
+systemctl restart docker-helper 2>&1 || true
+sleep 3
+echo "=== PROOF systemctl is-active docker-helper ==="
+systemctl is-active docker-helper 2>&1 || true
+echo "=== PROOF daemon journal (last 30) ==="
+journalctl -u docker-helper.service -n 30 --no-pager 2>&1 || true
+RMT
 }
 
 log "== 7. black-box UAT inside the guest =="
