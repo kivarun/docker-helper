@@ -569,7 +569,7 @@ echo "=== /proc/cmdline ==="; cat /proc/cmdline
 echo "=== /sys/kernel/security/lsm ==="; cat /sys/kernel/security/lsm
 echo "=== sestatus ==="; sestatus
 echo "=== getenforce ==="; getenforce
-echo "=== /sys/fs/selinux/enforce ==="; cat /sys/fs/selinux/enforce
+echo "=== /sys/fs/selinux/enforce ==="; cat /sys/fs/selinux/enforce; echo
 echo "LSM_VAL=$(cat /sys/kernel/security/lsm)"
 echo "CMDLINE_VAL=$(cat /proc/cmdline)"
 echo "GETENFORCE_VAL=$(getenforce)"
