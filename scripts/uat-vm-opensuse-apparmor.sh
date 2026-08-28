@@ -463,7 +463,8 @@ log "AppArmor proof passed: lsm='$LSM_FINAL' aa_enabled=$AA_ENABLED"
 # 9. STAGE 4: transfer repo + RPM into the guest
 # ---------------------------------------------------------------------------
 log "== 9. STAGE 4: transfer repo + RPM into the guest =="
-vm_ssh "mkdir -p /opt/uat /opt/uat-import" || fail "could not create guest import dirs"
+vm_ssh "sudo mkdir -p /opt/uat /opt/uat-import && sudo chown opc:opc /opt/uat /opt/uat-import" \
+  || fail "could not create guest import dirs"
 
 log "copying host checkout into guest (/opt/uat)"
 tar -C "$UAT_REPO_DIR" -czf repo.tgz \
