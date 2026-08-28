@@ -133,13 +133,19 @@ if [ "${1:-}" = "install-deps" ]; then
 fi
 
 # Platform-aware defaults: an explicit env value wins; otherwise use the
-# platform-provided default. Validate that the principal is not root and that
-# the allowed root exists.
+# platform-provided default. Validate that the principal account exists,
+# reject root, and validate that the allowed root exists.
 if [ -n "${UAT_PRINCIPAL:-}" ]; then
   PRINCIPAL="$UAT_PRINCIPAL"
 else
   PRINCIPAL="$(platform_default_principal)"
 fi
+# Fail-fast: the selected principal must exist as an OS account.
+if ! getent passwd "$PRINCIPAL" >/dev/null 2>&1; then
+  echo "error: UAT principal '$PRINCIPAL' does not exist" >&2
+  exit 1
+fi
+# Fail-fast: the principal must not be root.
 if [ "$PRINCIPAL" = "root" ]; then
   echo "error: UAT_PRINCIPAL resolved to root; this is not allowed" >&2
   exit 1

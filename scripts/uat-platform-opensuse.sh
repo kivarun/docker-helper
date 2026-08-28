@@ -37,15 +37,23 @@ platform_preflight() {
 
 # platform_install_deps installs the build/test/runtime toolchain via the
 # native package manager (zypper) and ensures the Docker daemon is running.
-# Required dependencies must fail the step; optional operations are best-effort.
+# Required provisioning steps (zypper refresh/install) explicitly propagate
+# failure; the Docker enable/start is deliberately best-effort because the
+# common UAT preflight will later prove whether Docker actually works.
 platform_install_deps() {
-  zypper --non-interactive refresh
+  zypper --non-interactive refresh || return $?
+
   zypper --non-interactive install -y \
     musl-gcc checkpolicy policycoreutils \
     apparmor-parser apparmor-utils openssl \
-    tar gzip file curl docker
-  # Best-effort: start Docker if not running (do not mask zypper failures).
+    tar gzip file curl docker \
+    || return $?
+
+  # Best-effort: start Docker if not running. The common UAT preflight will
+  # later prove whether Docker is actually reachable.
   systemctl enable --now docker >/dev/null 2>&1 || true
+
+  return 0
 }
 
 # platform_default_principal returns the OS user mapped to the docker-helper
