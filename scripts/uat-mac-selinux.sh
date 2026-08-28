@@ -68,7 +68,10 @@ mac_preflight() {
     || fail_uat "sestatus: SELinux status != enabled"
   sestatus 2>/dev/null | grep -qE 'Current mode:[[:space:]]+enforcing' \
     || fail_uat "sestatus: current mode != enforcing"
-  sestatus 2>/dev/null | grep -qE 'Policy from config file:[[:space:]]+targeted' \
+  # libselinux versions differ in the sestatus field name for the configured
+  # policy: newer versions report "Loaded policy name:", older "Policy from
+  # config file:". Accept both.
+  sestatus 2>/dev/null | grep -qE '(Policy from config file|Loaded policy name):[[:space:]]+targeted' \
     || fail_uat "sestatus: policy != targeted"
   for tool in semodule semanage restorecon getenforce sestatus; do
     command -v "$tool" >/dev/null 2>&1 || fail_uat "$tool not found"

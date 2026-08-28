@@ -258,7 +258,7 @@ fi
 [ "$GETENF" = "Enforcing" ] || fail "ACCEPT: getenforce != Enforcing (got '$GETENF')"
 echo "$PROOF" | grep -qE 'SELinux status:[[:space:]]+enabled' || fail "ACCEPT: sestatus not enabled"
 echo "$PROOF" | grep -qE 'Current mode:[[:space:]]+enforcing' || fail "ACCEPT: sestatus current mode != enforcing"
-echo "$PROOF" | grep -qE 'Policy from config file:[[:space:]]+targeted' || fail "ACCEPT: sestatus policy != targeted"
+echo "$PROOF" | grep -qE '(Policy from config file|Loaded policy name):[[:space:]]+targeted' || fail "ACCEPT: sestatus policy != targeted"
 log "SELinux proof passed: lsm='$LSM_FINAL' getenforce=$GETENF"
 log "final cmdline: $CMDLINE_FINAL"
 
