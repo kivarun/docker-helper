@@ -315,12 +315,14 @@ run_guest_uat "guest install-deps" \
   "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps"
 
 # The docker_helper.pp policy module requires container-selinux attributes
-# (container_domain, mcs_constrained_type, ...). install-deps pulls container-
-# selinux in as a dependency of docker; verify it is actually loaded before the
-# UAT installs the module, so a missing prerequisite is evidence, not a hidden
-# rpm %post failure. Best-effort: if the module is not loaded, load the
-# distro-shipped container-selinux module (a prerequisite, not a policy
-# widening) and re-verify.
+# (container_domain, mcs_constrained_type, container_net_domain) and types
+# (container_runtime_t, container_file_t, ...). install-deps pulls container-
+# selinux in as a dependency of docker, but the module is not guaranteed to be
+# loaded (its %posttrans install can be skipped/failed). Verify it is loaded
+# before the UAT installs the docker_helper module, so a missing prerequisite
+# is evidence, not a hidden rpm %post failure. If not loaded, load the
+# distro-shipped container-selinux module (a prerequisite for the UAT, not a
+# policy widening) and re-verify.
 log "verify container-selinux policy module is loaded (docker_helper.pp prerequisite)"
 if vm_ssh "semodule -l 2>/dev/null | grep -q '^container'"; then
   log "container-selinux module loaded"
@@ -329,18 +331,25 @@ else
   vm_ssh 'sudo bash -s' <<'RMT'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-PP="$(rpm -ql container-selinux 2>/dev/null | grep '\.pp$' | head -1 || true)"
-if [ -n "$PP" ] && [ -f "$PP" ]; then
-  echo "loading $PP"
-  semodule -i "$PP"
-else
-  echo "error: no container-selinux .pp module found"
+PP="$(rpm -ql container-selinux 2>/dev/null | grep -E '\.pp(\.bz2)?$' | head -1 || true)"
+if [ -z "$PP" ] || [ ! -f "$PP" ]; then
+  echo "error: container-selinux module file not found" >&2
+  echo "installed: $(rpm -q container-selinux 2>/dev/null || echo 'container-selinux NOT INSTALLED')" >&2
+  rpm -ql container-selinux 2>/dev/null | grep -i 'selinux\|\.pp' | head -30 || true
   exit 1
 fi
+echo "loading $PP"
+if ! semodule -i "$PP"; then
+  echo "error: semodule -i failed for $PP" >&2
+  exit 1
+fi
+echo "loaded container-selinux module via semodule -i"
 RMT
   if vm_ssh "semodule -l 2>/dev/null | grep -q '^container'"; then
     log "container-selinux module loaded (after explicit load)"
   else
+    log "semodule -l container modules:"
+    vm_ssh "semodule -l 2>/dev/null | grep -i container || echo '(none)'"
     fail "container-selinux module is NOT loaded; docker_helper.pp cannot be installed"
   fi
 fi
