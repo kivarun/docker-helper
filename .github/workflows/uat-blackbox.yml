@@ -12,21 +12,36 @@ permissions:
 # an independent workflow so it can stabilize before being promoted. See
 # scripts/uat-blackbox.sh for the full coverage list and rationale.
 #
-# The same scenario is run once per artifact/install pair (UAT_INSTALL): the
-# Debian package (.deb) and the release tarball (tar.gz). Both run on the MAC
-# adapter selected by UAT_MAC (AppArmor). The functional coverage is identical
-# across pairs; only artifact production and installation differ
-# (uat-artifact-*.sh / uat-install-*.sh).
+# Explicit profile matrix (no Cartesian product of meaningless combinations).
+# Each profile pins platform, artifact/install type and MAC adapter:
+#
+#   platform  install   MAC       runner
+#   ubuntu    deb       apparmor  ubuntu-24.04        (hosted)
+#   ubuntu    tarball   apparmor  ubuntu-24.04        (hosted)
+#   opensuse  rpm       apparmor  opensuse-apparmor   (self-hosted, pending)
+#
+# The openSUSE profile runs on a self-hosted runner labeled opensuse-apparmor
+# (a real openSUSE Tumbleweed VM/kernel with AppArmor active). It is gated to
+# workflow_dispatch so a push to main does not queue forever while no such
+# runner is registered; once registered, dispatch runs all three profiles.
+#
+# Dependency installation is platform-owned: each profile runs the platform
+# adapter's install-deps step before the UAT.
 
 jobs:
   uat-blackbox:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # Ubuntu runs on push + dispatch; openSUSE (self-hosted) only on dispatch.
+    if: ${{ matrix.platform == 'ubuntu' || github.event_name == 'workflow_dispatch' }}
 
     strategy:
       fail-fast: false
       matrix:
-        install: [deb, tarball]
+        include:
+          - {platform: ubuntu, install: deb, mac: apparmor, runner: ubuntu-24.04}
+          - {platform: ubuntu, install: tarball, mac: apparmor, runner: ubuntu-24.04}
+          - {platform: opensuse, install: rpm, mac: apparmor, runner: opensuse-apparmor}
 
     steps:
       - uses: actions/checkout@v7
@@ -35,11 +50,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Install build/test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools checkpolicy semodule-utils apparmor-utils openssl
 
       - name: Install nFPM (pinned)
         run: |
@@ -53,8 +63,14 @@ jobs:
           sudo mv nfpm /usr/local/bin/
           nfpm --version | grep -qF "2.47.0"
 
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM="${{ matrix.platform }}" \
+            scripts/uat-blackbox.sh install-deps
+
       - name: Run black-box UAT
         run: |
           sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+            UAT_PLATFORM="${{ matrix.platform }}" \
             UAT_INSTALL="${{ matrix.install }}" \
-            UAT_MAC="${UAT_MAC:-apparmor}" scripts/uat-blackbox.sh
+            UAT_MAC="${{ matrix.mac }}" scripts/uat-blackbox.sh

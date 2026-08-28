@@ -23,13 +23,21 @@
 # the Docker bridge gateway for the HTTPS harness — never as a substitute for
 # a docker-helper operation under test.
 #
-# Three pluggable adapters are loaded below, mirroring the architecture:
+# Four pluggable adapters are loaded below, mirroring the architecture:
 #
+#   platform adapter -> scripts/uat-platform-<name>.sh  (UAT_PLATFORM, default ubuntu)
+#                        owns the narrow set of things that differ between
+#                        distros: identity preflight, native dependency
+#                        installation, and platform defaults for the runner
+#                        principal/allowed root. Choices: ubuntu, opensuse.
+#        |
+#        v
 #   artifact adapter -> scripts/uat-artifact-<name>.sh  (UAT_INSTALL, default deb)
 #                        owns artifact PRODUCTION only: one upstream build step
 #                        yielding an exact, immutable artifact whose path and
 #                        SHA-256 (ARTIFACT_PATH / ARTIFACT_SHA256) are recorded.
-#                        Choices: deb (Debian package), tarball (release tar.gz).
+#                        Choices: deb (Debian), tarball (release tar.gz),
+#                        rpm (RPM package).
 #        |
 #        v  exact immutable artifact
 #   install adapter  -> scripts/uat-install-<name>.sh
@@ -45,32 +53,35 @@
 #                        owns confinement verification, audit-window tracking,
 #                        deny inspection and diagnostics.
 #
-# The generic scenario is written once and shared by every artifact/install
-# pair, so the .deb and tar.gz system UATs run identical functional coverage.
+# The generic scenario is written once and shared by every platform /
+# artifact/install / MAC combination, so the Ubuntu and openSUSE UATs run
+# identical functional coverage. Platform and MAC stay separate concepts:
+# distribution logic is never merged into the MAC adapter, and package-manager
+# specifics never enter the common scenario.
 #
-# Canonical vocabulary: artifact (production), install (consumption),
-# MAC (confinement/audit), scenario (runtime/authorization/functionality).
+# Canonical vocabulary: platform (distro), artifact (production),
+# install (consumption), MAC (confinement/audit),
+# scenario (runtime/authorization/functionality).
 #
 # Environment overrides:
+#   UAT_PLATFORM      platform adapter to exercise (default ubuntu)
 #   UAT_INSTALL       artifact+install adapter pair to exercise (default deb)
 #   UAT_MAC           MAC adapter to exercise (default apparmor)
 #   UAT_VERSION       version string (default 2.0.0-uat)
-#   UAT_ALLOWED_ROOT  global allowed root (default /home/runner)
+#   UAT_ALLOWED_ROOT  global allowed root (default: platform-provided)
 #   UAT_WORKSPACE     session workspace (default $UAT_ALLOWED_ROOT/uat-workspace)
-#   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default runner)
+#   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default: platform-provided)
 #   UAT_TLS_PORT      port for the local HTTPS endpoint (default 8443)
 #   UAT_KEEP          if set, skip best-effort cleanup (debugging)
 
 set -uo pipefail
 
 VERSION="${UAT_VERSION:-2.0.0-uat}"
-ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home/runner}"
-WS="${UAT_WORKSPACE:-${ALLOWED_ROOT}/uat-workspace}"
-PRINCIPAL="${UAT_PRINCIPAL:-runner}"
 TLS_PORT="${UAT_TLS_PORT:-8443}"
 KEEP="${UAT_KEEP:-}"
 INSTALL="${UAT_INSTALL:-deb}"
 MAC="${UAT_MAC:-apparmor}"
+PLATFORM="${UAT_PLATFORM:-ubuntu}"
 DEBUG="${UAT_DEBUG:-}"
 if [ -n "$DEBUG" ]; then
   # Verbose command tracing. set -v (NOT set -x) is used deliberately: -x
@@ -95,6 +106,45 @@ redact_tokens() {
     -e 's/dht_[A-Za-z0-9_-]+/<redacted-token>/g' \
     -e 's/dhc_[A-Za-z0-9_-]+/<redacted-token>/g'
 }
+
+# Load the platform adapter FIRST: it provides distro identity, dependency
+# installation, and the platform defaults for principal/allowed-root.
+PLATFORM_FILE="$REPO_ROOT/scripts/uat-platform-$PLATFORM.sh"
+if [ ! -f "$PLATFORM_FILE" ]; then
+  echo "error: unknown UAT platform adapter '$PLATFORM' (no $PLATFORM_FILE)" >&2
+  exit 1
+fi
+# shellcheck source=scripts/uat-platform-ubuntu.sh
+source "$PLATFORM_FILE"  # uat-platform-$PLATFORM.sh (ubuntu or opensuse)
+for fn in platform_name platform_preflight platform_install_deps \
+  platform_default_principal platform_default_allowed_root; do
+  if ! declare -F "$fn" >/dev/null 2>&1; then
+    echo "error: UAT platform adapter '$PLATFORM' is missing required function $fn" >&2
+    exit 1
+  fi
+done
+
+# install-deps mode: provision the build/test dependencies for this platform
+# and exit. Used by the workflow as a distinct provisioning step (run as root).
+if [ "${1:-}" = "install-deps" ]; then
+  platform_install_deps
+  exit 0
+fi
+
+# Platform-aware defaults: an explicit env value wins; otherwise use the
+# platform-provided default (Ubuntu -> runner//home/runner; openSUSE -> the
+# invoking runner user and its home).
+if [ -n "${UAT_PRINCIPAL:-}" ]; then
+  PRINCIPAL="$UAT_PRINCIPAL"
+else
+  PRINCIPAL="$(platform_default_principal)"
+fi
+if [ -n "${UAT_ALLOWED_ROOT:-}" ]; then
+  ALLOWED_ROOT="$UAT_ALLOWED_ROOT"
+else
+  ALLOWED_ROOT="$(platform_default_allowed_root "$PRINCIPAL")"
+fi
+WS="${UAT_WORKSPACE:-${ALLOWED_ROOT}/uat-workspace}"
 
 # Load the MAC adapter.
 MAC_FILE="$REPO_ROOT/scripts/uat-mac-$MAC.sh"
@@ -243,8 +293,12 @@ info "docker:       $(docker --version 2>/dev/null || true)"
 info "systemd:      $(systemctl --version 2>/dev/null | head -1 || true)"
 info "kernel:       $(uname -r)"
 info "distro:       $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
+info "platform:     $(platform_name)"
 info "install:      $(install_name)"
 info "mac:          $(mac_name)"
+
+# Platform adapter identity/distro preflight.
+platform_preflight
 
 # MAC adapter availability (AppArmor LSM enabled, parser present, ...).
 mac_preflight
@@ -510,6 +564,7 @@ mac_audit_check
 
 say "UAT PASSED"
 info "preflight ......................... ok"
+info "platform ($(platform_name)) .......... ok"
 info "artifact ($(artifact_name)) .......... ok"
 info "install ($(install_name)) + confine .. ok"
 info "principal/credential + sessions .. ok"
