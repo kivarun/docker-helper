@@ -558,7 +558,7 @@ func configShowAll(stdout, stderr io.Writer) int {
 
 	configDir := filepath.Dir(configPath)
 	runtimeDir := getRuntimeDirSafe()
-	stateDir := getStateDir()
+	stateDir := getStateDirFunc()
 	socketPath := ""
 	lockPath := ""
 	if runtimeDir != "" {
@@ -719,7 +719,7 @@ func configShowField(field string, stdout, stderr io.Writer) int {
 
 	ec := resolveEffectiveConfig(*fc)
 
-	stateDir := getStateDir()
+	stateDir := getStateDirFunc()
 
 	switch field {
 	case "allowed_roots":

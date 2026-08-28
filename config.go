@@ -263,6 +263,9 @@ var getConfigPathFunc = getConfigPath
 // getRuntimeDirFunc is injectable for testing.
 var getRuntimeDirFunc = getRuntimeDir
 
+// getStateDirFunc is injectable for testing.
+var getStateDirFunc = getStateDir
+
 func getConfigDir() string {
 	return filepath.Dir(getConfigPathFunc())
 }
@@ -387,7 +390,7 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 		}
 	}
 
-	stateDir := getStateDir()
+	stateDir := getStateDirFunc()
 
 	// Derive configDir from configPath so DOCKER_HELPER_CONFIG is respected.
 	configDir := filepath.Dir(configPath)
@@ -734,7 +737,7 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 	mode := resolveDeploymentMode()
 	configPath := getConfigPathFunc()
 	configDir := filepath.Dir(configPath)
-	stateDir := getStateDir()
+	stateDir := getStateDirFunc()
 
 	// Create directories with mode-appropriate permissions.
 	if mode == ModeSystem {
@@ -749,6 +752,16 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		return nil, fmt.Errorf("cannot create state directory: %w", err)
+	}
+
+	// Under enforcing SELinux system mode, apply the installed fcontext rules
+	// to the helper-owned config/state trees immediately after their creation
+	// and before config/admin-token are written, so the created files get the
+	// correct labels and the first daemon start succeeds. Relabel failure is
+	// fatal (no misleading partial initialization). AppArmor system mode and
+	// user mode never invoke SELinux relabel.
+	if err := applyDeploymentSELinuxRelabel(mode); err != nil {
+		return nil, err
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {

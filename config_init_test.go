@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -622,5 +623,168 @@ func TestInstallUserSystemdUnitSkipsWhenSystemUnitMissing(t *testing.T) {
 	userUnitPath := filepath.Join(homeDir, ".config", "systemd", "user", "docker-helper.service")
 	if _, err := os.Stat(userUnitPath); err == nil {
 		t.Error("user unit should not be created when system unit is missing")
+	}
+}
+
+// --- SELinux deployment relabel (system init) tests ---
+//
+// These cover the clean-install SELinux lifecycle invariant: system-mode init
+// under enforcing SELinux applies the installed fcontext rules to the
+// helper-owned config/state directories (recursive restorecon) immediately
+// after creating them and before writing the admin token, so the first daemon
+// start succeeds. AppArmor system mode and user mode never invoke the SELinux
+// relabel, and a relabel failure is fatal (no misleading partial init).
+
+// setupInitSystemMode points config + state dirs at temp dirs and forces
+// system mode (EffectiveUID 0) so initCore can run without root and without
+// touching /etc/docker-helper or /var/lib/docker-helper.
+func setupInitSystemMode(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	t.Cleanup(func() { getConfigPathFunc = origGetConfig })
+
+	origGetState := getStateDirFunc
+	getStateDirFunc = func() string { return filepath.Join(dir, "state") }
+	t.Cleanup(func() { getStateDirFunc = origGetState })
+
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+
+	return dir
+}
+
+// TestInitSystemSELinuxRelabelsDeploymentPaths verifies that system init under
+// enforcing SELinux applies the deployment relabel to exactly the helper-owned
+// config/state trees, before the admin token is created, and never touches the
+// runtime tree or a Session/workspace path.
+func TestInitSystemSELinuxRelabelsDeploymentPaths(t *testing.T) {
+	dir := setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+	defer func() { detectLSM = origLSM }()
+
+	origRC := deploymentRestorecon
+	var calls [][]string
+	tokenAtRelabel := "unset"
+	deploymentRestorecon = func(args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		if _, err := os.Stat(filepath.Join(dir, "admin.token")); os.IsNotExist(err) {
+			tokenAtRelabel = "absent"
+		} else {
+			tokenAtRelabel = "present"
+		}
+		return nil, nil
+	}
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	if _, err := initCore(rootDir, &stdout, &stderr); err != nil {
+		t.Fatalf("initCore failed: %v", err)
+	}
+
+	want := [][]string{{"-R", "-m", "/etc/docker-helper", "/var/lib/docker-helper"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Errorf("deployment restorecon calls = %v, want %v", calls, want)
+	}
+	if tokenAtRelabel != "absent" {
+		t.Errorf("deployment relabel must run before the admin token is created, got %q", tokenAtRelabel)
+	}
+	for _, call := range calls {
+		for _, a := range call {
+			if strings.Contains(a, "/run/docker-helper") {
+				t.Errorf("deployment relabel must never target /run/docker-helper, got %q", a)
+			}
+			if a == rootDir || strings.HasPrefix(a, rootDir+string(filepath.Separator)) {
+				t.Errorf("system init must not prepare Session/workspace MAC state (relabeled workspace %q)", a)
+			}
+		}
+	}
+}
+
+// TestInitSystemAppArmorNoSELinuxRelabel verifies that AppArmor system init
+// does not invoke any SELinux relabel.
+func TestInitSystemAppArmorNoSELinuxRelabel(t *testing.T) {
+	setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMAppArmor, nil }
+	defer func() { detectLSM = origLSM }()
+
+	called := false
+	origRC := deploymentRestorecon
+	deploymentRestorecon = func(args ...string) ([]byte, error) { called = true; return nil, nil }
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	if _, err := initCore(rootDir, &stdout, &stderr); err != nil {
+		t.Fatalf("initCore failed: %v", err)
+	}
+	if called {
+		t.Error("AppArmor system init must not invoke the SELinux deployment relabel")
+	}
+}
+
+// TestInitUserModeNoSELinuxRelabel verifies that user-mode init does not
+// invoke any SELinux relabel (no new SELinux dependency).
+func TestInitUserModeNoSELinuxRelabel(t *testing.T) {
+	dir := t.TempDir()
+
+	origGetConfig := getConfigPathFunc
+	getConfigPathFunc = func() string { return filepath.Join(dir, "config.json") }
+	defer func() { getConfigPathFunc = origGetConfig }()
+
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	defer func() { EffectiveUID = origUID }()
+
+	called := false
+	origRC := deploymentRestorecon
+	deploymentRestorecon = func(args ...string) ([]byte, error) { called = true; return nil, nil }
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	if _, err := initCore(rootDir, &stdout, &stderr); err != nil {
+		t.Fatalf("initCore failed: %v", err)
+	}
+	if called {
+		t.Error("user-mode init must not invoke the SELinux deployment relabel")
+	}
+}
+
+// TestInitSystemSELinuxRelabelFailureFatal verifies that a deployment relabel
+// failure under enforcing SELinux system mode makes init fail and leaves no
+// partial initialization (no admin token).
+func TestInitSystemSELinuxRelabelFailureFatal(t *testing.T) {
+	dir := setupInitSystemMode(t)
+
+	origLSM := detectLSM
+	detectLSM = func() (LSMBackend, error) { return LSMSELinux, nil }
+	defer func() { detectLSM = origLSM }()
+
+	origRC := deploymentRestorecon
+	deploymentRestorecon = func(args ...string) ([]byte, error) {
+		return []byte("restorecon: permission denied"), errors.New("restorecon exit status 1")
+	}
+	defer func() { deploymentRestorecon = origRC }()
+
+	rootDir := testAllowedRootDir(t)
+	var stdout, stderr bytes.Buffer
+	_, err := initCore(rootDir, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected init to fail when the deployment relabel fails")
+	}
+	if !strings.Contains(err.Error(), "relabel") {
+		t.Errorf("expected deployment relabel error, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "admin.token")); !os.IsNotExist(statErr) {
+		t.Error("admin.token must not be created when the relabel fails (no partial init)")
 	}
 }

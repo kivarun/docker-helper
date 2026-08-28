@@ -263,7 +263,7 @@ func runSessionCleanup(stdout, stderr io.Writer) int {
 	defer lockFile.Close()
 
 	// Lock acquired: safe to open the database and clean up.
-	dbPath := filepath.Join(getStateDir(), "docker-helper.db")
+	dbPath := filepath.Join(getStateDirFunc(), "docker-helper.db")
 
 	db, err := openDatabase(dbPath)
 	if err != nil {

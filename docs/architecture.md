@@ -713,6 +713,15 @@ MAC state is derived from the concrete live session/workspace lifecycle,
 not from the authorization ceiling. Only the session workspace participates
 in MAC preparation (AppArmor managed-root rules or SELinux fcontext labels).
 
+Distinct from session workspace MAC preparation, system-mode `docker-helper init`
+under enforcing SELinux applies the installed fcontext rules to docker-helper's
+own deployment state: the helper-owned `/etc/docker-helper/**` (config) and
+`/var/lib/docker-helper/**` (state) trees are relabeled to
+`docker_helper_config_t` / `docker_helper_state_t` immediately after they are
+created and before the admin token is written, so the first daemon start can
+open its database. A relabel failure aborts init (no partial initialization).
+AppArmor system mode and user mode perform no SELinux relabel.
+
 Adding `/opt` as a global allowed root must never imply recursive relabeling
 of `/opt/**`.
 
