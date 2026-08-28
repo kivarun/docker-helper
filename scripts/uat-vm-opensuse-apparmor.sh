@@ -437,7 +437,7 @@ echo "AA_ENABLED_VAL=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null |
 echo "=== /etc/os-release ==="; cat /etc/os-release
 echo "=== systemd ==="; systemctl is-system-running 2>&1 || true
 echo "=== sshd ==="; systemctl is-active sshd 2>/dev/null || systemctl is-active ssh 2>/dev/null || echo "unknown"
-echo "=== aa-status ==="; aa-status 2>&1 | head -40
+echo "=== aa-status ==="; aa-status 2>&1 | head -40 || true
 echo "=== apparmor service ==="; systemctl is-active apparmor.service 2>&1 || true
 echo "PROOF-DONE"
 RMT
