@@ -570,6 +570,10 @@ echo "=== /sys/kernel/security/lsm ==="; cat /sys/kernel/security/lsm
 echo "=== sestatus ==="; sestatus
 echo "=== getenforce ==="; getenforce
 echo "=== /sys/fs/selinux/enforce ==="; cat /sys/fs/selinux/enforce
+echo "LSM_VAL=$(cat /sys/kernel/security/lsm)"
+echo "CMDLINE_VAL=$(cat /proc/cmdline)"
+echo "GETENFORCE_VAL=$(getenforce)"
+echo "ENFORCE_VAL=$(cat /sys/fs/selinux/enforce)"
 echo "=== systemd failed units ==="
 systemctl --failed --no-legend || true
 echo "=== sshd active ==="; systemctl is-active sshd 2>/dev/null || systemctl is-active ssh 2>/dev/null || echo "unknown"
@@ -593,10 +597,11 @@ printf '%s\n' "$ACCEPT"
 echo "$ACCEPT" | grep -q "ACCEPTANCE-DONE" || fail "acceptance script did not complete"
 
 echo "$ACCEPT" | grep -qi 'opensuse-tumbleweed' || fail "ACCEPT: not openSUSE Tumbleweed"
-echo "$ACCEPT" | grep -q 'security=selinux' || fail "ACCEPT: /proc/cmdline missing security=selinux"
-echo "$ACCEPT" | grep -q 'selinux=1' || fail "ACCEPT: /proc/cmdline missing selinux=1"
-echo "$ACCEPT" | grep -q 'enforcing=1' || fail "ACCEPT: /proc/cmdline missing enforcing=1"
-LSM_FINAL="$(printf '%s\n' "$ACCEPT" | grep -A1 '=== /sys/kernel/security/lsm ===' | tail -1)"
+CMDLINE_FINAL="$(printf '%s\n' "$ACCEPT" | sed -n 's/^CMDLINE_VAL=//p' | tail -1)"
+echo "$CMDLINE_FINAL" | grep -q 'security=selinux' || fail "ACCEPT: /proc/cmdline missing security=selinux"
+echo "$CMDLINE_FINAL" | grep -q 'selinux=1' || fail "ACCEPT: /proc/cmdline missing selinux=1"
+echo "$CMDLINE_FINAL" | grep -q 'enforcing=1' || fail "ACCEPT: /proc/cmdline missing enforcing=1"
+LSM_FINAL="$(printf '%s\n' "$ACCEPT" | sed -n 's/^LSM_VAL=//p' | tail -1)"
 echo "$LSM_FINAL" | grep -qw selinux || fail "ACCEPT: selinux not in active LSM ($LSM_FINAL)"
 if echo "$LSM_FINAL" | grep -qw apparmor; then
   fail "ACCEPT: apparmor is a concurrently active LSM ($LSM_FINAL)"
@@ -604,9 +609,9 @@ fi
 echo "$ACCEPT" | grep -qE "SELinux status:[[:space:]]+enabled" || fail "ACCEPT: sestatus not enabled"
 echo "$ACCEPT" | grep -qE "Current mode:[[:space:]]+enforcing" || fail "ACCEPT: sestatus current mode != enforcing"
 echo "$ACCEPT" | grep -qE "Mode from config file:[[:space:]]+enforcing" || fail "ACCEPT: sestatus config mode != enforcing"
-GETENF="$(printf '%s\n' "$ACCEPT" | grep -A1 '=== getenforce ===' | tail -1 | tr -d ' ')"
+GETENF="$(printf '%s\n' "$ACCEPT" | sed -n 's/^GETENFORCE_VAL=//p' | tail -1 | tr -d ' ')"
 [ "$GETENF" = "Enforcing" ] || fail "ACCEPT: getenforce != Enforcing (got '$GETENF')"
-ENF="$(printf '%s\n' "$ACCEPT" | grep -A1 '=== /sys/fs/selinux/enforce ===' | tail -1 | tr -d ' ')"
+ENF="$(printf '%s\n' "$ACCEPT" | sed -n 's/^ENFORCE_VAL=//p' | tail -1 | tr -d ' ')"
 [ "$ENF" = "1" ] || fail "ACCEPT: /sys/fs/selinux/enforce != 1 (got '$ENF')"
 echo "$ACCEPT" | grep -q "bind OK" || fail "ACCEPT: bind mount failed"
 if printf '%s\n' "$ACCEPT" | grep -q "outbound FAIL"; then
@@ -615,7 +620,7 @@ fi
 log "FINAL ACCEPTANCE PASSED (selinux=$ENF getenforce=$GETENF lsm='$LSM_FINAL')"
 log "RESULT final_selinux=enforcing-OK"
 log "RESULT final_lsm=$LSM_FINAL"
-log "RESULT final_cmdline=$(printf '%s\n' "$ACCEPT" | grep -A1 '=== /proc/cmdline ===' | tail -1)"
+log "RESULT final_cmdline=$CMDLINE_FINAL"
 
 # ---------------------------------------------------------------------------
 # 11. Summary + timing
@@ -638,7 +643,7 @@ echo "initial LSM:   $RAW_LSM (selinux=$SELINUX_ACTIVE apparmor=$APPARMOR_ACTIVE
 echo "relabel:       $NEED_RELABEL"
 echo "reboots:       $REBOOT_N$REBOOT_LOG"
 echo "final LSM:     $LSM_FINAL"
-echo "final cmdline: $(printf '%s\n' "$ACCEPT" | grep -A1 '=== /proc/cmdline ===' | tail -1)"
+echo "final cmdline: $CMDLINE_FINAL"
 echo "selinux:       enforcing-OK (getenforce=$GETENF enforce=$ENF)"
 echo "total job:     ${TOTAL}s"
 echo "======================================================"
