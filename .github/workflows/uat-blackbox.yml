@@ -175,6 +175,17 @@ jobs:
           name: docker-helper-rpm
           path: /tmp/docker-helper-rpm
 
+      # The self-hosted openSUSE runner's default PATH omits the standard system
+      # sbin dirs, so installed binaries such as apparmor_parser and aa-status
+      # (in /usr/sbin) are not found by the root UAT invocation
+      # (`sudo -E env "PATH=$PATH"`). Normalize PATH once for this job so the
+      # standard system dirs are available, keeping the rest of the runner PATH
+      # after them. Applied identically to the install-deps and black-box steps
+      # below via the shared job environment.
+      - name: Normalize PATH (system sbin dirs)
+        run: |
+          echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}" >> "$GITHUB_ENV"
+
       - name: Install platform dependencies
         run: |
           sudo -E env "PATH=$PATH" UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps
