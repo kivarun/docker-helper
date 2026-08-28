@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# uat-blackbox.sh — backend-agnostic black-box UAT for docker-helper on a
-# full Ubuntu VM (e.g. a GitHub-hosted ubuntu-24.04 runner) with a real
-# Docker daemon and an active MAC backend (AppArmor by default).
+# uat-blackbox.sh — black-box UAT for docker-helper on a full Ubuntu VM (e.g.
+# a GitHub-hosted ubuntu-24.04 runner) with a real Docker daemon and an active
+# MAC backend (AppArmor by default).
 #
 # The GitHub workflow runs this script as root:
 #     sudo -E env "PATH=$PATH" scripts/uat-blackbox.sh
 # It is also runnable manually on any Ubuntu VM with a rootful Docker daemon.
 #
-# Coverage (generic, backend-independent):
+# Coverage (generic, install-backend-independent and MAC-backend-independent):
 #   1. preflight: Docker, systemd, versions
-#   2. package build + system-mode install
+#   2. artifact build + system-mode install + confinement
 #   3. operator surface: principal + credential; admin and principal sessions
 #   4. pull + run (uid/gid/workdir + container exit-code propagation)
 #   5. workspace mounts: RW write, RO read, RO write rejected, no host leak
@@ -23,13 +23,28 @@
 # the Docker bridge gateway for the HTTPS harness — never as a substitute for
 # a docker-helper operation under test.
 #
-# MAC-backend orchestration lives in scripts/uat-backend-<name>.sh (selected
-# by UAT_BACKEND, default apparmor). That layer owns backend-specific
-# preflight, confinement verification, audit-window tracking, deny inspection
-# and diagnostics; this core is backend-agnostic.
+# Two pluggable layers are loaded below, mirroring the architecture:
+#
+#   install backend  -> scripts/uat-install-<name>.sh  (UAT_INSTALL, default deb)
+#                        owns artifact production, installation, and proof that
+#                        the installed binary/unit/profile came from that
+#                        install path. Choices: deb (Debian package),
+#                        tarball-system (release tar.gz system install).
+#        |
+#        v
+#   common system black-box scenario  (this file, phases 3-7)
+#        |
+#        v
+#   MAC backend      -> scripts/uat-backend-<name>.sh  (UAT_BACKEND, default apparmor)
+#                        owns confinement verification, audit-window tracking,
+#                        deny inspection and diagnostics.
+#
+# The generic scenario is written once and shared by every install backend, so
+# the .deb and tar.gz system-mode UATs run identical functional coverage.
 #
 # Environment overrides:
-#   UAT_VERSION       package version string (default 2.0.0-uat)
+#   UAT_INSTALL       install backend to exercise (default deb)
+#   UAT_VERSION       version string (default 2.0.0-uat)
 #   UAT_ALLOWED_ROOT  global allowed root (default /home/runner)
 #   UAT_WORKSPACE     session workspace (default $UAT_ALLOWED_ROOT/uat-workspace)
 #   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default runner)
@@ -45,6 +60,7 @@ WS="${UAT_WORKSPACE:-${ALLOWED_ROOT}/uat-workspace}"
 PRINCIPAL="${UAT_PRINCIPAL:-runner}"
 TLS_PORT="${UAT_TLS_PORT:-8443}"
 KEEP="${UAT_KEEP:-}"
+INSTALL="${UAT_INSTALL:-deb}"
 BACKEND="${UAT_BACKEND:-apparmor}"
 DEBUG="${UAT_DEBUG:-}"
 if [ -n "$DEBUG" ]; then
@@ -74,10 +90,27 @@ source "$BACKEND_FILE"
 # Every backend must implement the contract below. Verify it now so a
 # misbehaving backend fails loudly instead of deep inside a phase.
 for fn in backend_name backend_audit_start backend_preflight \
-  backend_reset_policy backend_verify_policy_packaged backend_verify_confinement \
+  backend_reset_policy backend_verify_confinement \
   backend_audit_check backend_diagnostics; do
   if ! declare -F "$fn" >/dev/null 2>&1; then
     echo "error: UAT backend '$BACKEND' is missing required function $fn" >&2
+    exit 1
+  fi
+done
+
+# Load the install backend layer.
+INSTALL_FILE="$REPO_ROOT/scripts/uat-install-$INSTALL.sh"
+if [ ! -f "$INSTALL_FILE" ]; then
+  echo "error: unknown UAT install backend '$INSTALL' (no $INSTALL_FILE)" >&2
+  exit 1
+fi
+# shellcheck source=scripts/uat-install-deb.sh
+source "$INSTALL_FILE"  # uat-install-$INSTALL.sh (deb or tarball-system)
+# Every install backend must implement the contract below.
+for fn in install_name install_preflight install_build install_install \
+  install_verify_artifacts install_verify_version; do
+  if ! declare -F "$fn" >/dev/null 2>&1; then
+    echo "error: UAT install backend '$INSTALL' is missing required function $fn" >&2
     exit 1
   fi
 done
@@ -164,75 +197,58 @@ fi
 if ! command -v openssl >/dev/null 2>&1; then
   fail_uat "openssl not found"
 fi
-if ! command -v nfpm >/dev/null 2>&1; then
-  fail_uat "nfpm not found on PATH (the workflow must install the pinned nfpm)"
-fi
 
 info "docker:       $(docker --version 2>/dev/null || true)"
 info "systemd:      $(systemctl --version 2>/dev/null | head -1 || true)"
 info "kernel:       $(uname -r)"
 info "distro:       $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
+info "install:      $(install_name)"
+info "mac backend:  $(backend_name)"
 
 # MAC backend availability (AppArmor LSM enabled, parser present, ...).
 backend_preflight
 
+# Install backend prerequisites (build tooling required for this artifact).
+install_preflight
+
 # ==============================================================================
-# Phase 2: package build + system-mode installation
+# Phase 2: artifact build + system-mode installation + confinement
 # ==============================================================================
 
-say "phase 2: build the Debian package with the repository packaging path"
+say "phase 2: build + install via $(install_name)"
 
 # Idempotency for re-runs on a persistent VM: stop/disable any prior service,
 # unload any previously loaded shipped policy, and remove docker-helper-owned
-# state so init has a clean slate.
+# state so init has a clean slate. This reset is common to every install
+# backend.
 systemctl stop docker-helper.service >/dev/null 2>&1 || true
 systemctl disable docker-helper.service >/dev/null 2>&1 || true
 backend_reset_policy
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
-rm -rf dist
-./build-packages.sh "$VERSION" || fail_uat "./build-packages.sh $VERSION failed"
-
-DEB="$(ls dist/*.deb 2>/dev/null | head -1)"
-[ -n "$DEB" ] || fail_uat "no .deb produced under dist/"
-info "built $DEB"
-
-dpkg -i "$DEB" || fail_uat "dpkg -i failed"
-
-# System init writes config + admin token (root reads admin.token later).
-say "phase 2: initialize and start the confined system service"
-[ -d "$ALLOWED_ROOT" ] || fail_uat "allowed root does not exist: $ALLOWED_ROOT"
-INIT_OUT="$(docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)" || {
-  printf '%s\n' "$INIT_OUT" | grep -v -E '^Admin token:|^dht_' >&2
-  fail_uat "docker-helper init failed"
-}
-
-systemctl daemon-reload
-systemctl enable --now docker-helper.service || fail_uat "systemctl enable --now docker-helper failed"
+# Produce the release artifact (one upstream build step) and install it.
+install_build
+install_install
 
 # The service must be active AND confined by the backend, using the
-# package-installed binary/policy/unit.
+# install-backend-installed binary/policy/unit.
 systemctl is-active --quiet docker-helper.service || fail_uat "docker-helper service is not active"
 DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
 [ -n "$DH_PID" ] && [ "$DH_PID" != "0" ] || fail_uat "daemon MainPID is empty/zero"
 
 EXE="$(readlink -f "/proc/$DH_PID/exe" 2>/dev/null || true)"
 [ "$EXE" = "/usr/bin/docker-helper" ] \
-  || fail_uat "daemon binary is not the packaged /usr/bin/docker-helper: got '$EXE'"
+  || fail_uat "daemon binary is not the installed /usr/bin/docker-helper: got '$EXE'"
 
-dpkg -S /usr/bin/docker-helper >/dev/null 2>&1 \
-  || fail_uat "/usr/bin/docker-helper is not owned by the docker-helper package"
-dpkg -S /usr/lib/systemd/system/docker-helper.service >/dev/null 2>&1 \
-  || fail_uat "systemd unit is not owned by the docker-helper package"
+# Prove the installed binary/unit/profile came from this install path (for
+# tarball-system: the extracted bundle, with no package-manager involvement).
+install_verify_artifacts
+install_verify_version
 
-# Backend-specific confinement + shipped-policy ownership checks.
-backend_verify_policy_packaged
+# Backend-specific confinement check (same profile name, same enforce mode).
 backend_verify_confinement "$DH_PID"
 
-[ "$(/usr/bin/docker-helper version)" = "$VERSION" ] \
-  || fail_uat "installed binary version mismatch (expected $VERSION)"
-
-info "service active: pid=$DH_PID binary=$EXE"
+info "service active: pid=$DH_PID binary=$EXE install=$(install_name)"
 
 # ==============================================================================
 # Phase 3: operator surface (principal + credential) and sessions
@@ -447,7 +463,7 @@ backend_audit_check
 
 say "UAT PASSED"
 info "preflight ......................... ok"
-info "package build + install + confine . ok"
+info "install ($(install_name)) + confine .. ok"
 info "principal/credential + sessions .. ok"
 info "pull/run/identity/exit-code ...... ok"
 info "workspace mounts ................. ok"

@@ -10,12 +10,15 @@
 #   * establishing the kernel-audit window for this UAT run;
 #   * resetting the shipped profile for idempotent re-runs;
 #   * verifying the running daemon is confined by docker-helper-system
-#     (enforce), not unconfined, using the package-installed profile;
-#   * verifying the packaged profile artifact is owned by the package;
+#     (enforce), not unconfined, using the installed profile;
 #   * checking the fresh kernel audit window for unexpected DENIED records
 #     under profile docker-helper-system, tolerating a narrow allowlist of
 #     demonstrated benign probes;
 #   * emitting AppArmor-specific diagnostics on failure.
+#
+# Proof that the installed AppArmor profile artifact came from a given install
+# path (deb package vs release tarball) is owned by the install backend layer
+# (uat-install-<name>.sh), not here.
 #
 # The AppArmor policy itself is NOT widened here to silence audit records;
 # the allowlist below merely tolerates already-demonstrated benign probes.
@@ -52,13 +55,6 @@ backend_preflight() {
 # re-run on a persistent VM starts from a clean slate (phase 2 idempotency).
 backend_reset_policy() {
   apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null || true
-}
-
-# backend_verify_policy_packaged fails unless the shipped AppArmor profile
-# artifact is installed as part of the docker-helper package.
-backend_verify_policy_packaged() {
-  dpkg -S /etc/apparmor.d/docker-helper-system >/dev/null 2>&1 \
-    || fail_uat "AppArmor profile is not owned by the docker-helper package"
 }
 
 # backend_verify_confinement PID fails unless the daemon process is confined

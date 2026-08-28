@@ -11,11 +11,22 @@ permissions:
 # This UAT is intentionally NOT a required check or a release gate yet: it is
 # an independent workflow so it can stabilize before being promoted. See
 # scripts/uat-blackbox.sh for the full coverage list and rationale.
+#
+# The same install-agnostic black-box scenario is run once per install backend
+# (UAT_INSTALL): the Debian package (.deb) and the release tarball system-mode
+# install (tar.gz). Both run on the MAC backend selected by UAT_BACKEND
+# (AppArmor). The functional coverage is identical across install backends;
+# only artifact production/installation differs (see uat-install-*.sh).
 
 jobs:
   uat-blackbox:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        install: [deb, tarball-system]
 
     steps:
       - uses: actions/checkout@v7
@@ -45,4 +56,5 @@ jobs:
       - name: Run black-box UAT
         run: |
           sudo -E env "PATH=$PATH" UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+            UAT_INSTALL="${{ matrix.install }}" \
             UAT_BACKEND="${UAT_BACKEND:-apparmor}" scripts/uat-blackbox.sh
