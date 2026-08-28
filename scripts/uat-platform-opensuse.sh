@@ -10,16 +10,16 @@
 #   * native dependency installation (zypper) for the build/test/runtime
 #     toolchain, including ensuring the Docker daemon runs;
 #   * platform defaults for the runner principal and allowed root (derived
-#     from the invoking runner user on a self-hosted VM).
+#     from the invoking (sudo) user inside the VM guest).
 #
 # It does NOT own artifact production, installation, the common scenario, or
 # MAC confinement/audit (those are separate adapters). AppArmor confinement is
 # deliberately NOT here — it belongs to the MAC adapter.
 #
-# NOTE: This profile requires a real openSUSE Tumbleweed VM/kernel with
-# AppArmor active. It is NOT validated yet — the repository has no such
-# self-hosted runner registered. Package names below are the expected openSUSE
-# equivalents and must be confirmed on a real runner.
+# This adapter describes an already-working openSUSE Tumbleweed system; making
+# the guest one (booting the Tumbleweed Cloud VM and switching it to AppArmor
+# enforcing) is owned by the VM harness
+# (scripts/uat-vm-opensuse-apparmor.sh).
 #
 # The scenario core defines: fail_uat. It runs this adapter as root.
 
