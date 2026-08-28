@@ -327,8 +327,8 @@ set_cmdline() {
 }
 
 log "installing AppArmor userspace: apparmor-parser apparmor-utils apparmor-abstractions"
-zypper --non-interactive --connect-timeout 10 --timeout 30 refresh || true
-zypper --non-interactive --connect-timeout 10 --timeout 30 install -y --no-recommends \
+zypper --non-interactive refresh || true
+zypper --non-interactive install -y --no-recommends \
   apparmor-parser apparmor-utils apparmor-abstractions
 log "AppArmor packages:"
 rpm -qa | grep -Ei 'apparmor|libapparmor' | sort || true
