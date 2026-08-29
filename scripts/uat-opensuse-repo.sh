@@ -45,6 +45,17 @@ OPENSUSE_ZYPP_CONNECT_TIMEOUT=5
 OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED=262144
 OPENSUSE_ZYPPER_ATTEMPTS=3
 OPENSUSE_ZYPPER_DELAY=2
+# Fallback mirrors (region-neutral / US-hosted) used only when the default
+# download.opensuse.org repos are unreachable from the CI network (e.g. Azure
+# West US). Each is tried with the same bounded curl policy; the first that
+# yields a usable repomd.xml is selected. The original repo set is restored
+# afterwards, so a failed run never leaves the guest pointing at a fallback.
+OPENSUSE_ZYPP_FALLBACK_MIRRORS=(
+  "https://cdn.opensuse.org/tumbleweed/repo/oss"
+  "https://mirrors.tuna.tsinghua.edu.cn/opensuse/tumbleweed/repo/oss"
+  "https://mirror.freedif.org/opensuse/tumbleweed/repo/oss"
+  "https://mirror.sjtu.edu.cn/opensuse/tumbleweed/repo/oss"
+)
 
 # zypp_set_download_key KEY VALUE: enforce one zypp.conf download key
 # (uncomment/rewrite if present, append otherwise; the last value wins). The
@@ -84,14 +95,50 @@ opensuse_zypper() {
 }
 
 # opensuse_zypper_refresh: refresh with the retry policy; never proceed with
-# stale/incomplete metadata.
+# stale/incomplete metadata. When the default repos cannot be refreshed from the
+# CI network, temporarily point the Tumbleweed base repos (repo-oss /
+# repo-non-oss / repo-update, whatever exists) at a reachable fallback mirror
+# (bounded curl probe), refresh through it, and restore the original
+# configuration before returning.
 opensuse_zypper_refresh() {
   local rc
   if opensuse_zypper refresh; then
     return 0
-  else
-    rc=$?
   fi
-  echo "error: zypper refresh exhausted $OPENSUSE_ZYPPER_ATTEMPTS attempts (repository/network failure); not continuing with stale or incomplete metadata" >&2
+  rc=$?
+  # Repos to repoint when falling back: the standard Tumbleweed base aliases
+  # (repo-oss is authoritative; non-oss/update only exist where the image has
+  # them). Non-existent aliases are simply skipped by modifyrepo.
+  local base_repos=("repo-oss" "repo-non-oss" "repo-update")
+  local m url saved alias repo_line repo_url
+  for m in "${OPENSUSE_ZYPP_FALLBACK_MIRRORS[@]}"; do
+    url="$m/repodata/repomd.xml"
+    echo "fallback mirror probe: $url"
+    if curl -fsS --connect-timeout 5 --max-time 20 -o /dev/null "$url" 2>/dev/null; then
+      # Save the current URL of each base repo so we can restore it.
+      for alias in "${base_repos[@]}"; do
+        repo_line="$(zypper --non-interactive repos --url 2>/dev/null | grep "| $alias |" | head -1)"
+        repo_url="$(printf '%s' "$repo_line" | sed -E 's/.*\| [^|]+ \| ([^|]+) \|.*/\1/' | xargs)"
+        if [ -n "$repo_url" ]; then
+          eval "saved_$alias=\$repo_url"
+        fi
+      done
+      for alias in "${base_repos[@]}"; do
+        zypper --non-interactive modifyrepo --url "$m" "$alias" >/dev/null 2>&1 || true
+      done
+      if opensuse_zypper refresh; then
+        echo "fallback mirror selected: $m"
+        return 0
+      fi
+      # Restore the original URLs before trying the next candidate.
+      for alias in "${base_repos[@]}"; do
+        eval "restore_url=\$saved_$alias"
+        if [ -n "$restore_url" ]; then
+          zypper --non-interactive modifyrepo --url "$restore_url" "$alias" >/dev/null 2>&1 || true
+        fi
+      done
+    fi
+  done
+  echo "error: zypper refresh exhausted attempts and fallback mirrors (repository/network failure); not continuing with stale or incomplete metadata" >&2
   return "$rc"
 }
