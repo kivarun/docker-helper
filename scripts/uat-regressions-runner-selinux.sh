@@ -52,8 +52,15 @@ for d in /etc/selinux/targeted/modules/active/modules /etc/selinux/targeted/tmp/
     echo "  [$d] absent"
   fi
 done
-echo "  find docker_helper module files:"
-find /etc/selinux -iname '*docker_helper*' -o -iname 'docker_helper*' 2>/dev/null | sed 's/^/    /' || true
+  echo "  find docker_helper module files:"
+  find /etc/selinux -iname '*docker_helper*' 2>/dev/null | sed 's/^/    /' || true
+  STORE="$(find /etc/selinux -path '*/active/modules/*/docker_helper' 2>/dev/null | head -1)"
+  if [ -n "$STORE" ]; then
+    info "  module store file: $STORE ($(stat -c '%s bytes' "$STORE" 2>/dev/null || echo '?'))"
+    info "  module store file head (hexdump first 256 bytes):"
+    od -A x -t x1z -N 256 "$STORE" 2>&1 | sed 's/^/    /' || true
+    info "  module store file type: $(file -b "$STORE" 2>/dev/null || echo '?')"
+  fi
 # The installed module's CIL is exactly what the kernel policy contains.
 info "installed docker_helper module CIL export (semodule -E docker_helper):"
 if semodule -E docker_helper >/tmp/dh_loaded.cil 2>/tmp/dh_loaded.err; then
@@ -72,21 +79,7 @@ if command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null
   python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
 import sys
 try:
-    from setools import SELinuxPolicy
-    # setools 4.7.x: query classes live in submodules; import whichever exists.
-    TypeQuery = AVRuleQuery = TypeRuleQuery = None
-    try:
-        from setools.typequery import TypeQuery
-    except Exception:
-        pass
-    try:
-        from setools.avrulequery import AVRuleQuery
-    except Exception:
-        pass
-    try:
-        from setools.typequery import TypeRuleQuery
-    except Exception:
-        pass
+    from setools import SELinuxPolicy, TypeQuery, AVRuleQuery, TypeRuleQuery
     qcls = AVRuleQuery or TypeRuleQuery
     p = SELinuxPolicy("/sys/fs/selinux/policy")
     print("policy version:", getattr(p, "version", "?"))
