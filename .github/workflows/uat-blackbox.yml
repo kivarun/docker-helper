@@ -1,7 +1,16 @@
 name: UAT (black-box)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Which jobs to run (full matrix or bounded SELinux A/B proof)'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - selinux-ab-proof
   push:
     branches: [main]
 
@@ -61,6 +70,7 @@ permissions:
 jobs:
   # Ubuntu profiles (hosted runners) run on push and dispatch.
   uat-blackbox:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.scope != 'selinux-ab-proof')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -180,7 +190,7 @@ jobs:
   # final phase. A failure in one group never stops the others. Gated to
   # workflow_dispatch (like the RPM producer and the VM jobs).
   uat-regressions-ubuntu:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'selinux-ab-proof'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -225,7 +235,7 @@ jobs:
   # job, never recomputed-and-trusted on openSUSE. No build toolchain (Go, nfpm,
   # musl-gcc, checkpolicy) is installed here.
   uat-blackbox-opensuse-apparmor:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'selinux-ab-proof'
     needs: uat-rpm-build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -276,7 +286,7 @@ jobs:
   # from the build job's checksum file, never recomputed-and-trusted on
   # openSUSE. No build toolchain is installed here.
   uat-blackbox-opensuse-selinux:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'selinux-ab-proof'
     needs: uat-rpm-build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -313,4 +323,50 @@ jobs:
           UAT_RPM="$UAT_RPM" \
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
           UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+          scripts/uat-vm-opensuse-selinux.sh
+
+  # Bounded SELinux A/B proof (scope=selinux-ab-proof): ONE enforcing Tumbleweed
+  # VM that installs the RPM + confined service (install-only) and runs ONLY the
+  # SELinux A/B proofs (docker runtime/socket A/B + semanage production-path
+  # proof) via scripts/uat-selinux-ab-proof.sh. Evidence collection, not a gate;
+  # no full matrix, no black-box scenario, no regressions.
+  uat-selinux-ab-proof:
+    if: github.event_name == 'workflow_dispatch' && inputs.scope == 'selinux-ab-proof'
+    needs: uat-rpm-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download RPM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-helper-rpm
+          path: /tmp/docker-helper-rpm
+
+      - name: Read expected RPM checksum (from build job)
+        run: |
+          set -euo pipefail
+          SHA="$(awk '{print $1}' /tmp/docker-helper-rpm/artifact.sha256)"
+          RPM="/tmp/docker-helper-rpm/$(awk '{print $2}' /tmp/docker-helper-rpm/artifact.sha256)"
+          [ -n "$SHA" ] || { echo "error: empty RPM SHA-256 from artifact" >&2; exit 1; }
+          [ -f "$RPM" ] || { echo "error: downloaded RPM missing: $RPM" >&2; exit 1; }
+          echo "UAT_RPM=$RPM" >> "$GITHUB_ENV"
+          echo "UAT_RPM_SHA256=$SHA" >> "$GITHUB_ENV"
+
+      - name: Run bounded SELinux A/B proofs in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_RPM="$UAT_RPM" \
+          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+          UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
+          UAT_SELINUX_MODE=ab-proof \
           scripts/uat-vm-opensuse-selinux.sh
