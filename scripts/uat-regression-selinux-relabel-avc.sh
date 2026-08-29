@@ -139,11 +139,12 @@ fi
 
 # --- AVC evidence: relabel matrix for BOTH directions (best-effort) ---------------------
 # A permissive-mode denial is the exact set of permissions the confined relabel
-# requires (permissive=1). Filter to permissive=1 + docker_helper_t + restorecon
-# + relabel ops. permissive=1 uniquely scopes this to the temporary-permissive
-# window of THIS group (other groups run enforcing and log permissive=0).
-# Source is the audit.log tail (proven to capture records in this harness),
-# merged with the bounded ausearch window.
+# requires (permissive=1). Capture ALL docker_helper_t restorecon denials
+# (relabelfrom/relabelto plus the getattr needed to read a label before
+# relabeling), scoped by permissive=1 which uniquely identifies the temporary
+# permissive window of THIS group (other groups run enforcing and log
+# permissive=0). Source is the audit.log tail (proven to capture records in
+# this harness), merged with the bounded ausearch window.
 relabel_avcs() {
   {
     tail -800 /var/log/audit/audit.log 2>/dev/null
@@ -152,7 +153,7 @@ relabel_avcs() {
     fi
   } | grep 'avc:  denied' | grep 'permissive=1' \
     | grep 'scontext=.*docker_helper_t' | grep 'comm="restorecon"' \
-    | grep -E 'relabelfrom|relabelto'
+    | grep -E 'relabelfrom|relabelto|getattr'
 }
 
 # canonical: COMM PERM TCONTEXT_TYPE CLASS (dedups across objects/pid/source)
