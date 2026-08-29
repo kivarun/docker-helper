@@ -1841,9 +1841,10 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	// Absence of the temporary mount-scan grants that were only needed when
 	// restorecon was run without -m. Assert the exact unwanted allow rules so
 	// unrelated legitimate references to these types do not cause false
-	// failures.
+	// failures. fs_t:filesystem getattr is intentionally NOT in this list: it
+	// is required (and asserted separately) for the workspace recursive
+	// restorecon's target-path fstatfs, mirroring the tmpfs_t rule.
 	for _, absent := range []string{
-		"allow docker_helper_t fs_t:filesystem { getattr };",
 		"allow docker_helper_t device_t:filesystem { getattr };",
 		"allow docker_helper_t devpts_t:filesystem { getattr };",
 		"allow docker_helper_t cgroup_t:filesystem { getattr };",
@@ -1857,5 +1858,28 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 		if strings.Contains(content, absent) {
 			t.Errorf("policy must NOT contain temporary mount-scan grant %s", absent)
 		}
+	}
+}
+
+// TestSELinuxPolicyWorkspaceRestoreconFstatfs guards the single
+// filesystem:getattr grant the confined workspace restorecon requires. The
+// recursive restorecon (-R -m -x) unconditionally fstatfs()es its explicit
+// target path (selinux_restorecon_common), and a non-home workspace lives on
+// the root filesystem (fs_t). This mirrors the trusted-CA tmpfs_t rule; it is
+// a target-path statfs grant, not a mount-scan grant. Proven necessary by the
+// bounded scope=selinux run AFTER the invocation was corrected to -m -x:
+//
+//	restorecon -R -m -x: ...: statfs(/opt/uat-ws-*) failed: Permission denied
+func TestSELinuxPolicyWorkspaceRestoreconFstatfs(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "allow docker_helper_t fs_t:filesystem { getattr };") {
+		t.Error("policy must grant docker_helper_t fs_t:filesystem getattr for the workspace recursive restorecon target-path statfs")
+	}
+	if strings.Contains(content, "allow docker_helper_t fs_t:filesystem { unmount getattr };") {
+		t.Error("fs_t filesystem grant must keep the mount-pin unmount and the target-path getattr as distinct narrow rules")
 	}
 }

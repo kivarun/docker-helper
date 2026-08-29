@@ -350,6 +350,16 @@ allow docker_helper_t fs_t:filesystem { unmount };
 # getattr on the filesystem class. This is not a mount-scan permission.
 allow docker_helper_t tmpfs_t:filesystem { getattr };
 
+# Workspace restorecon (-R -m -x) inspects the filesystem containing its
+# explicit target path: a non-home workspace lives on the root filesystem.
+# selinux_restorecon_common() unconditionally fstatfs()es the recursive walk
+# target, which requires getattr on the filesystem class. Proven necessary by
+# the bounded scope=selinux run AFTER the invocation was corrected to -m -x:
+#   restorecon -R -m -x: ...: statfs(/opt/uat-ws-*) failed: Permission denied
+# This mirrors the tmpfs_t rule above and is NOT a mount-scan permission: the
+# mount-scan filesystem types (device_t, devpts_t, cgroup_t, ...) stay denied.
+allow docker_helper_t fs_t:filesystem { getattr };
+
 # --- Buildx execution/runtime/network/certificates (proven in enforcing UAT) ---
 
 # Buildx needs lib_t for execute_no_trans (executing the Docker Buildx CLI plugin)
