@@ -46,7 +46,18 @@
 #       -> reboot through the harness (vm_reboot)
 #       -> prove real SELinux enforcing / AppArmor absent
 #       -> copy checkout + exact RPM into the guest
-#       -> install-deps (UAT_PLATFORM=opensuse)
+#       -> two-stage Docker preparation: install/ensure container-selinux in
+#          its own transaction and settle its policy module BEFORE Docker is
+#          installed (the rpm selinux plugin then labels dockerd naturally as
+#          container_runtime_exec_t; no explicit restorecon/restart)
+#       -> install-deps (UAT_PLATFORM=opensuse)  [Docker install, stage 2]
+#       -> Docker SELinux health gate before the docker-helper RPM install:
+#          dockerd exec = container_runtime_exec_t, dockerd process =
+#          container_runtime_t, docker.sock = container_var_run_t. If healthy,
+#          the previous docker socket blocker is classified as a UAT/environment
+#          construction defect, not a docker-helper production defect. If NOT
+#          healthy, stop and report (docker-helper must not own Docker daemon
+#          repair without another architecture decision).
 #       -> existing black-box UAT (UAT_PLATFORM=opensuse UAT_INSTALL=rpm
 #          UAT_MAC=selinux, prebuilt RPM)            [result recorded, collect-all]
 #       -> SELinux mount-pin / RPM postinstall regression  [result recorded]
@@ -205,13 +216,18 @@ for p in selinux-policy-targeted policycoreutils selinux-tools policycoreutils-p
   rpm -q "$p" >/dev/null 2>&1 || { NEED=1; log "missing: $p"; }
 done
 # In ab-proof mode the semanage production-path proof must determine whether the
-# policy provides semanage_exec_t / semanage_t; that requires setools-console
-# (seinfo/sesearch). On openSUSE the tools ship in setools-console, not the
-# bare `setools` package (which only exists in the experimental security:/SELinux
-# repo); setools-console is in the default Tumbleweed repos. Not needed for the
+# policy provides semanage_exec_t / semanage_t and derive the standard semanage
+# transition (sesearch), build a TEMPORARY proof module (checkmodule +
+# semodule_package from checkpolicy), and capture AVC evidence with auditd
+# RUNNING (the minimal image does not ship/start it). setools-console provides
+# seinfo/sesearch on openSUSE (the bare `setools` package only exists in the
+# experimental security:/SELinux repo; setools-console is in the default
+# Tumbleweed repos). `audit` provides the auditd daemon. Not needed for the
 # full UAT stages.
 if [ "${UAT_SELINUX_MODE:-full}" = "ab-proof" ]; then
-  rpm -q setools-console >/dev/null 2>&1 || { NEED=1; log "missing: setools-console (ab-proof mode)"; }
+  for p in setools-console audit checkpolicy; do
+    rpm -q "$p" >/dev/null 2>&1 || { NEED=1; log "missing: $p (ab-proof mode)"; }
+  done
 fi
 if [ "$NEED" = 1 ]; then
   opensuse_zypp_tune_timeouts
@@ -221,7 +237,7 @@ if [ "$NEED" = 1 ]; then
   fi
   PKGS="selinux-policy-targeted policycoreutils selinux-tools policycoreutils-python-utils"
   if [ "${UAT_SELINUX_MODE:-full}" = "ab-proof" ]; then
-    PKGS="$PKGS setools-console"
+    PKGS="$PKGS setools-console audit checkpolicy"
   fi
   # shellcheck disable=SC2086
   opensuse_zypper install -y $PKGS
@@ -367,39 +383,113 @@ record_stage() { # name result
   SELINUX_STAGES="${SELINUX_STAGES}$(printf '%-28s %s\n' "$1" "$2")"
 }
 
+# ---------------------------------------------------------------------------
+# 6b. two-stage Docker preparation: settle the container-selinux policy BEFORE
+#     Docker is installed so the Docker daemon binary is labeled naturally.
+# ---------------------------------------------------------------------------
+# Root cause of the previous "docker socket blocker" (var_run_t socket):
+# dockerd was installed in the SAME package transaction as container-selinux.
+# In a single transaction container-selinux's %posttrans (which loads its
+# policy module) runs only after every package is already on disk, so the rpm
+# selinux plugin labeled /usr/bin/dockerd while the container-selinux fcontext
+# rules were not yet active — dockerd kept the generic bin_t label, ran as
+# unconfined_service_t, and created /run/docker.sock as var_run_t.
+#
+# Two-stage fix (UAT environment construction, NOT docker-helper production
+# code and NOT an explicit restorecon/restart):
+#   Stage 1: install/ensure container-selinux in its OWN transaction and load
+#            its policy module, so the container fcontext rules are active.
+#   Stage 2: install Docker (below, via install-deps). The rpm selinux plugin
+#            then labels /usr/bin/dockerd per the active container-selinux
+#            fcontext (container_runtime_exec_t) at install time, and the
+#            running daemon transitions to container_runtime_t with the socket
+#            at container_var_run_t — all without any docker-helper intervention.
+#
+# This also satisfies the docker_helper.pp prerequisite (container-selinux
+# attributes/types) before the docker-helper RPM install.
+log "== 6b. two-stage Docker preparation: container-selinux before Docker =="
+STAGE1="$(vm_ssh 'sudo bash -s' <<'RMT'
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# shellcheck source=/dev/null
+source /opt/uat-repo-policy.sh
+log(){ echo "[vm] $*"; }
+
+log "stage 1: ensure container-selinux in its own transaction"
+if ! rpm -q container-selinux >/dev/null 2>&1; then
+  opensuse_zypp_tune_timeouts
+  opensuse_zypper_refresh || { echo "REPO-FAILURE: zypper refresh failed; aborting stage 1" >&2; exit 1; }
+  opensuse_zypper install -y container-selinux
+fi
+PP="$(rpm -ql container-selinux 2>/dev/null | grep -E '\.pp(\.bz2)?$' | head -1 || true)"
+if [ -z "$PP" ] || [ ! -f "$PP" ]; then
+  echo "error: container-selinux policy module file not found" >&2
+  exit 1
+fi
+log "settling container-selinux policy module: $PP"
+semodule -i "$PP" 2>&1 || { echo "error: semodule -i failed for $PP" >&2; exit 1; }
+log "matchpathcon /usr/bin/dockerd: $(matchpathcon /usr/bin/dockerd 2>&1 || true)"
+echo "STAGE1-DONE"
+RMT
+)" || true
+printf '%s\n' "$STAGE1"
+printf '%s\n' "$STAGE1" | grep -q "STAGE1-DONE" || fail "stage 1 (container-selinux before Docker) did not complete"
+log "container-selinux policy settled BEFORE Docker install (two-stage)"
+
 log "== 7. black-box UAT inside the guest =="
 log "install-deps (UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps)"
-# install-deps is a hard prerequisite for everything that follows.
+# install-deps is a hard prerequisite for everything that follows. It installs
+# Docker (stage 2) in its own transaction AFTER the container-selinux policy
+# was settled above.
 run_guest_capture "guest install-deps" \
   "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_PLATFORM=opensuse scripts/uat-blackbox.sh install-deps" \
   || fail "guest install-deps failed (hard prerequisite)"
 
-# The docker_helper.pp policy module requires container-selinux attributes
-# (container_domain, mcs_constrained_type, container_net_domain) and types
-# (container_runtime_t, container_file_t, ...). install-deps pulls container-
-# selinux in as a dependency of docker and its %posttrans loads the module
-# (semodule -i reports "Overriding container module at lower priority 200" when
-# it is already present — the module lives in the semanage store, though
-# neither `semodule -l` nor the active-modules directory reliably expose it on
-# this system, so no hard presence gate is possible). As a best effort the
-# distro-shipped container-selinux module is loaded (idempotent; a prerequisite
-# for the UAT, not a policy widening). The authoritative proof that the
-# prerequisite is satisfied is the UAT install itself: the RPM %post runs
-# `semodule -i docker_helper.pp`, which fails loudly if the container
-# attributes/types are unavailable.
-log "ensure container-selinux policy module (docker_helper.pp prerequisite)"
-vm_ssh 'sudo bash -s' <<'RMT'
+# ---------------------------------------------------------------------------
+# 7a. Docker SELinux health gate (BEFORE the docker-helper RPM install).
+# ---------------------------------------------------------------------------
+# The two-stage setup must yield a naturally healthy Docker host with NO
+# docker-helper intervention and NO explicit restorecon/restart:
+#   dockerd executable = container_runtime_exec_t
+#   dockerd process    = container_runtime_t
+#   docker.sock        = container_var_run_t
+# If healthy, the previous socket blocker is classified as a UAT/environment
+# construction defect (container-selinux policy not settled before Docker),
+# NOT a docker-helper production defect. If NOT healthy, stop and report:
+# docker-helper must not be made to own Docker daemon repair without another
+# architecture decision.
+log "== 7a. Docker SELinux state before docker-helper RPM install (health gate) =="
+DOCKER_HEALTH="$(vm_ssh 'sudo bash -s' <<'RMT'
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-PP="$(rpm -ql container-selinux 2>/dev/null | grep -E '\.pp(\.bz2)?$' | head -1 || true)"
-if [ -z "$PP" ] || [ ! -f "$PP" ]; then
-  echo "warning: container-selinux module file not found; relying on the UAT install to prove the prerequisite"
-  exit 0
+echo "--- Docker SELinux state before docker-helper RPM install (two-stage setup) ---"
+echo "dockerd executable:    $(ls -lZ /usr/bin/dockerd 2>&1 || true)"
+echo "dockerd matchpathcon:  $(matchpathcon /usr/bin/dockerd 2>&1 || true)"
+DPID="$(pidof dockerd 2>/dev/null || true)"
+if [ -n "$DPID" ]; then
+  printf 'dockerd process:      '; tr -d '\0' < "/proc/$DPID/attr/current" 2>/dev/null || true; echo
+else
+  echo "dockerd process:      (dockerd not running / pidof empty)"
 fi
-echo "ensuring container-selinux module: $PP"
-semodule -i "$PP" || echo "warning: semodule -i failed for $PP; relying on the UAT install to prove the prerequisite"
+echo "docker.sock:           $(ls -lZ /run/docker.sock 2>&1 || true)"
+echo "docker.sock matchpathcon: $(matchpathcon /run/docker.sock 2>&1 || true)"
+EXEC_T="$(stat -c '%C' /usr/bin/dockerd 2>/dev/null | cut -d: -f3 || true)"
+PROC_T="$(if [ -n "$DPID" ]; then tr -d '\0' < "/proc/$DPID/attr/current" 2>/dev/null | cut -d: -f3; fi)"
+SOCK_T="$(stat -c '%C' /run/docker.sock 2>/dev/null | cut -d: -f3 || true)"
+if [ "$EXEC_T" = "container_runtime_exec_t" ] && [ "$PROC_T" = "container_runtime_t" ] && [ "$SOCK_T" = "container_var_run_t" ]; then
+  echo "DOCKER_SELINUX_HEALTHY=yes"
+else
+  echo "DOCKER_SELINUX_HEALTHY=no (dockerd_exec=$EXEC_T dockerd_proc=$PROC_T socket=$SOCK_T)"
+fi
 RMT
-log "container-selinux module ensured (best-effort); UAT install is the authoritative check"
+)" || true
+printf '%s\n' "$DOCKER_HEALTH"
+if printf '%s\n' "$DOCKER_HEALTH" | grep -q "DOCKER_SELINUX_HEALTHY=yes"; then
+  DOCKER_HEALTHY=1
+  log "Docker host is NATURALLY healthy after two-stage setup: the previous docker socket blocker is a UAT/environment construction defect (container-selinux policy was not settled before Docker), NOT a docker-helper production defect"
+else
+  fail "Docker host NOT naturally healthy after two-stage setup (see labels above). docker-helper must not be made to own Docker daemon repair without another architecture decision — stopping and reporting"
+fi
 
 if [ "$MODE" = "ab-proof" ]; then
   # ---------------------------------------------------------------------------
@@ -509,6 +599,7 @@ echo "getenforce:       $GETENF"
 echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
 echo "UAT version:      $VERSION"
+echo "Docker SELinux:   ${DOCKER_HEALTHY:-0}=naturally healthy two-stage setup (container-selinux before Docker)"
 echo "total:            ${TOTAL}s"
 echo "---- SELinux job stages ----"
 printf '%s\n' "$SELINUX_STAGES"
