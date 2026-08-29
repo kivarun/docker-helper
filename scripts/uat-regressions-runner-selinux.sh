@@ -65,7 +65,7 @@ done
           case "$(basename "$f")" in
             cil)
               info "    CIL FULL CONTENT (decompressed if bzip2):"
-              if command -v bzip2 >/dev/null 2>&1 && [ "$(head -c 3 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "425a68" ]; then
+              if command -v bzip2 >/dev/null 2>&1 && file -b "$f" 2>/dev/null | grep -q 'bzip2'; then
                 info "      bzip2 available: yes; attempting decompress"
                 bzip2 -dc "$f" >/tmp/dh_store.cil 2>/tmp/dh_bz.err
                 info "      decompress rc=$? stderr: $(tr '\n' ' ' < /tmp/dh_bz.err)"
@@ -73,7 +73,7 @@ done
                 sed -n '1,120p' /tmp/dh_store.cil 2>/dev/null | sed 's/^/      /' || true
                 rm -f /tmp/dh_store.cil /tmp/dh_bz.err
               else
-                info "      bzip2 not used (unavailable or not BZh)"
+                info "      bzip2 not used (unavailable or not bzip2: '$(file -b "$f" 2>/dev/null || echo '?')')"
                 sed -n '1,120p' "$f" 2>/dev/null | sed 's/^/      /' || true
               fi
               info "    CIL workspace relabel/getattr rules:"
@@ -93,7 +93,7 @@ done
               ;;
             hll)
               info "    hll content type: $(file -b "$f" 2>/dev/null || echo '?')"
-              if command -v bzip2 >/dev/null 2>&1 && [ "$(head -c 3 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "425a68" ]; then
+              if command -v bzip2 >/dev/null 2>&1 && file -b "$f" 2>/dev/null | grep -q 'bzip2'; then
                 info "    hll decompressed (this is the actual installed module source that semodule -E should export):"
                 bzip2 -dc "$f" 2>/dev/null | sed -n '1,150p' | sed 's/^/      /' || true
               fi
