@@ -211,7 +211,16 @@ type_transition docker_helper_t docker_helper_trusted_ca_t:lnk_file docker_helpe
 # reuse an existing snapshot.
 allow docker_helper_t docker_helper_trusted_ca_t:dir { create getattr search read open write add_name remove_name setattr };
 allow docker_helper_t docker_helper_trusted_ca_t:file { create read write open getattr setattr rename unlink };
-allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink };
+# getattr on the existing trusted-CA hash symlink is required so restorecon
+# (running as docker_helper_t via execute_no_trans on setfiles_exec_t) can read
+# the current label of the already-labeled symlink during the daemon-restart
+# re-preparation. Live AVC (bounded enforcing run, auditd verified capturing):
+#   avc: denied { getattr } scontext=docker_helper_t
+#     tcontext=docker_helper_trusted_ca_t tclass=lnk_file comm="restorecon"
+#     name=<hash>.0
+# Without it, the RPM-reinstall restart fails with "trusted CA restorecon
+# failed: ... Could not set context for .../<hash>.0: Permission denied".
+allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink getattr };
 
 # restorecon relabels the trusted CA tree from docker_helper_runtime_t to
 # docker_helper_trusted_ca_t. relabelfrom is on the runtime source types,

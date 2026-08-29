@@ -266,6 +266,27 @@ func TestSELinuxPolicySELinuxWorkspaceLock(t *testing.T) {
 	}
 }
 
+func TestSELinuxPolicyTrustedCARestartGetattr(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// The daemon-restart trusted-CA re-preparation runs
+	// `restorecon -R -m /run/docker-helper/trusted-ca` as docker_helper_t
+	// (execute_no_trans on setfiles_exec_t). The existing hash symlink is
+	// already labeled docker_helper_trusted_ca_t, so restorecon only needs to
+	// READ its current label. Regression for the live enforcing AVC:
+	//   avc: denied { getattr } scontext=docker_helper_t
+	//     tcontext=docker_helper_trusted_ca_t tclass=lnk_file comm="restorecon"
+	// Without getattr the RPM-reinstall restart fails with
+	//   trusted CA restorecon failed: ... Could not set context for
+	//   .../<hash>.0: Permission denied
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink getattr };") {
+		t.Error("policy must grant docker_helper_t getattr on the trusted-CA hash symlink for the restart restorecon")
+	}
+}
+
 // --- Home-path classification tests ---
 
 func TestIsUnderHome(t *testing.T) {
@@ -1700,8 +1721,8 @@ func TestSELinuxPolicyTrustedCATypeAndPermissions(t *testing.T) {
 	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:file { create read write open getattr setattr rename unlink };") {
 		t.Error("policy must grant docker_helper_t trusted_ca_t file management")
 	}
-	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink };") {
-		t.Error("policy must grant docker_helper_t trusted_ca_t lnk_file management")
+	if !strings.Contains(content, "allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { create read unlink getattr };") {
+		t.Error("policy must grant docker_helper_t trusted_ca_t lnk_file management (incl. getattr for restorecon on restart)")
 	}
 	// Container read-only perms.
 	if !strings.Contains(content, "allow docker_helper_container_t docker_helper_trusted_ca_t:dir { getattr search read open };") {
