@@ -64,22 +64,25 @@ done
           info "    file $f: $(stat -c '%s bytes' "$f" 2>/dev/null || echo '?')"
           case "$(basename "$f")" in
             cil)
-              info "    CIL FULL CONTENT (attempt bzip2 decompress, fall back to raw):"
-              if command -v bzip2 >/dev/null 2>&1; then
-                bzip2 -dc "$f" >/tmp/dh_store.cil 2>/tmp/dh_bz.err
-                BZRC=$?
-                BZBYTES=$(wc -c < /tmp/dh_store.cil 2>/dev/null || echo 0)
-                info "      bzip2 -dc rc=$BZRC bytes=$BZBYTES stderr: $(tr '\n' ' ' < /tmp/dh_bz.err)"
-                if [ "$BZRC" = 0 ] && [ "$BZBYTES" -gt 0 ]; then
-                  info "      decompressed lines: $(wc -l < /tmp/dh_store.cil 2>/dev/null || echo 0)"
-                  sed -n '1,120p' /tmp/dh_store.cil 2>/dev/null | sed 's/^/      /' || true
-                else
-                  info "      decompress failed; dumping raw:"
-                  sed -n '1,40p' "$f" 2>/dev/null | sed 's/^/      /' || true
-                fi
-                rm -f /tmp/dh_store.cil /tmp/dh_bz.err
+              info "    CIL FULL CONTENT (attempt bzip2 decompress via python bz2, fall back to raw):"
+              if command -v python3 >/dev/null 2>&1; then
+                python3 - "$f" <<'PY' 2>&1 | sed 's/^/      /' || true
+import sys, bz2
+path = sys.argv[1]
+data = open(path, 'rb').read()
+if data[:3] == b'BZh':
+    try:
+        out = bz2.decompress(data)
+        print(f"decompressed {len(data)} -> {len(out)} bytes, {out.count(chr(10).encode())+1 if out else 0} lines")
+        print(out.decode('utf-8', 'replace')[:4000])
+    except Exception as e:
+        print(f"bz2 decompress failed: {e}")
+else:
+    print("not bzip2; raw:")
+    print(data[:4000].decode('utf-8', 'replace'))
+PY
               else
-                info "      bzip2 unavailable; dumping raw:"
+                info "      no python3; dumping raw:"
                 sed -n '1,40p' "$f" 2>/dev/null | sed 's/^/      /' || true
               fi
               info "    CIL workspace relabel/getattr rules:"
@@ -100,8 +103,22 @@ done
             hll)
               info "    hll content type: $(file -b "$f" 2>/dev/null || echo '?')"
               info "    hll decompressed (this is the actual installed module source that semodule -E should export):"
-              if command -v bzip2 >/dev/null 2>&1; then
-                bzip2 -dc "$f" 2>/dev/null | sed -n '1,150p' | sed 's/^/      /' || true
+              if command -v python3 >/dev/null 2>&1; then
+                python3 - "$f" <<'PY' 2>&1 | sed 's/^/      /' || true
+import sys, bz2
+path = sys.argv[1]
+data = open(path, 'rb').read()
+if data[:3] == b'BZh':
+    try:
+        out = bz2.decompress(data)
+        print(f"decompressed {len(data)} -> {len(out)} bytes")
+        print(out.decode('utf-8', 'replace')[:4000])
+    except Exception as e:
+        print(f"bz2 decompress failed: {e}")
+else:
+    print("not bzip2; raw:")
+    print(data[:4000].decode('utf-8', 'replace'))
+PY
               else
                 sed -n '1,150p' "$f" 2>/dev/null | sed 's/^/      /' || true
               fi
