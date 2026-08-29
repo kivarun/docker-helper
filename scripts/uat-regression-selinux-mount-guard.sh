@@ -80,9 +80,17 @@ else
   reg_ok "session create rejected (rc=$SESS_EC) for a workspace with a mount beneath it"
 fi
 if printf '%s' "$SESS_JSON" | grep -Eq 'refusing recursive workspace relabel.*beneath workspace'; then
-  reg_ok "rejection is the mount-boundary guard error (not a restorecon error)"
+  reg_ok "rejection is the mount-boundary guard error (from CLI)"
 else
-  reg_fail "rejection is NOT the guard error (got): $(printf '%s' "$SESS_JSON" | redact | head -4)"
+  # The CLI surfaces only a generic API error (internal details are not leaked
+  # into API errors by contract). The authoritative guard error is in the
+  # daemon's operational log for this workspace.
+  DAEMON_ERR="$(journalctl -u docker-helper.service -n 200 --no-pager 2>/dev/null | grep -F "$WS" | tail -6)"
+  if printf '%s' "$DAEMON_ERR" | grep -Eq 'refusing recursive workspace relabel.*beneath workspace'; then
+    reg_ok "rejection is the mount-boundary guard error (daemon operational log)"
+  else
+    reg_fail "rejection is NOT the guard error (CLI: $(printf '%s' "$SESS_JSON" | redact | head -2); daemon: $(printf '%s' "$DAEMON_ERR" | redact | tail -2))"
+  fi
 fi
 
 # --- the external source inode must be untouched -----------------------------------
