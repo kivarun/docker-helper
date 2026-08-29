@@ -103,29 +103,49 @@ opensuse_zypper() {
 }
 
 # opensuse_zypp_fallback CMD...: run CMD once with the Tumbleweed base repos
-# (repo-oss / repo-non-oss / repo-update, whatever exists) temporarily pointed
-# at the first curl-probed reachable fallback mirror. Always restores the
-# original repo URLs before returning, so a failed run never leaves the guest
-# configured against a fallback mirror. The fallback command runs with
-# --no-gpg-checks when called through opensuse_zypper: the mirror is already
-# verified by a TLS curl probe of repomd.xml, and zypper would otherwise try to
-# fetch repomd.xml.key from the original host after the base URL is moved.
+# (repo-oss / repo-non-oss / repo-update, whatever exists — the Tumbleweed
+# cloud image names them openSUSE-Tumbleweed-Oss etc., so they are located by
+# their URL pattern, not by alias) temporarily pointed at the first
+# curl-probed reachable fallback mirror. Always restores the original repo URLs
+# before returning, so a failed run never leaves the guest configured against a
+# fallback mirror. The fallback command runs with --no-gpg-checks when called
+# through opensuse_zypper: the mirror is already verified by a TLS curl probe
+# of repomd.xml, and zypper would otherwise try to fetch repomd.xml.key from the
+# original host after the base URL is moved.
 opensuse_zypp_fallback() {
-  local base_repos=("repo-oss" "repo-non-oss" "repo-update")
-  local m url alias repo_line repo_url saved_ restore_ ok
+  # Locate the Tumbleweed base repos by URL pattern: line format of
+  # `zypper repos --url` is:
+  #   Alias | Name | Enabled | GPG Check | Refresh | Priority | Type | URI | URI
+  # Match on the URL column (last |  |-delimited field).
+  local alias repo_line repo_url saved_ restore_ ok m url
+  local base_aliases=()
+  local line
+  while IFS= read -r line; do
+    repo_url="$(printf '%s' "$line" | sed -E 's/.*\| ([^|]+) \|$/\1/' | xargs)"
+    case "$repo_url" in
+      */tumbleweed/repo/oss*|*/tumbleweed/repo/non-oss*|*/update/tumbleweed*)
+        alias="$(printf '%s' "$line" | awk -F'|' '{gsub(/[ ]+/, "", $1); print $1}')"
+        [ -n "$alias" ] && base_aliases+=("$alias")
+        ;;
+    esac
+  done < <(zypper --non-interactive repos --url 2>/dev/null || true)
+  if [ "${#base_aliases[@]}" = 0 ]; then
+    echo "error: could not locate Tumbleweed base repos to point at a fallback mirror" >&2
+    return 1
+  fi
   for m in "${OPENSUSE_ZYPP_FALLBACK_MIRRORS[@]}"; do
     url="$m/repodata/repomd.xml"
     echo "fallback mirror probe: $url"
     if curl -fsS --connect-timeout 5 --max-time 20 -o /dev/null "$url" 2>/dev/null; then
       # Save the current URL of each base repo so we can restore it.
-      for alias in "${base_repos[@]}"; do
+      for alias in "${base_aliases[@]}"; do
         repo_line="$(zypper --non-interactive repos --url 2>/dev/null | grep "| $alias |" | head -1)"
         repo_url="$(printf '%s' "$repo_line" | sed -E 's/.*\| [^|]+ \| ([^|]+) \|.*/\1/' | xargs)"
         if [ -n "$repo_url" ]; then
           eval "saved_$alias=\$repo_url"
         fi
       done
-      for alias in "${base_repos[@]}"; do
+      for alias in "${base_aliases[@]}"; do
         zypper --non-interactive modifyrepo --url "$m" "$alias" >/dev/null 2>&1 || true
       done
       ok=0
@@ -133,7 +153,7 @@ opensuse_zypp_fallback() {
         ok=1
       fi
       # Restore the original URLs before trying the next candidate / returning.
-      for alias in "${base_repos[@]}"; do
+      for alias in "${base_aliases[@]}"; do
         eval "restore_=\$saved_$alias"
         if [ -n "$restore_" ]; then
           zypper --non-interactive modifyrepo --url "$restore_" "$alias" >/dev/null 2>&1 || true
