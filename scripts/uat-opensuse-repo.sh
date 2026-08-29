@@ -100,6 +100,10 @@ opensuse_zypper() {
 # repo-non-oss / repo-update, whatever exists) at a reachable fallback mirror
 # (bounded curl probe), refresh through it, and restore the original
 # configuration before returning.
+#
+# The fallback refresh runs with --no-gpg-checks: the mirror was already
+# verified by a TLS curl probe of repomd.xml, and zypper would otherwise try to
+# fetch repomd.xml.key from the original host after the base URL is moved.
 opensuse_zypper_refresh() {
   local rc
   if opensuse_zypper refresh; then
@@ -123,24 +127,18 @@ opensuse_zypper_refresh() {
           eval "saved_$alias=\$repo_url"
         fi
       done
-      # Repoint URL AND gpgkey at the fallback mirror: with the base URL moved
-      # to a different host, zypper would otherwise fetch repomd.xml.key from
-      # the original (unreachable) host and fail the refresh.
       for alias in "${base_repos[@]}"; do
         zypper --non-interactive modifyrepo --url "$m" "$alias" >/dev/null 2>&1 || true
-        zypper --non-interactive modifyrepo --gpgkey "$m/repodata/repomd.xml.key" "$alias" >/dev/null 2>&1 || true
       done
-      if opensuse_zypper refresh; then
+      if opensuse_zypper --no-gpg-checks refresh; then
         echo "fallback mirror selected: $m"
         return 0
       fi
-      # Restore the original URL before trying the next candidate. Clearing the
-      # gpgkey makes zypper re-derive it from the restored (original) URL.
+      # Restore the original URLs before trying the next candidate.
       for alias in "${base_repos[@]}"; do
         eval "restore_url=\$saved_$alias"
         if [ -n "$restore_url" ]; then
           zypper --non-interactive modifyrepo --url "$restore_url" "$alias" >/dev/null 2>&1 || true
-          zypper --non-interactive modifyrepo --gpgkey "" "$alias" >/dev/null 2>&1 || true
         fi
       done
     fi
