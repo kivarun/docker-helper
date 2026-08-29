@@ -120,13 +120,31 @@ fi
 FAKE="/run/docker-helper/sessions/dhs_$(openssl rand -hex 16)/docker"
 mkdir -p "$FAKE"
 reg_info "planted fake stale session runtime dir: $(dirname "$FAKE")"
-# Restart once more so the planted stale dir is observed at startup.
+# Restart once more so the planted stale dir is observed at startup. The
+# subcase oracle is the disappearance of the planted stale session runtime
+# dir itself: systemctl is-active becomes active before the daemon's startup
+# sweep has run, so it is not a sufficient startup-completion signal. Poll
+# the real condition at short bounded intervals (no blind sleep) and require
+# the daemon API to be reachable too (GET /health is served on the unix
+# socket only after the startup sweep completes). Fail immediately if the
+# service exits/fails while we wait.
 systemctl restart docker-helper.service >/dev/null 2>&1 || true
-for _ in $(seq 1 30); do
-  systemctl is-active --quiet docker-helper.service && break
-  sleep 1
+STALE="$(dirname "$FAKE")"
+READY=0
+for _ in $(seq 1 50); do
+  if [ ! -e "$STALE" ] && \
+     curl --silent --fail --max-time 1 \
+       --unix-socket "$SOCK" http://localhost/health >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  if ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
+    reg_fail "docker-helper.service exited/failed while waiting for stale runtime cleanup"
+    reg_result
+  fi
+  sleep 0.2
 done
-if [ ! -e "$(dirname "$FAKE")" ]; then
+if [ "$READY" = 1 ]; then
   reg_ok "stale session runtime dir removed at startup"
 else
   reg_fail "stale session runtime dir was NOT cleaned at startup"
