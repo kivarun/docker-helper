@@ -79,6 +79,8 @@ opensuse_zypp_tune_timeouts() {
 # opensuse_zypper: retry wrapper preserving the final real zypper exit code.
 # The zypper call runs in an `if` condition so its failure is captured (rc)
 # instead of tripping `set -e` in callers (the bootstraps run errexit).
+# If the default repo URLs are flaky/unreachable from the CI network, retry
+# once through a fallback mirror (see opensuse_zypp_fallback).
 opensuse_zypper() {
   local attempts="$OPENSUSE_ZYPPER_ATTEMPTS" delay="$OPENSUSE_ZYPPER_DELAY"
   local n rc=1
@@ -91,30 +93,26 @@ opensuse_zypper() {
     fi
     [ "$n" -lt "$attempts" ] && sleep "$delay"
   done
+  # Default repos failed for a transient network reason: try once through a
+  # curl-probed fallback mirror. Refresh inherits this path too, but the
+  # explicit refresh function below also guarantees repo restore.
+  if opensuse_zypp_fallback zypper --non-interactive --no-gpg-checks "$@"; then
+    return 0
+  fi
   return "$rc"
 }
 
-# opensuse_zypper_refresh: refresh with the retry policy; never proceed with
-# stale/incomplete metadata. When the default repos cannot be refreshed from the
-# CI network, temporarily point the Tumbleweed base repos (repo-oss /
-# repo-non-oss / repo-update, whatever exists) at a reachable fallback mirror
-# (bounded curl probe), refresh through it, and restore the original
-# configuration before returning.
-#
-# The fallback refresh runs with --no-gpg-checks: the mirror was already
+# opensuse_zypp_fallback CMD...: run CMD once with the Tumbleweed base repos
+# (repo-oss / repo-non-oss / repo-update, whatever exists) temporarily pointed
+# at the first curl-probed reachable fallback mirror. Always restores the
+# original repo URLs before returning, so a failed run never leaves the guest
+# configured against a fallback mirror. The fallback command runs with
+# --no-gpg-checks when called through opensuse_zypper: the mirror is already
 # verified by a TLS curl probe of repomd.xml, and zypper would otherwise try to
 # fetch repomd.xml.key from the original host after the base URL is moved.
-opensuse_zypper_refresh() {
-  local rc
-  if opensuse_zypper refresh; then
-    return 0
-  fi
-  rc=$?
-  # Repos to repoint when falling back: the standard Tumbleweed base aliases
-  # (repo-oss is authoritative; non-oss/update only exist where the image has
-  # them). Non-existent aliases are simply skipped by modifyrepo.
+opensuse_zypp_fallback() {
   local base_repos=("repo-oss" "repo-non-oss" "repo-update")
-  local m url saved alias repo_line repo_url
+  local m url alias repo_line repo_url saved_ restore_ ok
   for m in "${OPENSUSE_ZYPP_FALLBACK_MIRRORS[@]}"; do
     url="$m/repodata/repomd.xml"
     echo "fallback mirror probe: $url"
@@ -130,19 +128,36 @@ opensuse_zypper_refresh() {
       for alias in "${base_repos[@]}"; do
         zypper --non-interactive modifyrepo --url "$m" "$alias" >/dev/null 2>&1 || true
       done
-      if opensuse_zypper --no-gpg-checks refresh; then
+      ok=0
+      if "$@"; then
+        ok=1
+      fi
+      # Restore the original URLs before trying the next candidate / returning.
+      for alias in "${base_repos[@]}"; do
+        eval "restore_=\$saved_$alias"
+        if [ -n "$restore_" ]; then
+          zypper --non-interactive modifyrepo --url "$restore_" "$alias" >/dev/null 2>&1 || true
+        fi
+      done
+      if [ "$ok" = 1 ]; then
         echo "fallback mirror selected: $m"
         return 0
       fi
-      # Restore the original URLs before trying the next candidate.
-      for alias in "${base_repos[@]}"; do
-        eval "restore_url=\$saved_$alias"
-        if [ -n "$restore_url" ]; then
-          zypper --non-interactive modifyrepo --url "$restore_url" "$alias" >/dev/null 2>&1 || true
-        fi
-      done
     fi
   done
+  return 1
+}
+
+# opensuse_zypper_refresh: refresh with the retry policy; never proceed with
+# stale/incomplete metadata. Falls back to a mirror through the shared
+# opensuse_zypper path (which adds --no-gpg-checks for the fallback run).
+opensuse_zypper_refresh() {
+  local rc
+  if opensuse_zypper refresh; then
+    return 0
+  else
+    rc=$?
+  fi
   echo "error: zypper refresh exhausted attempts and fallback mirrors (repository/network failure); not continuing with stale or incomplete metadata" >&2
   return "$rc"
 }
