@@ -178,8 +178,21 @@ fi
 rm -f /tmp/dh_loaded.cil /tmp/dh_loaded.err
 # Authoritative: query the LIVE kernel policy (/sys/fs/selinux/policy) for the
 # docker_helper_t -> usr_t / docker_helper_workspace_t allows actually enforced.
+# Prefer sesearch (setools-console); fall back to the setools python API.
 info "live kernel policy grants (setools, /sys/fs/selinux/policy):"
-if command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null; then
+if command -v sesearch >/dev/null 2>&1; then
+  for tgt in usr_t docker_helper_workspace_t; do
+    for cls in dir file lnk_file fifo_file; do
+      out="$(sesearch --allow -s docker_helper_t -t "$tgt" -c "$cls" /sys/fs/selinux/policy 2>/dev/null || true)"
+      if [ -n "$out" ]; then
+        echo "  docker_helper_t -> $tgt:$cls:" | sed 's/^/  /'
+        printf '%s\n' "$out" | sed 's/^/    /'
+      else
+        echo "  docker_helper_t -> $tgt:$cls: (no allow rules)" | sed 's/^/  /'
+      fi
+    done
+  done
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null; then
   python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
 import sys
 try:

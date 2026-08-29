@@ -242,6 +242,14 @@ if [ "$NEED" = 1 ]; then
   # shellcheck disable=SC2086
   opensuse_zypper install -y $PKGS
 fi
+# sesearch/seinfo (setools-console) are also used by the scope=selinux
+# diagnostic to inspect the LIVE kernel policy, so ensure they exist even in
+# full mode.
+if ! rpm -q setools-console >/dev/null 2>&1; then
+  opensuse_zypp_tune_timeouts
+  opensuse_zypper_refresh || true
+  opensuse_zypper install -y setools-console || true
+fi
 log "SELinux/AppArmor-related packages:"
 rpm -qa | grep -Ei 'selinux|policycoreutils|libselinux|libsepol|libsemanage|apparmor' | sort || true
 
