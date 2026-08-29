@@ -65,7 +65,7 @@ done
           case "$(basename "$f")" in
             cil)
               info "    CIL FULL CONTENT (decompressed if bzip2):"
-              if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
+              if command -v bzip2 >/dev/null 2>&1 && [ "$(head -c 3 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "425a68" ]; then
                 info "      bzip2 available: yes; attempting decompress"
                 bzip2 -dc "$f" >/tmp/dh_store.cil 2>/tmp/dh_bz.err
                 info "      decompress rc=$? stderr: $(tr '\n' ' ' < /tmp/dh_bz.err)"
@@ -93,8 +93,9 @@ done
               ;;
             hll)
               info "    hll content type: $(file -b "$f" 2>/dev/null || echo '?')"
-              if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
-                info "    hll decompressed size: $(bzip2 -dc "$f" 2>/dev/null | wc -c)"
+              if command -v bzip2 >/dev/null 2>&1 && [ "$(head -c 3 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "425a68" ]; then
+                info "    hll decompressed (this is the actual installed module source that semodule -E should export):"
+                bzip2 -dc "$f" 2>/dev/null | sed -n '1,150p' | sed 's/^/      /' || true
               fi
               ;;
           esac
