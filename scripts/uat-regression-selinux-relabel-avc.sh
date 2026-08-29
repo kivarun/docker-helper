@@ -139,28 +139,42 @@ fi
 
 # --- AVC evidence: relabel matrix for BOTH directions (best-effort) ---------------------
 # A permissive-mode denial is the exact set of permissions the confined relabel
-# requires (permissive=1). Filter to docker_helper_t + restorecon + relabel ops.
+# requires (permissive=1). Filter to permissive=1 + docker_helper_t + restorecon
+# + relabel ops. permissive=1 uniquely scopes this to the temporary-permissive
+# window of THIS group (other groups run enforcing and log permissive=0).
+# Source is the audit.log tail (proven to capture records in this harness),
+# merged with the bounded ausearch window.
 relabel_avcs() {
-  local since="$1"
-  if command -v ausearch >/dev/null 2>&1; then
-    ausearch -m AVC -ts "$since" 2>/dev/null | grep 'avc:  denied' | grep 'scontext=.*docker_helper_t' | grep 'comm="restorecon"' | grep -E 'relabelfrom|relabelto' || true
-  else
-    tail -400 /var/log/audit/audit.log 2>/dev/null | grep 'avc:  denied' | grep 'scontext=.*docker_helper_t' | grep 'comm="restorecon"' | grep -E 'relabelfrom|relabelto' || true
-  fi
+  {
+    tail -800 /var/log/audit/audit.log 2>/dev/null
+    if command -v ausearch >/dev/null 2>&1; then
+      ausearch -m AVC -ts "$AVC_START" 2>/dev/null
+    fi
+  } | grep 'avc:  denied' | grep 'permissive=1' \
+    | grep 'scontext=.*docker_helper_t' | grep 'comm="restorecon"' \
+    | grep -E 'relabelfrom|relabelto'
 }
 
+# canonical: COMM PERM TCONTEXT_TYPE CLASS (dedups across objects/pid/source)
+avc_canonical() {
+  sed -E 's/.*\{ ([a-z_ ]+) \}.*comm="([^"]+)".* tcontext=[^:]+:[^:]+:([^:]+):[^ ]+ tclass=([a-z_]+).*/\2 \1 \3 \4/' | sort -u
+}
+
+# Type-only tcontext matches (user component varies: host-relabeled objects are
+# unconfined_u, container-created objects are system_u).
+USR_T="tcontext=[^:]+:[^:]+:usr_t:"
+WS_T="tcontext=[^:]+:[^:]+:docker_helper_workspace_t:"
+
 echo "--- initial relabel AVC matrix (usr_t -> docker_helper_workspace_t) ---"
-relabel_avcs "$AVC_START" | grep -E 'tcontext=(unconfined_u:object_r:usr_t|system_u:object_r:docker_helper_workspace_t):' | sort -u
-echo "--- initial relabel AVC matrix (normalized: PERM TCONTEXT_TYPE CLASS) ---"
-relabel_avcs "$AVC_START" | grep -E 'tcontext=(unconfined_u:object_r:usr_t|system_u:object_r:docker_helper_workspace_t):' \
-  | sed -E 's/.*\{ ([a-z_ ,]+) \}.* tcontext=[^:]+:[^:]+:([^:]+):[^ ]+ tclass=([a-z_]+).*/\1 \2 \3/' | sort -u
+relabel_avcs | grep -E "$USR_T|$WS_T" | sort -u
+echo "--- initial relabel AVC matrix (canonical: COMM PERM TCONTEXT_TYPE CLASS) ---"
+relabel_avcs | grep -E "$USR_T|$WS_T" | avc_canonical
 echo "--- teardown relabel AVC matrix (docker_helper_workspace_t -> usr_t) ---"
-relabel_avcs "$AVC_START" | grep -E 'tcontext=(system_u:object_r:docker_helper_workspace_t|unconfined_u:object_r:usr_t):' | sort -u
-echo "--- teardown relabel AVC matrix (normalized: PERM TCONTEXT_TYPE CLASS) ---"
-relabel_avcs "$AVC_START" | grep -E 'tcontext=(system_u:object_r:docker_helper_workspace_t|unconfined_u:object_r:usr_t):' \
-  | sed -E 's/.*\{ ([a-z_ ,]+) \}.* tcontext=[^:]+:[^:]+:([^:]+):[^ ]+ tclass=([a-z_]+).*/\1 \2 \3/' | sort -u
-echo "--- all docker_helper_t restorecon relabel AVCs (raw, both directions) ---"
-relabel_avcs "$AVC_START" | sort -u
+relabel_avcs | grep -E "$WS_T|$USR_T" | sort -u
+echo "--- teardown relabel AVC matrix (canonical: COMM PERM TCONTEXT_TYPE CLASS) ---"
+relabel_avcs | grep -E "$WS_T|$USR_T" | avc_canonical
+echo "--- all docker_helper_t restorecon relabel AVCs (canonical, both directions) ---"
+relabel_avcs | avc_canonical
 
 # --- remove temporary permissive now that evidence is captured ---------------------------
 semanage permissive -d docker_helper_t >/dev/null 2>&1 && PERMISSIVE_ADDED=0
