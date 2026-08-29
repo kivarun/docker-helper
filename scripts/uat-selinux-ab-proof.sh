@@ -279,6 +279,13 @@ else
   echo "--- build + load TEMPORARY proof module (docker_helper_t -> semanage_exec_t -> semanage_t) ---"
   # checkmodule requires the module name to match the output base filename, so
   # the .mod/.pp artifacts are named dh_semanage_proof.* (module dh_semanage_proof).
+  # First candidate = the MINIMAL standard semanage domtrans pattern observed in
+  # the installed policy (type_transition + process transition/siginh + process2
+  # nnp_transition because NoNewPrivileges=true + file execute on semanage_exec_t
+  # by docker_helper_t and entrypoint/execute by semanage_t). Interpreter (bin_t)
+  # and pipe access are intentionally NOT pre-granted: semanage_t already execs its
+  # own interpreter in the base policy, and any additional need must be driven by
+  # actual AVC evidence, not speculation.
   TE="/tmp/dh_semanage_proof.te"
   cat > "$TE" <<'TE_EOF'
 module dh_semanage_proof 1.0;
@@ -287,11 +294,9 @@ require {
 	type docker_helper_t;
 	type semanage_t;
 	type semanage_exec_t;
-	type bin_t;
 	class process { transition siginh };
 	class process2 { nnp_transition };
 	class file { execute read open getattr map entrypoint };
-	class pipe { read write ioctl getattr };
 }
 
 # Standard semanage domain transition (semanage_domtrans pattern):
@@ -303,18 +308,22 @@ allow docker_helper_t semanage_t:process { transition siginh };
 allow docker_helper_t semanage_t:process2 { nnp_transition };
 allow docker_helper_t semanage_exec_t:file { execute read open getattr map };
 allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };
-# The semanage python script interpreter must be executable by the target domain.
-allow semanage_t bin_t:file { execute read open getattr map };
-# Parent/child pipe I/O for capturing semanage stdout (CombinedOutput).
-allow docker_helper_t self:pipe { read write getattr ioctl };
-allow semanage_t docker_helper_t:pipe { read write getattr ioctl };
-allow docker_helper_t semanage_t:pipe { read write getattr ioctl };
 TE_EOF
   if checkmodule -M -m -o /tmp/dh_semanage_proof.mod "$TE" 2>&1; then
-    semodule_package -o /tmp/dh_semanage_proof.pp -m /tmp/dh_semanage_proof.mod 2>&1 \
-      && semodule -i /tmp/dh_semanage_proof.pp 2>&1 \
-      && echo "AB_PROOF_MODULE=loaded" \
-      || { echo "error: could not package/load the temporary proof module" >&2; exit 1; }
+    if semodule_package -o /tmp/dh_semanage_proof.pp -m /tmp/dh_semanage_proof.mod 2>&1 && semodule -i /tmp/dh_semanage_proof.pp 2>&1; then
+      echo "AB_PROOF_MODULE=loaded"
+    else
+      # Load-time failure (e.g. 'Failed to resolve allow statement at .../cil:N'):
+      # dump the generated CIL with line numbers so the exact failing statement is
+      # visible without needing another run.
+      echo "error: could not package/load the temporary proof module" >&2
+      CIL="$(find /etc/selinux/targeted/tmp/modules -name cil 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)"
+      if [ -n "$CIL" ]; then
+        echo "--- generated CIL (with line numbers) ---"
+        nl -ba "$CIL" 2>&1 | head -40 || true
+      fi
+      exit 1
+    fi
   else
     echo "error: checkmodule failed for the temporary proof module" >&2
     exit 1
