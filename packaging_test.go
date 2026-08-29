@@ -24,6 +24,7 @@ func TestScriptSyntax(t *testing.T) {
 		{"bash", "build-bundle.sh"},
 		{"bash", "build-packages.sh"},
 		{"bash", "build-manpages.sh"},
+		{"bash", "build-selinux-policy.sh"},
 		{"sh", "packaging/scripts/deb/postinstall.sh"},
 		{"sh", "packaging/scripts/deb/preremove.sh"},
 		{"sh", "packaging/scripts/deb/postremove.sh"},
@@ -436,6 +437,8 @@ func TestBuildBundleScriptContent(t *testing.T) {
 		"systemd/user", "systemd/user/docker-helper.service", "systemd/system/docker-helper.service",
 		"apparmor", "apparmor/docker-helper", "apparmor/docker-helper-system",
 		"apparmor/local/curl",
+		"selinux", "selinux/docker_helper.pp",
+		"build-selinux-policy.sh",
 		"SKILL.md", "README.release.md", "LICENSE",
 	} {
 		if !strings.Contains(content, s) {
@@ -471,6 +474,34 @@ func TestBuildBundleScriptContent(t *testing.T) {
 		if !strings.Contains(content, s) {
 			t.Errorf("build-bundle.sh must bundle %s", s)
 		}
+	}
+}
+
+// TestBuildBundleSELinuxArtifact verifies build-bundle.sh verifies the SELinux
+// policy artifact is present in the bundle and that the tarball mandatory-path
+// list includes selinux/docker_helper.pp (fail-closed: a missing policy build
+// fails the bundle build).
+func TestBuildBundleSELinuxArtifact(t *testing.T) {
+	data, err := os.ReadFile("build-bundle.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Must build the policy through the canonical owner before assembling.
+	if !strings.Contains(content, "build-selinux-policy.sh") {
+		t.Error("build-bundle.sh must call build-selinux-policy.sh")
+	}
+	if !strings.Contains(content, "BUNDLE_DIR/selinux/docker_helper.pp") {
+		t.Error("build-bundle.sh must copy docker_helper.pp into BUNDLE_DIR/selinux/")
+	}
+	// Must verify the artifact is present and non-empty in the bundle.
+	if !strings.Contains(content, "-s \"$BUNDLE_DIR/selinux/docker_helper.pp\"") {
+		t.Error("build-bundle.sh must verify selinux/docker_helper.pp is present and non-empty")
+	}
+	// The tarball mandatory-path list must include the SELinux policy artifact.
+	if !strings.Contains(content, "selinux/docker_helper.pp") {
+		t.Error("build-bundle.sh EXPECTED_PATHS must include selinux/docker_helper.pp")
 	}
 }
 
@@ -4281,9 +4312,10 @@ func TestNfpmConfigIncludesSELinuxPolicy(t *testing.T) {
 	}
 }
 
-// TestBuildPackagesScriptContentSELinux verifies build-packages.sh builds
-// the SELinux policy module with fail-closed semantics: requires tools,
-// generates under dist/, removes previous output.
+// TestBuildPackagesScriptContentSELinux verifies build-packages.sh delegates
+// SELinux policy compilation to the canonical build-selinux-policy.sh owner
+// (the same one build-bundle.sh uses) and that the helper itself is
+// fail-closed: requires tools, generates the .pp, removes stale output.
 func TestBuildPackagesScriptContentSELinux(t *testing.T) {
 	data, err := os.ReadFile("build-packages.sh")
 	if err != nil {
@@ -4291,79 +4323,127 @@ func TestBuildPackagesScriptContentSELinux(t *testing.T) {
 	}
 	content := string(data)
 
-	if !strings.Contains(content, "checkmodule") {
-		t.Error("build-packages.sh must reference checkmodule")
+	if !strings.Contains(content, "build-selinux-policy.sh") {
+		t.Error("build-packages.sh must delegate SELinux policy build to build-selinux-policy.sh")
 	}
-	if !strings.Contains(content, "semodule_package") {
-		t.Error("build-packages.sh must reference semodule_package")
-	}
-	if !strings.Contains(content, "docker-helper.te") {
-		t.Error("build-packages.sh must reference docker-helper.te")
-	}
-	if !strings.Contains(content, "docker_helper.pp") {
-		t.Error("build-packages.sh must produce docker_helper.pp")
-	}
-
-	// Must generate under dist/, never under packaging/selinux/.
-	if !strings.Contains(content, "dist/docker_helper.pp") {
-		t.Error("build-packages.sh must output to dist/docker_helper.pp")
+	if !strings.Contains(content, "dist") {
+		t.Error("build-packages.sh must pass the dist output dir to the SELinux policy builder")
 	}
 	if strings.Contains(content, "packaging/selinux/docker_helper.pp") {
 		t.Error("build-packages.sh must not output to packaging/selinux/docker_helper.pp (stale policy risk)")
 	}
 
-	// Must fail-closed: exit 1 when tools are missing, not warn-and-continue.
-	// The script uses set -euo pipefail, so missing tools should cause failure.
-	// Verify explicit error handling with exit 1.
-	if !strings.Contains(content, "exit 1") {
-		t.Error("build-packages.sh must contain explicit exit 1 for missing tools")
-	}
-
-	// Must remove previous generated output before building.
-	if !strings.Contains(content, "rm -f") && !strings.Contains(content, "rm -rf") {
-		t.Error("build-packages.sh must remove previous generated output before building")
-	}
-}
-
-// TestBuildPackagesScriptSELinuxToolsRequired verifies that build-packages.sh
-// fails when SELinux build tools are unavailable, rather than warning and
-// continuing (which would allow stale policy packaging).
-func TestBuildPackagesScriptSELinuxToolsRequired(t *testing.T) {
-	data, err := os.ReadFile("build-packages.sh")
+	helper, err := os.ReadFile("build-selinux-policy.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
+	h := string(helper)
+
+	for _, s := range []string{"checkmodule", "semodule_package", "docker-helper.te", "docker-helper.fc", "docker_helper.pp"} {
+		if !strings.Contains(h, s) {
+			t.Errorf("build-selinux-policy.sh must reference %q", s)
+		}
+	}
+
+	// Must fail-closed: exit 1 when tools are missing, not warn-and-continue.
+	if !strings.Contains(h, "exit 1") {
+		t.Error("build-selinux-policy.sh must contain explicit exit 1 for missing tools")
+	}
+
+	// Must remove previous generated output before building (stale policy
+	// output can never satisfy the build).
+	if !strings.Contains(h, "rm -f") {
+		t.Error("build-selinux-policy.sh must remove previous generated output before building")
+	}
+}
+
+// TestBuildSelinuxPolicyHelperToolsRequired verifies that the canonical
+// build-selinux-policy.sh fails when SELinux build tools are unavailable,
+// rather than warning and continuing (which would allow stale policy
+// packaging), and that both build-packages.sh and build-bundle.sh invoke it.
+func TestBuildSelinuxPolicyHelperToolsRequired(t *testing.T) {
+	helper, err := os.ReadFile("build-selinux-policy.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(helper)
 
 	// The script must check for checkmodule and semodule_package and fail
 	// if either is missing. Verify the pattern: if ! command -v ... then exit 1.
-	checkmoduleIdx := strings.Index(content, "checkmodule")
-	semoduleIdx := strings.Index(content, "semodule_package")
-	if checkmoduleIdx < 0 {
-		t.Fatal("checkmodule reference not found")
-	}
-	if semoduleIdx < 0 {
-		t.Fatal("semodule_package reference not found")
-	}
-
-	// Find the error handling blocks for each tool.
-	// After each tool check, there should be an exit 1 before the next major step.
 	for _, tool := range []string{"checkmodule", "semodule_package"} {
 		idx := strings.Index(content, tool)
 		if idx < 0 {
-			continue
+			t.Fatalf("%s reference not found in build-selinux-policy.sh", tool)
 		}
-		// Look for the error block after this tool reference.
 		remaining := content[idx:]
-		// The error block should contain "exit 1" before "nfpm" or the next major step.
-		nfpmIdx := strings.Index(remaining, "nfpm")
-		if nfpmIdx < 0 {
-			continue
+		// The error block must contain "exit 1" before the actual compile step.
+		compileIdx := strings.Index(remaining, "checkmodule -M")
+		buildIdx := compileIdx
+		if buildIdx < 0 {
+			buildIdx = len(remaining)
 		}
-		errorBlock := remaining[:nfpmIdx]
-		if !strings.Contains(errorBlock, "exit 1") {
-			t.Errorf("build-packages.sh must exit 1 when %s is missing (before nfpm step)", tool)
+		if !strings.Contains(remaining[:buildIdx], "exit 1") {
+			t.Errorf("build-selinux-policy.sh must exit 1 when %s is missing", tool)
 		}
+	}
+
+	// Both consumers must route through the canonical owner.
+	for _, consumer := range []string{"build-packages.sh", "build-bundle.sh"} {
+		cd, err := os.ReadFile(consumer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(cd), "build-selinux-policy.sh") {
+			t.Errorf("%s must call build-selinux-policy.sh", consumer)
+		}
+	}
+}
+
+// TestBuildSelinuxPolicyHelperProducesPP runs the canonical helper and proves
+// it produces a non-empty docker_helper.pp, removing stale policy output first.
+// Skipped when the SELinux build tools are unavailable.
+func TestBuildSelinuxPolicyHelperProducesPP(t *testing.T) {
+	if _, err := exec.LookPath("checkmodule"); err != nil {
+		t.Skip("checkmodule not installed, skipping policy build test")
+	}
+	if _, err := exec.LookPath("semodule_package"); err != nil {
+		t.Skip("semodule_package not installed, skipping policy build test")
+	}
+
+	outDir := t.TempDir()
+	// Plant stale policy artifacts; they must never satisfy the build.
+	stale := []byte("stale-policy-content")
+	if err := os.WriteFile(filepath.Join(outDir, "docker_helper.pp"), stale, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "docker-helper.pp"), stale, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "docker_helper.mod"), stale, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "build-selinux-policy.sh", outDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build-selinux-policy.sh failed: %v\n%s", err, out)
+	}
+
+	pp := filepath.Join(outDir, "docker_helper.pp")
+	fi, err := os.Stat(pp)
+	if err != nil {
+		t.Fatalf("docker_helper.pp not produced: %v", err)
+	}
+	if fi.Size() == 0 {
+		t.Error("docker_helper.pp must not be empty")
+	}
+	if got, _ := os.ReadFile(pp); string(got) == string(stale) {
+		t.Error("docker_helper.pp must not be the planted stale artifact")
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "docker_helper.mod")); !os.IsNotExist(err) {
+		t.Error("intermediate docker_helper.mod must be removed")
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "docker-helper.pp")); !os.IsNotExist(err) {
+		t.Error("legacy docker-helper.pp must be removed")
 	}
 }
 

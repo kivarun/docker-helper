@@ -51,26 +51,11 @@ if [[ ! -s "${SCRIPT_DIR}/dist/completions/docker-helper" ]]; then
   exit 1
 fi
 
-# Build SELinux policy module (required).
-if ! command -v checkmodule >/dev/null 2>&1; then
-  echo "error: checkmodule not found (install checkpolicy or policycoreutils-devel)" >&2
-  exit 1
-fi
-if ! command -v semodule_package >/dev/null 2>&1; then
-  echo "error: semodule_package not found (install semodule-utils or policycoreutils)" >&2
-  exit 1
-fi
-# Remove any previous generated output to prevent stale artifacts. Clean both
-# the current docker_helper.pp and the legacy docker-helper.pp so a stale
-# artifact from an older checkout/build cannot remain in dist/.
-rm -f "${SCRIPT_DIR}/dist/docker_helper.pp" "${SCRIPT_DIR}/dist/docker-helper.pp"
-echo "Building SELinux policy module..."
-checkmodule -M -m -o "${SCRIPT_DIR}/dist/docker_helper.mod" \
-  "${SCRIPT_DIR}/packaging/selinux/docker-helper.te"
-semodule_package -o "${SCRIPT_DIR}/dist/docker_helper.pp" \
-  -m "${SCRIPT_DIR}/dist/docker_helper.mod" \
-  -f "${SCRIPT_DIR}/packaging/selinux/docker-helper.fc"
-rm -f "${SCRIPT_DIR}/dist/docker_helper.mod"
+# Build SELinux policy module through the canonical owner
+# (build-selinux-policy.sh), so the RPM/DEB and the release tarball always
+# carry the byte-identical docker_helper.pp. It fails closed when the SELinux
+# policy build tools are missing and removes stale .pp/.mod output first.
+"${SCRIPT_DIR}/build-selinux-policy.sh" "${SCRIPT_DIR}/dist"
 
 # Build from repo root so src paths in the config resolve correctly.
 # nFPM expands ${VERSION} from the environment.

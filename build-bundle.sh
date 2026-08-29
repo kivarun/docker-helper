@@ -28,6 +28,8 @@
 #       docker-helper-system
 #       local/
 #         curl
+#   selinux/
+#       docker_helper.pp
 #     skills/
 #       docker-helper/
 #         SKILL.md
@@ -53,10 +55,17 @@ OUT_DIR="$SCRIPT_DIR/dist"
 BUNDLE_DIR="$OUT_DIR/docker-helper-${VERSION}-linux-amd64"
 TARBALL="$OUT_DIR/docker-helper-${VERSION}-linux-amd64.tar.gz"
 
-# --- Step 1: Build static binary ---
+# --- Step 1: Build static binary + SELinux policy module ---
 
 echo "=== Building static binary ==="
 bash "$SCRIPT_DIR/build-static.sh" "$VERSION"
+
+# The canonical SELinux policy builder (same owner as build-packages.sh): the
+# tarball carries selinux/docker_helper.pp built from the authoritative
+# packaging/selinux/docker-helper.{te,fc}. A missing policy build tool or a
+# failed compilation FAILS the bundle build (fail-closed).
+echo "=== Building SELinux policy module ==="
+bash "$SCRIPT_DIR/build-selinux-policy.sh" "$OUT_DIR"
 
 # --- Step 2: Assemble bundle directory ---
 
@@ -101,6 +110,11 @@ cp "$SCRIPT_DIR/packaging/apparmor/docker-helper-system" \
    "$BUNDLE_DIR/apparmor/docker-helper-system"
 cp "$SCRIPT_DIR/packaging/apparmor/local/curl" \
    "$BUNDLE_DIR/apparmor/local/curl"
+
+# SELinux policy module (both MAC backends ship in the bundle; the installer
+# selects the active one)
+mkdir -p "$BUNDLE_DIR/selinux"
+cp "$OUT_DIR/docker_helper.pp" "$BUNDLE_DIR/selinux/docker_helper.pp"
 
 # Agent skill
 mkdir -p "$BUNDLE_DIR/skills/docker-helper"
@@ -172,6 +186,13 @@ if [[ "$STATIC_CONFIRMED" != "true" ]]; then
 fi
 echo "OK: binary is statically linked"
 
+# The SELinux policy artifact must be present and non-empty in the bundle.
+if [[ ! -s "$BUNDLE_DIR/selinux/docker_helper.pp" ]]; then
+  echo "FAIL: SELinux policy artifact missing or empty in bundle: selinux/docker_helper.pp" >&2
+  exit 1
+fi
+echo "OK: SELinux policy artifact present: selinux/docker_helper.pp"
+
 # Check tarball contains the exact mandatory set of paths.
 EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/docker-helper"
@@ -186,6 +207,7 @@ EXPECTED_PATHS=(
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper"
   "docker-helper-${VERSION}-linux-amd64/apparmor/docker-helper-system"
   "docker-helper-${VERSION}-linux-amd64/apparmor/local/curl"
+  "docker-helper-${VERSION}-linux-amd64/selinux/docker_helper.pp"
   "docker-helper-${VERSION}-linux-amd64/skills/docker-helper/SKILL.md"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper.1.gz"
   "docker-helper-${VERSION}-linux-amd64/man/docker-helper-config.5.gz"
