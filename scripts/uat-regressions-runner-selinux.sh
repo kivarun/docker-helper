@@ -43,8 +43,17 @@ info "service active: pid=$DH_PID type=$(cut -d: -f3 "/proc/$DH_PID/attr/current
 # attributed to the loaded policy (not guessed from the RPM artifact).
 info "loaded docker_helper module(s):"
 semodule -l 2>&1 | grep docker_helper | sed 's/^/  /' || echo "  (no docker_helper module listed)"
-info "module store files for docker_helper:"
-ls -la /etc/selinux/targeted/modules/active/modules/docker_helper 2>&1 | sed 's/^/  /' || echo "  (no store file found)"
+info "module store files for docker_helper (active + tmp):"
+for d in /etc/selinux/targeted/modules/active/modules /etc/selinux/targeted/tmp/modules /etc/selinux/targeted/modules/tmp; do
+  if [ -d "$d" ]; then
+    echo "  [$d]"
+    ls -la "$d" 2>&1 | grep -Ei "docker_helper|cil$|pp$|mod$" | sed 's/^/    /' || echo "    (no matching entries)"
+  else
+    echo "  [$d] absent"
+  fi
+done
+echo "  find docker_helper module files:"
+find /etc/selinux -iname '*docker_helper*' -o -iname 'docker_helper*' 2>/dev/null | sed 's/^/    /' || true
 # The installed module's CIL is exactly what the kernel policy contains.
 info "installed docker_helper module CIL export (semodule -E docker_helper):"
 if semodule -E docker_helper >/tmp/dh_loaded.cil 2>/tmp/dh_loaded.err; then
@@ -63,19 +72,42 @@ if command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null
   python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
 import sys
 try:
-    from setools import SELinuxPolicy, TypeRuleQuery, TypeQuery
+    from setools import SELinuxPolicy
+    # setools 4.7.x: query classes live in submodules; import whichever exists.
+    TypeQuery = AVRuleQuery = TypeRuleQuery = None
+    try:
+        from setools.typequery import TypeQuery
+    except Exception:
+        pass
+    try:
+        from setools.avrulequery import AVRuleQuery
+    except Exception:
+        pass
+    try:
+        from setools.typequery import TypeRuleQuery
+    except Exception:
+        pass
+    qcls = AVRuleQuery or TypeRuleQuery
     p = SELinuxPolicy("/sys/fs/selinux/policy")
-    print(f"policy loaded: {p.version if hasattr(p, 'version') else '?'}")
-    tq = TypeQuery(p)
-    ts = sorted(t.name for t in p.types() if t.name in ("docker_helper_t", "docker_helper_workspace_t", "usr_t"))
-    print("types present:", ts)
-    for tgt in ("usr_t", "docker_helper_workspace_t"):
-        for cls in ("dir", "file", "lnk_file", "fifo_file"):
-            perms = set()
-            for rule in p.query(TypeRuleQuery(source="docker_helper_t", target=tgt, tclass=cls, ruletype="allow")):
-                perms.update(rule.perms)
-            if perms:
-                print(f"docker_helper_t {tgt}:{cls} allow perms = {sorted(perms)}")
+    print("policy version:", getattr(p, "version", "?"))
+    try:
+        types = sorted(t.name for t in p.types() if t.name in ("docker_helper_t", "docker_helper_workspace_t", "usr_t"))
+        print("types present:", types)
+    except Exception as e:
+        print("types query failed:", e)
+    if qcls is None:
+        print("no query class available")
+    else:
+        for tgt in ("usr_t", "docker_helper_workspace_t"):
+            for cls in ("dir", "file", "lnk_file", "fifo_file"):
+                try:
+                    perms = set()
+                    for rule in p.query(qcls(source="docker_helper_t", target=tgt, tclass=cls, ruletype="allow")):
+                        perms.update(rule.perms)
+                    if perms:
+                        print(f"docker_helper_t {tgt}:{cls} allow perms = {sorted(perms)}")
+                except Exception as e:
+                    print(f"  query {tgt}:{cls} failed: {e}")
 except Exception as e:
     print(f"setools diagnostic failed: {e}")
 PY
