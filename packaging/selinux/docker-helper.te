@@ -66,6 +66,7 @@ module docker_helper 1.0;
 		attribute container_domain;
 		attribute mcs_constrained_type;
 		attribute container_net_domain;
+		attribute can_change_object_identity;
 
 		type security_t;
 		type node_t;
@@ -115,6 +116,16 @@ module docker_helper 1.0;
 
 # Domain definition
 type docker_helper_t, domain;
+
+# The workspace MAC lifecycle relabels concrete non-home workspaces between
+# usr_t and docker_helper_workspace_t. Those objects carry the unconfined_u
+# SELinux identity (restorecon without -F preserves user/role), while the
+# daemon runs as system_u:system_r:docker_helper_t. The base policy constraint
+# on { create relabelfrom relabelto } requires u1 == u2 unless the relabeling
+# domain has can_change_object_identity; docker_helper_t must therefore carry
+# that attribute to relabel workspace objects across the SELinux identity
+# boundary (proven by enforcing UAT AVCs).
+typeattribute docker_helper_t can_change_object_identity;
 
 # Allow system_r role to transition into docker_helper_t (systemd integration)
 role system_r types docker_helper_t;

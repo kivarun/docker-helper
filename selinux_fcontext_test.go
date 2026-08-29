@@ -2146,6 +2146,8 @@ func findRelabelRule(rules []selinuxAllowRule, target, class string) (selinuxAll
 // Each rule must grant exactly the proven permissions (getattr only where
 // restorecon must read an already-labeled object's current label before
 // relabeling it).
+// TestSELinuxPolicyWorkspaceRelabelRules verifies the AVC-proven workspace
+// relabel grants (exact source/target/class/perms).
 func TestSELinuxPolicyWorkspaceRelabelRules(t *testing.T) {
 	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
 	if err != nil {
@@ -2174,6 +2176,27 @@ func TestSELinuxPolicyWorkspaceRelabelRules(t *testing.T) {
 		if got.perms != w.perms {
 			t.Errorf("docker_helper_t %s:%s perms = %q, want exactly %q", w.target, w.class, got.perms, w.perms)
 		}
+	}
+}
+
+// TestSELinuxPolicyWorkspaceRelabelObjectIdentity guards that docker_helper_t
+// carries can_change_object_identity. The base policy constrains
+// { create relabelfrom relabelto } on file classes to u1 == u2 unless the
+// relabeling domain has that attribute; workspace objects keep the
+// unconfined_u identity (restorecon without -F) while the daemon runs as
+// system_u, so without the attribute the relabel is denied by the constraint
+// even though the allow rules are present (proven by enforcing UAT AVCs).
+func TestSELinuxPolicyWorkspaceRelabelObjectIdentity(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "attribute can_change_object_identity;") {
+		t.Error("policy must require attribute can_change_object_identity in its require block")
+	}
+	if !strings.Contains(content, "typeattribute docker_helper_t can_change_object_identity;") {
+		t.Error("docker_helper_t must carry the can_change_object_identity attribute so the workspace relabel is not blocked by the base u1 == u2 constraint")
 	}
 }
 
