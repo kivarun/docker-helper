@@ -64,6 +64,8 @@ done
           info "    file $f: $(stat -c '%s bytes' "$f" 2>/dev/null || echo '?')"
           case "$(basename "$f")" in
             cil)
+              info "    CIL FULL CONTENT:"
+              sed -n '1,200p' "$f" 2>/dev/null | sed 's/^/      /' || true
               info "    CIL workspace relabel/getattr rules:"
               grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' "$f" 2>/dev/null \
                 | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/      /' || echo "      (none)"
