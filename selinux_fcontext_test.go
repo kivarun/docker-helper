@@ -132,8 +132,8 @@ func TestSELinuxPolicyInitTAndSystemPermissions(t *testing.T) {
 	//   scontext=init_t tcontext=docker_helper_t tclass=process denied { siginh }
 	// The process class declaration and the init_t -> docker_helper_t process
 	// rule must both carry siginh.
-	if !strings.Contains(content, "class process { transition siginh };") {
-		t.Error("process class declaration must include siginh")
+	if !strings.Contains(content, "class process { transition siginh noatsecure rlimitinh };") {
+		t.Error("process class declaration must include siginh (and the kernel-required noatsecure/rlimitinh)")
 	}
 	if !strings.Contains(content, "allow init_t docker_helper_t:process { transition siginh };") {
 		t.Error("init_t -> docker_helper_t process rule must include siginh")
@@ -214,6 +214,55 @@ func TestSELinuxPolicyUserHomeTypeUnchanged(t *testing.T) {
 		if !strings.Contains(content, rule) {
 			t.Errorf("policy must retain: %s", rule)
 		}
+	}
+}
+
+func TestSELinuxPolicySemanageTransition(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// The Session MAC preparation (ensureWorkspaceFcontext) lists and adds
+	// local fcontext rules by executing semanage. Regression for the standard
+	// semanage domtrans pattern plus the live enforcing AVC deltas:
+	//   avc: denied { noatsecure } scontext=docker_helper_t tcontext=semanage_t tclass=process
+	//   avc: denied { execute } scontext=docker_helper_t tcontext=bin_t name=python3.13 tclass=file
+	for _, rule := range []string{
+		"type semanage_t;",
+		"type semanage_exec_t;",
+		"type bin_t;",
+		"type_transition docker_helper_t semanage_exec_t:process semanage_t;",
+		"allow docker_helper_t semanage_t:process { transition siginh noatsecure rlimitinh };",
+		"allow docker_helper_t semanage_t:process2 { nnp_transition };",
+		"allow docker_helper_t semanage_exec_t:file { execute read open getattr map };",
+		"allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };",
+		"allow docker_helper_t bin_t:file { execute read open getattr map };",
+	} {
+		if !strings.Contains(content, rule) {
+			t.Errorf("policy must grant: %s", rule)
+		}
+	}
+}
+
+func TestSELinuxPolicySELinuxWorkspaceLock(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// ensureWorkspaceFcontext acquires /run/lock/docker-helper-selinux.lock
+	// (var_lock_t) before listing/adding fcontext rules. Regression for the
+	// live enforcing AVC:
+	//   avc: denied { write } scontext=docker_helper_t tcontext=var_lock_t name=lock tclass=dir
+	if !strings.Contains(content, "type var_lock_t;") {
+		t.Error("policy must require type var_lock_t;")
+	}
+	if !strings.Contains(content, "allow docker_helper_t var_lock_t:dir { write add_name };") {
+		t.Error("policy must grant docker_helper_t var_lock_t:dir write add_name")
+	}
+	if !strings.Contains(content, "allow docker_helper_t var_lock_t:file { create open read write getattr lock };") {
+		t.Error("policy must grant docker_helper_t var_lock_t:file create/open/read/write/getattr/lock")
 	}
 }
 

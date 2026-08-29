@@ -89,6 +89,10 @@ module docker_helper 1.0;
 		type default_context_t;
 		type file_context_t;
 		type tmpfs_t;
+		type semanage_t;
+		type semanage_exec_t;
+		type bin_t;
+		type var_lock_t;
 
 		role system_r;
 
@@ -104,7 +108,7 @@ module docker_helper 1.0;
 		class unix_stream_socket { connectto getattr ioctl read write };
 		class udp_socket { create setopt connect getattr read write };
 		class capability { dac_read_search sys_admin };
-		class process { transition siginh };
+		class process { transition siginh noatsecure rlimitinh };
 		class process2 { nnp_transition };
 	}
 
@@ -284,6 +288,47 @@ allow docker_helper_t docker_helper_workspace_t:file { getattr read open };
 
 # docker_helper_workspace_t:lnk_file — symlink traversal in workspace
 allow docker_helper_t docker_helper_workspace_t:lnk_file { read };
+
+# --- semanage execution (docker_helper_t -> semanage_exec_t -> semanage_t) ---
+#
+# The Session MAC preparation (ensureWorkspaceFcontext) lists local fcontext
+# rules with `semanage fcontext -l -C -n` and adds the workspace boundary with
+# `semanage fcontext -a`. The standard semanage domain-transition pattern
+# (semanage_domtrans, as present in the installed policy for init_t, sysadm_t,
+# etc.) is:
+#   type_transition <dom> semanage_exec_t:process semanage_t
+#   allow <dom> semanage_t:process { transition siginh }
+#   allow <dom> semanage_t:process2 nnp_transition   (only when NNP is set)
+#   allow <dom> semanage_exec_t:file { execute read open getattr map }
+#   allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint }
+#
+# Live AVC evidence (bounded enforcing run, auditd verified capturing) added the
+# delta permissions:
+#   avc: denied { noatsecure } scontext=docker_helper_t tcontext=semanage_t tclass=process
+#     -> the process transition also requires noatsecure (and rlimitinh, the
+#        kernel-required companion) beyond transition/siginh;
+#   avc: denied { execute } scontext=docker_helper_t tcontext=bin_t
+#     name=python3.13 tclass=file
+#     -> the exec'ing source domain itself must be able to execute the script
+#        interpreter (python3.13 at bin_t), even though the script exec
+#        transitions the child to semanage_t.
+#
+# NoNewPrivileges=true in docker-helper.service means the transition requires
+# process2:nnp_transition (mirrors the existing init_t -> docker_helper_t rule).
+type_transition docker_helper_t semanage_exec_t:process semanage_t;
+allow docker_helper_t semanage_t:process { transition siginh noatsecure rlimitinh };
+allow docker_helper_t semanage_t:process2 { nnp_transition };
+allow docker_helper_t semanage_exec_t:file { execute read open getattr map };
+allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };
+allow docker_helper_t bin_t:file { execute read open getattr map };
+
+# --- SELinux workspace serialization lock (/run/lock/docker-helper-selinux.lock) ---
+# ensureWorkspaceFcontext acquires this global lock before listing/adding
+# fcontext rules. The lock lives in /run/lock (var_lock_t). AVC:
+#   avc: denied { write } scontext=docker_helper_t tcontext=var_lock_t
+#     name=lock tclass=dir
+allow docker_helper_t var_lock_t:dir { write add_name };
+allow docker_helper_t var_lock_t:file { create open read write getattr lock };
 
 # Capabilities for workspace access and mount-pin (proven in enforcing UAT)
 allow docker_helper_t self:capability { dac_read_search sys_admin };
