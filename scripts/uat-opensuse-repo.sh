@@ -47,11 +47,12 @@ OPENSUSE_ZYPPER_ATTEMPTS=3
 OPENSUSE_ZYPPER_DELAY=2
 
 # zypp_set_download_key KEY VALUE: enforce one zypp.conf download key
-# (uncomment/rewrite if present, append otherwise; the last value wins).
+# (uncomment/rewrite if present, append otherwise; the last value wins). The
+# Tumbleweed Minimal-VM Cloud image may ship without /etc/zypp/zypp.conf, so a
+# missing file is not an error: the append branch creates it.
 zypp_set_download_key() {
   local conf=/etc/zypp/zypp.conf key="$1" value="$2"
-  [ -f "$conf" ] || { echo "error: $conf not found" >&2; return 1; }
-  if grep -Eq "^[[:space:]]*#*[[:space:]]*$key([[:space:]]*=)" "$conf"; then
+  if [ -f "$conf" ] && grep -Eq "^[[:space:]]*#*[[:space:]]*$key([[:space:]]*=)" "$conf"; then
     sed -i -E "s|^[[:space:]]*#*[[:space:]]*$key([[:space:]=]+).*|$key = $value|" "$conf"
   else
     printf '\n%s = %s\n' "$key" "$value" >> "$conf"
