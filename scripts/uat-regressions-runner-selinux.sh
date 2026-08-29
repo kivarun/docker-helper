@@ -66,9 +66,15 @@ done
             cil)
               info "    CIL FULL CONTENT (decompressed if bzip2):"
               if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
-                bzip2 -dc "$f" 2>/dev/null | sed -n '1,200p' | sed 's/^/      /' || true
+                info "      bzip2 available: yes; attempting decompress"
+                bzip2 -dc "$f" >/tmp/dh_store.cil 2>/tmp/dh_bz.err
+                info "      decompress rc=$? stderr: $(tr '\n' ' ' < /tmp/dh_bz.err)"
+                info "      decompressed: $(wc -l < /tmp/dh_store.cil 2>/dev/null || echo 0) lines, $(wc -c < /tmp/dh_store.cil 2>/dev/null || echo 0) bytes"
+                sed -n '1,120p' /tmp/dh_store.cil 2>/dev/null | sed 's/^/      /' || true
+                rm -f /tmp/dh_store.cil /tmp/dh_bz.err
               else
-                sed -n '1,200p' "$f" 2>/dev/null | sed 's/^/      /' || true
+                info "      bzip2 not used (unavailable or not BZh)"
+                sed -n '1,120p' "$f" 2>/dev/null | sed 's/^/      /' || true
               fi
               info "    CIL workspace relabel/getattr rules:"
               if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
