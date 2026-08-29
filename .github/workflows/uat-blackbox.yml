@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: 'Which jobs to run (full matrix or bounded SELinux A/B proof)'
+        description: 'Which jobs to run (full matrix, bounded SELinux A/B proof, or openSUSE SELinux job only)'
         required: false
         default: 'full'
         type: choice
         options:
           - full
           - selinux-ab-proof
+          - selinux
   push:
     branches: [main]
 
@@ -70,7 +71,7 @@ permissions:
 jobs:
   # Ubuntu profiles (hosted runners) run on push and dispatch.
   uat-blackbox:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.scope != 'selinux-ab-proof')
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.scope == 'full')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -190,7 +191,7 @@ jobs:
   # final phase. A failure in one group never stops the others. Gated to
   # workflow_dispatch (like the RPM producer and the VM jobs).
   uat-regressions-ubuntu:
-    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'selinux-ab-proof'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -235,7 +236,7 @@ jobs:
   # job, never recomputed-and-trusted on openSUSE. No build toolchain (Go, nfpm,
   # musl-gcc, checkpolicy) is installed here.
   uat-blackbox-opensuse-apparmor:
-    if: github.event_name == 'workflow_dispatch' && inputs.scope != 'selinux-ab-proof'
+    if: github.event_name == 'workflow_dispatch' && inputs.scope == 'full'
     needs: uat-rpm-build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
