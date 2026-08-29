@@ -45,7 +45,9 @@ info "loaded docker_helper module(s):"
 semodule -l 2>&1 | grep docker_helper | sed 's/^/  /' || echo "  (no docker_helper module listed)"
 # The installed module's CIL is exactly what the kernel policy contains.
 if semodule -E docker_helper >/tmp/dh_loaded.cil 2>/dev/null; then
-  info "installed docker_helper module CIL size: $(wc -l < /tmp/dh_loaded.cil) lines, allow rules: $(grep -c '(allow docker_helper_t' /tmp/dh_loaded.cil || true)"
+  info "installed docker_helper module CIL size: $(wc -l < /tmp/dh_loaded.cil) lines, bytes: $(wc -c < /tmp/dh_loaded.cil), allow rules: $(grep -c '(allow docker_helper_t' /tmp/dh_loaded.cil || true)"
+  info "installed docker_helper module CIL (raw, first 40 lines):"
+  sed -n '1,40p' /tmp/dh_loaded.cil | sed 's/^/  /' || true
   info "installed docker_helper module CIL (workspace relabel/getattr rules, unquoted):"
   grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' /tmp/dh_loaded.cil \
     | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/  /' || echo "  (no unquoted workspace relabel/getattr rules found)"
