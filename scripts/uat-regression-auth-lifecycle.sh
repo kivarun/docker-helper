@@ -161,10 +161,16 @@ subcase_d() {
   reg_session "$cred" "$ws" || { reg_fail "D: session create failed"; return; }
   local sid="$REG_SESSION_ID" stok="$REG_SESSION_TOKEN"
 
-  # Long-running op: reports readiness via a started marker, then waits for a
-  # release marker in the same control mount.
+  # Long-running operation. The subject of this assertion is the DOCKER
+  # OPERATION (the container), not the authenticated CLI observer: a session
+  # lifecycle change may invalidate the CLI's own token, but the already-started
+  # operation must continue its lifecycle (docs/architecture.md: "an
+  # already-started Docker operation continues its lifecycle"). The container
+  # reports readiness, keeps writing a heartbeat into the pinned control mount,
+  # waits for the release marker, then writes op-done; all of these are read
+  # from the host side of the control mount, independent of the CLI.
   local runlog="/tmp/uat-reg3/d-run.log"
-  local script='echo started > /mnt/ctl/started; while [ ! -f /mnt/ctl/release ]; do sleep 1; done; echo OP-DONE'
+  local script='echo started > /mnt/ctl/started; n=0; while [ ! -f /mnt/ctl/release ]; do n=$((n+1)); echo "$n" >> /mnt/ctl/heartbeat; sleep 1; done; echo OP-DONE > /mnt/ctl/op-done'
   DOCKER_HELPER_SESSION_TOKEN="$stok" \
     dh run --image "$IMAGE" --mount ctl:/mnt/ctl -- sh -ec "$script" >"$runlog" 2>&1 &
   local runpid=$!
@@ -176,33 +182,49 @@ subcase_d() {
       started=1
       break
     fi
-    if ! kill -0 "$runpid" 2>/dev/null; then
-      reg_fail "D: long-running operation exited before readiness (log: $(cat "$runlog" 2>/dev/null | redact))"
-      return
-    fi
     sleep 1
   done
-  [ "$started" = 1 ] || { reg_fail "D: container did not report readiness in 60s"; return; }
+  [ "$started" = 1 ] || { reg_fail "D: container did not report readiness in 60s (log: $(cat "$runlog" 2>/dev/null | redact))"; return; }
+  reg_ok "D: operation started (container wrote started marker)"
+
+  # Heartbeat level before the lifecycle change.
+  local hb_before hb_after
+  hb_before="$(wc -l < "$ctl/heartbeat" 2>/dev/null || echo 0)"
 
   # Lifecycle change: delete the session while the operation is running.
   dh session delete --system --id "$sid" >/dev/null 2>&1 || true
   reg_ok "D: session deleted while operation running"
 
-  sleep 2
-  if kill -0 "$runpid" 2>/dev/null; then
-    reg_ok "D: already-started operation continued after session delete"
+  # The Docker operation must continue: the heartbeat in the pinned control
+  # mount keeps growing after session deletion.
+  sleep 5
+  hb_after="$(wc -l < "$ctl/heartbeat" 2>/dev/null || echo 0)"
+  if [ "$hb_after" -gt "$hb_before" ]; then
+    reg_ok "D: already-started Docker operation continued after session delete (heartbeat $hb_before -> $hb_after)"
   else
-    reg_fail "D: already-started operation was terminated by session delete"
+    reg_fail "D: already-started Docker operation stopped after session delete (heartbeat stalled at $hb_before)"
   fi
 
+  # Release the operation; the container must complete normally (op-done in the
+  # control mount), independent of the CLI observer's fate.
   touch "$ctl/release"
-  local ec=0
-  wait "$runpid" 2>/dev/null; ec=$?
-  if [ "$ec" -eq 0 ] && grep -q 'OP-DONE' "$runlog"; then
-    reg_ok "D: already-started operation completed normally (documented lifecycle)"
+  local done_seen=0
+  for _ in $(seq 1 60); do
+    if [ "$(cat "$ctl/op-done" 2>/dev/null || true)" = "OP-DONE" ]; then
+      done_seen=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$done_seen" = 1 ]; then
+    reg_ok "D: already-started Docker operation completed normally after session delete (op-done via control mount)"
   else
-    reg_fail "D: operation did not complete normally after session delete (rc=$ec)"
+    reg_fail "D: already-started Docker operation did not complete after session delete"
   fi
+
+  # Reap the CLI observer if it is still around (not part of the assertion).
+  kill "$runpid" 2>/dev/null || true
+  wait "$runpid" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------

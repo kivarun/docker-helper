@@ -84,9 +84,12 @@ echo "MICROPROOF_SESSION_CREATED=yes"
 # --- 4. one diagnostic pull (dontaudit disabled) --------------------------------
 export DOCKER_HELPER_SESSION_TOKEN="$TOKEN"
 echo "MICROPROOF pull alpine:3.24 (dontaudit disabled)"
-PULL_OUT="$(docker-helper pull alpine:3.24 2>&1 | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' || true)"
-PULL_RC=$?
-printf '%s\n' "$PULL_OUT" | tail -20
+# Capture the ACTUAL docker-helper exit code directly (the previous form piped
+# through sed before recording $?, so MICROPROOF_PULL_RC was the sed status or
+# was forced to 0 by `|| true`). Redaction happens only at display time.
+PULL_RC=0
+PULL_OUT="$(docker-helper pull alpine:3.24 2>&1)" || PULL_RC=$?
+printf '%s\n' "$PULL_OUT" | sed -E 's/dht_[A-Za-z0-9_-]+/<redacted>/g' | tail -20
 echo "MICROPROOF_PULL_RC=$PULL_RC"
 
 # --- 5. capture the complete relevant AVC records -------------------------------

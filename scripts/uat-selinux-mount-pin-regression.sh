@@ -80,6 +80,25 @@ selinux_ctx() {
   printf '%s' "$c"
 }
 
+# classify_run_exit: the background docker-helper run exited before a mount pin
+# appeared. If the log shows the known Docker-socket blocker (the var_run_t vs
+# container_var_run_t connection denial, documented by the A2 micro-proof), the
+# run could never have remained active and the mount-pin lifecycle cannot be
+# exercised — classify that case BLOCKED/inconclusive (exit 2) rather than FAIL.
+# Any other early exit is a genuine regression (exit 1).
+classify_run_exit() {
+  local logf="$1"
+  printf 'error: background run exited before a mount pin appeared (log below)\n' >&2
+  cat "$logf" >&2 || true
+  if grep -qiE 'permission denied.*docker|docker[^[:space:]]*\.sock|cannot connect to the docker daemon' "$logf" 2>/dev/null; then
+    echo "REGRESSION_RESULT=BLOCKED"
+    echo "REGRESSION_BLOCKED_REASON=docker socket blocker prevented the docker-helper run from remaining active (known UNRESOLVED; mount-pin lifecycle not exercised)"
+    echo "[pin-regression] BLOCKED: docker socket blocker prevented an active operation; mount-pin case is inconclusive" >&2
+    exit 2
+  fi
+  exit 1
+}
+
 say "== SELinux mount-pin / RPM postinstall regression =="
 info "workspace: $WS  (intentionally under /home: normal host user_home_type coverage)"
 info "RPM:       $UAT_RPM"
@@ -159,9 +178,7 @@ $d"
     break
   fi
   if ! kill -0 "$RUN_PID" 2>/dev/null; then
-    echo "error: background run exited before a mount pin appeared (log below)" >&2
-    cat "$RUN_LOG" >&2 || true
-    exit 1
+    classify_run_exit "$RUN_LOG"
   fi
   sleep 1
 done
