@@ -144,7 +144,7 @@ ensure_auditd() {
 restore_dontaudit() {
   echo "AB restore dontaudit: semodule -B"
   semodule -B 2>&1 || echo "warning: semodule -B failed (dontaudit may remain disabled)"
-  if [ -f /tmp/dh-semanage-proof.pp ]; then
+  if [ -f /tmp/dh_semanage_proof.pp ]; then
     echo "AB remove temp proof module: semodule -r dh_semanage_proof"
     semodule -r dh_semanage_proof 2>&1 || echo "warning: semodule -r dh_semanage_proof failed"
   fi
@@ -277,7 +277,9 @@ else
   echo "AB_NNP_EXPECTATION=NoNewPrivileges=true means the domain transition requires process2:nnp_transition (same as the existing init_t -> docker_helper_t rule)"
 
   echo "--- build + load TEMPORARY proof module (docker_helper_t -> semanage_exec_t -> semanage_t) ---"
-  TE="/tmp/dh-semanage-proof.te"
+  # checkmodule requires the module name to match the output base filename, so
+  # the .mod/.pp artifacts are named dh_semanage_proof.* (module dh_semanage_proof).
+  TE="/tmp/dh_semanage_proof.te"
   cat > "$TE" <<'TE_EOF'
 module dh_semanage_proof 1.0;
 
@@ -308,9 +310,9 @@ allow docker_helper_t self:pipe { read write getattr ioctl };
 allow semanage_t docker_helper_t:pipe { read write getattr ioctl };
 allow docker_helper_t semanage_t:pipe { read write getattr ioctl };
 TE_EOF
-  if checkmodule -M -m -o /tmp/dh-semanage-proof.mod "$TE" 2>&1; then
-    semodule_package -o /tmp/dh-semanage-proof.pp -m /tmp/dh-semanage-proof.mod 2>&1 \
-      && semodule -i /tmp/dh-semanage-proof.pp 2>&1 \
+  if checkmodule -M -m -o /tmp/dh_semanage_proof.mod "$TE" 2>&1; then
+    semodule_package -o /tmp/dh_semanage_proof.pp -m /tmp/dh_semanage_proof.mod 2>&1 \
+      && semodule -i /tmp/dh_semanage_proof.pp 2>&1 \
       && echo "AB_PROOF_MODULE=loaded" \
       || { echo "error: could not package/load the temporary proof module" >&2; exit 1; }
   else
