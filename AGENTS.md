@@ -564,7 +564,33 @@ paths again and verify:
 Run policy/static-build checks as required by the changed area and available
 tooling.
 
-25. Keep commits and pushes deliberate.
+25. Wait for asynchronous state, not estimated durations.
+
+When waiting for CI, builds, deployments, VM boot, background processes, or
+other external state, wait for the condition rather than an estimated amount of
+time.
+
+Prefer a native blocking/watch command when one exists, for example:
+
+    gh run watch <run-id> --exit-status --interval 10
+
+Otherwise use bounded polling with short intervals:
+- check the condition immediately before the first sleep;
+- normally poll every 5–15 seconds;
+- stop as soon as the operation reaches a terminal, ready, or failure state;
+- use an explicit overall timeout;
+- report useful progress when appropriate.
+
+Never use one long blind sleep to wait for an asynchronous event, for example:
+
+    sleep 420
+    gh run view ...
+
+A long blind sleep delays reaction to early completion/failure and wastes task
+time. If an operation is expected to take several minutes, keep waiting on its
+state rather than increasing the blind sleep interval.
+
+26. Keep commits and pushes deliberate.
 
 Keep commits focused. Commit messages must describe the code actually present;
 do not leave stale claims after amending implementation.
@@ -576,7 +602,7 @@ history was intentionally amended.
 Do not push merely because implementation is complete unless the task requests
 it.
 
-26. Review architecture after significant feature blocks.
+27. Review architecture after significant feature blocks.
 
 After multiple commits add a substantial capability, before the next major
 phase review for:
