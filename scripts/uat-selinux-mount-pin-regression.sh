@@ -80,15 +80,17 @@ selinux_ctx() {
   printf '%s' "$c"
 }
 
-# classify_run_exit: the background docker-helper run exited before a mount pin
-# appeared. If the log shows the known Docker-socket blocker (the var_run_t vs
-# container_var_run_t connection denial, documented by the A2 micro-proof), the
-# run could never have remained active and the mount-pin lifecycle cannot be
-# exercised — classify that case BLOCKED/inconclusive (exit 2) rather than FAIL.
-# Any other early exit is a genuine regression (exit 1).
+# classify_run_exit: the background docker-helper run exited before the
+# container became provably active (no mount pin appeared, or a pin appeared
+# but the container never wrote its active-context proof). If the log shows the
+# known Docker-socket blocker (the var_run_t vs container_var_run_t connection
+# denial, documented by the A2 micro-proof), the run could never have remained
+# active and the mount-pin lifecycle cannot be exercised — classify that case
+# BLOCKED/inconclusive (exit 2) rather than FAIL. Any other early exit is a
+# genuine regression (exit 1).
 classify_run_exit() {
-  local logf="$1"
-  printf 'error: background run exited before a mount pin appeared (log below)\n' >&2
+  local logf="$1" when="${2:-before the container became provably active}"
+  printf 'error: background run exited %s (log below)\n' "$when" >&2
   cat "$logf" >&2 || true
   if grep -qiE 'permission denied.*docker|docker[^[:space:]]*\.sock|cannot connect to the docker daemon' "$logf" 2>/dev/null; then
     echo "REGRESSION_RESULT=BLOCKED"
@@ -97,6 +99,14 @@ classify_run_exit() {
     exit 2
   fi
   exit 1
+}
+
+# attr_current reads /proc/<pid>/attr/current with the trailing NUL byte
+# stripped (the kernel writes a NUL terminator, which makes shell tools emit a
+# repeated "ignoring null byte in input" warning). Harness-only sanitation; no
+# production change.
+attr_current() {
+  tr -d '\0' < "/proc/$1/attr/current" 2>/dev/null || true
 }
 
 say "== SELinux mount-pin / RPM postinstall regression =="
@@ -111,7 +121,7 @@ info "== 1. restart docker-helper service =="
 systemctl enable --now docker-helper.service >/dev/null 2>&1 || { echo "error: cannot enable+start docker-helper" >&2; exit 1; }
 systemctl is-active --quiet docker-helper.service || { echo "error: docker-helper not active" >&2; exit 1; }
 DAEMON_PID="$(systemctl show -p MainPID --value docker-helper.service)"
-echo "DAEMON_CONTEXT_BEFORE=$(cat "/proc/$DAEMON_PID/attr/current" 2>/dev/null || true)"
+echo "DAEMON_CONTEXT_BEFORE=$(attr_current "$DAEMON_PID")"
 
 # ---------------------------------------------------------------------------
 # 2. fresh workspace + fixture (probe.txt), principal + credential + session
@@ -178,18 +188,36 @@ $d"
     break
   fi
   if ! kill -0 "$RUN_PID" 2>/dev/null; then
-    classify_run_exit "$RUN_LOG"
+    classify_run_exit "$RUN_LOG" "before a mount pin appeared"
   fi
   sleep 1
 done
 [ -n "$PIN" ] || { echo "error: no mount pin appeared within 120s" >&2; exit 1; }
 info "mount pin: $PIN"
 
-# Wait for the container to write its SELinux context file (bounded).
+# Wait for proof that the container is actually active: the container writes
+# its own SELinux context into container-context.txt. While waiting, keep
+# checking that the operation is still alive AND the pin still exists/is
+# mounted; if the operation exits before the active-container proof is
+# reached, classify the outcome from the run log (known Docker socket blocker
+# => BLOCKED, otherwise FAIL) instead of stat()ing a pin that may already be
+# gone.
+ACTIVE_PROOF=0
 for i in $(seq 1 30); do
-  [ -s "$WS/rw/container-context.txt" ] && break
+  if [ -s "$WS/rw/container-context.txt" ]; then
+    ACTIVE_PROOF=1
+    break
+  fi
+  if ! kill -0 "$RUN_PID" 2>/dev/null; then
+    classify_run_exit "$RUN_LOG" "after the mount pin appeared but before the container proved active"
+  fi
+  if ! mountpoint -q "$PIN" 2>/dev/null; then
+    # Operation is still running but the pin is gone: cannot prove active.
+    classify_run_exit "$RUN_LOG" "after the mount pin appeared but before the container proved active (pin no longer mounted)"
+  fi
   sleep 1
 done
+[ "$ACTIVE_PROOF" = 1 ] || { echo "error: container never proved active within 30s" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 5. BEFORE state: source + pin device:inode / context / type + matchpathcon
@@ -230,7 +258,7 @@ else
   info "matchpathcon at pin path: $MATCH_PIN"
 fi
 
-CONTAINER_CONTEXT="$(cat "$WS/rw/container-context.txt" 2>/dev/null || true)"
+CONTAINER_CONTEXT="$(tr -d '\0' < "$WS/rw/container-context.txt" 2>/dev/null || true)"
 echo "CONTAINER_CONTEXT=$CONTAINER_CONTEXT"
 CONTAINER_TYPE="$(printf '%s' "$CONTAINER_CONTEXT" | cut -d: -f3)"
 [ -n "$CONTAINER_TYPE" ] || { echo "error: container context file empty/missing" >&2; exit 1; }
@@ -348,8 +376,8 @@ fi
 systemctl is-active --quiet docker-helper.service \
   || { echo "error: docker-helper service not active after regression" >&2; exit 1; }
 NEW_PID="$(systemctl show -p MainPID --value docker-helper.service)"
-echo "DAEMON_CONTEXT_AFTER=$(cat "/proc/$NEW_PID/attr/current" 2>/dev/null || true)"
-D_CTX="$(cat "/proc/$NEW_PID/attr/current" 2>/dev/null || true)"
+echo "DAEMON_CONTEXT_AFTER=$(attr_current "$NEW_PID")"
+D_CTX="$(attr_current "$NEW_PID")"
 D_TYPE="$(printf '%s' "$D_CTX" | cut -d: -f3)"
 [ "$D_TYPE" = "docker_helper_t" ] \
   || { echo "error: daemon type != docker_helper_t after regression (got '$D_TYPE')" >&2; exit 1; }
