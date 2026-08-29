@@ -45,7 +45,7 @@ permissions:
 #
 # The openSUSE/SELinux profile additionally runs the Phase-A2 docker socket
 # micro-proof (scripts/uat-socket-microproof.sh) and the Release-2 SELinux
-# targeted regression groups 1-2 (scripts/uat-regressions-runner-selinux.sh),
+# targeted regression groups 1-3 (scripts/uat-regressions-runner-selinux.sh),
 # all with collect-all semantics: a failure in one stage never prevents the
 # remaining stages.
 #

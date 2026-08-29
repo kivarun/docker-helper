@@ -25,7 +25,7 @@
 # guest, running the existing UAT, the SELinux mount-pin / RPM postinstall
 # regression (scripts/uat-selinux-mount-pin-regression.sh), the Phase-A2 docker
 # socket micro-proof (scripts/uat-socket-microproof.sh) and the Release-2 SELinux
-# targeted regression groups 1-2 (scripts/uat-regressions-runner-selinux.sh).
+# targeted regression groups 1-3 (scripts/uat-regressions-runner-selinux.sh).
 # All VM mechanics live in the harness; the guest-side UAT is the existing
 # scripts/uat-blackbox.sh with its uat-platform-opensuse.sh (platform owner)
 # and uat-mac-selinux.sh (MAC owner) adapters, which remain the owners of their
@@ -33,7 +33,7 @@
 #
 # Collect-all: a failure in the common black-box UAT or the mount-pin
 # regression never prevents the remaining stages (socket micro-proof, Release-2
-# regressions 1-2) from executing; the final summary records every stage and
+# regressions 1-3) from executing; the final summary records every stage and
 # the job exits nonzero only when a gating stage failed.
 #
 # Flow:
@@ -62,7 +62,7 @@
 #          UAT_MAC=selinux, prebuilt RPM)            [result recorded, collect-all]
 #       -> SELinux mount-pin / RPM postinstall regression  [result recorded]
 #       -> A2 docker socket micro-proof (dontaudit off, bounded evidence)
-#       -> Release-2 SELinux targeted regression groups 1-2 (collect-all runner)
+#       -> Release-2 SELinux targeted regression groups 1-3 (collect-all runner)
 #
 # The Tumbleweed cloud image ships SELinux-active by default (the filesystem
 # is already labeled for the targeted policy), so the harness keeps SELinux as
@@ -82,7 +82,7 @@
 #   UAT_KEEP         keep the VM/workdir on failure for debugging
 #   UAT_SELINUX_MODE full (default) | ab-proof
 #                    full: the full collect-all SELinux job (black-box UAT,
-#                    mount-pin regression, socket micro-proof, regressions 1-2).
+#                    mount-pin regression, socket micro-proof, regressions 1-3).
 #                    ab-proof: bounded single-VM run that installs the RPM +
 #                    confined service (install-only) and then runs only the
 #                    SELinux A/B proofs (docker runtime/socket A/B and semanage
@@ -568,17 +568,17 @@ else
   record_stage "A2 socket micro-proof" "$MICRO_RESULT"
 
   # ---------------------------------------------------------------------------
-  # 8c. Release-2 SELinux targeted regression groups 1-2 (collect-all)
+  # 8c. Release-2 SELinux targeted regression groups 1-3 (collect-all)
   # ---------------------------------------------------------------------------
-  log "== 8c. SELinux targeted regression groups 1-2 (collect-all runner) =="
+  log "== 8c. SELinux targeted regression groups 1-3 (collect-all runner) =="
   SELREG_RESULT=FAIL
-  if run_guest_capture "SELinux regression groups 1-2 inside the guest" \
+  if run_guest_capture "SELinux regression groups 1-3 inside the guest" \
     "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-regressions-runner-selinux.sh"; then
     SELREG_RESULT=PASS
   else
-    log "SELinux regression groups 1-2 reported a failure (recorded)"
+    log "SELinux regression groups 1-3 reported a failure (recorded)"
   fi
-  record_stage "SELinux regressions (1-2)" "$SELREG_RESULT"
+  record_stage "SELinux regressions (1-3)" "$SELREG_RESULT"
 fi
 
 # ---------------------------------------------------------------------------

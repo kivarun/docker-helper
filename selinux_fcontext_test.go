@@ -960,7 +960,23 @@ func TestFcontextListLocalArgv(t *testing.T) {
 	}
 }
 
-func TestRestoreconTypeOnlyArgv(t *testing.T) {
+// TestRestoreconRecursiveArgv pins the exact canonical recursive restorecon
+// invocation for workspaces. Rationale (restorecon(8), Tumbleweed
+// policycoreutils 3.11-2.2):
+//
+//	-R  recursive relabel of the workspace boundary.
+//	-m  do not read /proc/mounts for non-seclabel mount exclusion. Without it
+//	    selinux_restorecon(3) statvfs()es every mounted filesystem, which in the
+//	    confined docker_helper_t context requires filesystem getattr on many
+//	    mount-scan types that the policy intentionally does not grant.
+//	-x  do not cross filesystem boundaries (SELINUX_RESTORECON_XDEV: skip
+//	    directories whose st_dev differs from the walk root). Prevents the
+//	    recursive relabel from touching a different filesystem mounted beneath
+//	    the workspace. Note: -x does NOT protect against same-filesystem bind
+//	    mounts (they share st_dev); that case is pre-existing and documented.
+//
+// -F must never be used (type-only restorecon).
+func TestRestoreconRecursiveArgv(t *testing.T) {
 	var lastArgs []string
 	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
 	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
@@ -970,7 +986,7 @@ func TestRestoreconTypeOnlyArgv(t *testing.T) {
 	if err := mgr.restoreconRecursive("/data"); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-R", "/data"}
+	want := []string{"-R", "-m", "-x", "/data"}
 	if !reflect.DeepEqual(lastArgs, want) {
 		t.Errorf("argv = %v, want %v", lastArgs, want)
 	}

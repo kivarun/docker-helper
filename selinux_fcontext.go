@@ -644,11 +644,46 @@ func (m *selinuxFcontextManager) removeFcontextRule(pattern string) error {
 	return nil
 }
 
+// restoreconRecursive relabels the workspace recursively via the canonical
+// restorecon invocation shared by the initial relabel, the idempotent
+// existing-boundary relabel, and the rollback/removal paths.
+//
+// Flags (confirmed against the UAT platform's restorecon(8), openSUSE
+// Tumbleweed policycoreutils 3.11-2.2):
+//
+//	-R   change file and directory labels recursively.
+//	-m   do not read /proc/mounts to obtain a list of non-seclabel mounts to
+//	     be excluded from relabeling checks.
+//	-x   prevent restorecon from crossing file system boundaries.
+//
+// -m is required in the confined context: without it selinux_restorecon(3)
+// scans /proc/mounts and statvfs()es every mounted filesystem to classify
+// seclabel vs non-seclabel mounts, which requires filesystem getattr on many
+// filesystem types (fs_t, device_t, devpts_t, cgroup_t, ...). The docker_helper_t
+// domain is intentionally not granted those mount-scan permissions. The
+// trusted-CA restorecon already uses -m for the same reason.
+//
+// -x prevents the recursive walk from relabeling a different filesystem
+// mounted beneath the workspace (selinux_restorecon(3) SELINUX_RESTORECON_XDEV:
+// do not descend into directories with a different device number than the
+// pathname from which the descent began). Combined with -m this also covers the
+// non-seclabel-mount exclusion that /proc/mounts scanning used to provide:
+// a non-seclabel filesystem is necessarily a different filesystem (different
+// st_dev), so -x skips it.
+//
+// Known limitation (documented, pre-existing): -x compares st_dev, so it does
+// NOT prevent descent into a same-filesystem bind mount (a bind mount shares
+// the source filesystem's device number). Same-filesystem bind mounts were
+// already traversed by the previous `restorecon -R` invocation; -x is a strict
+// reduction of what restorecon crosses into, and does not introduce or worsen
+// that case.
+//
+// Type-only: restorecon is never passed -F, so user/role/MLS/MCS range are not
+// forcibly reset.
 func (m *selinuxFcontextManager) restoreconRecursive(path string) error {
-	// Type-only restorecon: do not forcibly reset user, role, or MLS/MCS range.
-	out, err := m.runCommand(m.restoreconPath, "-R", path)
+	out, err := m.runCommand(m.restoreconPath, "-R", "-m", "-x", path)
 	if err != nil {
-		return fmt.Errorf("restorecon -R: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("restorecon -R -m -x: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
