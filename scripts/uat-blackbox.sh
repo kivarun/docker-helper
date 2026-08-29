@@ -412,6 +412,27 @@ mac_verify_confinement "$DH_PID"
 
 info "service active: pid=$DH_PID binary=$EXE install=$(install_name)"
 
+# The daemon binds its unix API socket after systemd reports the unit active
+# (and after the startup sweep); `systemctl is-active` alone is not a readiness
+# oracle, so the first API call in phase 3 can race the socket bind. Wait
+# (bounded, short interval) for the actual condition under test — the API
+# socket serving GET /health — and fail fast if the service exits/fails. This
+# is the same readiness pattern as the group-9 stale-runtime regression fix.
+DH_SOCK="/run/docker-helper/docker-helper.sock"
+DH_READY=0
+for _ in $(seq 1 50); do
+  if [ -S "$DH_SOCK" ] && curl --silent --fail --max-time 1 \
+      --unix-socket "$DH_SOCK" http://localhost/health >/dev/null 2>&1; then
+    DH_READY=1
+    break
+  fi
+  if ! systemctl is-active --quiet docker-helper.service 2>/dev/null; then
+    fail_uat "docker-helper.service exited/failed while waiting for the API socket"
+  fi
+  sleep 0.2
+done
+[ "$DH_READY" = 1 ] || fail_uat "docker-helper API socket not ready after bounded wait ($DH_SOCK)"
+
 # Bounded install-only mode: UAT_STOP_AFTER_INSTALL exits after the system
 # install + confinement proof (phase 2) so a caller (the SELinux A/B proof VM
 # orchestration) can run bounded experiments against the installed, confined
