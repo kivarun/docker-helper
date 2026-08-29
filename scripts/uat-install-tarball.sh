@@ -4,19 +4,27 @@
 # black-box UAT. Sourced by scripts/uat-blackbox.sh (the scenario core) when
 # UAT_INSTALL=tarball.
 #
-# This adapter owns INSTALLATION of an already-produced release tar.gz via the
-# shipped install-system.sh path, and proving the installed files came from
-# that exact artifact. It never builds the artifact (that is the artifact
-# adapter's job: uat-artifact-tarball.sh).
+# "Tarball" here means: install the exact release tar.gz via the real shipped
+# install-system.sh path (./install-system.sh --yes --allowed-root ...), not
+# "AppArmor tarball". The adapter is MAC-neutral: which MAC artifacts the
+# install must have produced and verified depends on the selected UAT_MAC.
 #
 #   * install_preflight       — install-time tooling present (tar, gzip);
 #   * install_apply           — verify the recorded artifact hash, extract the
 #                               EXACT artifact, verify it, then run
 #                               ./install-system.sh --yes --allowed-root <root>
 #                               non-interactively (init is part of that path);
-#   * install_verify_artifacts— installed /usr/bin/docker-helper, systemd unit and
-#                               AppArmor profile byte-match the extracted bundle,
-#                               and no package manager owns them;
+#   * install_verify_artifacts— proves the installed binary/unit and the MAC
+#                               artifacts of the selected backend came from the
+#                               extracted bundle, and that no package manager
+#                               owns the installed files (dpkg on Ubuntu, rpm
+#                               on openSUSE):
+#                               AppArmor: binary, unit, AppArmor profile;
+#                               SELinux:  binary, unit, SELinux policy artifact
+#                                         at the stable path, plus the
+#                                         docker_helper policy module loaded;
+#                               daemon confinement itself (profile enforce /
+#                               docker_helper_t) is verified by the MAC adapter;
 #   * install_verify_version  — installed /usr/bin/docker-helper version matches.
 #
 # It consumes the exact artifact recorded by the artifact adapter
@@ -26,7 +34,7 @@
 # — the equivalent of the documented `sudo ./install-system.sh`.
 #
 # The core defines: VERSION, ALLOWED_ROOT, REPO_ROOT, say, info, fail_uat,
-# fail_uat_status, redact_tokens.
+# fail_uat_status, redact_tokens, and the selected MAC/PLATFORM.
 
 # Module-level state shared between the install steps.
 BUNDLE_DIR=""
@@ -44,6 +52,27 @@ install_preflight() {
   fi
   if ! command -v gzip >/dev/null 2>&1; then
     fail_uat "gzip not found"
+  fi
+}
+
+# package_owns returns 0 when the platform package manager owns the path.
+# Platform-owned: Ubuntu -> dpkg, openSUSE -> rpm. dpkg is NOT a tarball
+# invariant; the openSUSE tarball case must use rpm ownership.
+package_owns() {
+  local path="$1"
+  case "$PLATFORM" in
+    ubuntu) dpkg -S "$path" >/dev/null 2>&1 ;;
+    opensuse) rpm -qf "$path" >/dev/null 2>&1 ;;
+    *) fail_uat "no package-ownership check for platform '$PLATFORM'" ;;
+  esac
+}
+
+# assert_no_package_owner fails the UAT if a package manager owns the path: the
+# tarball case must be installed by the tarball, never by a package manager.
+assert_no_package_owner() {
+  local path="$1" label="$2"
+  if package_owns "$path"; then
+    fail_uat "$label is owned by a package — tarball case must not use a package manager ($PLATFORM)"
   fi
 }
 
@@ -99,31 +128,43 @@ install_apply() {
   printf '%s\n' "$INSTALL_OUT" | redact_tokens
 }
 
-# install_verify_artifacts proves the installed binary/unit/profile came from
-# the extracted bundle and that no package-manager install was involved.
+# install_verify_artifacts proves the installed binary/unit and the MAC
+# artifacts of the selected backend came from the extracted bundle and that no
+# package-manager install was involved. Daemon confinement itself (AppArmor
+# enforce / docker_helper_t) is verified by the MAC adapter in the core.
 install_verify_artifacts() {
   [ -n "$BUNDLE_DIR" ] && [ -d "$BUNDLE_DIR" ] \
     || fail_uat "bundle directory not recorded for artifact verification"
 
   cmp -s /usr/bin/docker-helper "$BUNDLE_DIR/docker-helper" \
     || fail_uat "installed /usr/bin/docker-helper does not match the bundle binary"
+  assert_no_package_owner /usr/bin/docker-helper "installed binary"
   cmp -s /etc/systemd/system/docker-helper.service "$BUNDLE_DIR/systemd/system/docker-helper.service" \
     || fail_uat "installed systemd unit does not match the bundle unit"
-  cmp -s /etc/apparmor.d/docker-helper-system "$BUNDLE_DIR/apparmor/docker-helper-system" \
-    || fail_uat "installed AppArmor profile does not match the bundle profile"
+  assert_no_package_owner /etc/systemd/system/docker-helper.service "installed unit"
 
-  # No package-manager install may be used for this case: if any package owns
-  # the installed paths, the tarball path was not the actual install source.
-  if dpkg -S /usr/bin/docker-helper >/dev/null 2>&1; then
-    fail_uat "/usr/bin/docker-helper is owned by a package — tarball case must not use a package manager"
+  if [ "$MAC" = "apparmor" ]; then
+    cmp -s /etc/apparmor.d/docker-helper-system "$BUNDLE_DIR/apparmor/docker-helper-system" \
+      || fail_uat "installed AppArmor profile does not match the bundle profile"
+    assert_no_package_owner /etc/apparmor.d/docker-helper-system "installed AppArmor profile"
+    info "installed binary/unit/AppArmor profile match the extracted bundle (no package manager)"
+  elif [ "$MAC" = "selinux" ]; then
+    # The SELinux policy artifact at the stable path must originate from the
+    # bundle (install-system.sh copies selinux/docker_helper.pp there).
+    cmp -s /usr/share/selinux/docker_helper.pp "$BUNDLE_DIR/selinux/docker_helper.pp" \
+      || fail_uat "installed SELinux policy artifact does not match the bundle selinux/docker_helper.pp"
+    assert_no_package_owner /usr/share/selinux/docker_helper.pp "installed SELinux policy artifact"
+    # The docker_helper policy module must actually be loaded (semodule -i ran).
+    if ! command -v semodule >/dev/null 2>&1; then
+      fail_uat "semodule not found — cannot verify docker_helper policy module is loaded"
+    fi
+    if ! semodule -l 2>/dev/null | grep -qw docker_helper; then
+      fail_uat "docker_helper policy module is not loaded (semodule -l)"
+    fi
+    info "installed binary/unit/SELinux policy artifact match the extracted bundle; docker_helper module loaded (no package manager)"
+  else
+    fail_uat "install_verify_artifacts: unsupported UAT_MAC '$MAC'"
   fi
-  if dpkg -S /etc/systemd/system/docker-helper.service >/dev/null 2>&1; then
-    fail_uat "installed unit is owned by a package — tarball case must not use a package manager"
-  fi
-  if dpkg -S /etc/apparmor.d/docker-helper-system >/dev/null 2>&1; then
-    fail_uat "installed AppArmor profile is owned by a package — tarball case must not use a package manager"
-  fi
-  info "installed binary/unit/profile match the extracted bundle (no package manager)"
 }
 
 # install_verify_version fails unless the installed binary reports the exact
