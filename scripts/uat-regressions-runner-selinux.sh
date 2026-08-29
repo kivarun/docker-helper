@@ -43,28 +43,32 @@ info "service active: pid=$DH_PID type=$(cut -d: -f3 "/proc/$DH_PID/attr/current
 # attributed to the loaded policy (not guessed from the RPM artifact).
 info "loaded docker_helper module(s):"
 semodule -l 2>&1 | grep docker_helper | sed 's/^/  /' || echo "  (no docker_helper module listed)"
+info "module store files for docker_helper:"
+ls -la /etc/selinux/targeted/modules/active/modules/docker_helper 2>&1 | sed 's/^/  /' || echo "  (no store file found)"
 # The installed module's CIL is exactly what the kernel policy contains.
-if semodule -E docker_helper >/tmp/dh_loaded.cil 2>/dev/null; then
-  info "installed docker_helper module CIL size: $(wc -l < /tmp/dh_loaded.cil) lines, bytes: $(wc -c < /tmp/dh_loaded.cil), allow rules: $(grep -c '(allow docker_helper_t' /tmp/dh_loaded.cil || true)"
-  info "installed docker_helper module CIL (raw, first 40 lines):"
-  sed -n '1,40p' /tmp/dh_loaded.cil | sed 's/^/  /' || true
-  info "installed docker_helper module CIL (workspace relabel/getattr rules, unquoted):"
-  grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' /tmp/dh_loaded.cil \
-    | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/  /' || echo "  (no unquoted workspace relabel/getattr rules found)"
-  info "installed docker_helper module CIL (workspace relabel/getattr rules, quoted types):"
-  grep -E 'allow docker_helper_t "(usr_t|docker_helper_workspace_t)" ' /tmp/dh_loaded.cil \
-    | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/  /' || echo "  (no quoted workspace relabel/getattr rules found)"
-  info "installed docker_helper module CIL (ALL docker_helper_t allow source-target-class head):"
-  grep -oE '\(allow docker_helper_t [^ ]+ [^ ]+' /tmp/dh_loaded.cil | sort | uniq -c | sed 's/^/  /' | head -60 || echo "  (no (allow docker_helper_t rules at all)"
-  rm -f /tmp/dh_loaded.cil
+info "installed docker_helper module CIL export (semodule -E docker_helper):"
+if semodule -E docker_helper >/tmp/dh_loaded.cil 2>/tmp/dh_loaded.err; then
+  info "  export ok: $(wc -l < /tmp/dh_loaded.cil) lines, $(wc -c < /tmp/dh_loaded.cil) bytes, allow rules: $(grep -c '(allow docker_helper_t' /tmp/dh_loaded.cil || true)"
+  info "  export stderr: $(tr '\n' ' ' < /tmp/dh_loaded.err)"
+  info "  export CIL raw (first 60 lines):"
+  sed -n '1,60p' /tmp/dh_loaded.cil | sed 's/^/    /' || true
 else
-  info "semodule -E docker_helper failed; trying setools on /sys/fs/selinux/policy"
-  if command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null; then
-    python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
+  info "  semodule -E failed: $(tr '\n' ' ' < /tmp/dh_loaded.err)"
+fi
+rm -f /tmp/dh_loaded.cil /tmp/dh_loaded.err
+# Authoritative: query the LIVE kernel policy (/sys/fs/selinux/policy) for the
+# docker_helper_t -> usr_t / docker_helper_workspace_t allows actually enforced.
+info "live kernel policy grants (setools, /sys/fs/selinux/policy):"
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null; then
+  python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
 import sys
 try:
-    from setools import SELinuxPolicy, TypeRuleQuery
+    from setools import SELinuxPolicy, TypeRuleQuery, TypeQuery
     p = SELinuxPolicy("/sys/fs/selinux/policy")
+    print(f"policy loaded: {p.version if hasattr(p, 'version') else '?'}")
+    tq = TypeQuery(p)
+    ts = sorted(t.name for t in p.types() if t.name in ("docker_helper_t", "docker_helper_workspace_t", "usr_t"))
+    print("types present:", ts)
     for tgt in ("usr_t", "docker_helper_workspace_t"):
         for cls in ("dir", "file", "lnk_file", "fifo_file"):
             perms = set()
@@ -75,9 +79,8 @@ try:
 except Exception as e:
     print(f"setools diagnostic failed: {e}")
 PY
-  else
-    info "no CIL export and no setools; cannot dump loaded relabel grants"
-  fi
+else
+  info "  python setools not available on guest"
 fi
 
 REGRESSIONS=(
