@@ -38,6 +38,35 @@ fi
 DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
 info "service active: pid=$DH_PID type=$(cut -d: -f3 "/proc/$DH_PID/attr/current" 2>/dev/null || true)"
 
+# Diagnostic: dump the LOADED policy's docker_helper relabel/getattr grants and
+# the installed docker_helper module identity, so a relabel blocker can be
+# attributed to the loaded policy (not guessed from the RPM artifact).
+info "loaded docker_helper module(s):"
+semodule -l 2>&1 | grep docker_helper | sed 's/^/  /' || echo "  (no docker_helper module listed)"
+if command -v sesearch >/dev/null 2>&1; then
+  info "loaded policy: docker_helper_t -> usr_t / docker_helper_workspace_t relabel+getattr grants"
+  sesearch -A -s docker_helper_t -c dir -p relabelfrom -t usr_t 2>/dev/null | sed 's/^/  /' || true
+  sesearch -A -s docker_helper_t -c dir -p relabelto -t usr_t 2>/dev/null | sed 's/^/  /' || true
+  sesearch -A -s docker_helper_t -c fifo_file -p getattr -t usr_t 2>/dev/null | sed 's/^/  /' || true
+  sesearch -A -s docker_helper_t -c dir -p relabelfrom -t docker_helper_workspace_t 2>/dev/null | sed 's/^/  /' || true
+  sesearch -A -s docker_helper_t -c dir -p relabelto -t docker_helper_workspace_t 2>/dev/null | sed 's/^/  /' || true
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null; then
+  info "loaded policy (setools): docker_helper_t -> usr_t / docker_helper_workspace_t relabel+getattr grants"
+  python3 - <<'PY' 2>/dev/null | sed 's/^/  /' || true
+from setools import SELinuxPolicy, TypeRuleQuery
+p = SELinuxPolicy()
+for tgt in ("usr_t", "docker_helper_workspace_t"):
+    for cls in ("dir", "file", "lnk_file", "fifo_file"):
+        perms = set()
+        for rule in p.query(TypeRuleQuery(source="docker_helper_t", target=tgt, tclass=cls, ruletype="allow")):
+            perms.update(rule.perms)
+        if perms:
+            print(f"docker_helper_t {tgt}:{cls} allow perms = {sorted(perms)}")
+PY
+else
+  info "neither sesearch nor python setools available; cannot dump loaded relabel grants"
+fi
+
 REGRESSIONS=(
   "1:SELinux non-home workspace lifecycle:uat-regression-selinux-workspace-lifecycle.sh"
   "2:SELinux operator-owned boundary:uat-regression-selinux-operator-boundary.sh"
