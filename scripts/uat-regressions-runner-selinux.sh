@@ -43,28 +43,33 @@ info "service active: pid=$DH_PID type=$(cut -d: -f3 "/proc/$DH_PID/attr/current
 # attributed to the loaded policy (not guessed from the RPM artifact).
 info "loaded docker_helper module(s):"
 semodule -l 2>&1 | grep docker_helper | sed 's/^/  /' || echo "  (no docker_helper module listed)"
-if command -v sesearch >/dev/null 2>&1; then
-  info "loaded policy: docker_helper_t -> usr_t / docker_helper_workspace_t relabel+getattr grants"
-  sesearch -A -s docker_helper_t -c dir -p relabelfrom -t usr_t 2>/dev/null | sed 's/^/  /' || true
-  sesearch -A -s docker_helper_t -c dir -p relabelto -t usr_t 2>/dev/null | sed 's/^/  /' || true
-  sesearch -A -s docker_helper_t -c fifo_file -p getattr -t usr_t 2>/dev/null | sed 's/^/  /' || true
-  sesearch -A -s docker_helper_t -c dir -p relabelfrom -t docker_helper_workspace_t 2>/dev/null | sed 's/^/  /' || true
-  sesearch -A -s docker_helper_t -c dir -p relabelto -t docker_helper_workspace_t 2>/dev/null | sed 's/^/  /' || true
-elif command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null; then
-  info "loaded policy (setools): docker_helper_t -> usr_t / docker_helper_workspace_t relabel+getattr grants"
-  python3 - <<'PY' 2>/dev/null | sed 's/^/  /' || true
-from setools import SELinuxPolicy, TypeRuleQuery
-p = SELinuxPolicy()
-for tgt in ("usr_t", "docker_helper_workspace_t"):
-    for cls in ("dir", "file", "lnk_file", "fifo_file"):
-        perms = set()
-        for rule in p.query(TypeRuleQuery(source="docker_helper_t", target=tgt, tclass=cls, ruletype="allow")):
-            perms.update(rule.perms)
-        if perms:
-            print(f"docker_helper_t {tgt}:{cls} allow perms = {sorted(perms)}")
-PY
+# The installed module's CIL is exactly what the kernel policy contains.
+if semodule -E docker_helper >/tmp/dh_loaded.cil 2>/dev/null; then
+  info "installed docker_helper module CIL (workspace relabel/getattr rules):"
+  grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' /tmp/dh_loaded.cil \
+    | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/  /' || echo "  (no workspace relabel/getattr rules found in installed module CIL)"
+  rm -f /tmp/dh_loaded.cil
 else
-  info "neither sesearch nor python setools available; cannot dump loaded relabel grants"
+  info "semodule -E docker_helper failed; trying setools on /sys/fs/selinux/policy"
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import setools' 2>/dev/null; then
+    python3 - <<'PY' 2>&1 | sed 's/^/  /' || true
+import sys
+try:
+    from setools import SELinuxPolicy, TypeRuleQuery
+    p = SELinuxPolicy("/sys/fs/selinux/policy")
+    for tgt in ("usr_t", "docker_helper_workspace_t"):
+        for cls in ("dir", "file", "lnk_file", "fifo_file"):
+            perms = set()
+            for rule in p.query(TypeRuleQuery(source="docker_helper_t", target=tgt, tclass=cls, ruletype="allow")):
+                perms.update(rule.perms)
+            if perms:
+                print(f"docker_helper_t {tgt}:{cls} allow perms = {sorted(perms)}")
+except Exception as e:
+    print(f"setools diagnostic failed: {e}")
+PY
+  else
+    info "no CIL export and no setools; cannot dump loaded relabel grants"
+  fi
 fi
 
 REGRESSIONS=(
