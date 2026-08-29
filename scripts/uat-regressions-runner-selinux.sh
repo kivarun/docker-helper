@@ -74,7 +74,7 @@ if data[:3] == b'BZh':
     try:
         out = bz2.decompress(data)
         print(f"decompressed {len(data)} -> {len(out)} bytes, {out.count(chr(10).encode())+1 if out else 0} lines")
-        print(out.decode('utf-8', 'replace')[:4000])
+        print(out.decode('utf-8', 'replace')[:8000])
     except Exception as e:
         print(f"bz2 decompress failed: {e}")
 else:
@@ -86,15 +86,50 @@ PY
                 sed -n '1,40p' "$f" 2>/dev/null | sed 's/^/      /' || true
               fi
               info "    CIL workspace relabel/getattr rules:"
-              if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
-                bzip2 -dc "$f" 2>/dev/null | grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' \
-                  | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/      /' || echo "      (none)"
+              if command -v python3 >/dev/null 2>&1; then
+                python3 - "$f" <<'PY' 2>&1 | sed 's/^/      /' || echo "      (none)"
+import sys, bz2, re
+path = sys.argv[1]
+data = open(path, 'rb').read()
+if data[:3] == b'BZh':
+    try:
+        data = bz2.decompress(data)
+    except Exception:
+        pass
+text = data.decode('utf-8', 'replace')
+hits = [l for l in text.splitlines()
+        if re.search(r'\(allow docker_helper_t (usr_t|docker_helper_workspace_t) ', l)
+        and re.search(r'relabelfrom|relabelto|getattr', l)]
+print('\n'.join(hits) if hits else '(none)')
+PY
               else
                 grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' "$f" 2>/dev/null \
                   | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/      /' || echo "      (none)"
               fi
               info "    CIL ALL docker_helper_t allow heads:"
-              grep -oE '\(allow docker_helper_t [^ ]+ [^ ]+' "$f" 2>/dev/null | sort | uniq -c | sed 's/^/      /' | head -60 || echo "      (none)"
+              if command -v python3 >/dev/null 2>&1; then
+                python3 - "$f" <<'PY' 2>&1 | sed 's/^/      /' || echo "      (none)"
+import sys, bz2, re
+from collections import Counter
+path = sys.argv[1]
+data = open(path, 'rb').read()
+if data[:3] == b'BZh':
+    try:
+        data = bz2.decompress(data)
+    except Exception:
+        pass
+text = data.decode('utf-8', 'replace')
+heads = Counter()
+for l in text.splitlines():
+    m = re.match(r'\s*\(allow docker_helper_t\s+([^\s]+)\s+([^\s]+)\s+\(([^\s]+)', l)
+    if m:
+        heads[(m.group(1), m.group(2), m.group(3))] += 1
+out = '\n'.join(f'{c}x allow docker_helper_t {a} {b} ({cl}' for (a, b, cl), c in heads.items())
+print(out if out else '(none)')
+PY
+              else
+                grep -oE '\(allow docker_helper_t [^ ]+ [^ ]+' "$f" 2>/dev/null | sort | uniq -c | sed 's/^/      /' | head -60 || echo "      (none)"
+              fi
               ;;
             pp)
               info "    pp section listing:"
