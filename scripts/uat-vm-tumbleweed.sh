@@ -105,12 +105,17 @@ vm_cleanup() {
 }
 
 # --- image download (bounded mirror fallback; every attempt capped) ---
+# Aggressive CI-oriented download policy: a short connect timeout plus bounded
+# low-speed detection, so a technically connected but unusably slow mirror is
+# abandoned rather than consuming the CI job. SHA-256 verification is unchanged
+# (vm_prepare_image). Package-manager agnostic by design.
 vm_fetch_or_fail() {
   local name="$1"; shift
   local url
   for url in "$@"; do
     vm_log "  trying $url"
-    if curl -fL --connect-timeout 10 --max-time 600 --retry 2 --retry-delay 2 \
+    if curl -fL --connect-timeout 5 --max-time 600 --retry 2 --retry-delay 2 \
+        --speed-time 15 --speed-limit 262144 \
         -o "$VM_WORKDIR/$name" "$url"; then
       return 0
     fi

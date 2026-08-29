@@ -160,14 +160,29 @@ log "initial LSM: $RAW_LSM (selinux=$SELINUX_ACTIVE apparmor=$APPARMOR_ACTIVE)"
 #    is the harness vm_set_mac_tokens primitive below)
 # ---------------------------------------------------------------------------
 log "== 3. AppArmor userspace bootstrap =="
+# Transfer the canonical openSUSE repo/package policy helper into the guest
+# (the bootstrap uses the shared zypper timeout/retry owner; the full checkout
+# is only copied later, after the MAC proof).
+if vm_ssh "sudo tee /opt/uat-repo-policy.sh >/dev/null" < "$SCRIPT_DIR/uat-opensuse-repo.sh"; then
+  :
+else
+  EC=$?
+  fail "could not transfer repo policy helper (exit $EC)"
+fi
 BOOTSTRAP="$(vm_ssh 'sudo bash -s' <<'RMT'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 log(){ echo "[vm] $*"; }
+# shellcheck source=/dev/null
+source /opt/uat-repo-policy.sh
 
 log "installing AppArmor userspace: apparmor-parser apparmor-utils apparmor-abstractions"
-zypper --non-interactive refresh || true
-zypper --non-interactive install -y --no-recommends \
+opensuse_zypp_tune_timeouts
+if ! opensuse_zypper_refresh; then
+  echo "REPO-FAILURE: zypper refresh exhausted attempts; aborting bootstrap" >&2
+  exit 1
+fi
+opensuse_zypper install -y --no-recommends \
   apparmor-parser apparmor-utils apparmor-abstractions
 log "AppArmor packages:"
 rpm -qa | grep -Ei 'apparmor|libapparmor' | sort || true

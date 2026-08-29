@@ -173,10 +173,21 @@ log "initial LSM: $RAW_LSM (selinux=$SELINUX_ACTIVE apparmor=$APPARMOR_ACTIVE)"
 #    the harness vm_set_mac_tokens primitive below)
 # ---------------------------------------------------------------------------
 log "== 3. SELinux userspace bootstrap =="
+# Transfer the canonical openSUSE repo/package policy helper into the guest
+# (the bootstrap uses the shared zypper timeout/retry owner; the full checkout
+# is only copied later, after the MAC proof).
+if vm_ssh "sudo tee /opt/uat-repo-policy.sh >/dev/null" < "$SCRIPT_DIR/uat-opensuse-repo.sh"; then
+  :
+else
+  EC=$?
+  fail "could not transfer repo policy helper (exit $EC)"
+fi
 BOOTSTRAP="$(vm_ssh 'sudo bash -s' <<'RMT'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 log(){ echo "[vm] $*"; }
+# shellcheck source=/dev/null
+source /opt/uat-repo-policy.sh
 
 log "installing/verifying SELinux userspace + targeted policy"
 NEED=0
@@ -184,17 +195,12 @@ for p in selinux-policy-targeted policycoreutils selinux-tools policycoreutils-p
   rpm -q "$p" >/dev/null 2>&1 || { NEED=1; log "missing: $p"; }
 done
 if [ "$NEED" = 1 ]; then
-  # Tune libzypp network timeouts (zypper.conf(5)); zypper's CLI
-  # --connect-timeout flag is not accepted on this Tumbleweed image. Lower only
-  # download.connect_timeout so a dead mirror costs seconds; keep the 180s
-  # download.transfer_timeout default so large packages are not aborted.
-  if [ -f /etc/zypp/zypp.conf ] && grep -q '^[[:space:]]*#*[[:space:]]*download\.connect_timeout' /etc/zypp/zypp.conf; then
-    sed -i -E 's/^[[:space:]]*#*[[:space:]]*download\.connect_timeout([[:space:]=]+).*/download.connect_timeout = 15/' /etc/zypp/zypp.conf
-  else
-    printf '\ndownload.connect_timeout = 15\n' >> /etc/zypp/zypp.conf
+  opensuse_zypp_tune_timeouts
+  if ! opensuse_zypper_refresh; then
+    echo "REPO-FAILURE: zypper refresh exhausted attempts; aborting bootstrap" >&2
+    exit 1
   fi
-  zypper --non-interactive refresh || true
-  zypper --non-interactive install -y \
+  opensuse_zypper install -y \
     selinux-policy-targeted policycoreutils selinux-tools policycoreutils-python-utils
 fi
 log "SELinux/AppArmor-related packages:"

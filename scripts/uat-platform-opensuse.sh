@@ -23,6 +23,10 @@
 #
 # The scenario core defines: fail_uat. It runs this adapter as root.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/uat-opensuse-repo.sh
+source "$SCRIPT_DIR/uat-opensuse-repo.sh"  # canonical openSUSE zypper/repo policy owner
+
 # platform_name prints the platform label used in UAT output.
 platform_name() {
   printf 'openSUSE Tumbleweed'
@@ -51,27 +55,15 @@ platform_preflight() {
 # enable/start is deliberately best-effort because the common UAT preflight
 # will later prove whether Docker actually works.
 #
-# Tune libzypp network timeouts so a dead/stalled openSUSE mirror costs seconds,
-# not the 60s default, before zypper tries the next mirror. zypper's CLI
-# --connect-timeout flag is not accepted on this Tumbleweed image; zypp.conf is
-# the supported knob (zypper.conf(5)). Only download.connect_timeout is lowered;
-# download.transfer_timeout stays at its 180s default so large packages are not
-# aborted mid-download. zypp.conf semantics: the last value for a key wins.
-zypp_connect_timeout() {
-  local conf=/etc/zypp/zypp.conf
-  [ -f "$conf" ] || return 0
-  if grep -q '^[[:space:]]*#*[[:space:]]*download\.connect_timeout' "$conf"; then
-    sed -i -E 's/^[[:space:]]*#*[[:space:]]*download\.connect_timeout([[:space:]=]+).*/download.connect_timeout = 15/' "$conf"
-  else
-    printf '\ndownload.connect_timeout = 15\n' >> "$conf"
-  fi
-}
-
+# zypper timeout/retry behavior is owned by uat-opensuse-repo.sh (the single
+# canonical owner): connect timeout, attempt count/delay and the rule that a
+# failed refresh is a repository/network failure that must not be followed by
+# an install against stale/incomplete metadata.
 platform_install_deps() {
-  zypp_connect_timeout
-  zypper --non-interactive refresh || return $?
+  opensuse_zypp_tune_timeouts
+  opensuse_zypper_refresh || return $?
 
-  zypper --non-interactive install -y \
+  opensuse_zypper install -y \
     apparmor-parser apparmor-utils openssl \
     apparmor-abstractions \
     policycoreutils policycoreutils-python-utils \
