@@ -44,6 +44,26 @@ REGRESSIONS=(
   "3:SELinux restorecon filesystem-boundary:uat-regression-selinux-fs-boundary.sh"
 )
 
+# Fresh AVC/USER_AVC evidence (best-effort; requires auditd started by the
+# scope=selinux bootstrap). Dumps a bounded, docker-helper-relevant window of
+# denial records since AVC_START.
+AVC_START="$(date '+%m/%d/%Y %H:%M:%S')"
+info "fresh AVC/USER_AVC evidence window starts $AVC_START"
+avc_evidence() { # label
+  local label="$1"
+  echo "--- AVC evidence: $label ---" >&2
+  if command -v ausearch >/dev/null 2>&1; then
+    ausearch -m AVC,USER_AVC -ts "$AVC_START" 2>/dev/null \
+      | grep -E 'avc:  denied|USER_AVC|scontext=|tcontext=' \
+      | grep -Ei 'docker_helper|restorecon|setfiles|filesystem|getattr|denied' \
+      | tail -30 || true
+  fi
+  tail -150 /var/log/audit/audit.log 2>/dev/null \
+    | grep -E 'avc:  denied|USER_AVC' \
+    | grep -Ei 'docker_helper|restorecon|setfiles|filesystem|getattr|denied' \
+    | tail -30 || true
+}
+
 declare -A RESULT
 declare -A RC_OF
 FAILED=0
@@ -73,9 +93,11 @@ for entry in "${REGRESSIONS[@]}"; do
     FAILED=1
     echo "--- bounded evidence for group $num ($label) ---" >&2
     journalctl -u docker-helper.service -n 40 --no-pager 2>/dev/null | tail -40 >&2 || true
+    avc_evidence "group $num ($label)"
   fi
   printf 'REGRESSION_MAP: %s=%s:%s\n' "$num" "$label" "${RESULT[$num]}"
 done
+avc_evidence "full regression run"
 
 echo
 say "================= REGRESSION SUMMARY (Tumbleweed/RPM/SELinux) ==============="

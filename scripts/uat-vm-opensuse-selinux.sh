@@ -255,6 +255,23 @@ for b in sestatus getenforce semodule semanage restorecon matchpathcon; do
   fi
 done
 
+# Best-effort auditd for fresh AVC/USER_AVC evidence in the scope=selinux run
+# (mirrors the ab-proof mode's audit collection). Evidence collection, NOT a
+# hard prerequisite: if install or start fails the run continues and the
+# regression evidence falls back to journal-level denials.
+if ! rpm -q audit >/dev/null 2>&1; then
+  opensuse_zypp_tune_timeouts
+  opensuse_zypper_refresh || true
+  opensuse_zypper install -y audit || true
+fi
+if command -v ausearch >/dev/null 2>&1; then
+  systemctl enable --now auditd >/dev/null 2>&1 || true
+  auditctl -e 1 >/dev/null 2>&1 || true
+  log "auditd enabled for fresh AVC/USER_AVC evidence (best-effort)"
+else
+  log "auditd/ausearch unavailable; AVC evidence will be journal-level only"
+fi
+
 # Ensure /etc/selinux/config selects enforcing targeted.
 mkdir -p /etc/selinux
 cp /etc/selinux/config /etc/selinux/config.orig 2>/dev/null || true
