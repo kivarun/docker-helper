@@ -56,10 +56,30 @@ done
   find /etc/selinux -iname '*docker_helper*' 2>/dev/null | sed 's/^/    /' || true
   STORE="$(find /etc/selinux -path '*/active/modules/*/docker_helper' 2>/dev/null | head -1)"
   if [ -n "$STORE" ]; then
-    info "  module store file: $STORE ($(stat -c '%s bytes' "$STORE" 2>/dev/null || echo '?'))"
-    info "  module store file head (hexdump first 256 bytes):"
-    od -A x -t x1z -N 256 "$STORE" 2>&1 | sed 's/^/    /' || true
-    info "  module store file type: $(file -b "$STORE" 2>/dev/null || echo '?')"
+    info "  module store entry: $STORE (type: $(stat -c '%F' "$STORE" 2>/dev/null || echo '?'))"
+    if [ -d "$STORE" ]; then
+      echo "    contents:"; ls -la "$STORE" | sed 's/^/      /' || true
+      for f in "$STORE"/cil "$STORE"/pp "$STORE"/hll "$STORE"/lang_ext; do
+        if [ -e "$f" ]; then
+          info "    file $f: $(stat -c '%s bytes' "$f" 2>/dev/null || echo '?')"
+          case "$(basename "$f")" in
+            cil)
+              info "    CIL workspace relabel/getattr rules:"
+              grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' "$f" 2>/dev/null \
+                | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/      /' || echo "      (none)"
+              info "    CIL ALL docker_helper_t allow heads:"
+              grep -oE '\(allow docker_helper_t [^ ]+ [^ ]+' "$f" 2>/dev/null | sort | uniq -c | sed 's/^/      /' | head -60 || echo "      (none)"
+              ;;
+            pp)
+              info "    pp section listing:"
+              ls -la "$STORE" | sed 's/^/      /' || true
+              ;;
+          esac
+        fi
+      done
+    else
+      info "    store file bytes: $(stat -c '%s' "$STORE" 2>/dev/null || echo '?')"
+    fi
   fi
 # The installed module's CIL is exactly what the kernel policy contains.
 info "installed docker_helper module CIL export (semodule -E docker_helper):"
