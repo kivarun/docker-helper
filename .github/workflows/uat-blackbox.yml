@@ -12,6 +12,11 @@ on:
           - full
           - selinux-ab-proof
           - selinux
+      ab_tc_proof_lnk_perms:
+        description: 'Bounded trusted-CA proof only: space-separated perms to grant on docker_helper_trusted_ca_t:lnk_file in the temporary proof module (e.g. "getattr relabelfrom"); empty = pure reproduction with AVC capture'
+        required: false
+        default: ''
+        type: string
   push:
     branches: [main]
 
@@ -370,4 +375,5 @@ jobs:
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
           UAT_VERSION="${UAT_VERSION:-2.0.0-uat}" \
           UAT_SELINUX_MODE=ab-proof \
+          AB_TC_PROOF_LNK_PERMS="${{ inputs.ab_tc_proof_lnk_perms }}" \
           scripts/uat-vm-opensuse-selinux.sh

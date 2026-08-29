@@ -510,8 +510,8 @@ if [ "$MODE" = "ab-proof" ]; then
   record_stage "RPM install + confinement" "$INSTALL_RESULT"
 
   AB_RESULT=FAIL
-  if run_guest_capture "SELinux A/B proofs (docker socket + semanage) inside the guest" \
-    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-selinux-ab-proof.sh"; then
+  if run_guest_capture "SELinux A/B proofs (docker socket + semanage + trusted-CA restart) inside the guest" \
+    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin AB_TC_PROOF_LNK_PERMS=${AB_TC_PROOF_LNK_PERMS:-} bash scripts/uat-selinux-ab-proof.sh"; then
     AB_RESULT=PASS
     log "SELinux A/B proofs completed inside the guest (evidence recorded)"
   else

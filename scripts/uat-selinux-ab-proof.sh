@@ -31,12 +31,39 @@
 #   journal. ALWAYS restores dontaudit (semodule -B) and removes the temporary
 #   proof module, even on failure.
 #
+# Part C — trusted-CA restart/relabel blocker proof:
+#   Reproduces the daemon-restart failure "trusted CA restorecon failed: ...
+#   Could not set context for .../trusted-ca/<sha>/<hash>.0: Permission denied"
+#   observed after an RPM reinstall (the %post/systemd restart re-runs
+#   prepareCAInjection, whose restorecon -R -m over the existing trusted-ca
+#   tree fails on the hash symlink). Creates trusted-CA material through the
+#   REAL production path (openssl CA + `docker-helper config set
+#   trusted_ca_path`/`trusted_ca_injection auto`), proves the ordinary
+#   trusted-CA E2E succeeds, records BEFORE labels (base/snapshot/file/symlink:
+#   ls -ldZ, stat %C, matchpathcon, readlink) and the current policy lnk_file
+#   permissions (sesearch), then with dontaudit disabled (semodule -DB) and
+#   auditd running executes the exact production reproducer
+#       rpm -Uvh --replacepkgs /opt/uat-import/docker-helper.rpm
+#   and captures systemctl status / journalctl / ausearch AVC evidence to
+#   identify the EXACT denied source type, target type, class and permission.
+#   When AB_TC_PROOF_LNK_PERMS is set (space-separated perms such as
+#   "getattr relabelfrom"), a TEMPORARY proof module granting ONLY those perms
+#   on docker_helper_trusted_ca_t:lnk_file is loaded before the reinstall and
+#   the reinstall is re-run; success is daemon restarts normally + existing
+#   snapshot usable + a fresh docker-helper run with CA injection succeeds.
+#   ALWAYS restores dontaudit (semodule -B) and removes the temporary proof
+#   module, even on failure.
+#
 # Evidence collection, NOT a pass/fail gate: exit 0 whenever the proofs ran to
-# completion (the pull may fail, the session create may fail — those failures
-# are themselves the evidence); nonzero only on a harness failure.
+# completion (the pull may fail, the session create may fail, the reinstall
+# restart may fail — those failures are themselves the evidence); nonzero only
+# on a harness failure.
 #
 # Env inputs:
 #   (none required; the RPM must already be installed and the service confined)
+#   AB_TC_PROOF_LNK_PERMS  optional; space-separated perms to grant on
+#                          docker_helper_trusted_ca_t:lnk_file in the temp
+#                          trusted-CA proof module (empty = pure reproduction)
 
 set -uo pipefail
 
@@ -150,8 +177,8 @@ ensure_auditd() {
   fi
 }
 
-# restore dontaudit behavior + remove the temporary proof module on exit.
-# The proof module is removed even on failure so the guest never keeps the
+# restore dontaudit behavior + remove the temporary proof modules on exit.
+# The proof modules are removed even on failure so the guest never keeps the
 # candidate rules loaded beyond the bounded experiment.
 restore_dontaudit() {
   echo "AB restore dontaudit: semodule -B"
@@ -159,6 +186,13 @@ restore_dontaudit() {
   if [ -f /tmp/dh_semanage_proof.pp ]; then
     echo "AB remove temp proof module: semodule -r dh_semanage_proof"
     semodule -r dh_semanage_proof 2>&1 || echo "warning: semodule -r dh_semanage_proof failed"
+  fi
+  if [ -f /tmp/dh_trusted_ca_proof.pp ]; then
+    echo "AB remove temp trusted-CA proof module: semodule -r dh_trusted_ca_proof"
+    semodule -r dh_trusted_ca_proof 2>&1 || echo "warning: semodule -r dh_trusted_ca_proof failed"
+  fi
+  if [ -n "${AB_TC_SERVER_PID:-}" ]; then
+    kill "$AB_TC_SERVER_PID" >/dev/null 2>&1 || true
   fi
 }
 trap restore_dontaudit EXIT
@@ -419,6 +453,240 @@ TE_EOF
     || true
 
   rm -rf "$WS"
+fi
+
+# ===========================================================================
+# Part C — trusted-CA restart/relabel blocker proof
+# ===========================================================================
+echo
+echo "===== PART C: TRUSTED-CA RESTART/RELABEL BLOCKER PROOF ====="
+AB_TC_RPM="${AB_TC_RPM:-/opt/uat-import/docker-helper.rpm}"
+AB_TC_PROOF_LNK_PERMS="${AB_TC_PROOF_LNK_PERMS:-}"
+
+if [ ! -f "$AB_TC_RPM" ]; then
+  echo "AB_PART_C=SKIP (RPM not found: $AB_TC_RPM)"
+else
+  ensure_auditd
+  ensure_service || { echo "AB_PART_C=(service not active; trusted-CA proof not run)"; }
+  if systemctl is-active --quiet docker-helper.service; then
+    TOKEN="$(ensure_principal_session || true)"
+
+    # Reset to a clean injection-disabled state (fresh guest default; defensive).
+    docker-helper config set trusted_ca_injection disabled >/dev/null 2>&1 || true
+    docker-helper config set trusted_ca_path "" >/dev/null 2>&1 || true
+
+    TC_DIR="/tmp/uat-tc"
+    rm -rf "$TC_DIR"
+    mkdir -p "$TC_DIR"
+
+    # --- ephemeral CA + server cert + local HTTPS endpoint (gateway IP SAN) ---
+    GATEWAY="$(ip -4 addr show docker0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)"
+    if [ -z "$GATEWAY" ]; then
+      GATEWAY="$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)"
+    fi
+    TLS_PORT=18443
+    echo "AB_TC_GATEWAY=$GATEWAY"
+    echo "AB_TC_TLS_PORT=$TLS_PORT"
+    if [ -n "$GATEWAY" ]; then
+      openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$TC_DIR/ca.key" -out "$TC_DIR/ca.pem" -days 2 \
+        -subj "/CN=UAT-TC-Root-CA" >/dev/null 2>&1 || true
+      openssl req -newkey rsa:2048 -nodes \
+        -keyout "$TC_DIR/server.key" -out "$TC_DIR/server.csr" \
+        -subj "/CN=uat-tc-server" -addext "subjectAltName=IP:$GATEWAY" >/dev/null 2>&1 || true
+      openssl x509 -req -in "$TC_DIR/server.csr" \
+        -CA "$TC_DIR/ca.pem" -CAkey "$TC_DIR/ca.key" -CAcreateserial \
+        -out "$TC_DIR/server.pem" -days 2 -copy_extensions copy >/dev/null 2>&1 || true
+
+      openssl s_server -accept "$TLS_PORT" \
+        -cert "$TC_DIR/server.pem" -key "$TC_DIR/server.key" \
+        -www -quiet >/dev/null 2>&1 &
+      AB_TC_SERVER_PID=$!
+      sleep 1
+      curl -k -fsS --max-time 5 "https://127.0.0.1:$TLS_PORT/" >/dev/null 2>&1 \
+        || echo "AB_TC_SERVER_REACH=(local https endpoint not reachable; E2E will record evidence)"
+
+      # --- curl-capable image for the TLS E2E (same build path as the UAT) ---
+      BUILDCTX="/home/opc/uat-workspace/uat-tc-buildctx"
+      rm -rf "$BUILDCTX"
+      mkdir -p "$BUILDCTX"
+      cat > "$BUILDCTX/Dockerfile" <<'DEOF'
+FROM alpine:3.24
+RUN apk add --no-cache curl ca-certificates
+USER 65534:65534
+DEOF
+      chown -R opc:opc "$BUILDCTX" 2>/dev/null || true
+      BUILD_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper build --context uat-tc-buildctx --dockerfile Dockerfile --image uat-tc-curl:alpine3.24 2>&1 || true)"
+      printf '%s\n' "$BUILD_OUT" | redact | tail -6
+      CURLOK="$(DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper run --image uat-tc-curl:alpine3.24 -- sh -ec 'test -x /usr/bin/curl && echo CURLOK' 2>&1 || true)"
+      if printf '%s\n' "$CURLOK" | grep -q 'CURLOK'; then
+        echo "AB_TC_CURL_IMAGE=ready"
+      else
+        echo "AB_TC_CURL_IMAGE=unavailable (E2E evidence will be partial)"
+      fi
+
+      # --- control run: injection DISABLED => ephemeral CA must be rejected ---
+      CONTROL_EC=0
+      CONTROL_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper run --image uat-tc-curl:alpine3.24 -- sh -ec "curl -fsS https://$GATEWAY:$TLS_PORT/ >/dev/null" 2>&1)" || CONTROL_EC=$?
+      echo "AB_TC_CONTROL_EC=$CONTROL_EC (nonzero expected: CA must NOT be trusted without injection)"
+      printf '%s\n' "$CONTROL_OUT" | redact | tail -4
+
+      # --- REAL production path: enable automatic trusted-CA injection ---
+      echo "--- enable trusted-CA injection through the real config path ---"
+      docker-helper config set trusted_ca_path "$TC_DIR/ca.pem" 2>&1 | redact | tail -3 || true
+      docker-helper config set trusted_ca_injection auto 2>&1 | redact | tail -3 || true
+      sleep 2
+      systemctl is-active --quiet docker-helper.service \
+        && echo "AB_TC_DAEMON_AFTER_ENABLE=active" \
+        || echo "AB_TC_DAEMON_AFTER_ENABLE=inactive"
+
+      BASE="/run/docker-helper/trusted-ca"
+      SNAP="$(find "$BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 || true)"
+      CAFILE="$SNAP/ca.pem"
+      LNK="$(find "$SNAP" -maxdepth 1 -name '*.0' -type l 2>/dev/null | head -1 || true)"
+      echo "AB_TC_SNAP=$SNAP"
+      echo "AB_TC_CAFILE=$CAFILE"
+      echo "AB_TC_LNK=$LNK"
+
+      # --- positive run: injection AUTO => ordinary TLS request succeeds ---
+      TLS_EC=0
+      TLS_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper run --image uat-tc-curl:alpine3.24 -- sh -ec "curl -fsS https://$GATEWAY:$TLS_PORT/ >/dev/null && echo TLS-OK" 2>&1)" || TLS_EC=$?
+      if [ "$TLS_EC" -eq 0 ] && printf '%s\n' "$TLS_OUT" | grep -q 'TLS-OK'; then
+        echo "AB_TC_E2E=pass (ordinary trusted-CA E2E succeeded through the real path)"
+      else
+        echo "AB_TC_E2E=fail (exit=$TLS_EC; CA materialization may be blocked)"
+        printf '%s\n' "$TLS_OUT" | redact | tail -6
+      fi
+
+      # --- BEFORE labels: base / snapshot / file / symlink ---
+      echo "--- BEFORE labels (base/snapshot/file/symlink) ---"
+      for p in "$BASE" "$SNAP" "$CAFILE" "$LNK"; do
+        echo "AB_TC_BEFORE_LS [$p]: $(ls -ldZ "$p" 2>&1 || true)"
+        echo "AB_TC_BEFORE_STAT [$p]: $(stat -c '%C %F %n' "$p" 2>&1 || true)"
+        echo "AB_TC_BEFORE_MPC [$p]: $(matchpathcon "$p" 2>&1 || true)"
+      done
+      echo "AB_TC_BEFORE_LNK_READLINK: $(readlink "$LNK" 2>&1 || true)"
+
+      # --- current policy permissions: docker_helper_t / runtime / trusted_ca, lnk_file ---
+      echo "--- current policy permissions (lnk_file) ---"
+      echo "AB_TC_POLICY_DH_SRC_LNK (docker_helper_t source, lnk_file class):"
+      sesearch -A -s docker_helper_t -c lnk_file 2>&1 | head -40 || true
+      echo "AB_TC_POLICY_TGT_RUNTIME_LNK (rules touching docker_helper_runtime_t lnk_file):"
+      sesearch -A -t docker_helper_runtime_t -c lnk_file 2>&1 | head -40 || true
+      echo "AB_TC_POLICY_TGT_CAT_LNK (rules touching docker_helper_trusted_ca_t lnk_file):"
+      sesearch -A -t docker_helper_trusted_ca_t -c lnk_file 2>&1 | head -40 || true
+      echo "AB_TC_POLICY_DH_CA_ALL (docker_helper_t -> docker_helper_trusted_ca_t):"
+      sesearch -A -s docker_helper_t -t docker_helper_trusted_ca_t 2>&1 | head -40 || true
+
+      # --- fresh audit window + disable dontaudit ---
+      WIN_START="$(date +'%m/%d/%Y %H:%M:%S')"
+      echo "AB_TC_AUDIT_WINDOW_START=$WIN_START"
+      semodule -DB 2>&1 || { echo "error: semodule -DB failed" >&2; }
+
+      # --- optional narrow temporary proof module (AB_TC_PROOF_LNK_PERMS) ---
+      if [ -n "$AB_TC_PROOF_LNK_PERMS" ]; then
+        echo "--- build + load TEMPORARY trusted-CA proof module ---"
+        echo "AB_TC_PROOF_PERMS_REQUESTED=$AB_TC_PROOF_LNK_PERMS"
+        TE="/tmp/dh_trusted_ca_proof.te"
+        cat > "$TE" <<EOF
+module dh_trusted_ca_proof 1.0;
+
+require {
+	type docker_helper_t;
+	type docker_helper_trusted_ca_t;
+	class lnk_file { getattr relabelfrom relabelto };
+}
+
+allow docker_helper_t docker_helper_trusted_ca_t:lnk_file { $AB_TC_PROOF_LNK_PERMS };
+EOF
+        if checkmodule -M -m -o /tmp/dh_trusted_ca_proof.mod "$TE" 2>&1; then
+          if semodule_package -o /tmp/dh_trusted_ca_proof.pp -m /tmp/dh_trusted_ca_proof.mod 2>&1 && semodule -i /tmp/dh_trusted_ca_proof.pp 2>&1; then
+            echo "AB_TC_PROOF_MODULE=loaded"
+            echo "AB_TC_PROOF_LIVE: $(sesearch -A -s docker_helper_t -t docker_helper_trusted_ca_t -c lnk_file 2>&1 | head -5 || true)"
+          else
+            echo "error: could not package/load the temporary trusted-CA proof module" >&2
+          fi
+        else
+          echo "error: checkmodule failed for the temporary trusted-CA proof module" >&2
+        fi
+      fi
+
+      # --- EXACT production reproducer: rpm reinstall -> real restart path ---
+      echo "--- exact production reproducer: rpm -Uvh --replacepkgs ---"
+      echo "AB_TC_REINSTALL_CMD=rpm -Uvh --replacepkgs $AB_TC_RPM"
+      REINSTALL_OUT="$(rpm -Uvh --replacepkgs "$AB_TC_RPM" 2>&1)"
+      REINSTALL_EC=$?
+      echo "AB_TC_REINSTALL_RC=$REINSTALL_EC"
+      printf '%s\n' "$REINSTALL_OUT" | tail -12
+
+      echo "--- systemctl status docker-helper ---"
+      systemctl status docker-helper.service --no-pager -l 2>&1 | head -20 || true
+      echo "--- journalctl -u docker-helper ---"
+      journalctl -u docker-helper.service -n 50 --no-pager 2>&1 | tail -50 || true
+
+      echo "--- AVC evidence (audit window) ---"
+      ausearch -m AVC -m USER_AVC --start "$WIN_START" -i 2>&1 \
+        | grep -E 'docker_helper|trusted_ca|restorecon|denied|lnk_file|setfiles|setcontext|getattr|relabel' | head -40 \
+        || echo "(ausearch window: no matching AVC/USER_AVC records)"
+      echo "--- AVC evidence (raw audit.log) ---"
+      tail -100 /var/log/audit/audit.log 2>/dev/null | grep -E 'avc:|denied|docker_helper|trusted_ca|restorecon' | tail -40 \
+        || true
+
+      # --- re-ensure dontaudit off + one manual restart of the SAME daemon
+      #     startup path (prepareCAInjection restorecon) so the AVC is captured
+      #     even if the RPM %post's `semodule -i` re-enabled dontaudit ---
+      echo "--- re-ensure dontaudit off + manual restart for AVC capture ---"
+      semodule -DB 2>&1 || true
+      systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
+      systemctl restart docker-helper.service >/dev/null 2>&1 || true
+      sleep 4
+      ausearch -m AVC -m USER_AVC --start "$WIN_START" -i 2>&1 \
+        | grep -E 'docker_helper|trusted_ca|restorecon|denied|lnk_file|setfiles|getattr|relabel' | head -40 \
+        || echo "(ausearch after manual restart: no matching AVC/USER_AVC records)"
+      tail -60 /var/log/audit/audit.log 2>/dev/null | grep -E 'avc:|denied|docker_helper|trusted_ca|restorecon' | tail -30 \
+        || true
+
+      # --- restore dontaudit (default production behavior) ---
+      semodule -B 2>&1 || echo "warning: semodule -B failed"
+
+      # --- success check (only meaningful when a proof module was loaded) ---
+      if [ -n "$AB_TC_PROOF_LNK_PERMS" ]; then
+        echo "--- success check (temporary proof module loaded, dontaudit restored) ---"
+        systemctl reset-failed docker-helper.service >/dev/null 2>&1 || true
+        systemctl restart docker-helper.service >/dev/null 2>&1 || true
+        sleep 4
+        if systemctl is-active --quiet docker-helper.service; then
+          echo "AB_TC_DAEMON_ACTIVE=yes"
+        else
+          echo "AB_TC_DAEMON_ACTIVE=no"
+          journalctl -u docker-helper.service -n 15 --no-pager 2>/dev/null | tail -15 || true
+        fi
+        if [ -f "$CAFILE" ] && [ -L "$LNK" ]; then
+          echo "AB_TC_SNAPSHOT_USABLE=yes (ca.pem present; $LNK -> $(readlink "$LNK" 2>/dev/null || true))"
+        else
+          echo "AB_TC_SNAPSHOT_USABLE=no"
+        fi
+        if systemctl is-active --quiet docker-helper.service && [ -n "$TOKEN" ]; then
+          TLS2_EC=0
+          TLS2_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$TOKEN" docker-helper run --image uat-tc-curl:alpine3.24 -- sh -ec "curl -fsS https://$GATEWAY:$TLS_PORT/ >/dev/null && echo TLS-OK2" 2>&1)" || TLS2_EC=$?
+          if [ "$TLS2_EC" -eq 0 ] && printf '%s\n' "$TLS2_OUT" | grep -q 'TLS-OK2'; then
+            echo "AB_TC_FRESH_CA_RUN=yes"
+          else
+            echo "AB_TC_FRESH_CA_RUN=no (exit=$TLS2_EC)"
+            printf '%s\n' "$TLS2_OUT" | redact | tail -6
+          fi
+        else
+          echo "AB_TC_FRESH_CA_RUN=(not attempted)"
+        fi
+      fi
+
+      rm -rf "$TC_DIR" "$BUILDCTX"
+    else
+      echo "AB_PART_C=(no docker bridge gateway; trusted-CA proof not run)"
+    fi
+  else
+    echo "AB_PART_C=(service not active; trusted-CA proof not run)"
+  fi
 fi
 
 echo
