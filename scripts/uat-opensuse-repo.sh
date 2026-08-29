@@ -43,6 +43,7 @@
 
 OPENSUSE_ZYPP_CONNECT_TIMEOUT=5
 OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED=262144
+OPENSUSE_ZYPP_TRANSFER_TIMEOUT=600
 OPENSUSE_ZYPPER_ATTEMPTS=3
 OPENSUSE_ZYPPER_DELAY=2
 # Fallback mirrors (region-neutral / US-hosted) used only when the default
@@ -71,9 +72,15 @@ zypp_set_download_key() {
 }
 
 # opensuse_zypp_tune_timeouts: enforce the libzypp download policy.
+# download.connect_timeout limits only the connection phase; a large RPM can
+# still hit the transfer timeout (libzypp default 180s / curl default 60s) on
+# a slow mirror, so transfer_timeout is raised as well.
 opensuse_zypp_tune_timeouts() {
   zypp_set_download_key download.connect_timeout "$OPENSUSE_ZYPP_CONNECT_TIMEOUT"
   zypp_set_download_key download.min_download_speed "$OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED"
+  zypp_set_download_key download.transfer_timeout "$OPENSUSE_ZYPP_TRANSFER_TIMEOUT"
+  echo "zypp download policy: connect_timeout=$OPENSUSE_ZYPP_CONNECT_TIMEOUT min_download_speed=$OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED transfer_timeout=$OPENSUSE_ZYPP_TRANSFER_TIMEOUT"
+  grep -E '^download\.(connect_timeout|min_download_speed|transfer_timeout)' /etc/zypp/zypp.conf 2>/dev/null || true
 }
 
 # opensuse_zypper: retry wrapper preserving the final real zypper exit code.
