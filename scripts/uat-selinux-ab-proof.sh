@@ -5,27 +5,35 @@
 # the guest as root, against an already-installed, confined docker-helper
 # system service (docker_helper_t) with the Docker daemon running.
 #
-# Part A — Docker runtime/socket A/B proof:
-#   BEFORE  ->  restorecon -v "$(command -v dockerd)" ; systemctl restart docker
-#            ->  AFTER  ->  ONE real `docker-helper pull alpine:3.24`.
-#   Reports whether the exact dockerd executable relabel changes the dockerd
-#   domain, the /run/docker.sock type, and the docker-helper pull result.
-#   This is a bounded experiment and deliberately does NOT broaden the shipped
-#   policy: no `allow var_run_t`, no `allow unconfined_service_t`, and no
-#   recursive relabel of Docker runtime state.
+# Part A — Docker runtime/socket NATURAL-HEALTH confirmation:
+#   Reports whether the two-stage UAT environment setup (container-selinux
+#   settled BEFORE Docker is installed) produced the naturally healthy Docker
+#   state WITHOUT any docker-helper intervention and WITHOUT any explicit
+#   restorecon/restart:
+#     dockerd executable = container_runtime_exec_t
+#     dockerd process    = container_runtime_t
+#     docker.sock        = container_var_run_t
+#   Then performs ONE real `docker-helper pull alpine:3.24` and records the
+#   explicit pull rc (a successful proof script is NOT a successful pull).
 #
-# Part B — semanage production-path proof:
-#   Documents the semanage executable/interpreter types and whether the
-#   installed policy provides the standard semanage execution/domain types
-#   (semanage_exec_t / semanage_t). Then, with dontaudit disabled
-#   (semodule -DB), triggers ONE non-home Session creation through the real
-#   confined docker_helper_t daemon — the production path that invokes
-#   `semanage fcontext -l -C -n` — and captures the exact AVC(s). ALWAYS
-#   restores dontaudit (semodule -B), even on failure.
+# Part B — semanage production-path transition derivation:
+#   Documents the semanage executable/interpreter types, whether the installed
+#   policy provides semanage_exec_t / semanage_t, and the STANDARD semanage
+#   domain-transition pattern present in the installed policy (sesearch), and
+#   whether process2:nnp_transition is required (docker-helper.service sets
+#   NoNewPrivileges=true). Then loads a TEMPORARY proof module that adds ONLY
+#   the candidate transition/access rules for
+#       docker_helper_t -> semanage_exec_t -> semanage_t
+#   (no docker_helper_t generic policy-store access; no execute_no_trans on
+#   semanage_exec_t). With dontaudit disabled (semodule -DB) and auditd running,
+#   triggers ONE real non-home Session creation through the confined daemon and
+#   captures the exact AVC/USER_AVC evidence (ausearch + dmesg) and the daemon
+#   journal. ALWAYS restores dontaudit (semodule -B) and removes the temporary
+#   proof module, even on failure.
 #
 # Evidence collection, NOT a pass/fail gate: exit 0 whenever the proofs ran to
-# completion (the pull may fail — that failure is itself the evidence);
-# nonzero only on a harness failure.
+# completion (the pull may fail, the session create may fail — those failures
+# are themselves the evidence); nonzero only on a harness failure.
 #
 # Env inputs:
 #   (none required; the RPM must already be installed and the service confined)
@@ -35,6 +43,9 @@ set -uo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "error: must run as root" >&2; exit 1; }
 [ "$(getenforce 2>/dev/null || true)" = "Enforcing" ] \
   || { echo "error: SELinux not enforcing" >&2; exit 1; }
+for t in semodule ausearch checkmodule semodule_package sesearch; do
+  command -v "$t" >/dev/null 2>&1 || { echo "error: $t not found" >&2; exit 1; }
+done
 
 # NOTE: no info/say helpers here; the proof prints labeled AB_* evidence via
 # echo so the output is directly parseable.
@@ -102,20 +113,51 @@ ensure_principal_session() {
   printf '%s' "$tok"
 }
 
-# restore dontaudit behavior on exit (Part B mutates it and MUST restore it).
+# ensure_auditd makes sure the audit daemon is RUNNING so AVC evidence is
+# actually captured (the minimal image does not ship/start it). Best-effort
+# install through the canonical repo policy owner if the package is absent.
+ensure_auditd() {
+  if ! command -v auditd >/dev/null 2>&1 && [ -f /opt/uat-repo-policy.sh ]; then
+    # shellcheck source=/dev/null
+    source /opt/uat-repo-policy.sh
+    opensuse_zypp_tune_timeouts
+    opensuse_zypper_refresh >/dev/null 2>&1 || true
+    opensuse_zypper install -y audit >/dev/null 2>&1 || true
+  fi
+  systemctl enable --now auditd >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet auditd && break
+    sleep 1
+  done
+  if systemctl is-active --quiet auditd; then
+    echo "AB_AUDITD=running"
+    # Drain any pre-existing AVC records so only fresh ones are captured.
+    ausearch -m AVC -m USER_AVC --start recent >/dev/null 2>&1 || true
+  else
+    echo "AB_AUDITD=not-running (AVC evidence falls back to dmesg + daemon journal)"
+  fi
+}
+
+# restore dontaudit behavior + remove the temporary proof module on exit.
+# The proof module is removed even on failure so the guest never keeps the
+# candidate rules loaded beyond the bounded experiment.
 restore_dontaudit() {
   echo "AB restore dontaudit: semodule -B"
   semodule -B 2>&1 || echo "warning: semodule -B failed (dontaudit may remain disabled)"
+  if [ -f /tmp/dh-semanage-proof.pp ]; then
+    echo "AB remove temp proof module: semodule -r dh_semanage_proof"
+    semodule -r dh_semanage_proof 2>&1 || echo "warning: semodule -r dh_semanage_proof failed"
+  fi
 }
 trap restore_dontaudit EXIT
 
 echo "================ SELINUX A/B PROOFS (Tumbleweed/RPM/SELinux) ================"
 
 # ===========================================================================
-# Part A — Docker runtime/socket A/B proof
+# Part A — Docker runtime/socket NATURAL-HEALTH confirmation
 # ===========================================================================
 echo
-echo "===== PART A: DOCKER RUNTIME/SOCKET A/B PROOF ====="
+echo "===== PART A: DOCKER RUNTIME/SOCKET NATURAL-HEALTH CONFIRMATION ====="
 DOCKERD="$(command -v dockerd 2>/dev/null || true)"
 if [ -z "$DOCKERD" ]; then
   echo "AB_PART_A=SKIP (dockerd not found)"
@@ -123,56 +165,37 @@ else
   DOCKERD_REAL="$(readlink -f "$DOCKERD" 2>/dev/null || true)"
   DOCKERD_PID="$(pidof dockerd 2>/dev/null || true)"
 
-  echo "--- BEFORE ---"
+  echo "--- current (natural, two-stage setup) state ---"
   echo "AB_DOCKERD_CMD=$DOCKERD"
   echo "AB_DOCKERD_REALPATH=$DOCKERD_REAL"
   ls -lZ "$DOCKERD" 2>&1 || true
-  matchpathcon "$DOCKERD" 2>&1 || true
+  echo "AB_DOCKERD_MATCHPATHCON: $(matchpathcon "$DOCKERD" 2>&1 || true)"
   if [ -n "$DOCKERD_PID" ]; then
-    printf 'AB_DOCKERD_DOMAIN_BEFORE='
+    printf 'AB_DOCKERD_PROC_DOMAIN='
     attr_current "$DOCKERD_PID"
     echo
     ps -Z -p "$DOCKERD_PID" 2>&1 || true
   else
-    echo "AB_DOCKERD_DOMAIN_BEFORE=(dockerd not running / pidof empty)"
+    echo "AB_DOCKERD_PROC_DOMAIN=(dockerd not running / pidof empty)"
   fi
   ls -lZ /run/docker.sock 2>&1 || true
   echo "AB_SOCKET_REALPATH=$(readlink -f /run/docker.sock 2>/dev/null || true)"
-  matchpathcon /run/docker.sock 2>&1 || true
+  echo "AB_SOCKET_MATCHPATHCON: $(matchpathcon /run/docker.sock 2>&1 || true)"
 
-  echo "--- EXPERIMENT: restorecon -v dockerd + systemctl restart docker ---"
-  restorecon -v "$DOCKERD" 2>&1 || true
-  systemctl restart docker 2>&1 || true
-  # bounded wait for docker to come back
-  DOCKER_BACK=0
-  for _ in $(seq 1 60); do
-    if [ -S /run/docker.sock ] && pidof dockerd >/dev/null 2>&1; then
-      DOCKER_BACK=1
-      break
-    fi
-    sleep 1
-  done
-
-  echo "--- AFTER ---"
-  ls -lZ "$DOCKERD" 2>&1 || true
-  DOCKERD_PID="$(pidof dockerd 2>/dev/null || true)"
-  if [ -n "$DOCKERD_PID" ]; then
-    printf 'AB_DOCKERD_DOMAIN_AFTER='
-    attr_current "$DOCKERD_PID"
-    echo
-    ps -Z -p "$DOCKERD_PID" 2>&1 || true
+  EXEC_T="$(ctx_type "$DOCKERD")"
+  PROC_T="$(if [ -n "$DOCKERD_PID" ]; then attr_current "$DOCKERD_PID" | cut -d: -f3; fi)"
+  SOCK_T="$(ctx_type /run/docker.sock)"
+  if [ "$EXEC_T" = "container_runtime_exec_t" ] && [ "$PROC_T" = "container_runtime_t" ] && [ "$SOCK_T" = "container_var_run_t" ]; then
+    echo "AB_DOCKER_NATURAL_HEALTH=yes (dockerd_exec=$EXEC_T dockerd_proc=$PROC_T socket=$SOCK_T)"
   else
-    echo "AB_DOCKERD_DOMAIN_AFTER=(dockerd not running after restart)"
+    echo "AB_DOCKER_NATURAL_HEALTH=no (dockerd_exec=$EXEC_T dockerd_proc=$PROC_T socket=$SOCK_T)"
   fi
-  ls -lZ /run/docker.sock 2>&1 || true
-  matchpathcon /run/docker.sock 2>&1 || true
-  echo "AB_DOCKER_BACK=$DOCKER_BACK"
 
   # ONE real docker-helper pull through the confined daemon.
   if ensure_service; then
     TOKEN="$(ensure_principal_session || true)"
     if [ -n "$TOKEN" ]; then
-      echo "--- ONE real docker-helper pull alpine:3.24 (after Docker restart) ---"
+      echo "--- ONE real docker-helper pull alpine:3.24 ---"
       export DOCKER_HELPER_SESSION_TOKEN="$TOKEN"
       PULL_RC=0
       PULL_OUT="$(docker-helper pull alpine:3.24 2>&1)" || PULL_RC=$?
@@ -188,10 +211,12 @@ else
 fi
 
 # ===========================================================================
-# Part B — semanage production-path proof
+# Part B — semanage production-path transition derivation
 # ===========================================================================
 echo
-echo "===== PART B: SEMANAGE PRODUCTION-PATH PROOF ====="
+echo "===== PART B: SEMANAGE PRODUCTION-PATH TRANSITION DERIVATION ====="
+ensure_auditd
+
 SEMANAGE="$(command -v semanage 2>/dev/null || true)"
 if [ -z "$SEMANAGE" ]; then
   echo "AB_PART_B=SKIP (semanage not found)"
@@ -205,7 +230,6 @@ else
   echo "AB_SEMANAGE_MATCHPATHCON: $(matchpathcon "$SEMANAGE" 2>&1 || true)"
   echo "AB_SEMANAGE_HEAD: $(head -1 "$SEMANAGE" 2>&1 || true)"
 
-  # If semanage is a script, document its interpreter types too.
   FIRST="$(head -1 "$SEMANAGE" 2>/dev/null || true)"
   case "$FIRST" in
     '#!'*)
@@ -225,23 +249,75 @@ else
       ;;
   esac
 
-  # Does the installed policy provide the standard semanage types?
   echo "--- policy type availability (semanage_exec_t / semanage_t) ---"
   if command -v seinfo >/dev/null 2>&1; then
     echo "AB_POLICY_HAS_SEMANAGE_EXEC_T=$(seinfo -t semanage_exec_t 2>/dev/null | grep -c 'semanage_exec_t' || true)"
     echo "AB_POLICY_HAS_SEMANAGE_T=$(seinfo -t semanage_t 2>/dev/null | grep -c 'semanage_t' || true)"
   else
-    echo "AB_POLICY_TOOL=seinfo (setools) not installed; using matchpathcon + sesearch when available"
-  fi
-  if command -v sesearch >/dev/null 2>&1; then
-    echo "--- type_transition rules touching docker_helper_t -> semanage_exec_t ---"
-    sesearch -T -s docker_helper_t -t semanage_exec_t 2>/dev/null || echo "(none / no rules)"
-  else
-    echo "AB_POLICY_SESEARCH=not installed (no transition rule inspection possible)"
+    echo "AB_POLICY_TOOL=seinfo not installed"
   fi
 
-  # Disable dontaudit so the production-path denial is logged, then trigger
-  # ONE non-home Session creation through the real confined daemon.
+  echo "--- standard semanage domain-transition pattern in installed policy ---"
+  echo "AB_SESEARCH_T_TO_SEMANAGE_EXEC (type_transition rules targeting semanage_exec_t):"
+  sesearch -T -t semanage_exec_t 2>&1 || echo "(none / no rules)"
+  echo "AB_SESEARCH_A_FILE_T_SEMANAGE_EXEC (file allows on semanage_exec_t):"
+  sesearch -A -t semanage_exec_t -c file 2>&1 | head -30 || true
+  echo "AB_SESEARCH_A_PROC_T_SEMANAGE_T (process allows on semanage_t):"
+  sesearch -A -t semanage_t -c process 2>&1 | head -30 || true
+  echo "AB_SESEARCH_A_PROC2_T_SEMANAGE_T (process2 allows on semanage_t):"
+  sesearch -A -t semanage_t -c process2 2>&1 | head -30 || true
+  echo "AB_SESEARCH_DOCKER_HELPER_SEMANAGE (docker_helper_t rules touching semanage):"
+  sesearch -A -s docker_helper_t -t semanage_exec_t -c file 2>&1 || true
+  sesearch -A -s docker_helper_t -t semanage_t -c process 2>&1 || true
+  sesearch -A -s docker_helper_t -t semanage_t -c process2 2>&1 || true
+  sesearch -T -s docker_helper_t -t semanage_exec_t 2>&1 || true
+
+  echo "--- NoNewPrivileges determination ---"
+  grep -n 'NoNewPrivileges' /usr/lib/systemd/system/docker-helper.service 2>&1 || true
+  echo "AB_NNP_EXPECTATION=NoNewPrivileges=true means the domain transition requires process2:nnp_transition (same as the existing init_t -> docker_helper_t rule)"
+
+  echo "--- build + load TEMPORARY proof module (docker_helper_t -> semanage_exec_t -> semanage_t) ---"
+  TE="/tmp/dh-semanage-proof.te"
+  cat > "$TE" <<'TE_EOF'
+module dh_semanage_proof 1.0;
+
+require {
+	type docker_helper_t;
+	type semanage_t;
+	type semanage_exec_t;
+	type bin_t;
+	class process { transition siginh };
+	class process2 { nnp_transition };
+	class file { execute read open getattr map entrypoint };
+	class pipe { read write ioctl getattr };
+}
+
+# Standard semanage domain transition (semanage_domtrans pattern):
+#   docker_helper_t -> semanage_exec_t -> semanage_t
+type_transition docker_helper_t semanage_exec_t:process semanage_t;
+allow docker_helper_t semanage_t:process { transition siginh };
+# docker-helper.service sets NoNewPrivileges=true; the transition therefore
+# requires process2:nnp_transition (mirrors init_t -> docker_helper_t).
+allow docker_helper_t semanage_t:process2 { nnp_transition };
+allow docker_helper_t semanage_exec_t:file { execute read open getattr map };
+allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };
+# The semanage python script interpreter must be executable by the target domain.
+allow semanage_t bin_t:file { execute read open getattr map };
+# Parent/child pipe I/O for capturing semanage stdout (CombinedOutput).
+allow docker_helper_t self:pipe { read write getattr ioctl };
+allow semanage_t docker_helper_t:pipe { read write getattr ioctl };
+allow docker_helper_t semanage_t:pipe { read write getattr ioctl };
+TE_EOF
+  if checkmodule -M -m -o /tmp/dh-semanage-proof.mod "$TE" 2>&1; then
+    semodule_package -o /tmp/dh-semanage-proof.pp -m /tmp/dh-semanage-proof.mod 2>&1 \
+      && semodule -i /tmp/dh-semanage-proof.pp 2>&1 \
+      && echo "AB_PROOF_MODULE=loaded" \
+      || { echo "error: could not package/load the temporary proof module" >&2; exit 1; }
+  else
+    echo "error: checkmodule failed for the temporary proof module" >&2
+    exit 1
+  fi
+
   echo "--- disable dontaudit (semodule -DB) ---"
   semodule -DB 2>&1 || { echo "error: semodule -DB failed" >&2; exit 1; }
 
@@ -263,17 +339,24 @@ else
   WS="/opt/uat-ab-semanage-$RANDOM"
   mkdir -p "$WS"
   chmod 0755 "$WS"
-  echo "--- ONE non-home Session creation (production path, dontaudit off) ---"
+  echo "--- ONE non-home Session creation (production path, dontaudit off, auditd on) ---"
   SESS_JSON="$(docker-helper session create --system --workspace "$WS" --json 2>&1)"
   SESS_RC=$?
   printf '%s\n' "$SESS_JSON" | redact | head -8
   echo "AB_SESSION_RC=$SESS_RC"
+  if [ "$SESS_RC" -eq 0 ]; then
+    WS_TYPE="$(stat -c '%C' "$WS" 2>/dev/null | cut -d: -f3 || true)"
+    echo "AB_SESSION_WORKSPACE_TYPE=$WS_TYPE"
+  fi
 
-  echo "--- exact AVC evidence (ausearch --start recent) ---"
+  echo "--- exact AVC evidence (ausearch, auditd running) ---"
   ausearch -m AVC -m USER_AVC --start recent 2>/dev/null | grep -E 'docker_helper|semanage|denied' \
-    || echo "(ausearch found no matching AVC/USER_AVC records, or auditd is not logging them)"
-  echo "--- exact AVC evidence (dmesg fallback, operative source when auditd is absent) ---"
+    || echo "(ausearch found no matching AVC/USER_AVC records)"
+  echo "--- exact AVC evidence (dmesg fallback) ---"
   dmesg 2>/dev/null | grep -E 'docker_helper|semanage|avc:.*denied' | tail -20 \
+    || true
+  echo "--- docker-helper daemon journal (authoritative error text) ---"
+  journalctl -u docker-helper.service -n 40 --no-pager 2>/dev/null | tail -40 \
     || true
 
   rm -rf "$WS"
