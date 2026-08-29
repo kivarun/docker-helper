@@ -128,6 +128,15 @@ install_apply() {
   printf '%s\n' "$INSTALL_OUT" | redact_tokens
 }
 
+# files_identical compares two files byte-for-byte WITHOUT depending on `cmp`
+# (absent from the minimal openSUSE Tumbleweed cloud image — the RPM path only
+# gets it via RPM dependencies). sha256sum is guaranteed (coreutils) and is
+# already the UAT's canonical integrity primitive.
+files_identical() {
+  local a="$1" b="$2"
+  [ "$(sha256sum "$a" | awk '{print $1}')" = "$(sha256sum "$b" | awk '{print $1}')" ]
+}
+
 # install_verify_artifacts proves the installed binary/unit and the MAC
 # artifacts of the selected backend came from the extracted bundle and that no
 # package-manager install was involved. Daemon confinement itself (AppArmor
@@ -136,22 +145,22 @@ install_verify_artifacts() {
   [ -n "$BUNDLE_DIR" ] && [ -d "$BUNDLE_DIR" ] \
     || fail_uat "bundle directory not recorded for artifact verification"
 
-  cmp -s /usr/bin/docker-helper "$BUNDLE_DIR/docker-helper" \
+  files_identical /usr/bin/docker-helper "$BUNDLE_DIR/docker-helper" \
     || fail_uat "installed /usr/bin/docker-helper does not match the bundle binary"
   assert_no_package_owner /usr/bin/docker-helper "installed binary"
-  cmp -s /etc/systemd/system/docker-helper.service "$BUNDLE_DIR/systemd/system/docker-helper.service" \
+  files_identical /etc/systemd/system/docker-helper.service "$BUNDLE_DIR/systemd/system/docker-helper.service" \
     || fail_uat "installed systemd unit does not match the bundle unit"
   assert_no_package_owner /etc/systemd/system/docker-helper.service "installed unit"
 
   if [ "$MAC" = "apparmor" ]; then
-    cmp -s /etc/apparmor.d/docker-helper-system "$BUNDLE_DIR/apparmor/docker-helper-system" \
+    files_identical /etc/apparmor.d/docker-helper-system "$BUNDLE_DIR/apparmor/docker-helper-system" \
       || fail_uat "installed AppArmor profile does not match the bundle profile"
     assert_no_package_owner /etc/apparmor.d/docker-helper-system "installed AppArmor profile"
     info "installed binary/unit/AppArmor profile match the extracted bundle (no package manager)"
   elif [ "$MAC" = "selinux" ]; then
     # The SELinux policy artifact at the stable path must originate from the
     # bundle (install-system.sh copies selinux/docker_helper.pp there).
-    cmp -s /usr/share/selinux/docker_helper.pp "$BUNDLE_DIR/selinux/docker_helper.pp" \
+    files_identical /usr/share/selinux/docker_helper.pp "$BUNDLE_DIR/selinux/docker_helper.pp" \
       || fail_uat "installed SELinux policy artifact does not match the bundle selinux/docker_helper.pp"
     assert_no_package_owner /usr/share/selinux/docker_helper.pp "installed SELinux policy artifact"
     # The docker_helper policy module must actually be loaded (semodule -i ran).
