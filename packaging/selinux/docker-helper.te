@@ -76,6 +76,7 @@ module docker_helper 1.0;
 		type container_var_run_t;
 		type user_home_dir_t;
 		type fs_t;
+		type usr_t;
 		type lib_t;
 		type net_conf_t;
 		type http_port_t;
@@ -102,7 +103,7 @@ module docker_helper 1.0;
 		class lnk_file { create getattr read unlink write setattr append rename link ioctl lock relabelfrom relabelto };
 		class chr_file { append create getattr ioctl read watch open write };
 		class blk_file { append create getattr ioctl read };
-		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock };
+		class fifo_file { append create getattr ioctl read watch write open setattr rename link unlink lock relabelfrom relabelto };
 		class filesystem { mount remount unmount getattr };
 		class tcp_socket { create setopt bind node_bind listen accept getattr read write connect getopt name_connect };
 		class unix_stream_socket { connectto getattr ioctl read write };
@@ -359,6 +360,40 @@ allow docker_helper_t tmpfs_t:filesystem { getattr };
 # This mirrors the tmpfs_t rule above and is NOT a mount-scan permission: the
 # mount-scan filesystem types (device_t, devpts_t, cgroup_t, ...) stay denied.
 allow docker_helper_t fs_t:filesystem { getattr };
+
+# --- Workspace relabel grants (non-home Session workspaces) ---
+#
+# The Session MAC binding lifecycle relabels a concrete non-home workspace
+# between its normal host label (usr_t for files created under /opt and other
+# non-home roots) and docker_helper_workspace_t:
+#   initial:   usr_t                     -> docker_helper_workspace_t
+#   teardown:  docker_helper_workspace_t -> usr_t
+# The mount-boundary guard (checkWorkspaceRelabelBoundary) runs before any of
+# these recursive relabels, so no grant here can traverse a same-fs bind mount
+# to an external source inode.
+#
+# Proven necessary by live AVC evidence in the bounded scope=selinux run with a
+# temporary permissive docker_helper_t domain (both directions, container-created
+# objects included). Each rule grants exactly the permissions exercised:
+#   - getattr is included only where restorecon reads the current label of an
+#     already-labeled object before relabeling it (usr_t fifo_file, and
+#     workspace_t lnk_file/fifo_file).
+#   - usr_t:lnk_file getattr is deliberately NOT granted: it was not denied in
+#     the permissive run and is not needed by restorecon on the initial pass.
+# Deliberately excluded (not evidenced): file_type attribute relabel, generic
+# relabel, and sock_file/chr_file/blk_file relabel.
+#
+# usr_t (initial-pass source / teardown target)
+allow docker_helper_t usr_t:dir { relabelfrom relabelto };
+allow docker_helper_t usr_t:file { relabelfrom relabelto };
+allow docker_helper_t usr_t:lnk_file { relabelfrom relabelto };
+allow docker_helper_t usr_t:fifo_file { getattr relabelfrom relabelto };
+
+# docker_helper_workspace_t (teardown source / initial-pass target)
+allow docker_helper_t docker_helper_workspace_t:dir { relabelfrom relabelto };
+allow docker_helper_t docker_helper_workspace_t:file { relabelfrom relabelto };
+allow docker_helper_t docker_helper_workspace_t:lnk_file { getattr relabelfrom relabelto };
+allow docker_helper_t docker_helper_workspace_t:fifo_file { getattr relabelfrom relabelto };
 
 # --- Buildx execution/runtime/network/certificates (proven in enforcing UAT) ---
 

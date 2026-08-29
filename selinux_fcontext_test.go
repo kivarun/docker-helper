@@ -193,12 +193,30 @@ func TestSELinuxPolicyNoBroadHostTypeGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(data)
-	for _, typ := range []string{"usr_t", "default_t", "var_t"} {
+	// default_t and var_t must receive no docker_helper_t access at all.
+	for _, typ := range []string{"default_t", "var_t"} {
 		if strings.Contains(content, "allow docker_helper_t "+typ) {
 			t.Errorf("policy must NOT grant docker_helper_t broad access to %s", typ)
 		}
-		if strings.Contains(content, "allow docker_helper_container_t "+typ) {
-			t.Errorf("policy must NOT grant docker_helper_container_t broad access to %s", typ)
+	}
+	// docker_helper_container_t must never access host usr_t objects.
+	if strings.Contains(content, "allow docker_helper_container_t usr_t") {
+		t.Error("policy must NOT grant docker_helper_container_t access to usr_t")
+	}
+	// docker_helper_t may access usr_t only through the narrow workspace-relabel
+	// rules proven by AVC evidence (relabelfrom/relabelto, plus getattr on
+	// fifo_file for restorecon label reads). Any other class or any
+	// read/write/open/execute-style permission on usr_t would expand daemon
+	// reach into host user files and must fail.
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "allow docker_helper_t usr_t:") {
+			continue
+		}
+		for _, broad := range []string{"read", "write", "open", "execute", "create", "unlink", "rename", "setattr", "mounton", "append", "ioctl", "lock", "link", "reparent", "add_name", "remove_name", "rmdir", "search"} {
+			if strings.Contains(line, broad) {
+				t.Errorf("policy must NOT grant docker_helper_t broad access to usr_t: %s", line)
+			}
 		}
 	}
 }
@@ -2067,5 +2085,136 @@ func TestSELinuxPolicyWorkspaceRestoreconFstatfs(t *testing.T) {
 	}
 	if strings.Contains(content, "allow docker_helper_t fs_t:filesystem { unmount getattr };") {
 		t.Error("fs_t filesystem grant must keep the mount-pin unmount and the target-path getattr as distinct narrow rules")
+	}
+}
+
+// selinuxAllowRule is a parsed single-line allow rule from the shipped policy.
+type selinuxAllowRule struct {
+	target string
+	class  string
+	perms  string
+}
+
+// dockerHelperRelabelRules returns every allow rule from docker_helper_t that
+// grants relabelfrom or relabelto on any class. The policy is written with one
+// rule per line in the form:
+//
+//	allow docker_helper_t <target>:<class> { perms };
+//
+// so a line-based parse is sufficient and stays aligned with the shipped
+// artifact. A rule not parsed this way would fail the positive assertions below
+// rather than silently pass.
+func dockerHelperRelabelRules(content string) []selinuxAllowRule {
+	var rules []selinuxAllowRule
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "allow docker_helper_t ") {
+			continue
+		}
+		if !strings.Contains(line, "relabelfrom") && !strings.Contains(line, "relabelto") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "allow docker_helper_t "))
+		colon := strings.Index(rest, ":")
+		brace := strings.Index(rest, "{")
+		closeBrace := strings.LastIndex(rest, "}")
+		if colon < 0 || brace < 0 || brace < colon || closeBrace < brace {
+			rules = append(rules, selinuxAllowRule{target: "UNPARSEABLE", class: "UNPARSEABLE", perms: rest})
+			continue
+		}
+		rules = append(rules, selinuxAllowRule{
+			target: strings.TrimSpace(rest[:colon]),
+			class:  strings.TrimSpace(rest[colon+1 : brace]),
+			perms:  strings.TrimSpace(rest[brace+1 : closeBrace]),
+		})
+	}
+	return rules
+}
+
+func findRelabelRule(rules []selinuxAllowRule, target, class string) (selinuxAllowRule, bool) {
+	for _, r := range rules {
+		if r.target == target && r.class == class {
+			return r, true
+		}
+	}
+	return selinuxAllowRule{}, false
+}
+
+// TestSELinuxPolicyWorkspaceRelabelRules asserts the exact AVC-proven relabel
+// grants for the non-home workspace lifecycle: initial usr_t ->
+// docker_helper_workspace_t and teardown docker_helper_workspace_t -> usr_t.
+// Each rule must grant exactly the proven permissions (getattr only where
+// restorecon must read an already-labeled object's current label before
+// relabeling it).
+func TestSELinuxPolicyWorkspaceRelabelRules(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := dockerHelperRelabelRules(string(data))
+
+	want := []struct {
+		target, class, perms string
+	}{
+		{target: "usr_t", class: "dir", perms: "relabelfrom relabelto"},
+		{target: "usr_t", class: "file", perms: "relabelfrom relabelto"},
+		{target: "usr_t", class: "lnk_file", perms: "relabelfrom relabelto"},
+		{target: "usr_t", class: "fifo_file", perms: "getattr relabelfrom relabelto"},
+		{target: "docker_helper_workspace_t", class: "dir", perms: "relabelfrom relabelto"},
+		{target: "docker_helper_workspace_t", class: "file", perms: "relabelfrom relabelto"},
+		{target: "docker_helper_workspace_t", class: "lnk_file", perms: "getattr relabelfrom relabelto"},
+		{target: "docker_helper_workspace_t", class: "fifo_file", perms: "getattr relabelfrom relabelto"},
+	}
+	for _, w := range want {
+		got, ok := findRelabelRule(rules, w.target, w.class)
+		if !ok {
+			t.Errorf("policy must grant docker_helper_t %s:%s relabelfrom/relabelto", w.target, w.class)
+			continue
+		}
+		if got.perms != w.perms {
+			t.Errorf("docker_helper_t %s:%s perms = %q, want exactly %q", w.target, w.class, got.perms, w.perms)
+		}
+	}
+}
+
+// TestSELinuxPolicyNoFileTypeRelabel guards against granting relabelfrom or
+// relabelto through the file_type attribute instead of the concrete types.
+// A file_type-attribute relabel would be broader than the AVC-proven grant.
+func TestSELinuxPolicyNoFileTypeRelabel(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := dockerHelperRelabelRules(string(data))
+	for _, r := range rules {
+		if r.target == "file_type" {
+			t.Errorf("policy must NOT grant relabel permissions via the file_type attribute: %s:%s {%s}", r.target, r.class, r.perms)
+		}
+	}
+}
+
+// TestSELinuxPolicyNoUnprovenClassRelabel guards that the workspace relabel
+// grants stay confined to the AVC-proven object classes (dir/file/lnk_file/
+// fifo_file). sock_file/chr_file/blk_file relabel on usr_t or
+// docker_helper_workspace_t is not evidenced and must not be granted.
+// It also guards that usr_t:lnk_file getattr is not added (not denied in the
+// permissive evidence run; must be proven by an enforcing run before shipping).
+func TestSELinuxPolicyNoUnprovenClassRelabel(t *testing.T) {
+	data, err := os.ReadFile("packaging/selinux/docker-helper.te")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := dockerHelperRelabelRules(string(data))
+	for _, r := range rules {
+		if r.target != "usr_t" && r.target != "docker_helper_workspace_t" {
+			continue
+		}
+		switch r.class {
+		case "sock_file", "chr_file", "blk_file":
+			t.Errorf("policy must NOT grant relabel permissions on unproven class %s (target %s): {%s}", r.class, r.target, r.perms)
+		}
+		if r.target == "usr_t" && r.class == "lnk_file" && strings.Contains(r.perms, "getattr") {
+			t.Error("policy must NOT grant usr_t:lnk_file getattr (not proven needed by an enforcing run)")
+		}
 	}
 }
