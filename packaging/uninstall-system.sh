@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # uninstall-system.sh — system (root) uninstallation of docker-helper.
 #
-# Stops and removes the system service, unloads the AppArmor profile,
-# and removes the binary. Config, state, and managed-roots are preserved
-# by default. Use --purge to remove them.
+# Stops and removes the system service, unloads/removes the installed MAC
+# backend policy (AppArmor profile and/or SELinux docker_helper module +
+# artifact) and removes the binary. Config, state, and managed-roots are
+# preserved by default. Use --purge to remove them.
+#
+# The uninstaller is MAC-neutral: it cleans up whichever backend was installed
+# (AppArmor profile, and/or the SELinux docker_helper module + policy artifact)
+# without requiring the currently active LSM to match the installed backend, so
+# an administrator can still uninstall after host configuration changes. It
+# never damages unrelated AppArmor/SELinux state.
 #
 # Usage:
 #   sudo ./uninstall-system.sh
@@ -29,6 +36,8 @@ AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
 AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
 AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
+SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
+SEMODULE="${SEMODULE:-semodule}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/docker-helper}"
 STATE_DIR="${STATE_DIR:-/var/lib/docker-helper}"
 RUNTIME_DIR="${RUNTIME_DIR:-/run/docker-helper}"
@@ -162,6 +171,31 @@ remove_apparmor_profile() {
 	rm -f "$AA_PROFILE_DEST"
 }
 
+# --- SELinux ---
+
+remove_selinux_policy() {
+	# Best-effort module removal mirroring the RPM final-erase semantics
+	# (packaging/scripts/rpm/preremove.sh): the docker_helper module is removed
+	# when loaded, but removal is best-effort and a failure only warns. This is
+	# independent of the currently active LSM so an administrator can uninstall
+	# after host configuration changes; it only ever touches docker_helper.
+	if ! command -v "$SEMODULE" >/dev/null 2>&1; then
+		warn "semodule not available; skipping SELinux policy module removal"
+		return
+	fi
+	info "Removing SELinux policy module docker_helper (best-effort)"
+	if ! "$SEMODULE" -r docker_helper 2>/dev/null; then
+		warn "Failed to remove SELinux policy module docker_helper (may not be loaded)"
+	fi
+}
+
+remove_selinux_artifact() {
+	if [[ -f "$SELINUX_PP_DEST" ]]; then
+		info "Removing SELinux policy artifact $SELINUX_PP_DEST"
+		rm -f "$SELINUX_PP_DEST"
+	fi
+}
+
 # --- Binary ---
 
 remove_binary() {
@@ -225,6 +259,8 @@ main() {
 	reload_systemd
 	unload_apparmor_profile
 	remove_apparmor_profile
+	remove_selinux_policy
+	remove_selinux_artifact
 	remove_binary
 	remove_completion
 

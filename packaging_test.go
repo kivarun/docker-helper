@@ -1557,6 +1557,10 @@ type systemScriptEnv struct {
 	destDir    string
 	logFile    string
 	env        []string
+	// Kernel-truth LSM status files used by install-system.sh backend
+	// selection (AA_ENABLED_PATH / SELINUX_ENFORCE_PATH).
+	aaEnabledPath      string
+	selinuxEnforcePath string
 }
 
 // dest returns a path under the emulated system root.
@@ -1576,6 +1580,47 @@ func (e *systemScriptEnv) fakeSystemctl(t *testing.T, script string) {
 func (e *systemScriptEnv) fakeParser(t *testing.T, script string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "apparmor_parser"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeSemodule installs a semodule fake (SELinux path) into the fake bin dir.
+func (e *systemScriptEnv) fakeSemodule(t *testing.T, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "semodule"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeRestorecon installs a restorecon fake (SELinux path) into the fake bin dir.
+func (e *systemScriptEnv) fakeRestorecon(t *testing.T, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.fakeBinDir, "restorecon"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setLSMState writes the AppArmor and SELinux kernel-truth files that drive
+// install-system.sh backend selection.
+func (e *systemScriptEnv) setLSMState(t *testing.T, aaEnabled, selinuxEnforce string) {
+	t.Helper()
+	if err := os.WriteFile(e.aaEnabledPath, []byte(aaEnabled), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.selinuxEnforcePath, []byte(selinuxEnforce), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeBundledSELinuxPP creates the bundled selinux/docker_helper.pp asset in
+// the emulated bundle so the SELinux install path has an artifact to load.
+func (e *systemScriptEnv) writeBundledSELinuxPP(t *testing.T) {
+	t.Helper()
+	dir := filepath.Join(e.scriptDir, "selinux")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docker_helper.pp"), []byte("fake-pp"), 0644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1667,7 +1712,8 @@ log_file="%s"
 echo "$0 $@" >> "$log_file"
 exit 0
 `, logFile))
-	// Standard AppArmor LSM status: active.
+	// Standard AppArmor LSM status: active; SELinux: not enforcing. The
+	// backend-selection tests override these files as needed.
 	aaDir := filepath.Join(e.destDir, "sys", "module", "apparmor", "parameters")
 	if err := os.MkdirAll(aaDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1675,17 +1721,25 @@ exit 0
 	if err := os.WriteFile(filepath.Join(aaDir, "enabled"), []byte("Y"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	selinuxDir := filepath.Join(e.destDir, "sys", "fs", "selinux")
+	if err := os.MkdirAll(selinuxDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selinuxDir, "enforce"), []byte("0"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	scriptData, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Replace the hardcoded AppArmor LSM path with the test-controlled one.
-	scriptData = []byte(strings.ReplaceAll(string(scriptData),
-		"/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH"))
 	if err := os.WriteFile(e.scriptPath, scriptData, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// The LSM kernel-truth paths are injected through the same env overrides the
+	// production scripts support (AA_ENABLED_PATH / SELINUX_ENFORCE_PATH).
+	e.aaEnabledPath = filepath.Join(aaDir, "enabled")
+	e.selinuxEnforcePath = filepath.Join(selinuxDir, "enforce")
 	return e
 }
 
@@ -1727,7 +1781,9 @@ exit 0
 		"AA_PARSER=" + filepath.Join(e.fakeBinDir, "apparmor_parser"),
 		"SYSTEMCTL=" + filepath.Join(e.fakeBinDir, "systemctl"),
 		"DOCKER=" + filepath.Join(e.fakeBinDir, "docker"),
-		"AA_ENABLED_PATH=" + filepath.Join(e.destDir, "sys", "module", "apparmor", "parameters", "enabled"),
+		"SELINUX_PP_DEST=" + e.dest("usr/share/selinux/docker_helper.pp"),
+		"AA_ENABLED_PATH=" + e.aaEnabledPath,
+		"SELINUX_ENFORCE_PATH=" + e.selinuxEnforcePath,
 	}
 	return e
 }
@@ -1765,6 +1821,7 @@ func newSystemUninstallScriptEnv(t *testing.T) *systemScriptEnv {
 		"STATE_DIR=" + e.dest("var/lib/docker-helper"),
 		"RUNTIME_DIR=" + e.dest("run/docker-helper"),
 		"AA_PARSER=" + filepath.Join(e.fakeBinDir, "apparmor_parser"),
+		"SELINUX_PP_DEST=" + e.dest("usr/share/selinux/docker_helper.pp"),
 		"SYSTEMCTL=" + filepath.Join(e.fakeBinDir, "systemctl"),
 	}
 	return e
@@ -2387,28 +2444,452 @@ esac
 	}
 }
 
-// TestInstallSystemInactiveApparmorLsm verifies that install-system.sh
-// fails early when AppArmor LSM is not active, before any file installation.
+// TestInstallSystemInactiveApparmorLsm verifies that install-system.sh fails
+// early when AppArmor is inactive and SELinux is not enforcing (no supported
+// MAC backend active), before any file installation.
 func TestInstallSystemInactiveApparmorLsm(t *testing.T) {
 	env := newSystemInstallScriptEnv(t)
 
-	// Override LSM status to inactive.
-	aaEnabledPath := filepath.Join(env.destDir, "sys", "module", "apparmor", "parameters", "enabled")
-	if err := os.WriteFile(aaEnabledPath, []byte("N"), 0644); err != nil {
-		t.Fatal(err)
-	}
+	env.setLSMState(t, "N", "0")
 
 	testRoot := t.TempDir()
 	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
 	if err == nil {
-		t.Fatal("install should fail when AppArmor LSM is inactive")
+		t.Fatal("install should fail when no MAC backend is active")
 	}
-	if !strings.Contains(out, "not active") && !strings.Contains(out, "AppArmor") {
-		t.Errorf("expected AppArmor error, got: %s", out)
+	if !strings.Contains(out, "not active") || !strings.Contains(out, "AppArmor") {
+		t.Errorf("expected no-active-backend error mentioning AppArmor, got: %s", out)
 	}
 	// Binary should NOT have been installed.
 	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
-		t.Error("binary should not be installed when AppArmor LSM is inactive")
+		t.Error("binary should not be installed when no MAC backend is active")
+	}
+}
+
+// TestInstallSystemSelectsApparmor verifies the AppArmor-only host selects the
+// AppArmor path: profile installed and loaded, and no SELinux tooling is
+// required (no bundled selinux/ artifact, no semodule on PATH).
+func TestInstallSystemSelectsApparmor(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "Y", "0") // AppArmor only (fixture default, explicit)
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err != nil {
+		t.Fatalf("AppArmor-only install failed: %v\n%s", err, out)
+	}
+
+	parserSeen := false
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "apparmor_parser") {
+			parserSeen = true
+			if !strings.Contains(c, "--replace") {
+				t.Errorf("AppArmor profile load must use --replace: %q", c)
+			}
+		}
+		if strings.Contains(c, "semodule") {
+			t.Errorf("AppArmor path must not invoke semodule: %q", c)
+		}
+		if strings.Contains(c, "restorecon") {
+			t.Errorf("AppArmor path must not invoke restorecon: %q", c)
+		}
+	}
+	if !parserSeen {
+		t.Error("AppArmor profile must be loaded on the AppArmor-only path")
+	}
+	if _, err := os.Stat(env.dest("etc/apparmor.d/docker-helper-system")); err != nil {
+		t.Error("AppArmor profile must be installed on the AppArmor-only path")
+	}
+	// The bundled SELinux artifact must not be required on the AppArmor path.
+	if _, err := os.Stat(filepath.Join(env.scriptDir, "selinux", "docker_helper.pp")); !os.IsNotExist(err) {
+		t.Error("AppArmor path must not require a bundled SELinux policy artifact")
+	}
+}
+
+// TestInstallSystemSelectsSelinux verifies the SELinux-enforcing host selects
+// the SELinux path: docker_helper module loaded with semodule -i from the
+// bundled artifact, the artifact copied to the stable path, exact narrow
+// restorecon applied, and no AppArmor tooling required.
+func TestInstallSystemSelectsSelinux(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "N", "1")
+	env.writeBundledSELinuxPP(t)
+	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+	env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err != nil {
+		t.Fatalf("SELinux-only install failed: %v\n%s", err, out)
+	}
+
+	semoduleSeen := false
+	restoreconSeen := false
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "semodule") {
+			semoduleSeen = true
+			if !strings.Contains(c, "-i") || !strings.Contains(c, "docker_helper.pp") {
+				t.Errorf("semodule must load the bundled docker_helper.pp with -i: %q", c)
+			}
+		}
+		if strings.Contains(c, "restorecon") {
+			restoreconSeen = true
+		}
+		if strings.Contains(c, "apparmor_parser") {
+			t.Errorf("SELinux path must not invoke apparmor_parser: %q", c)
+		}
+	}
+	if !semoduleSeen {
+		t.Error("semodule -i must be called on the SELinux path")
+	}
+	if !restoreconSeen {
+		t.Error("restorecon must be applied on the SELinux path")
+	}
+	// The AppArmor profile must not be installed on the SELinux path.
+	if _, err := os.Stat(env.dest("etc/apparmor.d/docker-helper-system")); !os.IsNotExist(err) {
+		t.Error("AppArmor profile must not be installed on the SELinux path")
+	}
+	// The policy artifact must be copied to the stable path.
+	if _, err := os.Stat(env.dest("usr/share/selinux/docker_helper.pp")); err != nil {
+		t.Error("SELinux policy artifact must be installed to the stable path")
+	}
+}
+
+// TestInstallSystemBothBackendsFail verifies the dual-active host is rejected
+// before any installation mutation.
+func TestInstallSystemBothBackendsFail(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "Y", "1")
+	env.writeBundledSELinuxPP(t)
+	env.fakeSemodule(t, `#!/bin/bash
+exit 0
+`)
+	env.fakeRestorecon(t, `#!/bin/bash
+exit 0
+`)
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatal("install should fail when both MAC backends are active")
+	}
+	if !strings.Contains(out, "unsupported") {
+		t.Errorf("expected dual-active rejection, got: %s", out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should not be installed when both MAC backends are active")
+	}
+}
+
+// TestInstallSystemSelinuxMissingSemodule verifies a SELinux host without
+// semodule fails before any installation mutation.
+func TestInstallSystemSelinuxMissingSemodule(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "N", "1")
+	env.writeBundledSELinuxPP(t)
+	env.fakeRestorecon(t, `#!/bin/bash
+exit 0
+`)
+	// No semodule fake: it must be absent from PATH.
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatal("install should fail when semodule is missing on a SELinux host")
+	}
+	if !strings.Contains(out, "semodule") {
+		t.Errorf("expected semodule error, got: %s", out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should not be installed when semodule is missing")
+	}
+}
+
+// TestInstallSystemSelinuxMissingRestorecon verifies a SELinux host without
+// restorecon fails before any installation mutation.
+func TestInstallSystemSelinuxMissingRestorecon(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "N", "1")
+	env.writeBundledSELinuxPP(t)
+	env.fakeSemodule(t, `#!/bin/bash
+exit 0
+`)
+	// No restorecon fake: it must be absent from PATH.
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatal("install should fail when restorecon is missing on a SELinux host")
+	}
+	if !strings.Contains(out, "restorecon") {
+		t.Errorf("expected restorecon error, got: %s", out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should not be installed when restorecon is missing")
+	}
+}
+
+// TestInstallSystemSelinuxMissingBundledPP verifies a SELinux host without the
+// bundled selinux/docker_helper.pp fails before any installation mutation.
+func TestInstallSystemSelinuxMissingBundledPP(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "N", "1")
+	env.fakeSemodule(t, `#!/bin/bash
+exit 0
+`)
+	env.fakeRestorecon(t, `#!/bin/bash
+exit 0
+`)
+	// No bundled selinux/docker_helper.pp.
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatal("install should fail when the bundled SELinux policy artifact is missing")
+	}
+	if !strings.Contains(out, "docker_helper.pp") {
+		t.Errorf("expected bundled policy artifact error, got: %s", out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should not be installed when the bundled policy artifact is missing")
+	}
+}
+
+// TestInstallSystemApparmorMissingParser verifies an AppArmor host without the
+// parser fails before any installation mutation.
+func TestInstallSystemApparmorMissingParser(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "Y", "0")
+	// Point the parser at a nonexistent path.
+	env.env = append(env.env, "AA_PARSER=/nonexistent/apparmor_parser")
+
+	testRoot := t.TempDir()
+	out, err := env.run(t, "--yes --allowed-root "+testRoot, "")
+	if err == nil {
+		t.Fatal("install should fail when apparmor_parser is missing on an AppArmor host")
+	}
+	if !strings.Contains(out, "apparmor_parser") {
+		t.Errorf("expected apparmor_parser error, got: %s", out)
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary should not be installed when apparmor_parser is missing")
+	}
+}
+
+// TestInstallSystemSelinuxRestoreconExact verifies the SELinux restorecon
+// invocation uses exactly the narrow targets proven by the RPM path and never
+// recursively restores /run/docker-helper.
+func TestInstallSystemSelinuxRestoreconExact(t *testing.T) {
+	env := newSystemInstallScriptEnv(t)
+	env.setLSMState(t, "N", "1")
+	env.writeBundledSELinuxPP(t)
+	env.fakeSemodule(t, `#!/bin/bash
+exit 0
+`)
+	env.fakeRestorecon(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+
+	testRoot := t.TempDir()
+	if _, err := env.run(t, "--yes --allowed-root "+testRoot, ""); err != nil {
+		t.Fatalf("SELinux-only install failed: %v", err)
+	}
+
+	var restoreconCalls []string
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "restorecon") {
+			restoreconCalls = append(restoreconCalls, c)
+		}
+	}
+	if len(restoreconCalls) != 4 {
+		t.Errorf("expected exactly 4 restorecon invocations, got %d: %v", len(restoreconCalls), restoreconCalls)
+	}
+	joined := strings.Join(restoreconCalls, "\n")
+	for _, want := range []string{
+		"restorecon /usr/bin/docker-helper",
+		"restorecon -R /etc/docker-helper",
+		"restorecon -R /var/lib/docker-helper",
+		"restorecon /run/docker-helper",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("restorecon must include %q (got: %s)", want, joined)
+		}
+	}
+	if strings.Contains(joined, "restorecon -R /run/docker-helper") {
+		t.Error("restorecon must NEVER recurse into /run/docker-helper (mount-alias relabel bug)")
+	}
+	// Every restorecon target must be a docker-helper-owned path: no Docker
+	// daemon/socket path may be relabeled by the installer.
+	allowedTargets := map[string]bool{
+		"/usr/bin/docker-helper": true,
+		"/etc/docker-helper":     true,
+		"/var/lib/docker-helper": true,
+		"/run/docker-helper":     true,
+	}
+	for _, c := range restoreconCalls {
+		target := c[strings.LastIndex(c, " ")+1:]
+		if !allowedTargets[target] {
+			t.Errorf("restorecon must only target docker-helper-owned paths, got: %q", c)
+		}
+	}
+}
+
+// TestInstallSystemSELinuxNoRecursiveRuntimeRestorecon verifies install-system.sh
+// never contains a recursive restorecon of /run/docker-helper.
+func TestInstallSystemSELinuxNoRecursiveRuntimeRestorecon(t *testing.T) {
+	data, err := os.ReadFile("packaging/install-system.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "restorecon -R /run/docker-helper") {
+		t.Error("install-system.sh must not recursively restorecon /run/docker-helper (would walk mount-pin aliases and corrupt workspace SELinux labels)")
+	}
+}
+
+// TestUninstallSystemSELinuxModuleCleanup verifies the uninstaller removes the
+// SELinux docker_helper module (semodule -r docker_helper, RPM final-erase
+// semantics) and the tarball-installed policy artifact, independent of the
+// currently active LSM.
+func TestUninstallSystemSELinuxModuleCleanup(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 0
+`, env.logFile))
+	// The installed policy artifact (tarball-installed stable path).
+	ppDest := env.dest("usr/share/selinux/docker_helper.pp")
+	if err := os.MkdirAll(filepath.Dir(ppDest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ppDest, []byte("installed-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+
+	semoduleSeen := false
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "semodule") {
+			semoduleSeen = true
+			if !strings.Contains(c, "-r") || !strings.Contains(c, "docker_helper") {
+				t.Errorf("semodule must remove docker_helper: %q", c)
+			}
+		}
+	}
+	if !semoduleSeen {
+		t.Error("semodule -r docker_helper must be called on uninstall")
+	}
+	if _, err := os.Stat(ppDest); !os.IsNotExist(err) {
+		t.Error("SELinux policy artifact must be removed on uninstall")
+	}
+	if _, err := os.Stat(env.dest("bin/docker-helper")); !os.IsNotExist(err) {
+		t.Error("binary must be removed on uninstall")
+	}
+	// Config/state must be preserved without --purge.
+	if _, err := os.Stat(env.dest("etc/docker-helper")); os.IsNotExist(err) {
+		t.Error("config must be preserved without --purge")
+	}
+}
+
+// TestUninstallSystemSELinuxModuleRemovalFailureWarns verifies a semodule
+// removal failure (or an absent semodule) does not abort the uninstall: the
+// common lifecycle completes and a useful warning is emitted.
+func TestUninstallSystemSELinuxModuleRemovalFailureWarns(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+	// semodule exists but fails (module may not be loaded).
+	env.fakeSemodule(t, fmt.Sprintf(`#!/bin/bash
+log_file="%s"
+echo "$0 $@" >> "$log_file"
+exit 1
+`, env.logFile))
+	ppDest := env.dest("usr/share/selinux/docker_helper.pp")
+	if err := os.MkdirAll(filepath.Dir(ppDest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ppDest, []byte("installed-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall must complete despite semodule removal failure: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "docker_helper") || !strings.Contains(out, "warning") {
+		t.Errorf("expected a useful warning about module removal, got: %s", out)
+	}
+	if _, err := os.Stat(ppDest); !os.IsNotExist(err) {
+		t.Error("SELinux policy artifact must be removed even when module removal fails")
+	}
+}
+
+// TestUninstallSystemSELinuxMissingSemoduleWarns verifies an uninstall on a
+// host without semodule completes cleanly and warns instead of failing.
+func TestUninstallSystemSELinuxMissingSemoduleWarns(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+	// No semodule fake: absent from PATH.
+	ppDest := env.dest("usr/share/selinux/docker_helper.pp")
+	if err := os.MkdirAll(filepath.Dir(ppDest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ppDest, []byte("installed-pp"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall must complete without semodule: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "semodule") || !strings.Contains(out, "warning") {
+		t.Errorf("expected a warning about missing semodule, got: %s", out)
+	}
+	if _, err := os.Stat(ppDest); !os.IsNotExist(err) {
+		t.Error("SELinux policy artifact must be removed even without semodule")
+	}
+}
+
+// TestUninstallSystemApparmorCleanupWithoutLsm verifies the uninstaller unloads
+// and removes the AppArmor profile when present, even on a host whose active
+// LSM is no longer AppArmor (uninstall after host configuration changes).
+func TestUninstallSystemApparmorCleanupWithoutLsm(t *testing.T) {
+	env := newSystemUninstallScriptEnv(t)
+	// Profile file is present (installed previously).
+	if err := os.WriteFile(env.dest("etc/apparmor.d/docker-helper-system"), []byte("profile docker-helper-system {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := env.run(t, "--yes", "")
+	if err != nil {
+		t.Fatalf("uninstall failed: %v\n%s", err, out)
+	}
+
+	parserSeen := false
+	for _, c := range env.calls(t) {
+		if strings.Contains(c, "apparmor_parser") {
+			parserSeen = true
+			if !strings.Contains(c, "-R") {
+				t.Errorf("AppArmor unload must use -R: %q", c)
+			}
+		}
+	}
+	if !parserSeen {
+		t.Error("AppArmor profile must be unloaded when present")
+	}
+	if _, err := os.Stat(env.dest("etc/apparmor.d/docker-helper-system")); !os.IsNotExist(err) {
+		t.Error("AppArmor profile file must be removed on uninstall")
 	}
 }
 

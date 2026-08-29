@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # install-system.sh — system (root) installation of docker-helper.
 #
-# Installs the binary to /usr/bin/docker-helper, the systemd system
-# unit, the AppArmor system profile, and initializes the daemon.
+# Installs the binary to /usr/bin/docker-helper, the systemd system unit, and
+# initializes the daemon. The installer is MAC-backend neutral: it selects the
+# single supported active backend from kernel state and configures either
+# AppArmor (profile install/load + managed-boundary state) or enforcing SELinux
+# (docker_helper module load + narrow restorecon). A host with neither active
+# backend, or with both active, is rejected before any mutation.
 #
 # Usage:
 #   sudo ./install-system.sh
@@ -13,7 +17,8 @@
 #   --allowed-root P Required with --yes when /etc/docker-helper/config.json
 #                    is absent. Sets the initial allowed_root for init.
 #
-# Requires: bash 4+, root (effective UID 0), Docker, AppArmor parser.
+# Requires: bash 4+, root (effective UID 0), Docker, and the runtime tooling
+# for the single active MAC backend (AppArmor parser, or semodule+restorecon).
 
 set -euo pipefail
 
@@ -28,6 +33,14 @@ AA_PROFILE_DEST="${AA_PROFILE_DEST:-/etc/apparmor.d/docker-helper-system}"
 AA_STATE_FILE="${AA_STATE_FILE:-/var/lib/docker-helper/apparmor/managed-boundaries}"
 AA_LEGACY_FRAGMENT="${AA_LEGACY_FRAGMENT:-/etc/apparmor.d/docker-helper.d/managed-roots}"
 AA_PARSER="${AA_PARSER:-/usr/sbin/apparmor_parser}"
+SELINUX_PP_SRC="${SELINUX_PP_SRC:-selinux/docker_helper.pp}"
+SELINUX_PP_DEST="${SELINUX_PP_DEST:-/usr/share/selinux/docker_helper.pp}"
+SEMODULE="${SEMODULE:-semodule}"
+RESTORECON="${RESTORECON:-restorecon}"
+# Kernel truth for MAC backend selection (the same sources the RPM postinstall
+# and the MAC UAT adapters use).
+AA_ENABLED_PATH="${AA_ENABLED_PATH:-/sys/module/apparmor/parameters/enabled}"
+SELINUX_ENFORCE_PATH="${SELINUX_ENFORCE_PATH:-/sys/fs/selinux/enforce}"
 CONFIG_PATH="${CONFIG_PATH:-/etc/docker-helper/config.json}"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 DOCKER="${DOCKER:-docker}"
@@ -116,12 +129,6 @@ check_bundled_assets() {
 		error "systemd unit not found at $unit_path"
 		exit 1
 	fi
-
-	local profile_path="$script_dir/$AA_PROFILE_SRC"
-	if [[ ! -f "$profile_path" ]]; then
-		error "AppArmor profile not found at $profile_path"
-		exit 1
-	fi
 }
 
 check_systemctl() {
@@ -134,25 +141,80 @@ check_systemctl() {
 check_apparmor_parser() {
 	if [[ ! -x "$AA_PARSER" ]]; then
 		error "AppArmor parser not found or not executable at $AA_PARSER"
-		error "AppArmor is mandatory for system mode installation."
+		error "AppArmor parser is required for system mode installation on an AppArmor host."
 		exit 1
 	fi
 }
 
-check_apparmor_active() {
-	local enabled_file="/sys/module/apparmor/parameters/enabled"
-	if [[ ! -r "$enabled_file" ]]; then
-		error "AppArmor LSM status file not readable at $enabled_file"
-		error "AppArmor is mandatory for system mode installation."
+# select_mac_backend is the single owner of MAC backend selection for system
+# mode. It reads the same kernel truth used by the RPM postinstall and the MAC
+# UAT adapters:
+#   AppArmor active:  /sys/module/apparmor/parameters/enabled == Y
+#   SELinux enforcing: /sys/fs/selinux/enforce == 1
+# Exactly one supported backend must be active: AppArmor-only, or
+# SELinux-enforcing-only. A host with neither active, or with both active, is
+# rejected BEFORE any installation mutation (system mode must not install
+# unconfined, and the dual-active configuration is unsupported). On success it
+# sets the global selected_mac to "apparmor" or "selinux".
+select_mac_backend() {
+	local aa selinux
+	aa="$(cat "$AA_ENABLED_PATH" 2>/dev/null || true)"
+	aa="$(echo "$aa" | tr -d '[:space:]')"
+	selinux="$(cat "$SELINUX_ENFORCE_PATH" 2>/dev/null || true)"
+	selinux="$(echo "$selinux" | tr -d '[:space:]')"
+
+	local aa_active=false
+	local selinux_active=false
+	[[ "$aa" == "Y" ]] && aa_active=true
+	[[ "$selinux" == "1" ]] && selinux_active=true
+
+	if $aa_active && $selinux_active; then
+		error "both AppArmor and enforcing SELinux are active on this host"
+		error "docker-helper system mode supports exactly one active MAC backend; dual-active is unsupported."
 		exit 1
 	fi
-	local val
-	val="$(cat "$enabled_file" 2>/dev/null)" || true
-	val="$(echo "$val" | tr -d '[:space:]')"
-	if [[ "$val" != "Y" ]]; then
-		error "AppArmor LSM is not active on this kernel (value: '$val')"
-		error "AppArmor is mandatory for system mode installation."
+	if ! $aa_active && ! $selinux_active; then
+		error "no supported MAC backend is active (AppArmor not active and SELinux not enforcing)"
+		error "docker-helper system mode must not install unconfined."
 		exit 1
+	fi
+
+	if $aa_active; then
+		selected_mac="apparmor"
+		info "MAC backend: AppArmor (active)"
+	else
+		selected_mac="selinux"
+		info "MAC backend: SELinux (enforcing)"
+	fi
+}
+
+# check_selected_mac_tools validates the runtime tooling and the bundled MAC
+# artifact for the selected backend. It runs BEFORE any installation mutation,
+# so a missing required tool or a missing bundled artifact never leaves a
+# partially-installed system. Tooling of the inactive backend is never required.
+check_selected_mac_tools() {
+	if [[ "$selected_mac" == "apparmor" ]]; then
+		check_apparmor_parser
+		if [[ ! -f "$script_dir/$AA_PROFILE_SRC" ]]; then
+			error "AppArmor profile not found at $script_dir/$AA_PROFILE_SRC"
+			exit 1
+		fi
+	else
+		if ! command -v "$SEMODULE" >/dev/null 2>&1; then
+			error "semodule not found in PATH"
+			error "SELinux runtime tooling (semodule) is required for system mode on a SELinux host."
+			exit 1
+		fi
+		if ! command -v "$RESTORECON" >/dev/null 2>&1; then
+			error "restorecon not found in PATH"
+			error "SELinux runtime tooling (restorecon) is required for system mode on a SELinux host."
+			exit 1
+		fi
+		if [[ ! -f "$script_dir/$SELINUX_PP_SRC" ]]; then
+			error "bundled SELinux policy module not found at $script_dir/$SELINUX_PP_SRC"
+			error "the release tarball must carry selinux/docker_helper.pp."
+			exit 1
+		fi
 	fi
 }
 
@@ -310,6 +372,41 @@ load_apparmor_profile() {
 	fi
 }
 
+install_selinux_policy() {
+	info "Loading SELinux policy module from $SELINUX_PP_SRC"
+	if ! "$SEMODULE" -i "$script_dir/$SELINUX_PP_SRC"; then
+		error "Failed to load SELinux policy module (semodule -i)"
+		error "Installation aborted. Service will not be started."
+		exit 1
+	fi
+
+	# Install the policy artifact to the stable path used by the RPM layout
+	# so the uninstaller and the verification contract can find it.
+	info "Installing SELinux policy artifact to $SELINUX_PP_DEST"
+	mkdir -p "$(dirname "$SELINUX_PP_DEST")"
+	if ! cp "$script_dir/$SELINUX_PP_SRC" "$SELINUX_PP_DEST" || ! chmod 0644 "$SELINUX_PP_DEST"; then
+		error "Failed to install SELinux policy artifact to $SELINUX_PP_DEST"
+		exit 1
+	fi
+}
+
+apply_selinux_restorecon() {
+	# Exact narrow restorecon behavior already proven by the RPM postinstall:
+	# the binary, config and state trees, and ONLY the /run/docker-helper dir
+	# itself (never recursively — recursive relabeling would walk the
+	# bind-mount aliases in /run/docker-helper/mounts and relabel the real
+	# workspace files to docker_helper_runtime_t). Best-effort, like the RPM
+	# path: the loaded module + unit SELinuxContext provide confinement even if
+	# a label cannot be applied. Docker daemon/socket labels are never touched.
+	info "Applying SELinux file contexts"
+	if ! "$RESTORECON" /usr/bin/docker-helper; then
+		warn "restorecon /usr/bin/docker-helper failed (continuing; module + unit confinement apply)"
+	fi
+	"$RESTORECON" -R /etc/docker-helper 2>/dev/null || true
+	"$RESTORECON" -R /var/lib/docker-helper 2>/dev/null || true
+	"$RESTORECON" /run/docker-helper 2>/dev/null || true
+}
+
 run_init() {
 	if [[ -f "$CONFIG_PATH" ]]; then
 		info "Existing configuration found at $CONFIG_PATH, skipping init"
@@ -376,19 +473,29 @@ main() {
 	check_root
 	check_bundled_assets
 	check_systemctl
-	check_apparmor_parser
-	check_apparmor_active
+	# MAC backend selection and its tooling/artifact preflight happen before
+	# any installation mutation: neither/both active backends, a missing
+	# required backend tool, or a missing bundled MAC artifact aborts here.
+	select_mac_backend
+	check_selected_mac_tools
 	check_docker
 	check_allowed_root
 	check_active_service
 
 	install_binary
 	install_unit
-	install_apparmor_profile
-	prepare_apparmor_state
 	install_completion
-	load_apparmor_profile
-	cleanup_legacy_apparmor_state
+
+	if [[ "$selected_mac" == "apparmor" ]]; then
+		install_apparmor_profile
+		prepare_apparmor_state
+		load_apparmor_profile
+		cleanup_legacy_apparmor_state
+	else
+		install_selinux_policy
+		apply_selinux_restorecon
+	fi
+
 	run_init
 	reload_systemd
 
@@ -408,15 +515,20 @@ main() {
 	fi
 
 	info ""
-	info "docker-helper system installation complete."
+	info "docker-helper system installation complete (MAC backend: $selected_mac)."
 	info ""
 	info "Manage the service with:"
 	info "  systemctl status $UNIT_NAME"
 	info "  systemctl restart $UNIT_NAME"
 	info ""
-	info "Manage AppArmor workspace boundaries with:"
-	info "  docker-helper apparmor root add PATH"
-	info "  docker-helper apparmor root remove PATH"
+	if [[ "$selected_mac" == "apparmor" ]]; then
+		info "Manage AppArmor workspace boundaries with:"
+		info "  docker-helper apparmor root add PATH"
+		info "  docker-helper apparmor root remove PATH"
+	else
+		info "SELinux workspace MAC coverage is managed by docker-helper sessions"
+		info "(semanage fcontext + restorecon for non-home workspaces)."
+	fi
 }
 
 # Only run main when executed directly (not when sourced for testing)
