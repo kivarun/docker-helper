@@ -116,6 +116,8 @@ ensure_principal_session() {
 # ensure_auditd makes sure the audit daemon is RUNNING so AVC evidence is
 # actually captured (the minimal image does not ship/start it). Best-effort
 # install through the canonical repo policy owner if the package is absent.
+# It also force-enables the kernel audit subsystem (auditctl -e 1) and records
+# its status so AVC capture is verifiable, not assumed.
 ensure_auditd() {
   if ! command -v auditd >/dev/null 2>&1 && [ -f /opt/uat-repo-policy.sh ]; then
     # shellcheck source=/dev/null
@@ -130,6 +132,16 @@ ensure_auditd() {
     sleep 1
   done
   if systemctl is-active --quiet auditd; then
+    # Force the kernel audit subsystem on and record its status + the log file
+    # so a later empty ausearch is meaningful (capture proven) rather than
+    # ambiguous (capture silently broken).
+    if command -v auditctl >/dev/null 2>&1; then
+      auditctl -e 1 >/dev/null 2>&1 || true
+      echo "AB_AUDITCTL_STATUS: $(auditctl -s 2>&1 || true)"
+    else
+      echo "AB_AUDITCTL_STATUS=(auditctl not found)"
+    fi
+    echo "AB_AUDIT_LOG: $(ls -la /var/log/audit/audit.log 2>&1 || true)"
     echo "AB_AUDITD=running"
     # Drain any pre-existing AVC records so only fresh ones are captured.
     ausearch -m AVC -m USER_AVC --start recent >/dev/null 2>&1 || true
@@ -272,6 +284,12 @@ else
   sesearch -A -s docker_helper_t -t semanage_t -c process2 2>&1 || true
   sesearch -T -s docker_helper_t -t semanage_exec_t 2>&1 || true
 
+  echo "--- base-policy pre-grants for the semanage target (what semanage_t already has) ---"
+  echo "AB_SESEARCH_SEMANAGE_T_BIN_T_FILE (does the base policy already let semanage_t exec its interpreter bin_t?):"
+  sesearch -A -s semanage_t -t bin_t -c file 2>&1 | head -20 || true
+  echo "AB_SESEARCH_SEMANAGE_T_PIPE (pipe access from semanage_t):"
+  sesearch -A -s semanage_t -c pipe 2>&1 | head -10 || true
+
   echo "--- NoNewPrivileges determination ---"
   grep -n 'NoNewPrivileges' /usr/lib/systemd/system/docker-helper.service 2>&1 || true
   echo "AB_NNP_EXPECTATION=NoNewPrivileges=true means the domain transition requires process2:nnp_transition (same as the existing init_t -> docker_helper_t rule)"
@@ -312,6 +330,11 @@ TE_EOF
   if checkmodule -M -m -o /tmp/dh_semanage_proof.mod "$TE" 2>&1; then
     if semodule_package -o /tmp/dh_semanage_proof.pp -m /tmp/dh_semanage_proof.mod 2>&1 && semodule -i /tmp/dh_semanage_proof.pp 2>&1; then
       echo "AB_PROOF_MODULE=loaded"
+      echo "--- proof rules live in the active policy (post-load verification) ---"
+      echo "AB_PROOF_LIVE_T: $(sesearch -T -s docker_helper_t -t semanage_exec_t -c process 2>&1 | head -3 || true)"
+      echo "AB_PROOF_LIVE_A_FILE: $(sesearch -A -s docker_helper_t -t semanage_exec_t -c file 2>&1 | head -3 || true)"
+      echo "AB_PROOF_LIVE_A_PROC: $(sesearch -A -s docker_helper_t -t semanage_t -c process 2>&1 | head -3 || true)"
+      echo "AB_PROOF_LIVE_A_PROC2: $(sesearch -A -s docker_helper_t -t semanage_t -c process2 2>&1 | head -3 || true)"
     else
       # Load-time failure (e.g. 'Failed to resolve allow statement at .../cil:N'):
       # dump the generated CIL with line numbers so the exact failing statement is
@@ -360,10 +383,18 @@ TE_EOF
     echo "AB_SESSION_WORKSPACE_TYPE=$WS_TYPE"
   fi
 
-  echo "--- exact AVC evidence (ausearch, auditd running) ---"
+  echo "--- exact AVC evidence (raw audit.log, auditd running) ---"
+  tail -60 /var/log/audit/audit.log 2>/dev/null | grep -E 'avc:|docker_helper|semanage|denied' \
+    || echo "(audit.log has no matching AVC lines; raw tail follows)"
+  tail -20 /var/log/audit/audit.log 2>/dev/null || true
+  echo "--- exact AVC evidence (ausearch variants, since boot) ---"
+  ausearch -m avc -m user_avc -ts boot -i 2>&1 | grep -E 'docker_helper|semanage|denied' \
+    || echo "(ausearch found no matching AVC/USER_AVC records since boot)"
   ausearch -m AVC -m USER_AVC --start recent 2>/dev/null | grep -E 'docker_helper|semanage|denied' \
-    || echo "(ausearch found no matching AVC/USER_AVC records)"
-  echo "--- exact AVC evidence (dmesg fallback) ---"
+    || echo "(ausearch -ts recent found no matching AVC/USER_AVC records)"
+  echo "--- exact AVC evidence (kernel journal / dmesg fallback) ---"
+  journalctl -k --no-pager -n 2000 2>/dev/null | grep -E 'avc:.*denied|docker_helper|semanage' | tail -20 \
+    || true
   dmesg 2>/dev/null | grep -E 'docker_helper|semanage|avc:.*denied' | tail -20 \
     || true
   echo "--- docker-helper daemon journal (authoritative error text) ---"
