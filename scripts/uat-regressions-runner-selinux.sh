@@ -64,17 +64,32 @@ done
           info "    file $f: $(stat -c '%s bytes' "$f" 2>/dev/null || echo '?')"
           case "$(basename "$f")" in
             cil)
-              info "    CIL FULL CONTENT:"
-              sed -n '1,200p' "$f" 2>/dev/null | sed 's/^/      /' || true
+              info "    CIL FULL CONTENT (decompressed if bzip2):"
+              if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
+                bzip2 -dc "$f" 2>/dev/null | sed -n '1,200p' | sed 's/^/      /' || true
+              else
+                sed -n '1,200p' "$f" 2>/dev/null | sed 's/^/      /' || true
+              fi
               info "    CIL workspace relabel/getattr rules:"
-              grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' "$f" 2>/dev/null \
-                | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/      /' || echo "      (none)"
+              if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
+                bzip2 -dc "$f" 2>/dev/null | grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' \
+                  | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/      /' || echo "      (none)"
+              else
+                grep -E 'allow docker_helper_t (usr_t|docker_helper_workspace_t) ' "$f" 2>/dev/null \
+                  | grep -E 'relabelfrom|relabelto|getattr' | sed 's/^/      /' || echo "      (none)"
+              fi
               info "    CIL ALL docker_helper_t allow heads:"
               grep -oE '\(allow docker_helper_t [^ ]+ [^ ]+' "$f" 2>/dev/null | sort | uniq -c | sed 's/^/      /' | head -60 || echo "      (none)"
               ;;
             pp)
               info "    pp section listing:"
               ls -la "$STORE" | sed 's/^/      /' || true
+              ;;
+            hll)
+              info "    hll content type: $(file -b "$f" 2>/dev/null || echo '?')"
+              if command -v bzip2 >/dev/null 2>&1 && head -c 4 "$f" 2>/dev/null | grep -q 'BZh'; then
+                info "    hll decompressed size: $(bzip2 -dc "$f" 2>/dev/null | wc -c)"
+              fi
               ;;
           esac
         fi
