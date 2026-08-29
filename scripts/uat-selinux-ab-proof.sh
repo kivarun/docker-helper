@@ -297,13 +297,15 @@ else
   echo "--- build + load TEMPORARY proof module (docker_helper_t -> semanage_exec_t -> semanage_t) ---"
   # checkmodule requires the module name to match the output base filename, so
   # the .mod/.pp artifacts are named dh_semanage_proof.* (module dh_semanage_proof).
-  # First candidate = the MINIMAL standard semanage domtrans pattern observed in
-  # the installed policy (type_transition + process transition/siginh + process2
-  # nnp_transition because NoNewPrivileges=true + file execute on semanage_exec_t
-  # by docker_helper_t and entrypoint/execute by semanage_t). Interpreter (bin_t)
-  # and pipe access are intentionally NOT pre-granted: semanage_t already execs its
-  # own interpreter in the base policy, and any additional need must be driven by
-  # actual AVC evidence, not speculation.
+  # Candidate = standard semanage domtrans pattern PLUS the permissions proven by
+  # actual AVC evidence from the previous bounded run:
+  #   avc: denied { noatsecure } scontext=docker_helper_t tcontext=semanage_t tclass=process
+  #     -> process transition also needs noatsecure (and rlimitinh, the next
+  #        kernel-required transition perm) beyond transition/siginh;
+  #   avc: denied { execute } scontext=docker_helper_t tcontext=bin_t name=python3.13
+  #     tclass=file
+  #     -> the exec'ing source domain itself must be able to execute the script
+  #        interpreter (bin_t), even when the script exec transitions the child.
   TE="/tmp/dh_semanage_proof.te"
   cat > "$TE" <<'TE_EOF'
 module dh_semanage_proof 1.0;
@@ -312,7 +314,8 @@ require {
 	type docker_helper_t;
 	type semanage_t;
 	type semanage_exec_t;
-	class process { transition siginh };
+	type bin_t;
+	class process { transition siginh noatsecure rlimitinh };
 	class process2 { nnp_transition };
 	class file { execute read open getattr map entrypoint };
 }
@@ -320,12 +323,15 @@ require {
 # Standard semanage domain transition (semanage_domtrans pattern):
 #   docker_helper_t -> semanage_exec_t -> semanage_t
 type_transition docker_helper_t semanage_exec_t:process semanage_t;
-allow docker_helper_t semanage_t:process { transition siginh };
+allow docker_helper_t semanage_t:process { transition siginh noatsecure rlimitinh };
 # docker-helper.service sets NoNewPrivileges=true; the transition therefore
 # requires process2:nnp_transition (mirrors init_t -> docker_helper_t).
 allow docker_helper_t semanage_t:process2 { nnp_transition };
 allow docker_helper_t semanage_exec_t:file { execute read open getattr map };
 allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint };
+# The exec'ing source domain must be able to execute the script interpreter
+# (python3.13 at bin_t); AVC: docker_helper_t -> bin_t execute denied.
+allow docker_helper_t bin_t:file { execute read open getattr map };
 TE_EOF
   if checkmodule -M -m -o /tmp/dh_semanage_proof.mod "$TE" 2>&1; then
     if semodule_package -o /tmp/dh_semanage_proof.pp -m /tmp/dh_semanage_proof.mod 2>&1 && semodule -i /tmp/dh_semanage_proof.pp 2>&1; then
