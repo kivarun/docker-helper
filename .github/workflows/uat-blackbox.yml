@@ -79,9 +79,9 @@ permissions:
 # recomputed-and-trusted on openSUSE) and hand them to the UAT as
 # UAT_ARTIFACT_PATH / UAT_ARTIFACT_SHA256. The UAT verifies the exact SHA-256
 # before installing. Build once -> upload exact artifact -> VM downloads exact
-# bytes -> install/test that artifact. The ubuntu tarball consumer also
-# consumes the producer tarball on dispatch; on push (no producer) it
-# self-builds via the artifact adapter.
+# bytes -> install/test that artifact. The ubuntu tarball consumer consumes
+# the producer tarball on every trigger (push and dispatch); the tarball
+# producer therefore runs on every trigger too.
 #
 # Dependency installation is platform-owned: each profile runs the platform
 # adapter's install-deps step before the UAT. The openSUSE install-deps step
@@ -138,8 +138,8 @@ jobs:
 
   # Ubuntu tarball / AppArmor profile: hosted ubuntu-24.04 runner. Consumes the
   # exact tarball produced ONCE by the uat-tarball-build job (the release
-  # tarball is never rebuilt by a consumer); on push there is no producer, so it
-  # self-builds via the artifact adapter. Runs on push and dispatch.
+  # tarball is never rebuilt by a consumer). Runs on push and dispatch; the
+  # producer runs on every trigger so this job's `needs` always resolves.
   uat-blackbox-ubuntu-tarball:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.scope == 'full')
     needs: uat-tarball-build
@@ -159,15 +159,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Download tarball artifact (dispatch)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Download tarball artifact
         uses: actions/download-artifact@v4
         with:
           name: docker-helper-tarball
           path: /tmp/docker-helper-tarball
 
       - name: Read expected tarball checksum (from build job)
-        if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
           SHA="$(awk '{print $1}' /tmp/docker-helper-tarball/artifact.sha256)"
