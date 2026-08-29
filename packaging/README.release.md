@@ -10,7 +10,10 @@ Native packages are also available per release:
 The RPM carries both AppArmor and SELinux runtime toolchain dependencies
 because RPM dependency resolution cannot select packages based on the host's
 active LSM. The package supports either active AppArmor or enforcing SELinux
-at runtime. Broader RPM distribution support is planned post-Release-2.
+at runtime. The release tarball supports the same MAC-backend-neutral system
+mode: it ships both MAC backend artifacts and its system installer selects the
+single active backend. Broader RPM distribution support is planned
+post-Release-2.
 
 ## Contents
 
@@ -25,6 +28,7 @@ at runtime. Broader RPM distribution support is planned post-Release-2.
 - `apparmor/docker-helper-system` — system-mode AppArmor profile
 - `apparmor/docker-helper.d/managed-roots` — managed workspace roots fragment
 - `apparmor/local/curl` — AppArmor local-profile snippet for curl
+- `selinux/docker_helper.pp` — system-mode SELinux policy module (docker_helper)
 - `skills/docker-helper/SKILL.md` — agent-facing skill file
 - `man/docker-helper.1.gz` — command reference man page (compressed)
 - `man/docker-helper-config.5.gz` — configuration file format man page (compressed)
@@ -35,8 +39,9 @@ Two deployment modes are supported:
 
 ### System mode (multi-user, Release 2)
 
-System mode installs docker-helper as a root-owned system service with
-AppArmor confinement. This is the recommended deployment for shared hosts.
+System mode installs docker-helper as a root-owned system service with MAC
+confinement (AppArmor or enforcing SELinux, whichever single backend is active
+on the host). This is the recommended deployment for shared hosts.
 
 ```bash
 sudo ./install-system.sh
@@ -48,10 +53,24 @@ Non-interactive fresh install:
 sudo ./install-system.sh --yes --allowed-root /srv/workspaces
 ```
 
-The system installer:
+The system installer is MAC-backend neutral. It selects the single supported
+active backend from kernel state and configures it:
+
+- AppArmor host (AppArmor active, SELinux not enforcing): installs and loads
+  the AppArmor system profile and prepares the managed-boundary state.
+- SELinux host (enforcing SELinux, AppArmor inactive): loads the bundled
+  `selinux/docker_helper.pp` module with `semodule`, installs the policy
+  artifact to `/usr/share/selinux/docker_helper.pp`, and applies the narrow
+  restorecon behavior (never recursively relabeling `/run/docker-helper`, never
+  relabeling the Docker daemon/socket).
+- No active backend: the installer fails before changing anything — system mode
+  must not install unconfined.
+- Both AppArmor and enforcing SELinux active: the installer fails before
+  changing anything — the dual-active configuration is unsupported.
+
+The installer always:
 - Copies the binary to `/usr/bin/docker-helper`
 - Installs the systemd system unit
-- Installs and loads the AppArmor system profile
 - Runs `docker-helper init` to create initial configuration
 - Enables and starts the service
 
@@ -60,6 +79,11 @@ Uninstall:
 ```bash
 sudo ./uninstall-system.sh
 ```
+
+The uninstaller is also MAC-neutral: it unloads/removes the installed AppArmor
+profile and removes the SELinux `docker_helper` policy module (best-effort, as
+in RPM final-erase) plus the tarball-installed policy artifact, without
+requiring the currently active LSM to match the backend that was installed.
 
 With `--purge` to also remove config, state, and managed-roots:
 
