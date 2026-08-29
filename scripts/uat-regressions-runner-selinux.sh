@@ -2,7 +2,7 @@
 #
 # uat-regressions-runner-selinux.sh — collect-all runner for the Release-2
 # targeted UAT regression groups on the Tumbleweed / RPM / SELinux profile
-# (groups 1-3). Runs INSIDE the SELinux guest, as root.
+# (groups 1-4). Runs INSIDE the SELinux guest, as root.
 #
 # It re-ensures the docker-helper system service (the common black-box UAT may
 # have stopped it during cleanup) and runs every SELinux regression group,
@@ -42,6 +42,7 @@ REGRESSIONS=(
   "1:SELinux non-home workspace lifecycle:uat-regression-selinux-workspace-lifecycle.sh"
   "2:SELinux operator-owned boundary:uat-regression-selinux-operator-boundary.sh"
   "3:SELinux restorecon filesystem-boundary:uat-regression-selinux-fs-boundary.sh"
+  "4:SELinux mount-boundary guard:uat-regression-selinux-mount-guard.sh"
 )
 
 # Fresh AVC/USER_AVC evidence (best-effort; requires auditd started by the

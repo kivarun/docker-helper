@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -54,6 +55,9 @@ type selinuxFcontextManager struct {
 	runCommand     func(string, ...string) ([]byte, error)
 	readPathCon    func(string) (string, error)
 	selinuxActive  func() (bool, bool, error) // (active, enforcing, error)
+	// readMountinfo reads the current mount namespace's mount info
+	// (/proc/self/mountinfo) used by the workspace relabel-boundary guard.
+	readMountinfo func() ([]byte, error)
 	// acquireLock acquires the global SELinux workspace management lock.
 	// Returns a release function and an error. The release function must be
 	// called to release the lock.
@@ -72,8 +76,14 @@ func newSELinuxFcontextManager() *selinuxFcontextManager {
 		runCommand:     rc,
 		readPathCon:    readPathSELinuxType,
 		selinuxActive:  selinuxEnabled,
+		readMountinfo:  readSelfMountinfo,
 		acquireLock:    acquireSELinuxFcontextLock,
 	}
+}
+
+// readSelfMountinfo reads the current process mount namespace's mount info.
+func readSelfMountinfo() ([]byte, error) {
+	return os.ReadFile("/proc/self/mountinfo")
 }
 
 // acquireSELinuxFcontextLock acquires the global SELinux workspace management
@@ -211,12 +221,14 @@ func unescapeFcontextPath(s string) (string, bool) {
 
 // ensureWorkspaceFcontext ensures that the canonical workspace has a persistent
 // SELinux mapping to docker_helper_workspace_t. It:
-//  1. Acquires the global SELinux workspace management lock;
-//  2. Checks for existing local fcontext rules;
-//  3. If no matching rule exists, adds one;
-//  4. If an existing rule maps to a different type, fails closed;
-//  5. Runs restorecon recursively;
-//  6. Verifies the actual on-disk type.
+//  1. Fails closed when the workspace relabel boundary is unsafe (mount point
+//     at or beneath the workspace; see checkWorkspaceRelabelBoundary);
+//  2. Acquires the global SELinux workspace management lock;
+//  3. Checks for existing local fcontext rules;
+//  4. If no matching rule exists, adds one;
+//  5. If an existing rule maps to a different type, fails closed;
+//  6. Runs restorecon recursively (guarded again by the mount-boundary check);
+//  7. Verifies the actual on-disk type.
 //
 // Returns whether a new mapping was created (true) or already existed (false).
 //
@@ -246,6 +258,15 @@ func (m *selinuxFcontextManager) ensureWorkspaceFcontext(workspace string) (newl
 	}
 	if !active || !enforcing {
 		return false, nil
+	}
+
+	// Fail-closed mount-boundary preflight, before any fcontext state is read
+	// or mutated: reject a workspace that is itself a mount point or has a
+	// mount point beneath it. The authoritative re-check also runs inside
+	// restoreconRecursive immediately before the command; this early check
+	// avoids creating or modifying any fcontext rule for an unsafe boundary.
+	if err := m.checkWorkspaceRelabelBoundary(workspace); err != nil {
+		return false, err
 	}
 
 	// Acquire global SELinux workspace management lock.
@@ -467,6 +488,17 @@ func (m *selinuxFcontextManager) verifyActualType(path string) error {
 // mapping. Once ensureWorkspaceFcontext returns success, the mapping is
 // managed durable state and removal is a separate lifecycle operation.
 func (m *selinuxFcontextManager) removeFcontextBoundary(boundary string) error {
+	// Mount-safety preflight BEFORE deleting the persistent fcontext rule: if
+	// the boundary cannot be safely restored recursively, leave the existing
+	// rule/state intact and fail closed instead of removing the rule first and
+	// then discovering restorecon cannot run. The authoritative re-check also
+	// runs inside restoreconRecursive after rule removal (the rollback
+	// restorecon itself) — but by then the durable rule must already be
+	// preserved by this preflight when the relabel would be unsafe.
+	if err := m.checkWorkspaceRelabelBoundary(boundary); err != nil {
+		return err
+	}
+
 	pattern := fcontextPattern(boundary)
 
 	// First remove the fcontext rule.
@@ -644,6 +676,119 @@ func (m *selinuxFcontextManager) removeFcontextRule(pattern string) error {
 	return nil
 }
 
+// parseMountinfoMountPoints parses /proc/self/mountinfo content and returns the
+// unescaped mount point of every entry.
+//
+// mountinfo line format (proc(5)):
+//
+//	<id> <parent> <major:minor> <root> <mount point> <opts> [<optional>...] - <fstype> <source> <super opts>
+//
+// The kernel separates fields with single spaces but escapes any space, tab,
+// newline or backslash inside path/option values as \040, \011, \012, \134.
+// The first literal " - " is therefore the field-8 separator; the mount point
+// is field 5, token index 4 in the pre-separator region.
+//
+// A non-empty line that cannot be parsed fails closed (returns an error): a
+// mount topology we cannot classify must never be assumed safe.
+func parseMountinfoMountPoints(data []byte) ([]string, error) {
+	var mps []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		sep := strings.Index(line, " - ")
+		if sep < 0 {
+			return nil, fmt.Errorf("unparseable mountinfo line %q: missing field separator", line)
+		}
+		fields := strings.Fields(line[:sep])
+		if len(fields) < 5 {
+			return nil, fmt.Errorf("unparseable mountinfo line %q: fewer than five fields before separator", line)
+		}
+		mps = append(mps, unescapeMountinfoPath(fields[4]))
+	}
+	return mps, nil
+}
+
+// unescapeMountinfoPath decodes the octal escape sequences the kernel uses in
+// /proc/self/mountinfo path fields: \040 (space), \011 (tab), \012 (newline)
+// and \134 (backslash). Any other backslash sequence is left untouched.
+func unescapeMountinfoPath(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			if v, ok := decodeMountinfoOctal(s[i+1 : i+4]); ok {
+				b.WriteByte(v)
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// decodeMountinfoOctal decodes exactly three octal digits.
+func decodeMountinfoOctal(s string) (byte, bool) {
+	v := 0
+	for i := 0; i < 3; i++ {
+		c := s[i]
+		if c < '0' || c > '7' {
+			return 0, false
+		}
+		v = v*8 + int(c-'0')
+	}
+	return byte(v), true
+}
+
+// checkWorkspaceRelabelBoundary verifies that a helper-managed recursive
+// relabel of the given workspace is safe. It fails closed (returns an error)
+// when the workspace itself is a mount point or when any mount point exists
+// strictly beneath the workspace: a recursive restorecon would otherwise
+// descend into that mount and relabel its contents — including, for a
+// same-filesystem bind mount, the external source inode — according to the
+// workspace pathname (restorecon -x only skips mounts on a different st_dev).
+//
+// Classification (all paths canonical absolute, compared component-wise via
+// pathWithin/pathStrictlyWithin, not string-prefix-wise):
+//
+//	mount point == workspace          -> reject (workspace itself is a mount)
+//	mount point ancestor of workspace -> allowed (the workspace's own fs mount)
+//	mount point strictly beneath ws   -> reject (nested mount / bind mount)
+//	sibling / unrelated               -> allowed
+//
+// A mountinfo read or parse failure fails closed (relabel refused).
+func (m *selinuxFcontextManager) checkWorkspaceRelabelBoundary(workspace string) error {
+	data, err := m.readMountinfo()
+	if err != nil {
+		return fmt.Errorf("cannot read mount info for workspace relabel safety: %w", err)
+	}
+	mountPoints, err := parseMountinfoMountPoints(data)
+	if err != nil {
+		return fmt.Errorf("cannot parse mount info for workspace relabel safety: %w", err)
+	}
+	ws := filepath.Clean(workspace)
+	for _, mp := range mountPoints {
+		cleanMP := filepath.Clean(mp)
+		if cleanMP == ws {
+			return fmt.Errorf(
+				"refusing recursive workspace relabel: workspace %s is itself a mount point",
+				workspace,
+			)
+		}
+		if pathWithin(cleanMP, ws) {
+			// Ancestor mount (the workspace's own filesystem): allowed.
+			continue
+		}
+		if pathStrictlyWithin(ws, cleanMP) {
+			return fmt.Errorf(
+				"refusing recursive workspace relabel: mount point %s exists beneath workspace %s",
+				mp, workspace,
+			)
+		}
+	}
+	return nil
+}
+
 // restoreconRecursive relabels the workspace recursively via the canonical
 // restorecon invocation shared by the initial relabel, the idempotent
 // existing-boundary relabel, and the rollback/removal paths.
@@ -671,16 +816,21 @@ func (m *selinuxFcontextManager) removeFcontextRule(pattern string) error {
 // a non-seclabel filesystem is necessarily a different filesystem (different
 // st_dev), so -x skips it.
 //
-// Known limitation (documented, pre-existing): -x compares st_dev, so it does
-// NOT prevent descent into a same-filesystem bind mount (a bind mount shares
-// the source filesystem's device number). Same-filesystem bind mounts were
-// already traversed by the previous `restorecon -R` invocation; -x is a strict
-// reduction of what restorecon crosses into, and does not introduce or worsen
-// that case.
+// Same-filesystem bind mounts: -x compares st_dev, so it does NOT prevent
+// descent into a same-filesystem bind mount (a bind mount shares the source
+// filesystem's device number) and would relabel the external source inode
+// according to the workspace pathname. That mount-alias case is closed here by
+// checkWorkspaceRelabelBoundary, which rejects a workspace that is itself a
+// mount point or has any mount point strictly beneath it BEFORE restorecon
+// runs. This recursive relabel is therefore only ever invoked on a boundary
+// with no mount point at or below it.
 //
 // Type-only: restorecon is never passed -F, so user/role/MLS/MCS range are not
 // forcibly reset.
 func (m *selinuxFcontextManager) restoreconRecursive(path string) error {
+	if err := m.checkWorkspaceRelabelBoundary(path); err != nil {
+		return err
+	}
 	out, err := m.runCommand(m.restoreconPath, "-R", "-m", "-x", path)
 	if err != nil {
 		return fmt.Errorf("restorecon -R -m -x: %w: %s", err, strings.TrimSpace(string(out)))

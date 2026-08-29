@@ -10,13 +10,17 @@ import (
 )
 
 // newTestManager creates a selinuxFcontextManager with the given selinuxActive
-// seam and a no-op lock (for single-threaded tests).
+// seam and a no-op lock (for single-threaded tests). readMountinfo defaults to
+// an empty mount table (no mount points at or below any workspace), so the
+// relabel-boundary guard passes by default; tests that exercise the guard
+// override it.
 func newTestManager(active func() (bool, bool, error)) *selinuxFcontextManager {
 	return &selinuxFcontextManager{
 		selinuxActive: active,
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
+		readMountinfo: func() ([]byte, error) { return []byte{}, nil },
 	}
 }
 
@@ -997,6 +1001,185 @@ func TestRestoreconRecursiveArgv(t *testing.T) {
 	}
 }
 
+// --- mountinfo parsing / workspace relabel-boundary guard tests ---
+
+// mountinfoLine renders a single /proc/self/mountinfo line with the given
+// mount point field (raw, kernel-escaped form) and mount source.
+func mountinfoLine(mp, src string) string {
+	return "36 35 98:0 / " + mp + " rw,relatime - ext4 " + src + " rw"
+}
+
+func TestUnescapeMountinfoPath(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"/opt/ws", "/opt/ws"},
+		{"/opt/ws/with\\040space", "/opt/ws/with space"},
+		{"/a\\011b", "/a\tb"},
+		{"/a\\012b", "/a\nb"},
+		{"/a\\134b", "/a\\b"},
+		{"/opt/ws/with\\040space\\134dir", "/opt/ws/with space\\dir"},
+	}
+	for _, tc := range tests {
+		if got := unescapeMountinfoPath(tc.in); got != tc.want {
+			t.Errorf("unescapeMountinfoPath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParseMountinfoMountPoints(t *testing.T) {
+	data := []byte(
+		mountinfoLine("/", "/dev/sda1") + "\n" +
+			mountinfoLine("/opt/ws/with\\040space", "/dev/sda2") + "\n" +
+			mountinfoLine("/opt/ws/mnt", "/dev/sda2") + "\n")
+	mps, err := parseMountinfoMountPoints(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/", "/opt/ws/with space", "/opt/ws/mnt"}
+	if !reflect.DeepEqual(mps, want) {
+		t.Errorf("mount points = %v, want %v", mps, want)
+	}
+}
+
+func TestParseMountinfoMountPointsMalformed(t *testing.T) {
+	for _, line := range []string{
+		"this line has no field separator",
+		"1 2 3:4 /opt - ext4 /dev/sda1 rw",
+	} {
+		if _, err := parseMountinfoMountPoints([]byte(line + "\n")); err == nil {
+			t.Errorf("expected error for malformed line %q", line)
+		}
+	}
+}
+
+// TestCheckWorkspaceRelabelBoundary pins the fail-closed boundary
+// classification used before any recursive workspace restorecon. The guard is
+// deliberately filesystem-agnostic: any mount point at or strictly beneath the
+// workspace is rejected, which is exactly what also closes the same-filesystem
+// bind-mount alias (a bind mount shares st_dev, so restorecon -x cannot see it;
+// the guard does not rely on st_dev).
+func TestCheckWorkspaceRelabelBoundary(t *testing.T) {
+	tests := []struct {
+		name      string
+		workspace string
+		mounts    []string // raw (kernel-escaped) mount point fields
+		wantErr   bool
+		wantSub   string
+	}{
+		{"no mounts below workspace allowed", "/opt/ws", []string{"/"}, false, ""},
+		{"parent filesystem mount only allowed", "/opt/ws", []string{"/", "/opt"}, false, ""},
+		{"workspace itself mountpoint rejected", "/opt/ws", []string{"/", "/opt", "/opt/ws"}, true, "itself a mount point"},
+		{"nested different-fs mount rejected", "/opt/ws", []string{"/", "/opt", "/opt/ws/mnt"}, true, "beneath workspace"},
+		{"nested same-fs bind mount rejected", "/opt/ws", []string{"/", "/opt", "/opt/ws/mnt"}, true, "beneath workspace"},
+		{"sibling mount allowed", "/opt/ws", []string{"/", "/opt", "/opt/ws-other"}, false, ""},
+		{"path-prefix collision allowed", "/opt/ws", []string{"/", "/opt", "/opt/ws-other"}, false, ""},
+		{"escaped mountpoint parsed correctly", "/opt/ws", []string{"/", "/opt", "/opt/ws/with\\040space"}, true, "beneath workspace"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var lines []string
+			for _, mp := range tc.mounts {
+				lines = append(lines, mountinfoLine(mp, "/dev/sda2"))
+			}
+			mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+			mgr.readMountinfo = func() ([]byte, error) {
+				return []byte(strings.Join(lines, "\n") + "\n"), nil
+			}
+			err := mgr.checkWorkspaceRelabelBoundary(tc.workspace)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.wantSub) {
+					t.Errorf("error %q does not contain %q", err, tc.wantSub)
+				}
+			} else if err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestRestoreconRecursiveRefusesNestedMount(t *testing.T) {
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.readMountinfo = func() ([]byte, error) {
+		return []byte(mountinfoLine("/opt/ws/mnt", "/dev/sda2") + "\n"), nil
+	}
+	restoreconCalled := false
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		restoreconCalled = true
+		return []byte{}, nil
+	}
+	err := mgr.restoreconRecursive("/opt/ws")
+	if err == nil {
+		t.Fatal("expected error for nested mount beneath workspace")
+	}
+	if !strings.Contains(err.Error(), "beneath workspace") {
+		t.Errorf("expected 'beneath workspace' in error, got: %v", err)
+	}
+	if restoreconCalled {
+		t.Error("restorecon must not run when a mount exists beneath the workspace")
+	}
+}
+
+func TestEnsureWorkspaceFcontextUnsafeFailsClosed(t *testing.T) {
+	// A workspace with a mount beneath it must be rejected BEFORE any
+	// semanage/restorecon mutation: no fcontext rule is added, no restorecon
+	// runs, and no creation is reported.
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.readMountinfo = func() ([]byte, error) {
+		return []byte(mountinfoLine("/opt/ws/mnt", "/dev/sda2") + "\n"), nil
+	}
+	mutation := false
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		mutation = true
+		return []byte{}, nil
+	}
+	created, err := mgr.ensureWorkspaceFcontext("/opt/ws")
+	if err == nil {
+		t.Fatal("expected error for workspace with nested mount")
+	}
+	if !strings.Contains(err.Error(), "beneath workspace") {
+		t.Errorf("expected 'beneath workspace' in error, got: %v", err)
+	}
+	if created {
+		t.Error("must not report creation for an unsafe boundary")
+	}
+	if mutation {
+		t.Error("no semanage/restorecon mutation must occur for an unsafe boundary")
+	}
+}
+
+func TestRemoveFcontextBoundaryUnsafeKeepsRule(t *testing.T) {
+	// Removal ordering contract: the mount-safety preflight must run BEFORE
+	// deleting the persistent fcontext rule. When removal would be unsafe, the
+	// rule and state must be left intact (fail closed).
+	mgr := newTestManager(func() (bool, bool, error) { return true, true, nil })
+	mgr.readMountinfo = func() ([]byte, error) {
+		return []byte(mountinfoLine("/opt/ws/mnt", "/dev/sda2") + "\n"), nil
+	}
+	deleteCalled := false
+	restoreconCalled := false
+	mgr.runCommand = func(cmd string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fcontext" && len(args) > 1 && args[1] == "-d" {
+			deleteCalled = true
+		}
+		if len(args) > 0 && args[0] == "-R" {
+			restoreconCalled = true
+		}
+		return []byte{}, nil
+	}
+	err := mgr.removeFcontextBoundary("/opt/ws")
+	if err == nil {
+		t.Fatal("expected error for unsafe removal boundary")
+	}
+	if deleteCalled {
+		t.Error("fcontext rule must NOT be removed when the boundary cannot be safely restored")
+	}
+	if restoreconCalled {
+		t.Error("restorecon must not run for an unsafe removal boundary")
+	}
+}
+
 // --- Lock serialization test ---
 
 func TestSELinuxWorkspaceLockSerializes(t *testing.T) {
@@ -1630,6 +1813,7 @@ func TestSELinuxRootSlashConflictingFcontext(t *testing.T) {
 		selinuxActive: func() (bool, bool, error) {
 			return true, true, nil
 		},
+		readMountinfo: func() ([]byte, error) { return []byte{}, nil },
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
@@ -1663,6 +1847,7 @@ func TestSELinuxRootSlashEquivalenceOverlap(t *testing.T) {
 		selinuxActive: func() (bool, bool, error) {
 			return true, true, nil
 		},
+		readMountinfo: func() ([]byte, error) { return []byte{}, nil },
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
@@ -1696,6 +1881,7 @@ func TestSELinuxRootSlashEquivalenceSourceOverlap(t *testing.T) {
 		selinuxActive: func() (bool, bool, error) {
 			return true, true, nil
 		},
+		readMountinfo: func() ([]byte, error) { return []byte{}, nil },
 		acquireLock: func() (func() error, error) {
 			return func() error { return nil }, nil
 		},
