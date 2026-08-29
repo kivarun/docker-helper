@@ -205,10 +205,13 @@ for p in selinux-policy-targeted policycoreutils selinux-tools policycoreutils-p
   rpm -q "$p" >/dev/null 2>&1 || { NEED=1; log "missing: $p"; }
 done
 # In ab-proof mode the semanage production-path proof must determine whether the
-# policy provides semanage_exec_t / semanage_t; that requires setools
-# (seinfo/sesearch). Not needed for the full UAT stages.
+# policy provides semanage_exec_t / semanage_t; that requires setools-console
+# (seinfo/sesearch). On openSUSE the tools ship in setools-console, not the
+# bare `setools` package (which only exists in the experimental security:/SELinux
+# repo); setools-console is in the default Tumbleweed repos. Not needed for the
+# full UAT stages.
 if [ "${UAT_SELINUX_MODE:-full}" = "ab-proof" ]; then
-  rpm -q setools >/dev/null 2>&1 || { NEED=1; log "missing: setools (ab-proof mode)"; }
+  rpm -q setools-console >/dev/null 2>&1 || { NEED=1; log "missing: setools-console (ab-proof mode)"; }
 fi
 if [ "$NEED" = 1 ]; then
   opensuse_zypp_tune_timeouts
@@ -218,7 +221,7 @@ if [ "$NEED" = 1 ]; then
   fi
   PKGS="selinux-policy-targeted policycoreutils selinux-tools policycoreutils-python-utils"
   if [ "${UAT_SELINUX_MODE:-full}" = "ab-proof" ]; then
-    PKGS="$PKGS setools"
+    PKGS="$PKGS setools-console"
   fi
   # shellcheck disable=SC2086
   opensuse_zypper install -y $PKGS
