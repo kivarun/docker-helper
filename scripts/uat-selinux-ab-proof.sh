@@ -306,6 +306,11 @@ else
   #     tclass=file
   #     -> the exec'ing source domain itself must be able to execute the script
   #        interpreter (bin_t), even when the script exec transitions the child.
+  #   avc: denied { write } scontext=docker_helper_t tcontext=var_lock_t name="lock"
+  #     tclass=dir
+  #     -> ensureWorkspaceFcontext acquires /run/lock/docker-helper-selinux.lock
+  #        (var_lock_t) before listing boundaries; the daemon must be able to
+  #        create it there.
   TE="/tmp/dh_semanage_proof.te"
   cat > "$TE" <<'TE_EOF'
 module dh_semanage_proof 1.0;
@@ -315,9 +320,11 @@ require {
 	type semanage_t;
 	type semanage_exec_t;
 	type bin_t;
+	type var_lock_t;
 	class process { transition siginh noatsecure rlimitinh };
 	class process2 { nnp_transition };
-	class file { execute read open getattr map entrypoint };
+	class file { execute read open getattr map entrypoint create write lock };
+	class dir { write add_name };
 }
 
 # Standard semanage domain transition (semanage_domtrans pattern):
@@ -332,6 +339,10 @@ allow semanage_t semanage_exec_t:file { execute read open getattr map entrypoint
 # The exec'ing source domain must be able to execute the script interpreter
 # (python3.13 at bin_t); AVC: docker_helper_t -> bin_t execute denied.
 allow docker_helper_t bin_t:file { execute read open getattr map };
+# /run/lock/docker-helper-selinux.lock (var_lock_t) serialization lock acquired
+# by ensureWorkspaceFcontext; AVC: docker_helper_t -> var_lock_t dir write denied.
+allow docker_helper_t var_lock_t:dir { write add_name };
+allow docker_helper_t var_lock_t:file { create open read write getattr lock };
 TE_EOF
   if checkmodule -M -m -o /tmp/dh_semanage_proof.mod "$TE" 2>&1; then
     if semodule_package -o /tmp/dh_semanage_proof.pp -m /tmp/dh_semanage_proof.mod 2>&1 && semodule -i /tmp/dh_semanage_proof.pp 2>&1; then
