@@ -685,11 +685,14 @@ printf '%s\n' "$HTTP_RUN_OUT" | grep -q 'HTTP-RUN-OK' \
 
 # 5. Same authorization result as Unix transport: a workspace outside the
 #    session's authorization must be rejected identically over both transports.
+#    (Operator commands over HTTP require --token-file; use the principal
+#    credential file on BOTH transports so the denial is an authorization
+#    result, not a transport/token-source difference.)
 DENIED_WS="$ALLOWED_ROOT/../denied-ws-$RANDOM"
 mkdir -p "$DENIED_WS"
-UNIX_DENIED_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" docker-helper session create --system --workspace "$DENIED_WS" 2>&1)"
+UNIX_DENIED_OUT="$(docker-helper session create --system --token-file "$CRED_FILE" --workspace "$DENIED_WS" 2>&1)"
 UNIX_DENIED_RC=$?
-HTTP_DENIED_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" docker-helper session create --endpoint "$HTTP_EP" --workspace "$DENIED_WS" 2>&1)"
+HTTP_DENIED_OUT="$(docker-helper session create --endpoint "$HTTP_EP" --token-file "$CRED_FILE" --workspace "$DENIED_WS" 2>&1)"
 HTTP_DENIED_RC=$?
 if [ "$UNIX_DENIED_RC" -ne 0 ] && [ "$HTTP_DENIED_RC" -ne 0 ] \
     && [ "$UNIX_DENIED_RC" = "$HTTP_DENIED_RC" ]; then
