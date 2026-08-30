@@ -31,9 +31,15 @@ if systemctl is-enabled --quiet docker-helper.service 2>/dev/null; then
   fi
 fi
 
-# Unload AppArmor profile (best-effort).
-unload_output=$(apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>&1) || {
-  echo "warning: failed to unload AppArmor profile docker-helper-system: $unload_output" >&2
-}
+# Unload the AppArmor profile ONLY if it is actually loaded. Absence is a
+# normal idempotent success: a host that never loaded our profile (for example
+# one now booted under a different MAC backend) must not emit a bogus warning.
+# Only a real failure removing a present, loaded profile warns.
+if [ -r /sys/kernel/security/apparmor/profiles ] && \
+   grep -q '^docker-helper-system ' /sys/kernel/security/apparmor/profiles; then
+  unload_output=$(apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>&1) || {
+    echo "warning: failed to unload AppArmor profile docker-helper-system: $unload_output" >&2
+  }
+fi
 
 exit 0

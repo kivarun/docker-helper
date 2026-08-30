@@ -4013,7 +4013,10 @@ esac
 	}
 }
 
-// writeFakeSemodule creates a semodule script that logs calls.
+// writeFakeSemodule creates a semodule script that logs calls. The fake
+// reports the docker_helper module as installed when listing (-l) unless
+// SEMODULE_MODULE_PRESENT=false, so tests can exercise the presence-gated
+// preremove removal and its absence.
 func writeFakeSemodule(t *testing.T, fakeDir, logFile string, failInstall bool, failRemove bool) {
 	t.Helper()
 	failInstallStr := "false"
@@ -4027,6 +4030,12 @@ func writeFakeSemodule(t *testing.T, fakeDir, logFile string, failInstall bool, 
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$0 $@" >> "%s"
 case "$*" in
+  *"-l"*)
+    if [ "${SEMODULE_MODULE_PRESENT:-true}" = "true" ]; then
+      echo "docker_helper"
+    fi
+    exit 0
+    ;;
   *"-i"*)
     if [ "%s" = "true" ]; then
       echo "semodule: Failed to install module" >&2
@@ -4095,6 +4104,8 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 	modified := strings.ReplaceAll(string(data), "/run/systemd/system", "$TEST_RUN_SYSTEMD")
 	// Replace AppArmor LSM status path with a test-controlled path.
 	modified = strings.ReplaceAll(modified, "/sys/module/apparmor/parameters/enabled", "$AA_ENABLED_PATH")
+	// Replace AppArmor loaded-profiles path with a test-controlled path.
+	modified = strings.ReplaceAll(modified, "/sys/kernel/security/apparmor/profiles", "$AA_PROFILES_PATH")
 	// Replace SELinux enforce path with a test-controlled path.
 	modified = strings.ReplaceAll(modified, "/sys/fs/selinux/enforce", "$SELINUX_ENFORCE_PATH")
 	// Replace migration state paths with test-controlled paths.
@@ -4119,6 +4130,17 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(aaEnabledPath, []byte("Y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default: the managed AppArmor profile is loaded, so the presence-gated
+	// preremove unload is attempted. Tests can override by providing their own
+	// AA_PROFILES_PATH via extraEnv and writing the file.
+	aaProfilesPath := filepath.Join(tmpDir, "sys", "kernel", "security", "apparmor", "profiles")
+	if err := os.MkdirAll(filepath.Dir(aaProfilesPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aaProfilesPath, []byte("docker-helper-system (enforce)\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -4152,6 +4174,7 @@ func runScript(t *testing.T, scriptPath, fakeDir, logFile string, args []string,
 		"SEMODULE_FAIL=false",
 		"TEST_RUN_SYSTEMD="+testRunDir,
 		"AA_ENABLED_PATH="+aaEnabledPath,
+		"AA_PROFILES_PATH="+aaProfilesPath,
 		"SELINUX_ENFORCE_PATH="+selinuxEnforcePath,
 		"AA_STATE_FILE="+aaStateFile,
 		"AA_LEGACY_FRAGMENT="+aaLegacyFragment,
@@ -5390,6 +5413,154 @@ func TestRpmPreremoveUpgradePreservesSELinux(t *testing.T) {
 		}
 		if strings.Contains(c, "stop") || strings.Contains(c, "disable") {
 			t.Errorf("rpm preun upgrade must not stop/disable: %s", c)
+		}
+	}
+}
+
+// TestRpmPreremoveAppArmorOnlyNoSELinuxWarning verifies the observed
+// cross-MAC uninstall regression: on an AppArmor-only host (SELinux module
+// absent), final erase must NOT emit a bogus "failed to remove SELinux module"
+// warning and must not attempt semodule -r, while the loaded AppArmor profile
+// is still unloaded.
+func TestRpmPreremoveAppArmorOnlyNoSELinuxWarning(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{"SEMODULE_MODULE_PRESENT=false"})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+	if strings.Contains(out, "SELinux") {
+		t.Errorf("AppArmor-only erase must not warn about SELinux: %s", out)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-r") {
+			t.Errorf("must not call semodule -r when the module is absent: %s", c)
+		}
+	}
+	// The loaded AppArmor profile must still be unloaded.
+	unloadSeen := false
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") && strings.Contains(c, "-R") {
+			unloadSeen = true
+		}
+	}
+	if !unloadSeen {
+		t.Error("loaded AppArmor profile must still be unloaded on final erase")
+	}
+}
+
+// TestRpmPreremoveSELinuxPresentRemovesModule (final erase) verifies that on a
+// host where the SELinux module is installed, final erase really removes it.
+// The module-present default of the fake exercises the real `semodule -r`
+// removal path.
+func TestRpmPreremoveSELinuxPresentRemovesModule(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("installed module removal must not warn: %s", out)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	removeSeen := false
+	for _, c := range calls {
+		if strings.Contains(c, "semodule") && strings.Contains(c, "-r") {
+			removeSeen = true
+			if !strings.Contains(c, "docker_helper") {
+				t.Errorf("semodule -r must target docker_helper: %s", c)
+			}
+		}
+	}
+	if !removeSeen {
+		t.Error("semodule -r docker_helper must be called when the module is installed")
+	}
+}
+
+// TestRpmPreremoveAbsentBothIdempotent verifies that when neither our AppArmor
+// profile nor our SELinux module is present (for example a host now booted
+// under a different MAC backend), final erase is a clean idempotent success
+// with no attempt to unload/remove and no warning.
+func TestRpmPreremoveAbsentBothIdempotent(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, false)
+
+	absentProfiles := filepath.Join(t.TempDir(), "profiles")
+	if err := os.WriteFile(absentProfiles, []byte("# no docker-helper profile loaded\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, []string{"SEMODULE_MODULE_PRESENT=false", "AA_PROFILES_PATH=" + absentProfiles})
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0, got %d", code)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("absent managed MAC artifacts must be idempotent (no warning): %s", out)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") || (strings.Contains(c, "semodule") && strings.Contains(c, "-r")) {
+			t.Errorf("must not attempt to remove absent managed MAC artifacts: %s", c)
+		}
+	}
+}
+
+// TestRpmPreremoveSELinuxRemovalFailureWarns verifies a real failure removing
+// an installed SELinux module is still reported (warning), and does not abort
+// the erase.
+func TestRpmPreremoveSELinuxRemovalFailureWarns(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+	writeFakeSemodule(t, fakeDir, logFile, false, true)
+
+	out, _, code := runScript(t, "packaging/scripts/rpm/preremove.sh", fakeDir, logFile,
+		[]string{"0"}, true, nil)
+	if code != 0 {
+		t.Fatalf("rpm preun final erase should exit 0 despite module removal failure, got %d", code)
+	}
+	if !strings.Contains(out, "SELinux") || !strings.Contains(out, "warning") {
+		t.Errorf("real module removal failure must be reported: %s", out)
+	}
+}
+
+// TestDebPreremoveProfileAbsentIdempotent verifies the DEB preremove does not
+// attempt to unload an absent AppArmor profile and emits no warning.
+func TestDebPreremoveProfileAbsentIdempotent(t *testing.T) {
+	fakeDir, logFile := setupScriptTest(t)
+	writeFakeSystemctl(t, fakeDir, logFile, true, true)
+	writeFakeApparmorParser(t, fakeDir, logFile, false, false)
+
+	absentProfiles := filepath.Join(t.TempDir(), "profiles")
+	if err := os.WriteFile(absentProfiles, []byte("# no docker-helper profile loaded\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, code := runScript(t, "packaging/scripts/deb/preremove.sh", fakeDir, logFile,
+		[]string{"remove"}, true, []string{"AA_PROFILES_PATH=" + absentProfiles})
+	if code != 0 {
+		t.Fatalf("deb prerm remove should exit 0, got %d", code)
+	}
+	if strings.Contains(out, "warning") {
+		t.Errorf("absent AppArmor profile must be idempotent (no warning): %s", out)
+	}
+	calls := readLifecycleScriptCalls(t, logFile)
+	for _, c := range calls {
+		if strings.Contains(c, "apparmor_parser") {
+			t.Errorf("must not attempt to unload an absent AppArmor profile: %s", c)
 		}
 	}
 }
