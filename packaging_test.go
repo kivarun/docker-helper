@@ -6342,131 +6342,157 @@ func TestBuildPackagesScriptGeneratesCompletion(t *testing.T) {
 	}
 }
 
-// TestReleaseWorkflow guards the release pipeline contract: authoritative
-// build scripts, pinned nFPM version with SHA256, no @latest, SHA256SUMS,
-// all artifact types, and prerelease handling.
+// TestReleaseWorkflow guards the release pipeline contract: release.yml is a
+// thin caller of the single canonical artifact gate, promotion never
+// constructs artifacts, and the gate + canonical producer own the pinned nFPM,
+// build-bundle / build-packages and SHA256SUMS responsibilities.
 func TestReleaseWorkflow(t *testing.T) {
-	data, err := os.ReadFile(".github/workflows/release.yml")
+	release, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
+	releaseContent := string(release)
 
-	// Must use authoritative build scripts.
-	if !strings.Contains(content, "build-bundle.sh") {
-		t.Error("release.yml must call build-bundle.sh")
+	gate, err := os.ReadFile(".github/workflows/artifact-gate.yml")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(content, "build-packages.sh") {
-		t.Error("release.yml must call build-packages.sh")
-	}
+	gateContent := string(gate)
 
-	// Must pin nFPM version.
-	if !strings.Contains(content, "NFPM_VERSION=2.47.0") {
-		t.Error("release.yml must pin NFPM_VERSION=2.47.0")
-	}
-
-	// Must verify nFPM SHA256.
-	if !strings.Contains(content, "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783") {
-		t.Error("release.yml must contain pinned nFPM SHA256")
+	// release.yml must call the single canonical artifact gate (one matrix
+	// owner; release must not duplicate the UAT matrix).
+	if !strings.Contains(releaseContent, "uses: ./.github/workflows/artifact-gate.yml") {
+		t.Error("release.yml must call the artifact gate (artifact-gate.yml)")
 	}
 
-	// Must NOT use @latest for nFPM.
-	if strings.Contains(content, "@latest") {
-		t.Error("release.yml must not use @latest for nFPM")
+	// The gate must own the canonical producer and the pinned nFPM.
+	if !strings.Contains(gateContent, "scripts/release-candidate.sh") {
+		t.Error("artifact-gate.yml must run the canonical release-candidate.sh producer")
+	}
+	if !strings.Contains(gateContent, "NFPM_VERSION=2.47.0") {
+		t.Error("artifact-gate.yml must pin NFPM_VERSION=2.47.0")
+	}
+	if !strings.Contains(gateContent, "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783") {
+		t.Error("artifact-gate.yml must contain pinned nFPM SHA256")
+	}
+	if strings.Contains(gateContent, "@latest") {
+		t.Error("artifact-gate.yml must not use @latest for nFPM")
 	}
 
-	// Must generate and verify SHA256SUMS.
-	if !strings.Contains(content, "SHA256SUMS") {
-		t.Error("release.yml must generate SHA256SUMS")
+	// The canonical producer script must build through the authoritative
+	// builders and own SHA256SUMS generation + verification.
+	producer, err := os.ReadFile("scripts/release-candidate.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerContent := string(producer)
+	if !strings.Contains(producerContent, "build-bundle.sh") {
+		t.Error("release-candidate.sh must call build-bundle.sh")
+	}
+	if !strings.Contains(producerContent, "build-packages.sh") {
+		t.Error("release-candidate.sh must call build-packages.sh")
+	}
+	if !strings.Contains(producerContent, "SHA256SUMS") {
+		t.Error("release-candidate.sh must generate SHA256SUMS")
+	}
+	if !strings.Contains(producerContent, "--check") {
+		t.Error("release-candidate.sh must verify SHA256SUMS")
 	}
 
-	// Must upload all artifact types.
-	if !strings.Contains(content, "tar.gz") {
-		t.Error("release.yml must upload .tar.gz")
+	// The promote job must publish tar.gz/deb/rpm/SHA256SUMS via gh.
+	promoteJob := findJobSection(releaseContent, "promote")
+	if promoteJob == "" {
+		t.Fatal("release.yml must contain a promote job")
 	}
-	if !strings.Contains(content, ".deb") {
-		t.Error("release.yml must upload .deb")
+	if !strings.Contains(promoteJob, "gh release create") {
+		t.Error("promote job must call gh release create")
 	}
-	if !strings.Contains(content, ".rpm") {
-		t.Error("release.yml must upload .rpm")
+	for _, must := range []string{".tar.gz", ".deb", ".rpm", "SHA256SUMS"} {
+		if !strings.Contains(promoteJob, must) {
+			t.Errorf("promote job must publish %s", must)
+		}
 	}
-
 	// Prerelease handling must be preserved.
-	if !strings.Contains(content, "prerelease") {
-		t.Error("release.yml must handle prerelease")
+	if !strings.Contains(promoteJob, "prerelease") {
+		t.Error("promote job must handle prerelease")
 	}
 
-	// Must include race test (not weaker than CI).
-	if !strings.Contains(content, "go test -race") {
+	// release.yml must run race tests (not weaker than CI).
+	if !strings.Contains(releaseContent, "go test -race") {
 		t.Error("release.yml must run go test -race")
 	}
 
-	// musl-tools must be present (release job installs it before building).
-	muslIdx := strings.Index(content, "musl-tools")
-	testsIdx := strings.Index(content, "go test ./...")
-	if muslIdx < 0 || testsIdx < 0 {
-		t.Fatal("release.yml must contain musl-tools install and go test")
+	// Static checks must run before the gate/build.
+	gateJob := findJobSection(releaseContent, "gate")
+	if gateJob == "" {
+		t.Fatal("release.yml must contain a gate job")
+	}
+	if !strings.Contains(gateJob, "needs: [prepare, checks, selinux-policy]") {
+		t.Error("gate job must depend on prepare, checks and selinux-policy")
 	}
 }
 
-// TestReleaseJobSELinuxBuildDeps verifies that the release job's
-// "Install build dependencies" step installs checkpolicy and semodule-utils
-// before the "Build native packages" step. The assertion is scoped to that
-// specific step's run block so a mention in another step or job cannot satisfy it.
+// TestReleaseJobSELinuxBuildDeps verifies that the artifact gate's producer
+// installs the build toolchain (musl-tools, checkpolicy, semodule-utils via
+// the canonical platform dependency owner) BEFORE running the canonical
+// release-candidate.sh build. The assertion is scoped to that job's steps so a
+// mention in another job or step cannot satisfy it.
 func TestReleaseJobSELinuxBuildDeps(t *testing.T) {
-	data, err := os.ReadFile(".github/workflows/release.yml")
+	gateData, err := os.ReadFile(".github/workflows/artifact-gate.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := string(data)
+	gateContent := string(gateData)
 
-	// Locate the release job section.
-	releaseJob := findJobSection(content, "release")
-	if releaseJob == "" {
-		t.Fatal("could not locate release job in release.yml")
+	// Locate the producer job section (the sole build job).
+	producerJob := findJobSection(gateContent, "producer")
+	if producerJob == "" {
+		t.Fatal("could not locate producer job in artifact-gate.yml")
 	}
 
-	// Locate the "Install build dependencies" step within the release job.
-	installStep := findStepBlock(releaseJob, "Install build dependencies")
+	// The 'Install build dependencies' step must run the canonical platform
+	// dependency owner.
+	installStep := findStepBlock(producerJob, "Install build dependencies")
 	if installStep == "" {
-		t.Fatal("release job must contain 'Install build dependencies' step")
+		t.Fatal("producer job must contain 'Install build dependencies' step")
 	}
-
-	// Extract the run block of that step.
 	runBlock := extractRunBlock(installStep)
 	if runBlock == "" {
 		t.Fatal("'Install build dependencies' step must have a run block")
 	}
-
-	// Locate the apt-get install command line inside the run block and assert
-	// that all three packages are present on that specific command.
-	installCmd := findAptInstallLine(runBlock)
-	if installCmd == "" {
-		t.Fatal("'Install build dependencies' run block must contain an apt-get install command")
+	if !strings.Contains(runBlock, "uat-blackbox.sh install-deps") {
+		t.Fatal("'Install build dependencies' step must call uat-blackbox.sh install-deps")
 	}
+
+	// The canonical platform dependency owner must install the SELinux/build
+	// toolchain (musl-tools, checkpolicy, semodule-utils).
+	platformData, err := os.ReadFile("scripts/uat-platform-ubuntu.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	platformContent := string(platformData)
 	for _, pkg := range []string{"musl-tools", "checkpolicy", "semodule-utils"} {
-		if !strings.Contains(installCmd, pkg) {
-			t.Errorf("apt-get install command must install %s (got: %s)", pkg, installCmd)
+		if !strings.Contains(platformContent, pkg) {
+			t.Errorf("uat-platform-ubuntu.sh install-deps must install %s", pkg)
 		}
 	}
 
-	// The "Build native packages" step must exist and come after the install step.
-	buildStep := findStepBlock(releaseJob, "Build native packages")
+	// The canonical producer build step must exist and come after the install
+	// step.
+	buildStep := findStepBlock(producerJob, "Build + stage the immutable candidate set (canonical producer)")
 	if buildStep == "" {
-		t.Fatal("release job must contain 'Build native packages' step")
+		t.Fatal("producer job must contain the release-candidate.sh build step")
 	}
-	if !strings.Contains(buildStep, "build-packages.sh") {
-		t.Fatal("'Build native packages' step must call build-packages.sh")
+	if !strings.Contains(buildStep, "release-candidate.sh") {
+		t.Fatal("candidate build step must call release-candidate.sh")
 	}
-
-	// Verify ordering: install step must precede build step in the release job.
-	installPos := strings.Index(releaseJob, "Install build dependencies")
-	buildPos := strings.Index(releaseJob, "Build native packages")
+	installPos := strings.Index(producerJob, "Install build dependencies")
+	buildPos := strings.Index(producerJob, "Build + stage the immutable candidate set (canonical producer)")
 	if installPos < 0 || buildPos < 0 {
-		t.Fatal("could not locate both Install and Build steps in release job")
+		t.Fatal("could not locate both Install and Build steps in producer job")
 	}
 	if installPos > buildPos {
-		t.Error("Install build dependencies must precede Build native packages in release job")
+		t.Error("Install build dependencies must precede the candidate build in the producer job")
 	}
 }
 
@@ -6586,6 +6612,9 @@ func findAptInstallLine(text string) string {
 	return ""
 }
 
+// TestReleaseWorkflowRaceBeforeBuild verifies the race tests (checks job) run
+// before the candidate build in the release pipeline: the gate (which owns the
+// producer/build) depends on checks, and promotion depends on the gate.
 func TestReleaseWorkflowRaceBeforeBuild(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
@@ -6593,14 +6622,168 @@ func TestReleaseWorkflowRaceBeforeBuild(t *testing.T) {
 	}
 	content := string(data)
 
-	// Race tests must complete before build-bundle.sh.
-	raceIdx := strings.Index(content, "go test -race")
-	bundleIdx := strings.Index(content, "build-bundle.sh")
-	if raceIdx < 0 || bundleIdx < 0 {
-		t.Fatal("release.yml must contain go test -race and build-bundle.sh")
+	if !strings.Contains(content, "go test -race") {
+		t.Fatal("release.yml must contain go test -race")
 	}
-	if raceIdx > bundleIdx {
-		t.Error("release.yml must run race tests before build-bundle.sh")
+
+	// The gate job (which runs the candidate producer/build) must depend on the
+	// checks job, so race tests complete before the build.
+	gateJob := findJobSection(content, "gate")
+	if gateJob == "" {
+		t.Fatal("release.yml must contain a gate job")
+	}
+	if !strings.Contains(gateJob, "checks") {
+		t.Fatal("gate job must depend on the checks job (race tests run before the build)")
+	}
+
+	// Promotion must depend on the gate (the build + full UAT).
+	promoteJob := findJobSection(content, "promote")
+	if promoteJob == "" {
+		t.Fatal("release.yml must contain a promote job")
+	}
+	if !strings.Contains(promoteJob, "needs: [prepare, checks, selinux-policy, gate]") {
+		t.Fatal("promote job must depend on the gate")
+	}
+}
+
+// TestReleasePromoteNoBuild verifies the promote job contains NO construction:
+// no build scripts, no nFPM, no Go build/toolchain, no regenerated
+// manpages/completion, no regenerated SHA256SUMS. Promotion means PROMOTION,
+// not construction: it downloads the candidate set and verifies it.
+func TestReleasePromoteNoBuild(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	promoteJob := findJobSection(content, "promote")
+	if promoteJob == "" {
+		t.Fatal("release.yml must contain a promote job")
+	}
+	for _, banned := range []string{
+		"build-bundle.sh", "build-packages.sh", "build-static.sh",
+		"release-candidate.sh", "nfpm", "go build", "setup-go", "completion bash",
+	} {
+		if strings.Contains(promoteJob, banned) {
+			t.Errorf("promote job must not contain %s", banned)
+		}
+	}
+	if strings.Contains(promoteJob, "> SHA256SUMS") {
+		t.Error("promote job must not regenerate SHA256SUMS")
+	}
+	if !strings.Contains(promoteJob, "release-promote-verify.sh") {
+		t.Error("promote job must verify via release-promote-verify.sh")
+	}
+	if !strings.Contains(promoteJob, "download-artifact") {
+		t.Error("promote job must download the candidate artifact, not build it")
+	}
+}
+
+// TestReleaseDryRunNonPublishing verifies the safe dry-run path: publication is
+// gated on the push (tag) event, and workflow_dispatch runs only a promotion
+// verification that never calls gh release create.
+func TestReleaseDryRunNonPublishing(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	promoteJob := findJobSection(content, "promote")
+	if promoteJob == "" {
+		t.Fatal("release.yml must contain a promote job")
+	}
+	if !strings.Contains(promoteJob, "github.event_name == 'push'") {
+		t.Error("promote job must be gated on the push (tag) event")
+	}
+
+	dryRunJob := findJobSection(content, "promote-dry-run")
+	if dryRunJob == "" {
+		t.Fatal("release.yml must contain a promote-dry-run job")
+	}
+	if !strings.Contains(dryRunJob, "github.event_name == 'workflow_dispatch'") {
+		t.Error("promote-dry-run must be gated on workflow_dispatch")
+	}
+	if strings.Contains(dryRunJob, "gh release create") {
+		t.Error("promote-dry-run must never call gh release create")
+	}
+	if !strings.Contains(dryRunJob, "release-promote-verify.sh") {
+		t.Error("promote-dry-run must verify via release-promote-verify.sh")
+	}
+}
+
+// TestArtifactGateConsumersNoRebuild verifies every consumer of the artifact
+// gate downloads the candidate set, resolves its artifact from the producer
+// SHA256SUMS and never builds locally (no setup-go, no build scripts).
+func TestArtifactGateConsumersNoRebuild(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/artifact-gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	consumers := []string{
+		"uat-blackbox-ubuntu",
+		"uat-blackbox-ubuntu-tarball",
+		"uat-regressions-ubuntu",
+		"uat-blackbox-opensuse-apparmor",
+		"uat-blackbox-opensuse-selinux",
+		"uat-blackbox-opensuse-tarball-selinux",
+		"uat-selinux-ab-proof",
+	}
+	for _, c := range consumers {
+		job := findJobSection(content, c)
+		if job == "" {
+			t.Fatalf("artifact-gate.yml must contain consumer job %s", c)
+		}
+		if !strings.Contains(job, "needs: producer") {
+			t.Errorf("consumer job %s must depend on the producer", c)
+		}
+		for _, banned := range []string{"setup-go", "build-bundle.sh", "build-packages.sh", "build-static.sh", "nfpm"} {
+			if strings.Contains(job, banned) {
+				t.Errorf("consumer job %s must not contain %s (no local rebuild)", c, banned)
+			}
+		}
+		if !strings.Contains(job, "release-candidate-artifact.sh") {
+			t.Errorf("consumer job %s must resolve its artifact via release-candidate-artifact.sh", c)
+		}
+		if !strings.Contains(job, "download-artifact") {
+			t.Errorf("consumer job %s must download the candidate artifact", c)
+		}
+	}
+
+	// The Ubuntu regressions consumer must pass the exact candidate DEB to the
+	// runner (UAT_ARTIFACT_PATH / UAT_ARTIFACT_SHA256).
+	reg := findJobSection(content, "uat-regressions-ubuntu")
+	if !strings.Contains(reg, "UAT_ARTIFACT_PATH") || !strings.Contains(reg, "UAT_ARTIFACT_SHA256") {
+		t.Error("uat-regressions-ubuntu must consume the exact candidate DEB")
+	}
+}
+
+// TestRegressionsRunnerConsumesExternalDEB verifies the Ubuntu regressions
+// runner can consume an exact candidate DEB (UAT_ARTIFACT_PATH /
+// UAT_ARTIFACT_SHA256) with a single installation truth; the local build
+// (build-packages.sh) remains only the self-contained fallback.
+func TestRegressionsRunnerConsumesExternalDEB(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-regressions-runner-ubuntu.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	for _, s := range []string{"UAT_ARTIFACT_PATH", "UAT_ARTIFACT_SHA256", "install_deb"} {
+		if !strings.Contains(content, s) {
+			t.Errorf("uat-regressions-runner-ubuntu.sh must consume %s", s)
+		}
+	}
+	if !strings.Contains(content, "SHA-256 mismatch") {
+		t.Error("uat-regressions-runner-ubuntu.sh must fail on candidate DEB SHA mismatch")
+	}
+	if !strings.Contains(content, "never rebuild") {
+		t.Error("uat-regressions-runner-ubuntu.sh must not rebuild when a candidate DEB is supplied")
+	}
+	if !strings.Contains(content, "./build-packages.sh") {
+		t.Error("uat-regressions-runner-ubuntu.sh must keep the self-contained build fallback")
 	}
 }
 

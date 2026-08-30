@@ -4,12 +4,24 @@
 # targeted UAT regression groups on the Ubuntu / DEB / AppArmor profile
 # (groups 3-9).
 #
-# This runner is SELF-CONTAINED: it builds and installs the docker-helper .deb
-# (same exact build + install path as the common black-box UAT) and starts the
-# system service, then runs every regression group, capturing rc and recording
-# PASS / FAIL / BLOCKED for each. It does NOT depend on the common black-box
-# UAT reaching its final phase, and a failure in one group never stops the
-# remaining groups (collect-all).
+# The runner installs a docker-helper .deb and starts the system service, then
+# runs every regression group, capturing rc and recording PASS / FAIL / BLOCKED
+# for each. It does NOT depend on the common black-box UAT reaching its final
+# phase, and a failure in one group never stops the remaining groups
+# (collect-all).
+#
+# Two DEB sources are supported, with ONE installation truth (the same
+# dpkg install -> init -> daemon-reload -> enable+start sequence):
+#
+#   * External candidate DEB (UAT_ARTIFACT_PATH + UAT_ARTIFACT_SHA256): the
+#     runner consumes the EXACT candidate DEB produced once by the release
+#     pipeline. The expected SHA-256 is verified strictly BEFORE install and
+#     build-packages.sh is NEVER invoked; installed-file provenance is proven
+#     via dpkg ownership.
+#   * Self-contained (no UAT_ARTIFACT_PATH): the runner builds its own .deb via
+#     build-packages.sh (same exact build path as the common black-box UAT).
+#     This remains for local/developer use and for UAT paths that are not yet
+#     consuming the candidate set.
 #
 # Exit codes of the individual regression scripts (contract, see
 # uat-regression-lib.sh):
@@ -18,11 +30,15 @@
 # Exit status of this runner: 0 when no regression failed, nonzero otherwise.
 #
 # Env inputs:
-#   UAT_VERSION        version string (default 2.0.0-uat)
-#   UAT_ALLOWED_ROOT   global allowed root for init (default /home)
+#   UAT_VERSION            version string (default 2.0.0-uat)
+#   UAT_ALLOWED_ROOT       global allowed root for init (default /home)
+#   UAT_ARTIFACT_PATH      exact prebuilt candidate .deb (consumed, never built)
+#   UAT_ARTIFACT_SHA256    expected SHA-256 of the candidate .deb (required when
+#                          UAT_ARTIFACT_PATH is set)
 #
-# The workflow pre-installs the build toolchain (install-deps) and the pinned
-# nfpm before invoking this script (same as the black-box UAT).
+# The workflow must install the runtime/test/install dependencies. When an
+# external candidate DEB is supplied the runner needs no build toolchain (no
+# nfpm, no go); only the self-contained path requires build tooling.
 
 set -uo pipefail
 
@@ -34,11 +50,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION="${UAT_VERSION:-2.0.0-uat}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home}"
+UAT_ARTIFACT_PATH_IN="${UAT_ARTIFACT_PATH:-}"
+UAT_ARTIFACT_SHA256_IN="${UAT_ARTIFACT_SHA256:-}"
 
 [ "$(id -u)" -eq 0 ] || { echo "error: must run as root" >&2; exit 1; }
 cd "$REPO_ROOT" || exit 1
-
-say "self-contained setup: build + install docker-helper .deb + start service"
 
 # Clean slate for idempotent re-runs (same reset as the black-box UAT).
 systemctl stop docker-helper.service >/dev/null 2>&1 || true
@@ -46,35 +62,72 @@ systemctl disable docker-helper.service >/dev/null 2>&1 || true
 apparmor_parser -R /etc/apparmor.d/docker-helper-system 2>/dev/null || true
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
-# 1. Build the exact .deb.
-rm -rf dist
-./build-packages.sh "$VERSION" >/tmp/reg-build.log 2>&1 || {
-  echo "error: build-packages.sh failed (see /tmp/reg-build.log)" >&2
-  exit 1
-}
-DEB="$(ls dist/*.deb 2>/dev/null | head -1)"
-[ -n "$DEB" ] && [ -f "$DEB" ] || { echo "error: no .deb produced" >&2; exit 1; }
-info "artifact: $DEB ($(sha256sum "$DEB" | awk '{print $1}'))"
+# install_deb installs an already-produced .deb and starts the confined system
+# service. This is the SINGLE installation truth shared by the external-
+# candidate and self-contained paths: dpkg install -> init -> daemon-reload ->
+# enable+start -> active wait. Installed-file provenance is proven via dpkg
+# ownership.
+install_deb() {
+  local deb="$1" origin="$2"
+  [ -f "$deb" ] || { echo "error: $origin .deb not found: $deb" >&2; exit 1; }
 
-# 2. Install + init + start the confined system service.
-dpkg -i "$DEB" >/tmp/reg-install.log 2>&1 || {
-  echo "error: dpkg -i failed (see /tmp/reg-install.log)" >&2
-  exit 1
+  dpkg -i "$deb" >/tmp/reg-install.log 2>&1 || {
+    echo "error: dpkg -i failed for $origin DEB (see /tmp/reg-install.log)" >&2
+    exit 1
+  }
+
+  # Provenance: the installed binary must be owned by the docker-helper package
+  # (proves the installed bytes came from this .deb's install path).
+  dpkg -S /usr/bin/docker-helper >/dev/null 2>&1 || {
+    echo "error: /usr/bin/docker-helper is not owned by the docker-helper package" >&2
+    exit 1
+  }
+
+  docker-helper init --allowed-root "$ALLOWED_ROOT" >/tmp/reg-init.log 2>&1 || {
+    echo "error: docker-helper init failed (see /tmp/reg-init.log)" >&2
+    exit 1
+  }
+  systemctl daemon-reload
+  systemctl enable --now docker-helper.service >/dev/null 2>&1 || { echo "error: cannot enable+start service" >&2; exit 1; }
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet docker-helper.service && break
+    sleep 1
+  done
+  systemctl is-active --quiet docker-helper.service || { echo "error: service not active" >&2; exit 1; }
+  DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
+  info "service active: pid=$DH_PID"
+  info "confinement: $(cat "/proc/$DH_PID/attr/current" 2>/dev/null || true)"
 }
-docker-helper init --allowed-root "$ALLOWED_ROOT" >/tmp/reg-init.log 2>&1 || {
-  echo "error: docker-helper init failed (see /tmp/reg-init.log)" >&2
-  exit 1
-}
-systemctl daemon-reload
-systemctl enable --now docker-helper.service >/dev/null 2>&1 || { echo "error: cannot enable+start service" >&2; exit 1; }
-for _ in $(seq 1 30); do
-  systemctl is-active --quiet docker-helper.service && break
-  sleep 1
-done
-systemctl is-active --quiet docker-helper.service || { echo "error: service not active" >&2; exit 1; }
-DH_PID="$(systemctl show -p MainPID --value docker-helper.service)"
-info "service active: pid=$DH_PID"
-info "confinement: $(cat "/proc/$DH_PID/attr/current" 2>/dev/null || true)"
+
+if [ -n "$UAT_ARTIFACT_PATH_IN" ]; then
+  say "setup: consume EXACT candidate DEB (never rebuild)"
+
+  # External candidate DEB: verify the producer-recorded SHA-256 strictly, then
+  # install the exact bytes. build-packages.sh is never invoked.
+  [ -n "$UAT_ARTIFACT_SHA256_IN" ] || { echo "error: UAT_ARTIFACT_SHA256 is required when UAT_ARTIFACT_PATH is set" >&2; exit 1; }
+  [ -f "$UAT_ARTIFACT_PATH_IN" ] || { echo "error: UAT_ARTIFACT_PATH is not a regular file: $UAT_ARTIFACT_PATH_IN" >&2; exit 1; }
+  DEB_SHA="$(sha256sum "$UAT_ARTIFACT_PATH_IN" | awk '{print $1}')"
+  [ "$DEB_SHA" = "$UAT_ARTIFACT_SHA256_IN" ] || {
+    echo "error: candidate DEB SHA-256 mismatch (expected $UAT_ARTIFACT_SHA256_IN, got $DEB_SHA)" >&2
+    exit 1
+  }
+  info "candidate DEB: $UAT_ARTIFACT_PATH_IN"
+  info "sha256 (verified): $DEB_SHA"
+  install_deb "$UAT_ARTIFACT_PATH_IN" "candidate"
+else
+  say "self-contained setup: build + install docker-helper .deb + start service"
+
+  # Build the exact .deb locally (self-contained/developer path only).
+  rm -rf dist
+  ./build-packages.sh "$VERSION" >/tmp/reg-build.log 2>&1 || {
+    echo "error: build-packages.sh failed (see /tmp/reg-build.log)" >&2
+    exit 1
+  }
+  DEB="$(ls dist/*.deb 2>/dev/null | head -1)"
+  [ -n "$DEB" ] && [ -f "$DEB" ] || { echo "error: no .deb produced" >&2; exit 1; }
+  info "artifact: $DEB ($(sha256sum "$DEB" | awk '{print $1}'))"
+  install_deb "$DEB" "self-contained"
+fi
 
 # 3. Run every regression group (collect-all).
 #    name:label -> script file
