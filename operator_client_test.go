@@ -563,6 +563,67 @@ func TestTokenFileReadErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestTokenFileEmbeddedWhitespaceRejected verifies that a token file whose
+// content is not a single bearer token line (embedded whitespace) is rejected
+// locally with a clear diagnostic, instead of being sent to the server and
+// surfacing as a generic authentication failure. This is a format-only check;
+// authenticity remains server-owned.
+func TestTokenFileEmbeddedWhitespaceRejected(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"two-lines":      "dht_abc\ndef\n",
+		"internal-tabs":  "dht_abc\tdef\n",
+		"internal-space": "dht_abc def\n",
+	} {
+		path := filepath.Join(dir, name+".token")
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatalf("write token file: %v", err)
+		}
+		_, err := resolveOperatorClient(operatorClientOptions{
+			Endpoint:  "unix:///some/socket",
+			TokenFile: path,
+		})
+		if err == nil {
+			t.Fatalf("%s: expected local format error, got nil", name)
+		}
+		if !strings.Contains(err.Error(), "contains whitespace") {
+			t.Errorf("%s: expected whitespace diagnostic, got: %v", name, err)
+		}
+	}
+}
+
+// TestTokenFileTrailingNewlineAccepted verifies that the ordinary trailing
+// newline in a token file is trimmed and the token accepted.
+func TestTokenFileTrailingNewlineAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "admin.token")
+	if err := os.WriteFile(path, []byte("dht_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"), 0600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	token, err := readTokenFile(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if token != "dht_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
+		t.Errorf("unexpected token: %q", token)
+	}
+}
+
+// TestAgentSessionTokenWhitespaceRejected verifies the agent CLI rejects a
+// DOCKER_HELPER_SESSION_TOKEN containing whitespace with a clear local
+// diagnostic.
+func TestAgentSessionTokenWhitespaceRejected(t *testing.T) {
+	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "dht_abc def")
+	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "/nonexistent/socket")
+	_, err := resolveAgentClient(agentClientOptions{})
+	if err == nil {
+		t.Fatal("expected error for whitespace token")
+	}
+	if !strings.Contains(err.Error(), "contains whitespace") {
+		t.Errorf("expected whitespace diagnostic, got: %v", err)
+	}
+}
+
 // --- newHTTPAPIClient ---
 
 func TestNewHTTPAPIClientTimeout(t *testing.T) {

@@ -96,6 +96,9 @@ func resolveAgentClient(opts agentClientOptions) (*apiClient, error) {
 	if token == "" {
 		return nil, fmt.Errorf("DOCKER_HELPER_SESSION_TOKEN is not set")
 	}
+	if tokenHasEmbeddedWhitespace(token) {
+		return nil, fmt.Errorf("DOCKER_HELPER_SESSION_TOKEN contains whitespace; expected a single bearer token line")
+	}
 	tokenSource := func() (string, error) { return token, nil }
 
 	if opts.Endpoint != "" {

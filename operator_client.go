@@ -219,6 +219,15 @@ func validateOperatorEndpoint(endpoint string) error {
 	return nil
 }
 
+// tokenHasEmbeddedWhitespace reports whether a token contains whitespace that
+// would prevent it from being a single bearer token. This is a purely local
+// transport-format check for errors knowable without server state; whether a
+// well-formed token is authentic, revoked, or authorized is always decided by
+// the server.
+func tokenHasEmbeddedWhitespace(token string) bool {
+	return strings.ContainsAny(token, " \t\r\n")
+}
+
 // readTokenFile reads a token from a file and validates it.
 func readTokenFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
@@ -228,6 +237,9 @@ func readTokenFile(path string) (string, error) {
 	token := strings.TrimSpace(string(data))
 	if token == "" {
 		return "", fmt.Errorf("token file %s is empty", path)
+	}
+	if tokenHasEmbeddedWhitespace(token) {
+		return "", fmt.Errorf("token file %s contains whitespace; expected a single bearer token line", path)
 	}
 	return token, nil
 }
