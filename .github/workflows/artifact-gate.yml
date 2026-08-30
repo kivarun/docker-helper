@@ -148,7 +148,7 @@ jobs:
     if: inputs.scope == 'full' || inputs.scope == 'push'
     needs: producer
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v7
@@ -178,6 +178,13 @@ jobs:
             UAT_MAC=apparmor \
             UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
             UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" scripts/uat-blackbox.sh
+
+      - name: Run Release-2 acceptance + lifecycle (exact candidate DEB)
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
+            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
+            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
+            scripts/uat-release2-acceptance.sh
 
   # Ubuntu tarball / AppArmor (hosted ubuntu-24.04). Exact candidate tarball.
   uat-blackbox-ubuntu-tarball:

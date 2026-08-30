@@ -641,6 +641,67 @@ info "trusted-CA E2E passed (no --cacert/--capath/-k, no manual CA env overrides
 mac_audit_check
 
 # ==============================================================================
+# Phase 8b: loopback HTTP acceptance (Release-2 contract, 127.0.0.1:52375)
+# ==============================================================================
+
+say "phase 8b: loopback HTTP acceptance (127.0.0.1:52375)"
+HTTP_EP="http://127.0.0.1:52375"
+
+# 1. GET /health over the loopback HTTP endpoint.
+if curl --silent --fail --max-time 2 "$HTTP_EP/health" >/dev/null 2>&1; then
+  info "GET $HTTP_EP/health ok"
+else
+  fail_uat "GET /health over $HTTP_EP failed"
+fi
+
+# 2. One authenticated operator/admin operation over the explicit HTTP endpoint
+#    (--token-file required for http endpoints). The result must match the Unix
+#    transport for the same admin token.
+ADMIN_TOKEN_FILE="/etc/docker-helper/admin.token"
+HTTP_ADMIN_LIST="$(docker-helper session list --endpoint "$HTTP_EP" --token-file "$ADMIN_TOKEN_FILE" 2>&1)"
+UNIX_ADMIN_LIST="$(docker-helper session list --system --token-file "$ADMIN_TOKEN_FILE" 2>&1)"
+if [ "$HTTP_ADMIN_LIST" = "$UNIX_ADMIN_LIST" ]; then
+  info "admin session list identical over HTTP and Unix transports"
+else
+  fail_uat "admin session list differs between HTTP and Unix transports"
+fi
+
+# 3. One Principal/session flow over the explicit HTTP endpoint: create a
+#    principal session through HTTP using the credential token file.
+HTTP_SESS_JSON="$(docker-helper session create --endpoint "$HTTP_EP" --token-file "$CRED_FILE" --workspace "$WS" --json)" \
+  || fail_uat "principal session create over HTTP failed"
+HTTP_SESS_ID="$(printf '%s\n' "$HTTP_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
+HTTP_SESS_TOKEN="$(printf '%s\n' "$HTTP_SESS_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
+[ -n "$HTTP_SESS_ID" ] && [ -n "$HTTP_SESS_TOKEN" ] \
+  || fail_uat "principal session over HTTP returned no id/token"
+info "principal session over HTTP: $HTTP_SESS_ID"
+
+# 4. One session-authenticated operation over the explicit HTTP endpoint.
+HTTP_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$HTTP_SESS_TOKEN" \
+  docker-helper run --endpoint "$HTTP_EP" --image alpine:3.24 --workdir /tmp -- sh -ec 'echo HTTP-RUN-OK')" \
+  || fail_uat "session-authenticated run over HTTP failed"
+printf '%s\n' "$HTTP_RUN_OUT" | grep -q 'HTTP-RUN-OK' \
+  || fail_uat "HTTP run did not reach HTTP-RUN-OK: $HTTP_RUN_OUT"
+
+# 5. Same authorization result as Unix transport: a workspace outside the
+#    session's authorization must be rejected identically over both transports.
+DENIED_WS="$ALLOWED_ROOT/../denied-ws-$RANDOM"
+mkdir -p "$DENIED_WS"
+UNIX_DENIED_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" docker-helper session create --system --workspace "$DENIED_WS" 2>&1)"
+UNIX_DENIED_RC=$?
+HTTP_DENIED_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" docker-helper session create --endpoint "$HTTP_EP" --workspace "$DENIED_WS" 2>&1)"
+HTTP_DENIED_RC=$?
+if [ "$UNIX_DENIED_RC" -ne 0 ] && [ "$HTTP_DENIED_RC" -ne 0 ] \
+    && [ "$UNIX_DENIED_RC" = "$HTTP_DENIED_RC" ]; then
+  info "same authorization denial over Unix (rc=$UNIX_DENIED_RC) and HTTP (rc=$HTTP_DENIED_RC)"
+else
+  fail_uat "authorization result differs between transports (unix rc=$UNIX_DENIED_RC http rc=$HTTP_DENIED_RC) unix='$UNIX_DENIED_OUT' http='$HTTP_DENIED_OUT'"
+fi
+rm -rf "$DENIED_WS"
+docker-helper session delete --system --id "$HTTP_SESS_ID" >/dev/null 2>&1 || true
+info "loopback HTTP acceptance ok"
+
+# ==============================================================================
 # Summary
 # ==============================================================================
 
