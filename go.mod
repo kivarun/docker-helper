@@ -2,7 +2,7 @@ module docker-helper
 
 go 1.23.0
 
-toolchain go1.23.12
+toolchain go1.26.7
 
 require (
 	github.com/mattn/go-sqlite3 v1.14.49
