@@ -376,71 +376,11 @@ DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
 DAEMON_JSON_BACKUP="/tmp/uat-daemon.json.bak"
 
 if [ -n "$GATEWAY" ]; then
-  # 1. Generate the htpasswd file on the HOST (openssl apr1) so the registry
-  #    fixture does not depend on running tools inside the registry image;
-  #    fall back to the documented registry-image htpasswd only if needed.
-  rm -rf /tmp/uat-registry-auth; mkdir -p /tmp/uat-registry-auth
-  if openssl passwd -apr1 -salt "$(openssl rand -hex 4)" "$REG_HTPASS" \
-      > /tmp/uat-registry-auth/htpasswd.new 2>/dev/null \
-      && [ -s /tmp/uat-registry-auth/htpasswd.new ]; then
-    printf '%s:%s\n' "$REG_HTUSER" "$(cat /tmp/uat-registry-auth/htpasswd.new)" \
-      > /tmp/uat-registry-auth/htpasswd
-    acc_ok "registry htpasswd generated (host openssl apr1)"
-  elif docker run --rm --entrypoint htpasswd registry:2 -Bbn "$REG_HTUSER" "$REG_HTPASS" \
-      > /tmp/uat-registry-auth/htpasswd 2>/tmp/uat-htpasswd.err; then
-    acc_ok "registry htpasswd generated (registry:2 htpasswd)"
-  else
-    acc_blocked "could not generate registry htpasswd (openssl apr1 and registry:2 htpasswd both failed): $(tail -2 /tmp/uat-htpasswd.err 2>/dev/null | redact)"
-  fi
-
-  if [ -s /tmp/uat-registry-auth/htpasswd ]; then
-    REGISTRY_CID="$(docker run -d --name uat-registry-r2ac -p "$REG_PORT:5000" \
-      -e REGISTRY_AUTH=htpasswd \
-      -e REGISTRY_AUTH_HTPASSWD_REALM=UAT-Registry \
-      -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
-      -v /tmp/uat-registry-auth:/auth:ro registry:2 2>/tmp/uat-registry-run.err || true)"
-    if [ -z "$REGISTRY_CID" ]; then
-      acc_blocked "could not start local authenticated registry container: $(tail -2 /tmp/uat-registry-run.err | redact)"
-    fi
-  fi
-fi
-
-if [ -n "$REGISTRY_CID" ]; then
-  # Wait for the registry to serve (loopback, auth required -> 401).
-  REG_READY=0
-  for _ in $(seq 1 60); do
-    if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$REG_PORT/v2/" 2>/dev/null | grep -q '401'; then
-      REG_READY=1; break
-    fi
-    sleep 1
-  done
-  [ "$REG_READY" = 1 ] || acc_blocked "local registry did not become ready"
-  REG_UP=1
-elif [ -s /tmp/uat-registry-auth/htpasswd ] && [ -n "$GATEWAY" ]; then
-  acc_blocked "registry scenario could not start (no registry container)"
-  REG_UP=0
-else
-  REG_UP=0
-fi
-
-if [ "$REG_UP" = 1 ]; then
-
-  # 2. Seed a private image with UAT-owned credentials, using an isolated
-  #    docker config so the host ~/.docker/config.json stays clean.
-  rm -rf "$DOCKER_CFG_DIR"; mkdir -p "$DOCKER_CFG_DIR"
-  if printf '%s\n' "$REG_HTPASS" | docker --config "$DOCKER_CFG_DIR" login --username "$REG_HTUSER" --password-stdin "127.0.0.1:$REG_PORT" >/dev/null 2>&1 \
-    && docker tag alpine:3.24 "127.0.0.1:$REG_PORT/uat/private:v1" >/dev/null 2>&1 \
-    && docker --config "$DOCKER_CFG_DIR" push "127.0.0.1:$REG_PORT/uat/private:v1" >/dev/null 2>&1; then
-    acc_ok "seeded private image 127.0.0.1:$REG_PORT/uat/private:v1 (UAT-owned credentials)"
-  else
-    acc_fail "could not seed the private image into the local registry"
-  fi
-
-  # The docker-helper daemon must pull from the registry over the bridge. An
-  # HTTP non-loopback registry needs Docker's insecure-registries config. This
-  # is UAT-harness-owned setup: it is restored afterwards. The guard is
-  # deterministic (grep for our exact registry address in daemon.json), never
-  # an inference from /info.
+  # 1. Configure Docker's insecure-registries for the bridge registry address
+  #    BEFORE the registry exists, so the daemon restart cannot interfere with
+  #    the fixture mid-scenario. UAT-harness-owned setup, restored afterwards.
+  #    The guard is deterministic (grep for our exact registry address), never
+  #    an inference from /info.
   NEED_INSECURE=0
   if [ -f "$DOCKER_DAEMON_JSON" ] && grep -q "$REG_ADDR" "$DOCKER_DAEMON_JSON" 2>/dev/null; then
     : # already configured for this address
@@ -475,6 +415,75 @@ if [ "$REG_UP" = 1 ]; then
       sleep 1
     done
     docker info >/dev/null 2>&1 || acc_fail "docker daemon did not recover after insecure-registries config"
+  fi
+
+  # 2. Generate the htpasswd file on the HOST, independent of any tools inside
+  #    the registry image (which may not ship htpasswd). The registry binary
+  #    only accepts bcrypt hashes, so use Python's crypt (the documented hash
+  #    format); anything else (apr1/plaintext) is rejected with 401 by the
+  #    current distribution registry. The fixture is a bounded UAT-owned
+  #    random secret.
+  rm -rf /tmp/uat-registry-auth; mkdir -p /tmp/uat-registry-auth
+  if python3 -c 'import crypt,sys; print(crypt.crypt(sys.argv[1], crypt.mksalt(crypt.METHOD_BLOWFISH)))' "$REG_HTPASS" \
+      > /tmp/uat-registry-auth/htpasswd.new 2>/dev/null \
+      && [ -s /tmp/uat-registry-auth/htpasswd.new ]; then
+    printf '%s:%s\n' "$REG_HTUSER" "$(cat /tmp/uat-registry-auth/htpasswd.new)" > /tmp/uat-registry-auth/htpasswd
+    acc_ok "registry htpasswd generated (host python bcrypt)"
+  else
+    acc_blocked "could not generate bcrypt registry htpasswd (python crypt unavailable)"
+  fi
+  chmod 0644 /tmp/uat-registry-auth/htpasswd
+
+  if [ -s /tmp/uat-registry-auth/htpasswd ]; then
+    REGISTRY_CID="$(docker run -d --name uat-registry-r2ac -p "$REG_PORT:5000" \
+      -e REGISTRY_AUTH=htpasswd \
+      -e REGISTRY_AUTH_HTPASSWD_REALM=UAT-Registry \
+      -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+      -v /tmp/uat-registry-auth:/auth:ro registry:2 2>/tmp/uat-registry-run.err || true)"
+    if [ -z "$REGISTRY_CID" ]; then
+      acc_blocked "could not start local authenticated registry container: $(tail -2 /tmp/uat-registry-run.err | redact)"
+    fi
+  fi
+fi
+
+if [ -n "$REGISTRY_CID" ]; then
+  # Wait for the registry to serve (loopback, auth required -> 401).
+  REG_READY=0
+  for _ in $(seq 1 60); do
+    if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$REG_PORT/v2/" 2>/dev/null | grep -q '401'; then
+      REG_READY=1; break
+    fi
+    sleep 1
+  done
+  [ "$REG_READY" = 1 ] || acc_blocked "local registry did not become ready"
+  # Re-verify the container is actually running (not exited after serving).
+  if [ "$REG_READY" = 1 ] && ! docker ps -q --filter "name=uat-registry-r2ac" | grep -q .; then
+    acc_blocked "local registry container exited after readiness: $(docker logs --tail 15 uat-registry-r2ac 2>&1 | redact | tr '\n' ' ')"
+    REG_READY=0
+  fi
+  REG_UP=1
+elif [ -s /tmp/uat-registry-auth/htpasswd ] && [ -n "$GATEWAY" ]; then
+  acc_blocked "registry scenario could not start (no registry container)"
+  REG_UP=0
+else
+  REG_UP=0
+fi
+
+if [ "$REG_UP" = 1 ]; then
+
+  # 2. Seed a private image with UAT-owned credentials, using an isolated
+  #    docker config so the host ~/.docker/config.json stays clean.
+  rm -rf "$DOCKER_CFG_DIR"; mkdir -p "$DOCKER_CFG_DIR"
+  if printf '%s\n' "$REG_HTPASS" | docker --config "$DOCKER_CFG_DIR" login --username "$REG_HTUSER" --password-stdin "127.0.0.1:$REG_PORT" >/tmp/r2ac-seed-login.err 2>&1 \
+    && docker tag alpine:3.24 "127.0.0.1:$REG_PORT/uat/private:v1" >/dev/null 2>&1 \
+    && docker --config "$DOCKER_CFG_DIR" push "127.0.0.1:$REG_PORT/uat/private:v1" >/tmp/r2ac-seed-push.err 2>&1; then
+    acc_ok "seeded private image 127.0.0.1:$REG_PORT/uat/private:v1 (UAT-owned credentials)"
+  else
+    acc_fail "could not seed the private image into the local registry"
+    sed 's/^/    seed-login: /' /tmp/r2ac-seed-login.err 2>/dev/null | redact | tail -4 >&2
+    sed 's/^/    seed-push: /' /tmp/r2ac-seed-push.err 2>/dev/null | redact | tail -4 >&2
+    docker ps -a --filter "name=uat-registry-r2ac" --format 'registry-state: {{.Status}}' 2>/dev/null >&2
+    docker logs --tail 15 uat-registry-r2ac 2>&1 | sed 's/^/    registry-log: /' | redact >&2 || true
   fi
 
   # 3-4. Session A has no registry credentials -> private pull must FAIL.
@@ -723,7 +732,12 @@ mkdir -p "$E_XDG_RUNTIME"
 chown "$E_USER:$E_USER" "$E_XDG_RUNTIME"
 chmod 0700 "$E_XDG_RUNTIME"
 
-E_ENV="env HOME=$E_HOME XDG_RUNTIME_DIR=$E_XDG_RUNTIME"
+# A clean, user-scoped environment for every user-mode docker-helper process.
+# `env -i` prevents the CI runner's inherited XDG_CONFIG_HOME/XDG_STATE_HOME
+# (etc.) from leaking into the user-mode daemon: os.UserConfigDir() on Linux
+# prefers $XDG_CONFIG_HOME over $HOME, so a leaked runner value would make the
+# user-mode init write into the runner's config tree instead of the UAT user's.
+E_ENV="env -i HOME=$E_HOME XDG_RUNTIME_DIR=$E_XDG_RUNTIME PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # 3. BEFORE starting the system daemon, initialize + start the user's user-mode
 #    daemon.
@@ -769,8 +783,7 @@ if [ "$E_USER_READY" = 1 ]; then
     else
       acc_fail "user-mode database not found under user state path"
     fi
-    if DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" \
-        sudo -u "$E_USER" env DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" \
+    if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$E_USER_TOK" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         docker-helper run --image alpine:3.24 -- sh -ec 'echo USER-MODE-OK' | grep -q 'USER-MODE-OK'; then
       acc_ok "user-mode docker-helper operation works"
     else
@@ -858,7 +871,7 @@ if set_up_principal "$E_USER" "$E_OPERATOR_CRED" >/dev/null 2>&1; then
       acc_fail "explicit system-mode session not found in the system daemon"
     fi
     # A system-mode session token must NOT be consumed by the user daemon.
-    if sudo -u "$E_USER" env DOCKER_HELPER_SESSION_TOKEN="$GLOBAL_SESSION_TOKEN" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" \
+    if sudo -u "$E_USER" env -i DOCKER_HELPER_SESSION_TOKEN="$GLOBAL_SESSION_TOKEN" HOME="$E_HOME" XDG_RUNTIME_DIR="$E_XDG_RUNTIME" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         docker-helper run --image alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1; then
       acc_fail "system-mode session token was consumed by the user-mode daemon"
     else
@@ -1008,7 +1021,10 @@ else
   fi
 
   # --- reinstall (candidate) ------------------------------------------------
-  if dpkg --force-reinstall -i "$ARTIFACT_PATH_IN" >/tmp/r2ac-f-reinstall.log 2>&1; then
+  # dpkg has no --force-reinstall force option (unknown force/refuse option
+  # 'reinstall'); apt-get --reinstall install <deb> is the canonical way to
+  # force a same-version reinstall, running prerm(upgrade)+postinst(configure).
+  if apt-get -y --reinstall install "$ARTIFACT_PATH_IN" >/tmp/r2ac-f-reinstall.log 2>&1; then
     acc_ok "candidate DEB reinstall completed"
   else
     acc_fail "candidate DEB reinstall failed (see /tmp/r2ac-f-reinstall.log)"
