@@ -108,12 +108,18 @@ tar tzf "$TARBALL" >/dev/null 2>&1 || fail "tarball is corrupt or unreadable: $T
 
 # --- Verify DEB identity -------------------------------------------------------
 
-dpkg-deb --info "$DEB" | grep -q "Package: docker-helper" || fail "DEB is not the docker-helper package: $DEB"
-dpkg-deb --info "$DEB" | grep -q "Architecture: amd64" || fail "DEB is not amd64: $DEB"
+# NOTE: grep is used WITHOUT -q here. With set -o pipefail, `grep -q` closes the
+# pipe as soon as it matches, giving the upstream writer (dpkg-deb's tar
+# subprocess) a SIGPIPE/write error that fails the whole pipeline. Reading the
+# full listing keeps the pipeline exit status on grep's result.
+dpkg-deb --info "$DEB" | grep -F "Package: docker-helper" >/dev/null \
+  || fail "DEB is not the docker-helper package: $DEB"
+dpkg-deb --info "$DEB" | grep -F "Architecture: amd64" >/dev/null \
+  || fail "DEB is not amd64: $DEB"
 for path in /usr/bin/docker-helper /usr/lib/systemd/system/docker-helper.service \
   /etc/apparmor.d/docker-helper-system /usr/share/man/man1/docker-helper.1.gz \
   /usr/share/man/man5/docker-helper-config.5.gz /usr/share/doc/docker-helper/LICENSE; do
-  dpkg-deb --contents "$DEB" | grep -qF "$path" || fail "DEB missing $path"
+  dpkg-deb --contents "$DEB" | grep -F "$path" >/dev/null || fail "DEB missing $path"
 done
 
 # --- Verify RPM identity -------------------------------------------------------
@@ -127,7 +133,7 @@ done
 for path in /usr/bin/docker-helper /usr/lib/systemd/system/docker-helper.service \
   /etc/apparmor.d/docker-helper-system /usr/share/man/man1/docker-helper.1.gz \
   /usr/share/man/man5/docker-helper-config.5.gz /usr/share/doc/docker-helper/LICENSE; do
-  rpm -qpl "$RPM" | grep -qF "$path" || fail "RPM missing $path"
+  rpm -qpl "$RPM" | grep -F "$path" >/dev/null || fail "RPM missing $path"
 done
 
 # --- Stage the immutable candidate set ----------------------------------------
