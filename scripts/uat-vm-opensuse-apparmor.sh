@@ -81,6 +81,21 @@ KEEP="${UAT_KEEP:-}"
 [ -f "$UAT_REPO_DIR/scripts/uat-blackbox.sh" ] \
   || fail "UAT_REPO_DIR has no scripts/uat-blackbox.sh: $UAT_REPO_DIR"
 
+# The v2.0.0-rc.22 package is an immutable TEST FIXTURE for the real RPM
+# upgrade baseline. This file owns its pinned SHA-256 (independently verified
+# against the published rc.22 SHA256SUMS before pinning) and the
+# download+verify boundary; the guest lifecycle re-verifies before install.
+# shellcheck source=scripts/uat-rc22-fixture.sh
+source "$SCRIPT_DIR/uat-rc22-fixture.sh"
+
+RC22_RPM_PATH=""
+if rc22_fetch_rpm /tmp/uat-rc22-docker-helper.rpm >/tmp/rc22-rpm.path 2>/dev/null; then
+  RC22_RPM_PATH="$(cat /tmp/rc22-rpm.path)"
+  log "rc.22 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
+else
+  fail "could not download/verify the rc.22 baseline RPM (pinned fixture)"
+fi
+
 # ---------------------------------------------------------------------------
 # canonical Tumbleweed VM harness (VM mechanics; no MAC/package/UAT knowledge)
 # ---------------------------------------------------------------------------
@@ -280,6 +295,14 @@ else
   fail "RPM transfer to guest failed (exit $EC)"
 fi
 
+log "copying rc.22 baseline RPM into guest (/opt/uat-import/docker-helper-rc22.rpm)"
+if vm_scp "$RC22_RPM_PATH" opc@127.0.0.1:/opt/uat-import/docker-helper-rc22.rpm; then
+  :
+else
+  EC=$?
+  fail "rc.22 RPM transfer to guest failed (exit $EC)"
+fi
+
 # ---------------------------------------------------------------------------
 # 7. run the existing black-box UAT inside the guest
 # ---------------------------------------------------------------------------
@@ -309,6 +332,14 @@ run_guest_uat "black-box UAT inside the guest" \
 log "black-box UAT passed inside the guest"
 
 # ---------------------------------------------------------------------------
+# 7b. RPM lifecycle (install rc.22 -> upgrade candidate -> reinstall -> erase)
+# ---------------------------------------------------------------------------
+log "== 7b. RPM/AppArmor lifecycle (rc.22 -> candidate, AppArmor host) =="
+run_guest_uat "RPM lifecycle inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_PLATFORM=opensuse UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_RC22_RPM=/opt/uat-import/docker-helper-rc22.rpm UAT_RC22_RPM_SHA256=$RC22_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-package-lifecycle-rpm.sh"
+log "RPM/AppArmor lifecycle passed inside the guest"
+
+# ---------------------------------------------------------------------------
 # 8. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"
@@ -324,8 +355,9 @@ echo "final LSM:        $LSM_FINAL"
 echo "final cmdline:    $CMDLINE_FINAL"
 echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
+echo "rc.22 RPM:        $RC22_RPM_PATH (pinned fixture, verified)"
 echo "UAT version:      $VERSION"
 echo "total:            ${TOTAL}s"
-echo "RESULT: openSUSE/AppArmor black-box UAT PASSED inside Tumbleweed VM"
+echo "RESULT: openSUSE/AppArmor black-box UAT + RPM lifecycle PASSED inside Tumbleweed VM"
 echo "=============================================================="
 log "DONE"

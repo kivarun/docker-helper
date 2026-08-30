@@ -108,6 +108,21 @@ KEEP="${UAT_KEEP:-}"
 [ -f "$UAT_REPO_DIR/scripts/uat-blackbox.sh" ] \
   || fail "UAT_REPO_DIR has no scripts/uat-blackbox.sh: $UAT_REPO_DIR"
 
+# The v2.0.0-rc.22 package is an immutable TEST FIXTURE for the real RPM
+# upgrade baseline. This file owns its pinned SHA-256 (independently verified
+# against the published rc.22 SHA256SUMS before pinning) and the
+# download+verify boundary; the guest lifecycle re-verifies before install.
+# shellcheck source=scripts/uat-rc22-fixture.sh
+source "$SCRIPT_DIR/uat-rc22-fixture.sh"
+
+RC22_RPM_PATH=""
+if rc22_fetch_rpm /tmp/uat-rc22-docker-helper.rpm >/tmp/rc22-rpm.path 2>/dev/null; then
+  RC22_RPM_PATH="$(cat /tmp/rc22-rpm.path)"
+  log "rc.22 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
+else
+  fail "could not download/verify the rc.22 baseline RPM (pinned fixture)"
+fi
+
 # ---------------------------------------------------------------------------
 # shared SELinux host construction (sources the canonical Tumbleweed VM harness
 # and the SELinux bootstrap/proof/transfer/docker-prep); no VM/MAC knowledge
@@ -148,6 +163,7 @@ vm_selinux_bootstrap
 log "== 6. transfer repo + RPM into the guest =="
 vm_selinux_transfer_repo
 vm_selinux_transfer_artifact "docker-helper.rpm" "$UAT_RPM"
+vm_selinux_transfer_artifact "docker-helper-rc22.rpm" "$RC22_RPM_PATH"
 
 # ---------------------------------------------------------------------------
 # 6b-7a. two-stage Docker preparation + Docker SELinux health gate
@@ -216,6 +232,22 @@ record_stage "SELinux regressions (1-5)" "$SELREG_RESULT"
 
 
 # ---------------------------------------------------------------------------
+# 8d. RPM lifecycle under SELinux (install rc.22 -> upgrade candidate ->
+#     reinstall -> erase)
+# ---------------------------------------------------------------------------
+log "== 8d. RPM/SELinux lifecycle (rc.22 -> candidate, SELinux host) =="
+LIFECYCLE_RESULT=FAIL
+if run_guest_capture "RPM/SELinux lifecycle inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_RC22_RPM=/opt/uat-import/docker-helper-rc22.rpm UAT_RC22_RPM_SHA256=$RC22_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-package-lifecycle-rpm.sh"; then
+  LIFECYCLE_RESULT=PASS
+  log "RPM/SELinux lifecycle passed inside the guest"
+else
+  log "RPM/SELinux lifecycle reported a failure (recorded)"
+fi
+record_stage "RPM/SELinux lifecycle" "$LIFECYCLE_RESULT"
+
+
+# ---------------------------------------------------------------------------
 # 9. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"
@@ -232,6 +264,7 @@ echo "final cmdline:    $CMDLINE_FINAL"
 echo "getenforce:       $GETENF"
 echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
+echo "rc.22 RPM:        $RC22_RPM_PATH (pinned fixture, verified)"
 echo "UAT version:      $VERSION"
 echo "Docker SELinux:   ${DOCKER_HEALTHY:-0}=naturally healthy two-stage setup (container-selinux before Docker)"
 echo "total:            ${TOTAL}s"
@@ -243,7 +276,7 @@ echo "============================="
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"
