@@ -40,100 +40,6 @@ func newFailQueryDB(t *testing.T, dbPath string, failErr error) *sql.DB {
 
 // --- helpers ---
 
-func findAuthFailureRawLines(buf *bytes.Buffer) []string {
-	var lines []string
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		if evt, ok := m["event"].(string); ok && evt == "auth.failure" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
-}
-
-// validateAuthFailureRaw checks every required property on the raw audit JSON
-// for an auth.failure event.
-//
-// Parameters:
-//   - raw: the raw JSON line from stderr
-//   - expectedMethod, expectedPath, expectedResult: structural checks
-//   - injectedToken: the actual bearer token value sent in the request
-//   - injectedErrText: injected DB error text (for database_error tests)
-//   - authHeader: the full Authorization header value (e.g. "Bearer dht_xxx" or "Basic dXNlcjpwYXNz")
-//   - headerMarker: a custom header value that must not appear in audit
-//   - bodyMarker: a request-body value that must not appear in audit
-func validateAuthFailureRaw(t *testing.T, raw string, expectedMethod, expectedPath, expectedResult, injectedToken, injectedErrText, authHeader, headerMarker, bodyMarker string) {
-	t.Helper()
-
-	m := parseAuditMap(t, raw)
-
-	// --- required fields ---
-	if m["event"] != "auth.failure" {
-		t.Errorf("event: expected 'auth.failure', got %v", m["event"])
-	}
-	if m["method"] != expectedMethod {
-		t.Errorf("method: expected %q, got %v", expectedMethod, m["method"])
-	}
-	if m["path"] != expectedPath {
-		t.Errorf("path: expected %q, got %v", expectedPath, m["path"])
-	}
-	if m["result"] != expectedResult {
-		t.Errorf("result: expected %q, got %v", expectedResult, m["result"])
-	}
-
-	// --- session_id must be completely absent ---
-	if _, exists := m["session_id"]; exists {
-		t.Error("session_id key must not be present in auth.failure audit record")
-	}
-
-	// --- generic secret-leak checks ---
-	assertNoSecrets(t, raw, m, injectedToken, "")
-
-	// --- no full Authorization header value ---
-	if authHeader != "" && strings.Contains(raw, authHeader) {
-		t.Errorf("raw JSON contains Authorization header value %q", authHeader)
-	}
-
-	// --- no injected error text ---
-	assertNoInjectedError(t, raw, injectedErrText)
-
-	// --- no internal error text ---
-	for _, text := range []string{
-		"session not found",
-		"ErrSessionNotFound",
-		"cannot find session",
-		"sql.ErrNoRows",
-	} {
-		if strings.Contains(raw, text) {
-			t.Errorf("raw JSON contains internal error text %q", text)
-		}
-	}
-
-	// --- no request body content ---
-	if strings.Contains(raw, "alpine:latest") {
-		t.Error("raw JSON contains request body content (image)")
-	}
-	if strings.Contains(raw, "Content-Type") {
-		t.Error("raw JSON contains request header Content-Type")
-	}
-
-	// --- no custom header marker ---
-	if headerMarker != "" && strings.Contains(raw, headerMarker) {
-		t.Errorf("raw JSON contains custom header marker %q", headerMarker)
-	}
-
-	// --- no body marker ---
-	if bodyMarker != "" && strings.Contains(raw, bodyMarker) {
-		t.Errorf("raw JSON contains body marker %q", bodyMarker)
-	}
-}
-
 func assertNoAuthFailure(t *testing.T, buf *bytes.Buffer) {
 	t.Helper()
 	lines := findAuthFailureRawLines(buf)
@@ -166,7 +72,7 @@ func TestAuthAuditSessionControlParseFailed_MissingHeader(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", "", headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/sessions", Result: "parse_failed", HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 }
 
 func TestAuthAuditSessionControlParseFailed_WrongScheme(t *testing.T) {
@@ -188,7 +94,7 @@ func TestAuthAuditSessionControlParseFailed_WrongScheme(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/sessions", Result: "parse_failed", AuthHeader: authHeader})
 }
 
 func TestAuthAuditSessionControlParseFailed_EmptyBearer(t *testing.T) {
@@ -210,7 +116,7 @@ func TestAuthAuditSessionControlParseFailed_EmptyBearer(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "parse_failed", "", "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/sessions", Result: "parse_failed", AuthHeader: authHeader})
 }
 
 // ========================
@@ -270,7 +176,7 @@ func TestAuthAuditCredentialNotFound_CreateSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "credential.not_found", token, "", authHeader, headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/sessions", Result: "credential.not_found", InjectedToken: token, AuthHeader: authHeader, HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 }
 
 // ========================
@@ -323,7 +229,7 @@ func TestAuthAuditPrincipalCredentialRevoked_CreateSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "credential.revoked", token, "", authHeader, headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/sessions", Result: "credential.revoked", InjectedToken: token, AuthHeader: authHeader, HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 }
 
 // ========================
@@ -376,7 +282,7 @@ func TestAuthAuditPrincipalDisabled_CreateSession(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "principal.disabled", token, "", authHeader, headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/sessions", Result: "principal.disabled", InjectedToken: token, AuthHeader: authHeader, HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 
 	var resp response
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
@@ -428,7 +334,7 @@ func TestAuthAuditSessionControlCredentialDatabaseError_CreateSession(t *testing
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/sessions", "credential.database_error", token, "mock_query_injection_error_for_testing", authHeader, headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/sessions", Result: "credential.database_error", InjectedToken: token, InjectedErr: "mock_query_injection_error_for_testing", AuthHeader: authHeader, HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 
 	if raw := findAuditLine(auditBuf, "auth.session"); raw != "" {
 		t.Errorf("legacy auth.session audit event must not be emitted, got: %s", raw)
@@ -470,7 +376,7 @@ func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", "", headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/run", Result: "session.parse_failed", HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 }
 
 func TestAuthAuditSessionCapabilityParseFailed_WrongScheme_Run(t *testing.T) {
@@ -492,7 +398,7 @@ func TestAuthAuditSessionCapabilityParseFailed_WrongScheme_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/run", Result: "session.parse_failed", AuthHeader: authHeader})
 }
 
 func TestAuthAuditSessionCapabilityParseFailed_EmptyBearer_Run(t *testing.T) {
@@ -514,7 +420,7 @@ func TestAuthAuditSessionCapabilityParseFailed_EmptyBearer_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.parse_failed", "", "", authHeader, "", "")
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/run", Result: "session.parse_failed", AuthHeader: authHeader})
 }
 
 func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Build(t *testing.T) {
@@ -533,7 +439,7 @@ func TestAuthAuditSessionCapabilityParseFailed_MissingHeader_Build(t *testing.T)
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/build", "session.parse_failed", "", "", "", "", "")
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/build", Result: "session.parse_failed"})
 }
 
 // ========================
@@ -563,7 +469,7 @@ func TestAuthAuditSessionCapabilityNotFound_UnknownToken(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.not_found", token, "", authHeader, headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/run", Result: "session.not_found", InjectedToken: token, AuthHeader: authHeader, HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 }
 
 // ========================
@@ -604,7 +510,7 @@ func TestAuthAuditSessionCapabilityDatabaseError_Run(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 auth.failure line, got %d", len(lines))
 	}
-	validateAuthFailureRaw(t, lines[0], http.MethodPost, "/run", "session.database_error", result.Token, "mock_query_injection_error_for_testing", authHeader, headerMarker, bodyMarker)
+	validateAuthFailureRaw(t, lines[0], authFailureExpectation{Method: http.MethodPost, Path: "/run", Result: "session.database_error", InjectedToken: result.Token, InjectedErr: "mock_query_injection_error_for_testing", AuthHeader: authHeader, HeaderMarker: headerMarker, BodyMarker: bodyMarker})
 }
 
 // ========================

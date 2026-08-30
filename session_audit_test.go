@@ -147,58 +147,6 @@ func findAuditLine(buf *bytes.Buffer, event string) string {
 	return ""
 }
 
-// parseAuditMap unmarshals raw audit JSON; fails the test on error.
-func parseAuditMap(t *testing.T, raw string) map[string]any {
-	t.Helper()
-	var m map[string]any
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		t.Fatalf("cannot parse audit JSON: %v: %s", err, raw)
-	}
-	return m
-}
-
-// auditHasSecretKey returns true when the map contains a key whose
-// lower-case form is "token" or "authorization".
-func auditHasSecretKey(m map[string]any) bool {
-	for k := range m {
-		lk := strings.ToLower(k)
-		if lk == "token" || lk == "authorization" {
-			return true
-		}
-	}
-	return false
-}
-
-// assertNoSecrets verifies that raw audit JSON does not leak tokens or
-// Authorization header values, and does not carry secret keys.
-func assertNoSecrets(t *testing.T, raw string, m map[string]any, token, adminToken string) {
-	t.Helper()
-	if auditHasSecretKey(m) {
-		t.Error("audit has secret key (token/authorization)")
-	}
-	if token != "" && strings.Contains(raw, token) {
-		t.Error("audit contains session token")
-	}
-	if adminToken != "" && strings.Contains(raw, adminToken) {
-		t.Error("audit contains admin token")
-	}
-	if strings.Contains(raw, "Authorization") {
-		t.Error("audit contains Authorization")
-	}
-}
-
-// assertNoInjectedError checks that the raw audit JSON does not contain
-// the injected error text (full string, not just the result field).
-func assertNoInjectedError(t *testing.T, raw string, injected string) {
-	t.Helper()
-	if injected == "" {
-		return
-	}
-	if strings.Contains(raw, injected) {
-		t.Errorf("audit leaks injected error text %q in raw JSON", injected)
-	}
-}
-
 // --- session.create handler tests ---
 
 func TestSessionCreateAuditSuccess(t *testing.T) {
