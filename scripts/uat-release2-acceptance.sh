@@ -376,22 +376,31 @@ DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
 DAEMON_JSON_BACKUP="/tmp/uat-daemon.json.bak"
 
 if [ -n "$GATEWAY" ]; then
-  # 1. Start a disposable authenticated registry on the default bridge. The
-  #    container binds 0.0.0.0 so the docker-helper containers (also on the
-  #    default bridge) reach it at the bridge gateway, and the host reaches it
-  #    on the loopback-mapped port for seeding.
+  # 1. Generate the htpasswd file on the HOST (openssl apr1) so the registry
+  #    fixture does not depend on running tools inside the registry image;
+  #    fall back to the documented registry-image htpasswd only if needed.
   rm -rf /tmp/uat-registry-auth; mkdir -p /tmp/uat-registry-auth
-  docker run --rm registry:2 htpasswd -Bbn "$REG_HTUSER" "$REG_HTPASS" > /tmp/uat-registry-auth/htpasswd 2>/dev/null \
-    || { acc_blocked "could not generate registry htpasswd (registry:2 pull failed)"; :; }
+  if openssl passwd -apr1 -salt "$(openssl rand -hex 4)" "$REG_HTPASS" \
+      > /tmp/uat-registry-auth/htpasswd.new 2>/dev/null \
+      && [ -s /tmp/uat-registry-auth/htpasswd.new ]; then
+    printf '%s:%s\n' "$REG_HTUSER" "$(cat /tmp/uat-registry-auth/htpasswd.new)" \
+      > /tmp/uat-registry-auth/htpasswd
+    acc_ok "registry htpasswd generated (host openssl apr1)"
+  elif docker run --rm --entrypoint htpasswd registry:2 -Bbn "$REG_HTUSER" "$REG_HTPASS" \
+      > /tmp/uat-registry-auth/htpasswd 2>/tmp/uat-htpasswd.err; then
+    acc_ok "registry htpasswd generated (registry:2 htpasswd)"
+  else
+    acc_blocked "could not generate registry htpasswd (openssl apr1 and registry:2 htpasswd both failed): $(tail -2 /tmp/uat-htpasswd.err 2>/dev/null | redact)"
+  fi
 
-  if [ -f /tmp/uat-registry-auth/htpasswd ]; then
+  if [ -s /tmp/uat-registry-auth/htpasswd ]; then
     REGISTRY_CID="$(docker run -d --name uat-registry-r2ac -p "$REG_PORT:5000" \
       -e REGISTRY_AUTH=htpasswd \
       -e REGISTRY_AUTH_HTPASSWD_REALM=UAT-Registry \
       -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
-      -v /tmp/uat-registry-auth:/auth:ro registry:2 2>/dev/null || true)"
+      -v /tmp/uat-registry-auth:/auth:ro registry:2 2>/tmp/uat-registry-run.err || true)"
     if [ -z "$REGISTRY_CID" ]; then
-      acc_blocked "could not start local authenticated registry container"
+      acc_blocked "could not start local authenticated registry container: $(tail -2 /tmp/uat-registry-run.err | redact)"
     fi
   fi
 fi
@@ -405,7 +414,16 @@ if [ -n "$REGISTRY_CID" ]; then
     fi
     sleep 1
   done
-  [ "$REG_READY" = 1 ] || acc_fail "local registry did not become ready"
+  [ "$REG_READY" = 1 ] || acc_blocked "local registry did not become ready"
+  REG_UP=1
+elif [ -s /tmp/uat-registry-auth/htpasswd ] && [ -n "$GATEWAY" ]; then
+  acc_blocked "registry scenario could not start (no registry container)"
+  REG_UP=0
+else
+  REG_UP=0
+fi
+
+if [ "$REG_UP" = 1 ]; then
 
   # 2. Seed a private image with UAT-owned credentials, using an isolated
   #    docker config so the host ~/.docker/config.json stays clean.
@@ -469,10 +487,10 @@ if [ -n "$REGISTRY_CID" ]; then
 
   # 5. docker-helper registry login for session A (password via stdin).
   if printf '%s\n' "$REG_HTPASS" | DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
-      dh registry login --registry "$REG_ADDR" --username "$REG_HTUSER" --password-stdin >/dev/null 2>&1; then
+      dh registry login --registry "$REG_ADDR" --username "$REG_HTUSER" --password-stdin >/tmp/r2ac-reglogin.out 2>&1; then
     acc_ok "docker-helper registry login succeeded for session A"
   else
-    acc_fail "docker-helper registry login failed for session A"
+    acc_fail "docker-helper registry login failed for session A: $(tail -3 /tmp/r2ac-reglogin.out | redact)"
   fi
 
   # 6. Private pull now succeeds in session A.
@@ -548,8 +566,6 @@ if [ -n "$REGISTRY_CID" ]; then
   docker rm -f uat-registry-r2ac >/dev/null 2>&1 || true
   docker rmi "$REG_ADDR/uat/private:v1" >/dev/null 2>&1 || true
   rm -rf "$DOCKER_CFG_DIR" /tmp/uat-registry-auth
-else
-  acc_blocked "registry scenario could not start (no registry container)"
 fi
 
 # ==============================================================================
@@ -711,10 +727,20 @@ E_ENV="env HOME=$E_HOME XDG_RUNTIME_DIR=$E_XDG_RUNTIME"
 
 # 3. BEFORE starting the system daemon, initialize + start the user's user-mode
 #    daemon.
+{
+  echo "=== coexistence pre-init diagnostics ==="
+  echo "system socket exists: $(test -S /run/docker-helper/docker-helper.sock && echo yes || echo no)"
+  echo "user groups: $(id -nG "$E_USER")"
+  if sudo -u "$E_USER" $E_ENV sh -c 'test -S /run/docker.sock && echo "docker.sock visible" || echo "docker.sock NOT visible"'; then
+    :
+  fi
+} > /tmp/r2ac-coex-diag.log 2>&1 || true
 if sudo -u "$E_USER" $E_ENV docker-helper init --allowed-root "$E_HOME" >/tmp/r2ac-coex-init.log 2>&1; then
   acc_ok "user-mode init succeeded for $E_USER"
 else
   acc_fail "user-mode init failed for $E_USER (see /tmp/r2ac-coex-init.log)"
+  sed 's/^/    init-log: /' /tmp/r2ac-coex-init.log 2>/dev/null | redact | tail -15 >&2
+  sed 's/^/    diag: /' /tmp/r2ac-coex-diag.log 2>/dev/null | redact | tail -10 >&2
 fi
 
 E_USER_SOCK="$E_XDG_RUNTIME/docker-helper/docker-helper.sock"
@@ -986,6 +1012,7 @@ else
     acc_ok "candidate DEB reinstall completed"
   else
     acc_fail "candidate DEB reinstall failed (see /tmp/r2ac-f-reinstall.log)"
+    sed 's/^/    reinstall-log: /' /tmp/r2ac-f-reinstall.log 2>/dev/null | tail -15 >&2
   fi
   if [ "$(docker-helper version)" = "$VERSION" ]; then
     acc_ok "candidate version remains installed after reinstall"
