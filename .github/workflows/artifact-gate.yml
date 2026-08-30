@@ -1,0 +1,405 @@
+# artifact-gate.yml — reusable workflow that OWNS the docker-helper release
+# candidate set AND the full required UAT matrix that tests those exact bytes.
+#
+# This is the ONE canonical definition of the artifact gate. It is called by:
+#
+#   * uat-blackbox.yml  — ordinary full UAT (workflow_dispatch) and the
+#                         lightweight push-triggered subset (scope=push);
+#   * release.yml       — the release pipeline, which calls this SAME gate with
+#                         scope=full and then only promotes after it.
+#
+# The release candidate producer (the `producer` job) is the ONLY place that
+# builds the release artifacts. It stages an immutable candidate set:
+#
+#   docker-helper-<version>-linux-amd64.tar.gz
+#   docker-helper_<version>_amd64.deb
+#   docker-helper-<version>-<release>.x86_64.rpm
+#   SHA256SUMS            (producer-owned, generated exactly once)
+#   candidate.manifest    (binds source SHA + version + checksums)
+#
+# and uploads it as a workflow artifact. Every consumer job downloads that
+# candidate set, resolves its artifact type from the producer-owned SHA256SUMS
+# (scripts/release-candidate-artifact.sh), verifies the recorded SHA-256 before
+# install, and NEVER rebuilds the package/policy/binary locally. Guest VMs are
+# runtime/test/install consumers only.
+#
+# Candidate identity and retry semantics
+# --------------------------------------
+# The artifact is named docker-helper-candidate-<run_id>-<run_attempt> and the
+# producer job exposes the concrete name via the `candidate-name` output. All
+# consumers and the caller's promotion job download by that OUTPUT NAME (never
+# by recomputing the attempt), so the candidate identity is unambiguous and
+# stable per produced set:
+#
+#   * Attempt N: producer builds candidate-N; every consumer and promotion
+#     downloads candidate-N (the producer's output).
+#   * Re-run all jobs (new attempt): the producer builds a NEW candidate under
+#     a new attempt-suffixed name and every job re-runs against it — the
+#     complete new set passes the gate before anything can be promoted. GitHub
+#     wipes prior-attempt artifacts for a full re-run.
+#   * Re-run failed jobs / a single consumer: the producer is not re-run (a
+#     partial re-run creates a new attempt but does not re-run successful
+#     ancestors), so its `candidate-name` output is unchanged and the re-run
+#     consumer/promotion downloads the SAME candidate bytes it already tested.
+#     actions/download-artifact supports downloading from previous attempts of
+#     the same run, which is exactly this case.
+#   * Re-run the producer job: GitHub re-runs the job and its dependents, so the
+#     producer uploads a NEW candidate under the current attempt's name and all
+#     consumers + promotion re-run against it (full re-test). The upload does
+#     NOT use overwrite, so a same-name re-upload within a run fails closed
+#     instead of silently replacing already-tested bytes.
+#
+# See the promote job in release.yml for the promotion-side verification.
+#
+# uat-selinux-ab-proof is diagnostic evidence collection ONLY and is NOT a
+# release requirement.
+
+name: Release artifact gate
+
+on:
+  workflow_call:
+    inputs:
+      uat_version:
+        description: 'Version string baked into the candidate artifacts (e.g. 2.0.0-uat)'
+        required: true
+        type: string
+      scope:
+        description: 'Which consumers to run (full | push | selinux | selinux-ab-proof)'
+        required: false
+        default: 'full'
+        type: string
+      ab_tc_proof_lnk_perms:
+        description: 'Bounded trusted-CA proof only: perms to grant on docker_helper_trusted_ca_t:lnk_file'
+        required: false
+        default: ''
+        type: string
+    outputs:
+      candidate-name:
+        description: 'Name of the uploaded candidate artifact for this run attempt'
+        value: ${{ jobs.producer.outputs.candidate-name }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Canonical release-candidate producer. The ONLY job that builds release
+  # artifacts; all consumers (and release promotion) consume its staged bytes.
+  # ---------------------------------------------------------------------------
+  producer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    outputs:
+      candidate-name: ${{ steps.identity.outputs.artifact_name }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install build dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install nFPM (pinned)
+        run: |
+          NFPM_VERSION=2.47.0
+          NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
+          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSL -o "$NFPM_TARBALL" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
+          echo "${NFPM_SHA256}  ${NFPM_TARBALL}" | sha256sum --check -
+          tar xzf "$NFPM_TARBALL" nfpm
+          chmod +x nfpm
+          sudo mv nfpm /usr/local/bin/
+          nfpm --version | grep -qF "2.47.0"
+
+      - name: Install rpm (RPM identity verification)
+        run: |
+          sudo apt-get install -y rpm
+
+      - name: Build + stage the immutable candidate set (canonical producer)
+        run: |
+          scripts/release-candidate.sh "${{ inputs.uat_version }}" "${{ github.sha }}"
+
+      - name: Compute candidate identity
+        id: identity
+        run: |
+          echo "artifact_name=docker-helper-candidate-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload candidate set (transport only; bytes matter)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: dist/candidate
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Consumers. Each downloads the candidate set, resolves its artifact type from
+  # the producer SHA256SUMS and never rebuilds locally.
+  # ---------------------------------------------------------------------------
+
+  # Ubuntu DEB / AppArmor (hosted ubuntu-24.04). Exact candidate DEB.
+  uat-blackbox-ubuntu:
+    if: inputs.scope == 'full' || inputs.scope == 'push'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+
+      - name: Download candidate set
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate DEB from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate deb)
+          echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
+          echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run black-box UAT (exact candidate DEB)
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
+            UAT_PLATFORM=ubuntu \
+            UAT_INSTALL=deb \
+            UAT_MAC=apparmor \
+            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
+            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" scripts/uat-blackbox.sh
+
+  # Ubuntu tarball / AppArmor (hosted ubuntu-24.04). Exact candidate tarball.
+  uat-blackbox-ubuntu-tarball:
+    if: inputs.scope == 'full' || inputs.scope == 'push'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+
+      - name: Download candidate set
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate tarball from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate tar)
+          echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
+          echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run black-box UAT (exact candidate tarball)
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
+            UAT_PLATFORM=ubuntu \
+            UAT_INSTALL=tarball \
+            UAT_MAC=apparmor \
+            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
+            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" scripts/uat-blackbox.sh
+
+  # Ubuntu targeted regressions 3-9 (DEB/AppArmor). Exact candidate DEB; the
+  # runner never rebuilds when the candidate DEB is supplied.
+  uat-regressions-ubuntu:
+    if: inputs.scope == 'full'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install platform dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+
+      - name: Download candidate set
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate DEB from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate deb)
+          echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
+          echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run targeted Release-2 regressions (3-9, collect-all, exact candidate DEB)
+        run: |
+          sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
+            UAT_ALLOWED_ROOT=/home \
+            UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
+            UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
+            scripts/uat-regressions-runner-ubuntu.sh
+
+  # Tumbleweed RPM / AppArmor (QEMU/KVM). Exact candidate RPM.
+  uat-blackbox-opensuse-apparmor:
+    if: inputs.scope == 'full'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download candidate set
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate RPM from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate rpm)
+          echo "UAT_RPM=$path" >> "$GITHUB_ENV"
+          echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run openSUSE/AppArmor black-box UAT in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_RPM="$UAT_RPM" \
+          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+          UAT_VERSION="${{ inputs.uat_version }}" \
+          scripts/uat-vm-opensuse-apparmor.sh
+
+  # Tumbleweed RPM / SELinux (QEMU/KVM). Exact candidate RPM.
+  uat-blackbox-opensuse-selinux:
+    if: inputs.scope == 'full' || inputs.scope == 'selinux'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download candidate set
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate RPM from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate rpm)
+          echo "UAT_RPM=$path" >> "$GITHUB_ENV"
+          echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run openSUSE/SELinux black-box UAT in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_RPM="$UAT_RPM" \
+          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+          UAT_VERSION="${{ inputs.uat_version }}" \
+          scripts/uat-vm-opensuse-selinux.sh
+
+  # Tumbleweed tarball / SELinux (QEMU/KVM). Exact candidate tarball.
+  uat-blackbox-opensuse-tarball-selinux:
+    if: inputs.scope == 'full'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download candidate set
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate tarball from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate tar)
+          echo "UAT_TARBALL=$path" >> "$GITHUB_ENV"
+          echo "UAT_TARBALL_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run openSUSE/Tumbleweed tarball + SELinux black-box UAT in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_TARBALL="$UAT_TARBALL" \
+          UAT_TARBALL_SHA256="$UAT_TARBALL_SHA256" \
+          UAT_VERSION="${{ inputs.uat_version }}" \
+          scripts/uat-vm-opensuse-tarball-selinux.sh
+
+  # Bounded SELinux A/B proof (diagnostic evidence only — NOT a release
+  # requirement). Exact candidate RPM.
+  uat-selinux-ab-proof:
+    if: inputs.scope == 'selinux-ab-proof'
+    needs: producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install QEMU and cloud-image tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
+
+      - name: Download candidate set
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.producer.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Resolve exact candidate RPM from producer SHA256SUMS
+        run: |
+          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate rpm)
+          echo "UAT_RPM=$path" >> "$GITHUB_ENV"
+          echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Run bounded SELinux A/B proofs in Tumbleweed VM
+        run: |
+          UAT_REPO_DIR="${{ github.workspace }}" \
+          UAT_RPM="$UAT_RPM" \
+          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
+          UAT_VERSION="${{ inputs.uat_version }}" \
+          UAT_SELINUX_MODE=ab-proof \
+          AB_TC_PROOF_LNK_PERMS="${{ inputs.ab_tc_proof_lnk_perms }}" \
+          scripts/uat-vm-opensuse-selinux.sh
