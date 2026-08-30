@@ -6642,6 +6642,55 @@ func findAptInstallLine(text string) string {
 	return ""
 }
 
+// workflowPermissionsBlock returns the top-level `permissions:` block of a
+// workflow file (the block at column 0 up to the next top-level key), or ""
+// when the workflow declares no top-level permissions.
+func workflowPermissionsBlock(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if line != "permissions:" {
+			continue
+		}
+		var result []string
+		result = append(result, line)
+		for _, l := range lines[i+1:] {
+			if l != "" && l[0] != ' ' && l[0] != '\t' {
+				break
+			}
+			result = append(result, l)
+		}
+		return strings.Join(result, "\n")
+	}
+	return ""
+}
+
+// jobPermissionsBlock returns the `permissions:` block declared inside a job
+// section (4-space indented key, 6-space indented values), or "" when the job
+// declares none.
+func jobPermissionsBlock(jobContent string) string {
+	lines := strings.Split(jobContent, "\n")
+	for i, line := range lines {
+		if line != "    permissions:" {
+			continue
+		}
+		var result []string
+		result = append(result, line)
+		for _, l := range lines[i+1:] {
+			if l == "" {
+				result = append(result, l)
+				continue
+			}
+			indent := len(l) - len(strings.TrimLeft(l, " "))
+			if indent <= 4 {
+				break
+			}
+			result = append(result, l)
+		}
+		return strings.Join(result, "\n")
+	}
+	return ""
+}
+
 // TestReleaseWorkflowRaceBeforeBuild verifies the race tests (checks job) run
 // before the candidate build in the release pipeline: the gate (which owns the
 // producer/build) depends on checks, and promotion depends on the gate.
@@ -6739,6 +6788,52 @@ func TestReleaseDryRunNonPublishing(t *testing.T) {
 	}
 	if !strings.Contains(dryRunJob, "release-promote-verify.sh") {
 		t.Error("promote-dry-run must verify via release-promote-verify.sh")
+	}
+}
+
+// TestReleaseLeastPrivilegePermissions verifies the release pipeline runs at
+// least privilege: workflow-level `contents: read` only, with `contents: write`
+// granted to exactly one job — `promote`, the only job that publishes (via
+// `gh release create`). No other job (prepare, checks, selinux-policy, gate,
+// promote-dry-run) may declare explicit permissions, so a `contents: write`
+// regression anywhere else is caught structurally.
+func TestReleaseLeastPrivilegePermissions(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Workflow-level permissions must be the read-only baseline.
+	wfPerms := workflowPermissionsBlock(content)
+	if !strings.Contains(wfPerms, "contents: read") {
+		t.Error("workflow-level permissions must grant contents: read")
+	}
+	if strings.Contains(wfPerms, "contents: write") {
+		t.Error("workflow-level permissions must not grant contents: write (least privilege)")
+	}
+
+	// The promote job is the single writer: it must explicitly request
+	// contents: write because `gh release create` publishes via the API.
+	promoteJob := findJobSection(content, "promote")
+	if promoteJob == "" {
+		t.Fatal("release.yml must contain a promote job")
+	}
+	if block := jobPermissionsBlock(promoteJob); !strings.Contains(block, "contents: write") {
+		t.Error("promote job must declare permissions: contents: write (gh release create requires it)")
+	}
+
+	// No other job may carry explicit permissions; the workflow-level
+	// contents: read already covers checkout and artifact download, so write
+	// can never creep into the non-publishing jobs.
+	for _, job := range []string{"prepare", "checks", "selinux-policy", "gate", "promote-dry-run"} {
+		section := findJobSection(content, job)
+		if section == "" {
+			t.Fatalf("release.yml must contain a %s job", job)
+		}
+		if block := jobPermissionsBlock(section); block != "" {
+			t.Errorf("%s job must not declare explicit permissions (workflow-level contents: read suffices); got: %q", job, block)
+		}
 	}
 }
 

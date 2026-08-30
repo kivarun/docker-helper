@@ -42,8 +42,14 @@ on:
         default: '2.0.0-uat'
         type: string
 
+# Least privilege: every job except the publishing `promote` job runs with
+# `contents: read`. `gh release create` requires `contents: write`, so only the
+# `promote` job requests it (job-level). Artifacts are downloaded with
+# actions/download-artifact@v4, which uses the internal runtime JWT for
+# same-run artifacts and does not require `actions: read`; nothing else in the
+# pipeline needs elevated permissions.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   prepare:
@@ -170,6 +176,12 @@ jobs:
     if: ${{ github.event_name == 'push' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    # The ONLY job in the pipeline that needs write access: `gh release create`
+    # publishes via the GitHub API. All other jobs (and the reusable gate) run
+    # with the workflow-level `contents: read`.
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v7
