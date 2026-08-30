@@ -85,13 +85,6 @@
 #   UAT_RPM_SHA256   expected SHA-256 produced by the build job
 #   UAT_VERSION      version string (default 2.0.0-uat)
 #   UAT_KEEP         keep the VM/workdir on failure for debugging
-#   UAT_SELINUX_MODE full (default) | ab-proof
-#                    full: the full collect-all SELinux job (black-box UAT,
-#                    mount-pin regression, socket micro-proof, regressions 1-5).
-#                    ab-proof: bounded single-VM run that installs the RPM +
-#                    confined service (install-only) and then runs only the
-#                    SELinux A/B proofs (docker runtime/socket A/B and semanage
-#                    production-path proof) — no full matrix, no regressions.
 #
 # Exit 0 = full openSUSE/SELinux black-box UAT + mount-pin regression passed
 # inside the guest. Nonzero = failed; serial tail + guest evidence are printed.
@@ -108,9 +101,6 @@ UAT_RPM="${UAT_RPM:-}"
 UAT_RPM_SHA256="${UAT_RPM_SHA256:-}"
 VERSION="${UAT_VERSION:-2.0.0-uat}"
 KEEP="${UAT_KEEP:-}"
-MODE="${UAT_SELINUX_MODE:-full}"
-[ "$MODE" = "full" ] || [ "$MODE" = "ab-proof" ] \
-  || fail "UAT_SELINUX_MODE must be 'full' or 'ab-proof' (got '$MODE')"
 
 [ -n "$UAT_RPM" ] || fail "UAT_RPM is required (exact prebuilt RPM artifact)"
 [ -f "$UAT_RPM" ] || fail "UAT_RPM is not a file: $UAT_RPM"
@@ -125,9 +115,6 @@ MODE="${UAT_SELINUX_MODE:-full}"
 # ---------------------------------------------------------------------------
 # shellcheck source=scripts/uat-vm-opensuse-selinux-lib.sh
 source "$SCRIPT_DIR/uat-vm-opensuse-selinux-lib.sh"
-
-# The SELinux userspace bootstrap varies with the mode (full vs ab-proof).
-export UAT_SELINUX_MODE="$MODE"
 
 T0="$(date +%s)"
 
@@ -168,94 +155,65 @@ vm_selinux_transfer_artifact "docker-helper.rpm" "$UAT_RPM"
 vm_selinux_two_stage_docker
 
 # ---------------------------------------------------------------------------
-# 7b. ab-proof mode: install-only then SELinux A/B proofs
+# 7. existing black-box UAT
 # ---------------------------------------------------------------------------
-if [ "$MODE" = "ab-proof" ]; then
-  log "== 7b. install-only (RPM + confined service) then SELinux A/B proofs =="
-  INSTALL_RESULT=FAIL
-  if run_guest_capture "RPM install + confined service (install-only)" \
-    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_PLATFORM=opensuse UAT_INSTALL=rpm UAT_MAC=selinux UAT_ARTIFACT_PATH=/opt/uat-import/docker-helper.rpm UAT_ARTIFACT_SHA256=$UAT_RPM_SHA256 UAT_STOP_AFTER_INSTALL=1 scripts/uat-blackbox.sh"; then
-    INSTALL_RESULT=PASS
-    log "install-only passed inside the guest (RPM installed, service confined)"
-  else
-    log "install-only FAILED inside the guest (recorded; A/B proofs may still collect evidence)"
-  fi
-  record_stage "RPM install + confinement" "$INSTALL_RESULT"
-
-  AB_RESULT=FAIL
-  if run_guest_capture "SELinux A/B proofs (docker socket + semanage + trusted-CA restart) inside the guest" \
-    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin AB_TC_PROOF_LNK_PERMS=${AB_TC_PROOF_LNK_PERMS:-} bash scripts/uat-selinux-ab-proof.sh"; then
-    AB_RESULT=PASS
-    log "SELinux A/B proofs completed inside the guest (evidence recorded)"
-  else
-    log "SELinux A/B proofs did not complete (recorded; evidence may be partial)"
-  fi
-  record_stage "SELinux A/B proofs" "$AB_RESULT"
-
+log "black-box UAT (UAT_PLATFORM=opensuse UAT_INSTALL=rpm UAT_MAC=selinux, prebuilt RPM)"
+BB_RESULT=FAIL
+if run_guest_capture "black-box UAT inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_PLATFORM=opensuse UAT_INSTALL=rpm UAT_MAC=selinux UAT_ARTIFACT_PATH=/opt/uat-import/docker-helper.rpm UAT_ARTIFACT_SHA256=$UAT_RPM_SHA256 scripts/uat-blackbox.sh"; then
   BB_RESULT=PASS
+  log "black-box UAT passed inside the guest"
+else
+  log "black-box UAT FAILED inside the guest (recorded; continuing with regressions)"
+fi
+record_stage "black-box UAT" "$BB_RESULT"
+
+# ---------------------------------------------------------------------------
+# 8. SELinux mount-pin / RPM postinstall regression
+# ---------------------------------------------------------------------------
+log "== 8. SELinux mount-pin / RPM postinstall regression =="
+MP_RESULT=FAIL
+if run_guest_capture "SELinux mount-pin regression inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 scripts/uat-selinux-mount-pin-regression.sh"; then
   MP_RESULT=PASS
+  log "SELinux mount-pin regression passed inside the guest"
+else
+  MP_EC=$?
+  if [ "$MP_EC" = 2 ]; then
+    MP_RESULT=BLOCKED
+    log "SELinux mount-pin regression BLOCKED inside the guest (docker socket blocker; inconclusive, recorded)"
+  else
+    log "SELinux mount-pin regression FAILED inside the guest (recorded; continuing)"
+  fi
+fi
+record_stage "SELinux mount-pin regression" "$MP_RESULT"
+
+# ---------------------------------------------------------------------------
+# 8b. A2 bounded socket micro-proof (evidence collection; not a gate)
+# ---------------------------------------------------------------------------
+log "== 8b. A2 docker socket micro-proof (dontaudit off, bounded) =="
+MICRO_RESULT=FAIL
+if run_guest_capture "A2 socket micro-proof inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin scripts/uat-socket-microproof.sh"; then
+  MICRO_RESULT=PASS
+else
+  log "A2 socket micro-proof did not complete (recorded; evidence may be partial)"
+fi
+record_stage "A2 socket micro-proof" "$MICRO_RESULT"
+
+# ---------------------------------------------------------------------------
+# 8c. Release-2 SELinux targeted regression groups 1-5 (collect-all)
+# ---------------------------------------------------------------------------
+log "== 8c. SELinux targeted regression groups 1-5 (collect-all runner) =="
+SELREG_RESULT=FAIL
+if run_guest_capture "SELinux regression groups 1-5 inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-regressions-runner-selinux.sh"; then
   SELREG_RESULT=PASS
 else
-  # ---------------------------------------------------------------------------
-  # 7. existing black-box UAT
-  # ---------------------------------------------------------------------------
-  log "black-box UAT (UAT_PLATFORM=opensuse UAT_INSTALL=rpm UAT_MAC=selinux, prebuilt RPM)"
-  BB_RESULT=FAIL
-  if run_guest_capture "black-box UAT inside the guest" \
-    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_PLATFORM=opensuse UAT_INSTALL=rpm UAT_MAC=selinux UAT_ARTIFACT_PATH=/opt/uat-import/docker-helper.rpm UAT_ARTIFACT_SHA256=$UAT_RPM_SHA256 scripts/uat-blackbox.sh"; then
-    BB_RESULT=PASS
-    log "black-box UAT passed inside the guest"
-  else
-    log "black-box UAT FAILED inside the guest (recorded; continuing with regressions)"
-  fi
-  record_stage "black-box UAT" "$BB_RESULT"
-
-  # ---------------------------------------------------------------------------
-  # 8. SELinux mount-pin / RPM postinstall regression
-  # ---------------------------------------------------------------------------
-  log "== 8. SELinux mount-pin / RPM postinstall regression =="
-  MP_RESULT=FAIL
-  if run_guest_capture "SELinux mount-pin regression inside the guest" \
-    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 scripts/uat-selinux-mount-pin-regression.sh"; then
-    MP_RESULT=PASS
-    log "SELinux mount-pin regression passed inside the guest"
-  else
-    MP_EC=$?
-    if [ "$MP_EC" = 2 ]; then
-      MP_RESULT=BLOCKED
-      log "SELinux mount-pin regression BLOCKED inside the guest (docker socket blocker; inconclusive, recorded)"
-    else
-      log "SELinux mount-pin regression FAILED inside the guest (recorded; continuing)"
-    fi
-  fi
-  record_stage "SELinux mount-pin regression" "$MP_RESULT"
-
-  # ---------------------------------------------------------------------------
-  # 8b. A2 bounded socket micro-proof (evidence collection; not a gate)
-  # ---------------------------------------------------------------------------
-  log "== 8b. A2 docker socket micro-proof (dontaudit off, bounded) =="
-  MICRO_RESULT=FAIL
-  if run_guest_capture "A2 socket micro-proof inside the guest" \
-    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin scripts/uat-socket-microproof.sh"; then
-    MICRO_RESULT=PASS
-  else
-    log "A2 socket micro-proof did not complete (recorded; evidence may be partial)"
-  fi
-  record_stage "A2 socket micro-proof" "$MICRO_RESULT"
-
-  # ---------------------------------------------------------------------------
-  # 8c. Release-2 SELinux targeted regression groups 1-5 (collect-all)
-  # ---------------------------------------------------------------------------
-  log "== 8c. SELinux targeted regression groups 1-5 (collect-all runner) =="
-  SELREG_RESULT=FAIL
-  if run_guest_capture "SELinux regression groups 1-5 inside the guest" \
-    "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-regressions-runner-selinux.sh"; then
-    SELREG_RESULT=PASS
-  else
-    log "SELinux regression groups 1-5 reported a failure (recorded)"
-  fi
-  record_stage "SELinux regressions (1-5)" "$SELREG_RESULT"
+  log "SELinux regression groups 1-5 reported a failure (recorded)"
 fi
+record_stage "SELinux regressions (1-5)" "$SELREG_RESULT"
+
 
 # ---------------------------------------------------------------------------
 # 9. Summary
@@ -283,20 +241,6 @@ echo "============================="
 # A stage BLOCKED (exit 2) means a real prerequisite prevented the exercise
 # (here: the known docker socket blocker making the mount-pin run unable to
 # remain active) — inconclusive, not a product failure. Only a FAIL counts.
-if [ "$MODE" = "ab-proof" ]; then
-  # ab-proof is evidence collection, not a product gate: PASS means the
-  # bounded proofs completed and recorded their evidence (the A/B results
-  # themselves are reported from the guest output, never a gate here).
-  if [ "$AB_RESULT" = "PASS" ]; then
-    echo "RESULT: SELinux A/B proofs completed (evidence recorded)"
-    echo "=============================================================="
-    log "DONE"
-    exit 0
-  fi
-  echo "RESULT: SELinux A/B proof harness did not complete (see summary above)"
-  echo "=============================================================="
-  exit 1
-fi
 if [ "$BB_RESULT" = "PASS" ] && [ "$SELREG_RESULT" = "PASS" ] && [ "$MP_RESULT" != "FAIL" ]; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="

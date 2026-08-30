@@ -42,9 +42,6 @@
 #
 # Env inputs (host side):
 #   UAT_REPO_DIR     host checkout of docker-helper (default: repo root)
-#   UAT_SELINUX_MODE full (default) | ab-proof — package set for the SELinux
-#                    userspace bootstrap (ab-proof adds setools-console,
-#                    audit, checkpolicy). The tarball profile uses full.
 #
 # Exposed state (read-only for callers):
 #   SELINUX_ACTIVE / APPARMOR_ACTIVE / RAW_LSM   initial LSM state
@@ -148,7 +145,7 @@ RMT
     EC=$?
     fail "could not transfer repo policy helper (exit $EC)"
   fi
-  BOOTSTRAP="$(vm_ssh "sudo env UAT_SELINUX_MODE=${UAT_SELINUX_MODE:-full} bash -s" <<'RMT'
+  BOOTSTRAP="$(vm_ssh "sudo bash -s" <<'RMT'
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 log(){ echo "[vm] $*"; }
@@ -160,20 +157,6 @@ NEED=0
 for p in selinux-policy-targeted policycoreutils selinux-tools policycoreutils-python-utils; do
   rpm -q "$p" >/dev/null 2>&1 || { NEED=1; log "missing: $p"; }
 done
-# In ab-proof mode the semanage production-path proof must determine whether the
-# policy provides semanage_exec_t / semanage_t and derive the standard semanage
-# transition (sesearch), build a TEMPORARY proof module (checkmodule +
-# semodule_package from checkpolicy), and capture AVC evidence with auditd
-# RUNNING (the minimal image does not ship/start it). setools-console provides
-# seinfo/sesearch on openSUSE (the bare `setools` package only exists in the
-# experimental security:/SELinux repo; setools-console is in the default
-# Tumbleweed repos). `audit` provides the auditd daemon. Not needed for the
-# full UAT stages.
-if [ "${UAT_SELINUX_MODE:-full}" = "ab-proof" ]; then
-  for p in setools-console audit checkpolicy; do
-    rpm -q "$p" >/dev/null 2>&1 || { NEED=1; log "missing: $p (ab-proof mode)"; }
-  done
-fi
 if [ "$NEED" = 1 ]; then
   opensuse_zypp_tune_timeouts
   if ! opensuse_zypper_refresh; then
@@ -181,9 +164,6 @@ if [ "$NEED" = 1 ]; then
     exit 1
   fi
   PKGS="selinux-policy-targeted policycoreutils selinux-tools policycoreutils-python-utils"
-  if [ "${UAT_SELINUX_MODE:-full}" = "ab-proof" ]; then
-    PKGS="$PKGS setools-console audit checkpolicy"
-  fi
   # shellcheck disable=SC2086
   opensuse_zypper install -y $PKGS
 fi
@@ -208,10 +188,9 @@ for b in sestatus getenforce semodule semanage restorecon matchpathcon; do
   fi
 done
 
-# Best-effort auditd for fresh AVC/USER_AVC evidence in the scope=selinux run
-# (mirrors the ab-proof mode's audit collection). Evidence collection, NOT a
-# hard prerequisite: if install or start fails the run continues and the
-# regression evidence falls back to journal-level denials.
+# Best-effort auditd for fresh AVC/USER_AVC evidence in the scope=selinux run.
+# Evidence collection, NOT a hard prerequisite: if install or start fails the
+# run continues and the regression evidence falls back to journal-level denials.
 if ! rpm -q audit >/dev/null 2>&1; then
   opensuse_zypp_tune_timeouts
   opensuse_zypper_refresh || true

@@ -6759,7 +6759,6 @@ func TestArtifactGateConsumersNoRebuild(t *testing.T) {
 		"uat-blackbox-opensuse-apparmor",
 		"uat-blackbox-opensuse-selinux",
 		"uat-blackbox-opensuse-tarball-selinux",
-		"uat-selinux-ab-proof",
 	}
 	for _, c := range consumers {
 		job := findJobSection(content, c)

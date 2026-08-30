@@ -4,19 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        description: 'Which jobs to run (full matrix, bounded SELinux A/B proof, or openSUSE SELinux job only)'
+        description: 'Which jobs to run (full matrix or openSUSE SELinux job only)'
         required: false
         default: 'full'
         type: choice
         options:
           - full
-          - selinux-ab-proof
           - selinux
-      ab_tc_proof_lnk_perms:
-        description: 'Bounded trusted-CA proof only: space-separated perms to grant on docker_helper_trusted_ca_t:lnk_file in the temporary proof module (e.g. "getattr relabelfrom"); empty = pure reproduction with AVC capture'
-        required: false
-        default: ''
-        type: string
       uat_version:
         description: 'Version string baked into the candidate artifacts (default 2.0.0-uat)'
         required: false
@@ -35,8 +29,7 @@ permissions:
 # it. See artifact-gate.yml for the producer/consumer graph and the candidate
 # identity / retry semantics.
 #
-#   workflow_dispatch (scope=input)  -> gate with that scope (full | selinux |
-#                                       selinux-ab-proof)
+#   workflow_dispatch (scope=input)  -> gate with that scope (full | selinux)
 #   push to main (scope=push)        -> gate with scope=push (producer + Ubuntu
 #                                       DEB and tarball consumers; no heavy VMs
 #                                       on every commit)
@@ -50,7 +43,7 @@ permissions:
 #   opensuse  rpm       apparmor  ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full)
 #   opensuse  rpm       selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full/selinux)
 #   opensuse  tarball   selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full)
-#   (uat-selinux-ab-proof: diagnostic only, scope=selinux-ab-proof)
+#   (scope=selinux: bounded openSUSE SELinux job only, developer diagnostic)
 #
 # EVERY consumer downloads the one immutable candidate set produced by the gate
 # producer, resolves its artifact from the producer-owned SHA256SUMS and installs
@@ -68,4 +61,3 @@ jobs:
       # expressions short-circuit to the defaults.
       uat_version: ${{ github.event_name == 'workflow_dispatch' && inputs.uat_version || '2.0.0-uat' }}
       scope: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'push' }}
-      ab_tc_proof_lnk_perms: ${{ github.event_name == 'workflow_dispatch' && inputs.ab_tc_proof_lnk_perms || '' }}

@@ -433,17 +433,6 @@ for _ in $(seq 1 50); do
 done
 [ "$DH_READY" = 1 ] || fail_uat "docker-helper API socket not ready after bounded wait ($DH_SOCK)"
 
-# Bounded install-only mode: UAT_STOP_AFTER_INSTALL exits after the system
-# install + confinement proof (phase 2) so a caller (the SELinux A/B proof VM
-# orchestration) can run bounded experiments against the installed, confined
-# service without the black-box scenario phases 3-8. The install path and its
-# verification are unchanged. The EXIT trap still stops the service; the
-# caller's proof script re-enables it.
-if [ -n "${UAT_STOP_AFTER_INSTALL:-}" ]; then
-  say "UAT_STOP_AFTER_INSTALL set: stopping after install + confinement (phase 2)"
-  exit 0
-fi
-
 # ==============================================================================
 # Phase 3: operator surface (principal + credential) and sessions
 # ==============================================================================

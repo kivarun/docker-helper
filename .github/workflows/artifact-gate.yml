@@ -51,8 +51,11 @@
 #
 # See the promote job in release.yml for the promotion-side verification.
 #
-# uat-selinux-ab-proof is diagnostic evidence collection ONLY and is NOT a
-# release requirement.
+# uat-selinux-ab-proof was retired with the Release-2 SELinux blockers it was
+# built to diagnose (Docker runtime/socket natural-health, semanage production
+# transition, trusted-CA restart/relabel): those blockers are closed and the
+# production SELinux path is covered by the full gate. The bounded SELinux
+# developer diagnostic is the scope=selinux run (openSUSE SELinux job only).
 
 name: Release artifact gate
 
@@ -64,14 +67,9 @@ on:
         required: true
         type: string
       scope:
-        description: 'Which consumers to run (full | push | selinux | selinux-ab-proof)'
+        description: 'Which consumers to run (full | push | selinux)'
         required: false
         default: 'full'
-        type: string
-      ab_tc_proof_lnk_perms:
-        description: 'Bounded trusted-CA proof only: perms to grant on docker_helper_trusted_ca_t:lnk_file'
-        required: false
-        default: ''
         type: string
     outputs:
       candidate-name:
@@ -363,43 +361,3 @@ jobs:
           UAT_TARBALL_SHA256="$UAT_TARBALL_SHA256" \
           UAT_VERSION="${{ inputs.uat_version }}" \
           scripts/uat-vm-opensuse-tarball-selinux.sh
-
-  # Bounded SELinux A/B proof (diagnostic evidence only — NOT a release
-  # requirement). Exact candidate RPM.
-  uat-selinux-ab-proof:
-    if: inputs.scope == 'selinux-ab-proof'
-    needs: producer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Install QEMU and cloud-image tools
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage
-
-      - name: Download candidate set
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs.producer.outputs.candidate-name }}
-          path: /tmp/candidate
-
-      - name: Resolve exact candidate RPM from producer SHA256SUMS
-        run: |
-          read -r path sha < <(scripts/release-candidate-artifact.sh /tmp/candidate rpm)
-          echo "UAT_RPM=$path" >> "$GITHUB_ENV"
-          echo "UAT_RPM_SHA256=$sha" >> "$GITHUB_ENV"
-
-      - name: Run bounded SELinux A/B proofs in Tumbleweed VM
-        run: |
-          UAT_REPO_DIR="${{ github.workspace }}" \
-          UAT_RPM="$UAT_RPM" \
-          UAT_RPM_SHA256="$UAT_RPM_SHA256" \
-          UAT_VERSION="${{ inputs.uat_version }}" \
-          UAT_SELINUX_MODE=ab-proof \
-          AB_TC_PROOF_LNK_PERMS="${{ inputs.ab_tc_proof_lnk_perms }}" \
-          scripts/uat-vm-opensuse-selinux.sh
