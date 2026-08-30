@@ -212,8 +212,8 @@ func TestValidateEndpointValid(t *testing.T) {
 		"http://127.0.0.1:65535",
 	}
 	for _, ep := range validEndpoints {
-		if err := validateOperatorEndpoint(ep); err != nil {
-			t.Errorf("validateOperatorEndpoint(%q) = %v, want nil", ep, err)
+		if err := validateEndpoint(ep); err != nil {
+			t.Errorf("validateEndpoint(%q) = %v, want nil", ep, err)
 		}
 	}
 }
@@ -243,14 +243,14 @@ func TestValidateEndpointReject(t *testing.T) {
 		{"", "empty string"},
 	}
 	for _, tc := range rejectEndpoints {
-		if err := validateOperatorEndpoint(tc.endpoint); err == nil {
-			t.Errorf("validateOperatorEndpoint(%q) = nil, want error (%s)", tc.endpoint, tc.why)
+		if err := validateEndpoint(tc.endpoint); err == nil {
+			t.Errorf("validateEndpoint(%q) = nil, want error (%s)", tc.endpoint, tc.why)
 		}
 	}
 }
 
 func TestValidateEndpointUnixRelativeErrorMessage(t *testing.T) {
-	err := validateOperatorEndpoint("unix://relative/path")
+	err := validateEndpoint("unix://relative/path")
 	if err == nil {
 		t.Fatal("expected error for relative unix path")
 	}
@@ -672,9 +672,9 @@ func TestAgentClientUnchanged(t *testing.T) {
 	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "session-token")
 	t.Setenv("DOCKER_HELPER_SOCKET_PATH", "")
 
-	client, err := agentClient()
+	client, err := resolveAgentClient(agentClientOptions{})
 	if err != nil {
-		t.Fatalf("agentClient: %v", err)
+		t.Fatalf("resolveAgentClient(default): %v", err)
 	}
 
 	token, err := client.tokenSource()

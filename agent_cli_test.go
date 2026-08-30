@@ -1227,9 +1227,9 @@ func TestResolveAgentClientSystemFlag(t *testing.T) {
 	defer server.Close()
 	waitForDialReady(t, "unix", socketPath)
 
-	origSystemSocket := agentSystemSocketPath
-	agentSystemSocketPath = socketPath
-	t.Cleanup(func() { agentSystemSocketPath = origSystemSocket })
+	origSystemSocket := systemSocketPath
+	systemSocketPath = socketPath
+	t.Cleanup(func() { systemSocketPath = origSystemSocket })
 
 	t.Setenv("DOCKER_HELPER_SESSION_TOKEN", "tok")
 	t.Setenv("DOCKER_HELPER_SOCKET_PATH", filepath.Join(tempDir, "elsewhere.sock"))

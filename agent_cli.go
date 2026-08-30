@@ -17,17 +17,7 @@ import (
 const (
 	// operationPollInterval is the fixed interval between operation status polls.
 	operationPollInterval = 500 * time.Millisecond
-
-	// agentSocketPath is the fallback Unix socket path for agent-facing CLI
-	// commands when no explicit endpoint, system flag, DOCKER_HELPER_SOCKET_PATH,
-	// or existing user-mode socket selects a daemon (system/sandbox default).
-	agentSocketPath = "/run/docker-helper/docker-helper.sock"
 )
-
-// agentSystemSocketPath is the system daemon socket selected by --system for
-// agent-facing commands. It is a variable so tests can bind a real listener at
-// a controlled path; production always uses the system socket.
-var agentSystemSocketPath = filepath.Join(systemRuntimeDir, "docker-helper.sock")
 
 // agentClientOptions specifies how an agent-facing command connects to a daemon.
 // Agent commands authenticate with the Session token (DOCKER_HELPER_SESSION_TOKEN),
@@ -49,7 +39,7 @@ func registerAgentEndpointFlags(fs *flag.FlagSet) (system *bool, endpoint *strin
 // Resolution precedence:
 //  1. DOCKER_HELPER_SOCKET_PATH if set
 //  2. $XDG_RUNTIME_DIR/docker-helper/docker-helper.sock if that user-mode socket exists
-//  3. /run/docker-helper/docker-helper.sock (system/sandbox default)
+//  3. systemSocketPath (/run/docker-helper/docker-helper.sock, system/sandbox default)
 //
 // The presence of XDG_RUNTIME_DIR alone does not select a nonexistent user socket;
 // agent commands fall back to the system socket when no user-mode daemon is present.
@@ -59,17 +49,11 @@ func resolveAgentSocketPath() string {
 	}
 	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
 		userSocket := filepath.Join(runtimeDir, "docker-helper", "docker-helper.sock")
-		if fileExists(userSocket) {
+		if userSocketExists(userSocket) {
 			return userSocket
 		}
 	}
-	return agentSocketPath
-}
-
-// fileExists reports whether the path exists (as a file or socket).
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	return systemSocketPath
 }
 
 // validateAgentEndpointOptions validates the CLI-only --system/--endpoint
@@ -81,7 +65,7 @@ func validateAgentEndpointOptions(opts agentClientOptions) error {
 		return fmt.Errorf("--system and --endpoint are mutually exclusive")
 	}
 	if opts.Endpoint != "" {
-		return validateOperatorEndpoint(opts.Endpoint)
+		return validateEndpoint(opts.Endpoint)
 	}
 	return nil
 }
@@ -105,7 +89,7 @@ func resolveAgentClient(opts agentClientOptions) (*apiClient, error) {
 		return resolveAgentEndpoint(opts.Endpoint, tokenSource)
 	}
 	if opts.System {
-		return newUnixAPIClient(agentSystemSocketPath, tokenSource, nil), nil
+		return newUnixAPIClient(systemSocketPath, tokenSource, nil), nil
 	}
 	return newUnixAPIClient(resolveAgentSocketPath(), tokenSource, nil), nil
 }
@@ -114,7 +98,7 @@ func resolveAgentClient(opts agentClientOptions) (*apiClient, error) {
 // Unlike operator commands, the authentication token comes from the environment
 // (the Session token), so an http endpoint does not require --token-file.
 func resolveAgentEndpoint(endpoint string, tokenSource func() (string, error)) (*apiClient, error) {
-	if err := validateOperatorEndpoint(endpoint); err != nil {
+	if err := validateEndpoint(endpoint); err != nil {
 		return nil, err
 	}
 	if strings.HasPrefix(endpoint, "unix://") {
@@ -125,13 +109,6 @@ func resolveAgentEndpoint(endpoint string, tokenSource func() (string, error)) (
 	}
 	addr := strings.TrimPrefix(endpoint, "http://")
 	return newHTTPAPIClient(addr, tokenSource, nil), nil
-}
-
-// agentClient returns an apiClient configured for the current session using the
-// default endpoint resolution (no explicit --system/--endpoint).
-// It reads the session token from DOCKER_HELPER_SESSION_TOKEN (no config.json required).
-func agentClient() (*apiClient, error) {
-	return resolveAgentClient(agentClientOptions{})
 }
 
 // waitForOperationContext polls an operation until it reaches a terminal state.

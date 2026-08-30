@@ -18,6 +18,12 @@ const (
 	systemConfigDir  = "/etc/docker-helper"
 )
 
+// systemSocketPath is the canonical Unix socket path of the system daemon.
+// Both operator and agent CLI endpoint selection resolve the same path; it is a
+// variable so tests can bind a real listener at a controlled path (the same
+// test-injection pattern as systemSocketExists).
+var systemSocketPath = filepath.Join(systemRuntimeDir, "docker-helper.sock")
+
 // operatorClientOptions specifies how to connect to the daemon.
 type operatorClientOptions struct {
 	System    bool   // --system: force system daemon
@@ -44,7 +50,7 @@ func resolveOperatorClient(opts operatorClientOptions) (*apiClient, error) {
 }
 
 func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
-	if err := validateOperatorEndpoint(opts.Endpoint); err != nil {
+	if err := validateEndpoint(opts.Endpoint); err != nil {
 		return nil, err
 	}
 
@@ -96,7 +102,7 @@ func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
 }
 
 func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
-	socketPath := filepath.Join(systemRuntimeDir, "docker-helper.sock")
+	socketPath := systemSocketPath
 	tokenPath := opts.TokenFile
 	if tokenPath == "" {
 		tokenPath = resolveSystemModeTokenPath()
@@ -117,17 +123,11 @@ func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
 		return nil, err
 	}
 	userSocketPath := filepath.Join(runtimeDir, "docker-helper.sock")
-	systemSocketPath := filepath.Join(systemRuntimeDir, "docker-helper.sock")
-
-	userSocketExists := func() bool {
-		_, err := os.Stat(userSocketPath)
-		return err == nil
-	}
 
 	// Determine which socket to use.
 	// If user socket exists, use it. Otherwise fall back to system socket.
 	socketPath := userSocketPath
-	if !userSocketExists() && systemSocketExists() {
+	if !userSocketExists(userSocketPath) && systemSocketExists() {
 		socketPath = systemSocketPath
 	}
 
@@ -152,7 +152,13 @@ func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
 // systemSocketExists reports whether the system daemon socket is present.
 // Can be replaced in tests.
 var systemSocketExists = func() bool {
-	_, err := os.Stat(filepath.Join(systemRuntimeDir, "docker-helper.sock"))
+	_, err := os.Stat(systemSocketPath)
+	return err == nil
+}
+
+// userSocketExists reports whether a user-mode daemon socket exists at path.
+func userSocketExists(path string) bool {
+	_, err := os.Stat(path)
 	return err == nil
 }
 
@@ -171,8 +177,10 @@ func resolveSystemModeTokenPath() string {
 	return filepath.Join(getConfigDir(), "admin.token")
 }
 
-// validateOperatorEndpoint validates an explicit endpoint URL.
-func validateOperatorEndpoint(endpoint string) error {
+// validateEndpoint validates an explicit endpoint URL. This is shared transport
+// syntax validation used by both operator and agent (Session) clients; it does
+// not carry any authentication semantics.
+func validateEndpoint(endpoint string) error {
 	if strings.HasPrefix(endpoint, "unix://") {
 		path := strings.TrimPrefix(endpoint, "unix://")
 		if !strings.HasPrefix(path, "/") {
