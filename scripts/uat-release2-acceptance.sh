@@ -510,7 +510,12 @@ if [ "$REG_UP" = 1 ]; then
     acc_fail "private pull+run failed in session A after registry login"
   fi
 
-  # 7. Session B still cannot pull it (session isolation).
+  # 7. Session B still cannot pull it (session isolation). Session A's pull
+  #    cached the image in the local Docker daemon, so remove the cached image
+  #    first (harness-owned cleanup): otherwise session B would "succeed" by
+  #    reusing the local cache without ever contacting the registry, which is
+  #    not what the isolation contract proves.
+  docker rmi "$REG_ADDR/uat/private:v1" >/dev/null 2>&1 || true
   if DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_B" \
       dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' >/dev/null 2>&1; then
     acc_fail "session B unexpectedly pulled the private image (isolation broken)"
@@ -526,7 +531,10 @@ if [ "$REG_UP" = 1 ]; then
   else
     acc_ok "registry password absent from journal/audit"
   fi
-  OP_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_B" \
+  # Session A (which holds the registry credentials) re-pulls the image after
+  # the isolation check removed the local cache; its output is the successful
+  # authenticated path, i.e. the strongest place a password could leak.
+  OP_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
     dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
   if printf '%s\n' "$OP_OUT" | grep -q "$PASS_MARKER"; then
     acc_fail "registry password leaked into operation output"
