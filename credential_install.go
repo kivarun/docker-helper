@@ -139,12 +139,27 @@ func readTokenHidden(prompt string, stderr io.Writer) (string, error) {
 }
 
 // installCredential performs the full credential installation flow.
-// Rejects root, reads token (hidden on TTY, stdin otherwise), validates,
-// checks --force for existing credential, and writes atomically.
+// Rejects root, checks --force for an existing credential, reads token
+// (hidden on TTY, stdin otherwise), validates, and writes atomically.
 // Returns the credential path on success.
+//
+// The existing-credential conflict is detected and rejected BEFORE any token
+// input is read, so stdin/token-file input remains untouched when the
+// operation is going to be rejected anyway.
 func installCredential(cfg credentialInstallConfig) (string, error) {
 	if cfg.uid() == 0 {
 		return "", ErrCredentialInstallAsRoot
+	}
+
+	credPath, err := credentialPath()
+	if err != nil {
+		return "", err
+	}
+
+	if !cfg.force {
+		if info, err := os.Stat(credPath); err == nil && !info.IsDir() {
+			return "", fmt.Errorf("credential already exists: use --force to replace: %w", ErrCredentialAlreadyExists)
+		}
 	}
 
 	var token string
@@ -166,20 +181,9 @@ func installCredential(cfg credentialInstallConfig) (string, error) {
 		return "", err
 	}
 
-	credPath, err := credentialPath()
-	if err != nil {
-		return "", err
-	}
-
 	dir := filepath.Dir(credPath)
 	if err := ensureCredentialDir(dir); err != nil {
 		return "", err
-	}
-
-	if !cfg.force {
-		if info, err := os.Stat(credPath); err == nil && !info.IsDir() {
-			return "", fmt.Errorf("credential already exists: use --force to replace: %w", ErrCredentialAlreadyExists)
-		}
 	}
 
 	data := append([]byte(token), '\n')

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -154,6 +155,70 @@ func TestCredentialInstallExistingNoForce(t *testing.T) {
 		t.Errorf("credential was changed: %q", string(data))
 	}
 }
+
+// TestCredentialInstallExistingNoForceDoesNotConsumeInput proves the
+// existing-credential conflict is rejected BEFORE any token input is read:
+// the stdin/token-file reader must remain untouched when the operation is
+// going to be rejected anyway.
+func TestCredentialInstallExistingNoForceDoesNotConsumeInput(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	oldToken := "dhc_" + strings.Repeat("a", 64)
+	_, err := installCredential(credentialInstallConfig{
+		reader:       strings.NewReader(oldToken),
+		writer:       safeWriteCredential,
+		uid:          func() int { return 1000 },
+		isTerminal:   func() bool { return false },
+		readPassword: func() (string, error) { return "", nil },
+		force:        false,
+	})
+	if err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	// A reader that fails if it is ever read: preflight rejection must not
+	// consume the token source.
+	consumed := false
+	reader := &recordingReader{onRead: func() { consumed = true }}
+
+	_, err = installCredential(credentialInstallConfig{
+		reader:       reader,
+		writer:       safeWriteCredential,
+		uid:          func() int { return 1000 },
+		isTerminal:   func() bool { return false },
+		readPassword: func() (string, error) { return "", nil },
+		force:        false,
+	})
+	if !errors.Is(err, ErrCredentialAlreadyExists) {
+		t.Fatalf("expected ErrCredentialAlreadyExists, got: %v", err)
+	}
+	if consumed {
+		t.Error("token input was consumed even though the operation was rejected on preflight")
+	}
+
+	// The existing credential must be untouched.
+	credPath, _ := credentialPath()
+	data, _ := os.ReadFile(credPath)
+	if string(data) != oldToken+"\n" {
+		t.Errorf("credential was changed: %q", string(data))
+	}
+}
+
+// recordingReader marks onRead the first time it is read.
+type recordingReader struct {
+	onRead func()
+	read   bool
+}
+
+func (r *recordingReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		r.onRead()
+	}
+	return 0, io.EOF
+}
+
 func TestCredentialInstallRootRejected(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
