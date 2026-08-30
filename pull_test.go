@@ -384,6 +384,108 @@ func TestPullSuccessResponse(t *testing.T) {
 	}
 }
 
+// TestPullFailureClassification verifies that expected docker pull failures
+// (image not found, access denied, registry unreachable) are classified into
+// precise HTTP status/code/message pairs instead of a generic 500, while the
+// docker output is preserved for the client.
+func TestPullFailureClassification(t *testing.T) {
+	cases := []struct {
+		name       string
+		dockerOut  string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "image not found",
+			dockerOut:  "Error response from daemon: manifest for alpine:doesnotexist not found: manifest unknown",
+			wantStatus: http.StatusNotFound,
+			wantCode:   "image_not_found",
+		},
+		{
+			name:       "pull access denied",
+			dockerOut:  "Error response from daemon: pull access denied for private/repo, repository does not exist or may require docker login",
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "pull_access_denied",
+		},
+		{
+			name:       "registry network failure",
+			dockerOut:  "Error response from daemon: Get \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io on 127.0.0.53:53: no such host",
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "registry_unavailable",
+		},
+		{
+			name:       "unrecognized failure stays generic",
+			dockerOut:  "some other docker error",
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "docker_pull_failed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newTestAppWithAdminToken(t)
+
+			result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+			if err != nil {
+				t.Fatalf("createSession() error: %v", err)
+			}
+
+			out := tc.dockerOut
+			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "/bin/sh", "-c", "printf '%s' '"+out+"'; exit 1")
+			}
+
+			reqBody := map[string]string{"image": "nonexistent:latest"}
+			body, _ := json.Marshal(reqBody)
+
+			req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+result.Token)
+			w := httptest.NewRecorder()
+
+			app.handlePull(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Errorf("expected status %d, got %d", tc.wantStatus, w.Code)
+			}
+
+			var resp response
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("cannot decode response: %v", err)
+			}
+			if resp.Code != tc.wantCode {
+				t.Errorf("expected code %q, got %q", tc.wantCode, resp.Code)
+			}
+			if resp.Output != out {
+				t.Errorf("expected docker output preserved, got %q", resp.Output)
+			}
+		})
+	}
+}
+
+// TestClassifyDockerError proves the coarse classifier distinguishes the
+// categories Docker's stable stderr lines support.
+func TestClassifyDockerError(t *testing.T) {
+	cases := []struct {
+		output string
+		want   dockerErrorKind
+	}{
+		{"manifest unknown", dockerErrorImageNotFound},
+		{"Error response from daemon: manifest for alpine:x not found: manifest unknown", dockerErrorImageNotFound},
+		{"pull access denied for repo, repository does not exist", dockerErrorAuthDenied},
+		{"unauthorized: authentication required", dockerErrorAuthDenied},
+		{"failed with status: 401 Unauthorized", dockerErrorAuthDenied},
+		{"dial tcp: lookup registry-1.docker.io: no such host", dockerErrorNetwork},
+		{"connection refused", dockerErrorNetwork},
+		{"some unrelated error text", dockerErrorUnknown},
+		{"", dockerErrorUnknown},
+	}
+	for _, tc := range cases {
+		if got := classifyDockerError(tc.output); got != tc.want {
+			t.Errorf("classifyDockerError(%q) = %v, want %v", tc.output, got, tc.want)
+		}
+	}
+}
+
 func TestPullErrorResponse(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 

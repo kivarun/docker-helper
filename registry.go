@@ -16,6 +16,22 @@ type registryLoginRequest struct {
 	Password string `json:"password"`
 }
 
+// classifyRegistryLoginFailure maps a docker login failure's stderr output to
+// an HTTP status, error code, and message. Authentication/authorization
+// denials are distinguished from registry/backend failures; the docker CLI
+// exposes no structured error, so the classification relies on its stable
+// stderr lines. Unrecognized failures keep the existing generic contract.
+func classifyRegistryLoginFailure(output string) (status int, code, message string) {
+	switch classifyDockerError(output) {
+	case dockerErrorAuthDenied:
+		return http.StatusUnauthorized, "registry_auth_denied", "authentication failed for registry"
+	case dockerErrorNetwork:
+		return http.StatusBadGateway, "registry_unavailable", "registry unreachable or backend failure"
+	default:
+		return http.StatusBadRequest, "registry_login_failed", "registry login failed"
+	}
+}
+
 func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
@@ -77,16 +93,23 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 	cmd.Stdin = &stdinBuf
 
 	// Registry login output is intentionally not retained or exposed.
-	// Discard stdout/stderr to avoid unbounded memory retention and
-	// prevent Docker output or credential material from leaking.
+	// Capture only enough stderr to classify the failure, never returning or
+	// logging it: the password is supplied via stdin (never argv/env/logs) and
+	// must not leak, and Docker output must not be exposed verbatim.
+	var errBuf *boundedBuffer = newBoundedBuffer(4096)
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	cmd.Stderr = errBuf
 
 	err = cmd.Run()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
-		// Generic error — do not return Docker output.
+		// Classify the login failure (authentication vs. registry/backend)
+		// using the docker CLI's stable stderr lines. Only a sanitized
+		// category message is returned; the captured output is discarded.
+		outData, _, _ := errBuf.Range(0)
+		status, code, message := classifyRegistryLoginFailure(string(outData))
+
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "registry.login.finish",
 			SessionID:     session.ID,
@@ -101,10 +124,10 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 			slog.String("error", err.Error()),
 		)
 
-		writeJSON(ctx, w, http.StatusBadRequest, response{
+		writeJSON(ctx, w, status, response{
 			OK:       false,
-			Code:     "registry_login_failed",
-			Message:  "registry login failed",
+			Code:     code,
+			Message:  message,
 			Duration: duration,
 		})
 		return

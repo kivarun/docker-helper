@@ -7,6 +7,23 @@ import (
 	"time"
 )
 
+// classifyPullFailure maps a docker pull failure's stderr output to an HTTP
+// status, error code, and message. Expected user/domain failures are
+// distinguished from generic failures; the docker CLI exposes no structured
+// error, so the classification relies on the daemon's stable stderr lines.
+func classifyPullFailure(output string) (status int, code, message string) {
+	switch classifyDockerError(output) {
+	case dockerErrorImageNotFound:
+		return http.StatusNotFound, "image_not_found", "image not found"
+	case dockerErrorAuthDenied:
+		return http.StatusUnauthorized, "pull_access_denied", "pull access denied or authentication required"
+	case dockerErrorNetwork:
+		return http.StatusBadGateway, "registry_unavailable", "registry unreachable or backend failure"
+	default:
+		return http.StatusInternalServerError, "docker_pull_failed", "docker pull failed"
+	}
+}
+
 func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.requireSessionCapability(w, r)
 	if !ok {
@@ -95,10 +112,17 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		exitCode = extractExitCode(waitErr)
 		result = "pull_error"
 
-		writeJSONRaw(ctx, w, http.StatusInternalServerError, pullResponse{
+		// Classify the docker pull failure so expected user/domain failures
+		// (image not found, access denied, registry unreachable) are not
+		// collapsed into a generic HTTP 500. The docker CLI exposes no
+		// structured error, so the classification uses the daemon's stable
+		// stderr lines. The output is preserved for the client as before.
+		status, code, message := classifyPullFailure(outputStr)
+
+		writeJSONRaw(ctx, w, status, pullResponse{
 			OK:        false,
-			Code:      "docker_pull_failed",
-			Message:   "docker pull failed",
+			Code:      code,
+			Message:   message,
 			Output:    outputStr,
 			Truncated: truncated,
 			Duration:  duration,

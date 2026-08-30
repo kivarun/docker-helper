@@ -399,3 +399,84 @@ func TestRegistryLoginFailureNoOutput(t *testing.T) {
 		t.Error("response must not contain Docker output on failure")
 	}
 }
+
+// TestRegistryLoginFailureClassification verifies that expected registry login
+// failures (authentication denied, registry/backend failure) are classified
+// into precise status/code pairs, and that only a sanitized message is
+// returned (never the raw Docker output).
+func TestRegistryLoginFailureClassification(t *testing.T) {
+	cases := []struct {
+		name       string
+		dockerErr  string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "authentication denied",
+			dockerErr:  "Error response from daemon: login attempt to https://registry.example.com/v2/ failed with status: 401 Unauthorized",
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "registry_auth_denied",
+		},
+		{
+			name:       "registry network failure",
+			dockerErr:  "Error response from daemon: Get \"https://registry.example.com/v2/\": dial tcp: lookup registry.example.com: no such host",
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "registry_unavailable",
+		},
+		{
+			name:       "unrecognized failure stays generic",
+			dockerErr:  "login failed with details",
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "registry_login_failed",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newTestAppWithAdminToken(t)
+
+			result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+			if err != nil {
+				t.Fatalf("createSession: %v", err)
+			}
+
+			errText := tc.dockerErr
+			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "/bin/sh", "-c", "echo '"+errText+"' >&2; exit 1")
+			}
+
+			reqBody := map[string]string{
+				"registry": "registry.example.com",
+				"username": "user",
+				"password": "secret",
+			}
+			body, _ := json.Marshal(reqBody)
+
+			req := httptest.NewRequest(http.MethodPost, "/registry/login", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+result.Token)
+			w := httptest.NewRecorder()
+
+			app.handleRegistryLogin(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("expected %d, got %d", tc.wantStatus, w.Code)
+			}
+
+			var resp response
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("cannot decode: %v", err)
+			}
+			if resp.Code != tc.wantCode {
+				t.Errorf("expected code %q, got %q", tc.wantCode, resp.Code)
+			}
+			// The sanitized message must not contain the raw Docker error text.
+			if strings.Contains(resp.Message, tc.dockerErr) {
+				t.Errorf("message must not contain raw Docker output: %q", resp.Message)
+			}
+			rawBody := w.Body.String()
+			if strings.Contains(rawBody, errText) {
+				t.Error("response must not contain Docker output on failure")
+			}
+		})
+	}
+}
