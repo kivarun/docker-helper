@@ -439,6 +439,28 @@ func TestCompletionConfigSetValue(t *testing.T) {
 	}
 }
 
+// TestCompletionConfigSetTrustedCAPathFilesystem verifies that the
+// trusted_ca_path value (a filesystem path) is completed with filesystem
+// entries, matching the other path-valued config value.
+func TestCompletionConfigSetTrustedCAPathFilesystem(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "config", "set", "trusted_ca_path", "/usr"})
+	if len(results) == 0 {
+		t.Error("expected trusted_ca_path value completions")
+		return
+	}
+	found := false
+	for _, r := range results {
+		if strings.HasPrefix(r, "/usr") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected /usr* path completions, got %v", results)
+	}
+}
+
 func TestCompletionIntermediateCommandHelp(t *testing.T) {
 	// -h/--help must complete on intermediate commands whose NewInvocation is nil
 	script := completionScript(t)
@@ -715,6 +737,54 @@ func TestCompletionAllowedRootListNoPathCompletion(t *testing.T) {
 		if slices.Contains(results, sub) {
 			t.Errorf("after 'config allowed-root list', must not suggest action %q, got: %v", sub, results)
 		}
+	}
+}
+
+// TestCompletionApparmorRootAddDirectoryOnly verifies that "apparmor root add"
+// completes directories (a managed workspace root must be a directory).
+func TestCompletionApparmorRootAddDirectoryOnly(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "apparmor", "root", "add", "/us"})
+	if len(results) == 0 {
+		t.Error("expected apparmor root add directory completions")
+		return
+	}
+	found := false
+	for _, r := range results {
+		if strings.HasPrefix(r, "/usr") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected /usr* directory completions, got %v", results)
+	}
+	if !strings.Contains(script, "\"apparmor root add\"") {
+		t.Error("completion script must include an apparmor root add case")
+	}
+}
+
+// TestCompletionApparmorRootRemoveFilesystem verifies that "apparmor root
+// remove" completes filesystem entries.
+func TestCompletionApparmorRootRemoveFilesystem(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "apparmor", "root", "remove", "/us"})
+	if len(results) == 0 {
+		t.Error("expected apparmor root remove filesystem completions")
+		return
+	}
+	found := false
+	for _, r := range results {
+		if strings.HasPrefix(r, "/usr") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected /usr* filesystem completions, got %v", results)
+	}
+	if !strings.Contains(script, "\"apparmor root remove\"") {
+		t.Error("completion script must include an apparmor root remove case")
 	}
 }
 
