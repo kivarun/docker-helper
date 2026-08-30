@@ -350,7 +350,9 @@ expect_fail "manifest checksum mismatch is fatal" "checksum" \
 # G. Duplicate manifest artifact key is fatal.
 CAND_G="$WORK/cand-manifest-dup"
 cp -r "$CAND" "$CAND_G"
-grep '^rpm=' "$CAND_G/candidate.manifest" >> "$CAND_G/candidate.manifest"
+cp "$CAND_G/candidate.manifest" "$CAND_G/manifest.tmp"
+grep '^rpm=' "$CAND_G/candidate.manifest" >> "$CAND_G/manifest.tmp"
+mv "$CAND_G/manifest.tmp" "$CAND_G/candidate.manifest"
 expect_fail "duplicate manifest artifact key is fatal" "duplicate rpm" \
   scripts/release-promote-verify.sh "$CAND_G" "$VERSION" "$SOURCE_SHA" "v$VERSION"
 
