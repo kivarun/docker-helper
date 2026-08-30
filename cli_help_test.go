@@ -233,6 +233,36 @@ func TestBlackBoxTooManyPositionalArgs(t *testing.T) {
 	}
 }
 
+// TestBlackBoxFlagAfterPositionalDiagnostic verifies that a flag typed after
+// a positional argument (which Go's flag parser silently leaves in the
+// positional args) is rejected with an explicit diagnostic instead of a
+// confusing count message.
+func TestBlackBoxFlagAfterPositionalDiagnostic(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"credential", "create", "alice", "--name", "foo"}, &stdout, &stderr)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "flags must precede positional arguments") {
+		t.Errorf("expected flag-after-positional diagnostic, got: %s", out)
+	}
+	if !strings.Contains(out, `"--name"`) {
+		t.Errorf("expected the offending option-like token named, got: %s", out)
+	}
+
+	// A flag-like token explicitly terminated by "--" must keep the ordinary
+	// rejection message (it is an intentional positional, not a misplaced flag).
+	var stdout2, stderr2 bytes.Buffer
+	code = runCommandWithWriters([]string{"admin", "token", "rotate", "--", "-x"}, &stdout2, &stderr2)
+	if code != 2 {
+		t.Errorf("expected exit code 2, got %d", code)
+	}
+	if out2 := stderr2.String(); strings.Contains(out2, "flags must precede positional arguments") {
+		t.Errorf("explicit -- must not produce flag-after-positional diagnostic, got: %s", out2)
+	}
+}
+
 func TestBlackBoxVersionExact(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{"version"}, &stdout, &stderr)

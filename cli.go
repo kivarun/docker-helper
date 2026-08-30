@@ -189,7 +189,7 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 		} else if c.MaxPosArgs == 0 {
 			// No positional args allowed (zero-value default behavior)
 			if nArgs > 0 {
-				c.printArgError(stderr, path, fmt.Sprintf("unexpected argument %q", fs.Arg(0)))
+				c.printArgError(stderr, path, positionalArgError(args, fs.Args(), fmt.Sprintf("unexpected argument %q", fs.Arg(0))))
 				return 2
 			}
 		} else {
@@ -199,14 +199,14 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 				return 2
 			}
 			if nArgs > c.MaxPosArgs {
-				c.printArgError(stderr, path, fmt.Sprintf("too many arguments: expected at most %d, got %d", c.MaxPosArgs, nArgs))
+				c.printArgError(stderr, path, positionalArgError(args, fs.Args(), fmt.Sprintf("too many arguments: expected at most %d, got %d", c.MaxPosArgs, nArgs)))
 				return 2
 			}
 		}
 	} else {
 		// Default: reject all positional args
 		if nArgs > 0 {
-			c.printArgError(stderr, path, fmt.Sprintf("unexpected argument %q", fs.Arg(0)))
+			c.printArgError(stderr, path, positionalArgError(args, fs.Args(), fmt.Sprintf("unexpected argument %q", fs.Arg(0))))
 			return 2
 		}
 	}
@@ -221,6 +221,38 @@ func (c *Command) dispatchLeaf(args []string, path []string, stdout, stderr io.W
 
 	// Run the command
 	return inv.Run(stdout, stderr)
+}
+
+// positionalArgError improves the rejection diagnostic when the user placed a
+// flag after a positional argument. Go's flag package stops parsing at the
+// first non-flag token, so an option-like token typed after a positional is
+// silently left in the positional arguments and rejected with a confusing
+// count message. When such a token is present (and the user did not explicitly
+// terminate flags with "--"), explain the real cause. Otherwise keep the
+// fallback message unchanged.
+func positionalArgError(origArgs, parsedArgs []string, fallback string) string {
+	if tok := optionLikeArgAfterPositional(origArgs, parsedArgs); tok != "" {
+		return fmt.Sprintf("flags must precede positional arguments: unexpected option-like argument %q", tok)
+	}
+	return fallback
+}
+
+// optionLikeArgAfterPositional returns the first option-like token the user
+// placed after a positional argument, or "" when none exists or when the user
+// explicitly terminated flags with "--" (after which option-like tokens are
+// intentional positionals).
+func optionLikeArgAfterPositional(origArgs, parsedArgs []string) string {
+	for _, a := range origArgs {
+		if a == "--" {
+			return ""
+		}
+	}
+	for _, a := range parsedArgs {
+		if a != "-" && strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
 }
 
 // printArgError writes a semantic argument error followed by the specific
