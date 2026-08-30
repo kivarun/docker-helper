@@ -273,6 +273,111 @@ else
   ok "release-promote-verify.sh never writes SHA256SUMS (producer-owned)"
 fi
 
+# --- T10+: promotion verification set identity + manifest contract --------------
+# Every negative test mutates a COPY of the canonical candidate set so the
+# original stays intact. Helper: digest recorded in a candidate's SHA256SUMS.
+
+sha_of() { awk -v f="$2" '$2==f {print $1}' "$1/SHA256SUMS"; }
+
+# A. The exact review exploit: SHA256SUMS lists the tarball three times and
+# DEB/RPM have no checksum entries. The old verifier only counted 3 lines and
+# accepted this; the hardened verifier must reject it.
+CAND_A="$WORK/cand-tar-x3"
+cp -r "$CAND" "$CAND_A"
+TAR_NAME="$(basename "$CAND_A"/*.tar.gz)"
+TAR_SHA="$(sha_of "$CAND_A" "$TAR_NAME")"
+printf '%s  %s\n%s  %s\n%s  %s\n' "$TAR_SHA" "$TAR_NAME" "$TAR_SHA" "$TAR_NAME" "$TAR_SHA" "$TAR_NAME" > "$CAND_A/SHA256SUMS"
+expect_fail "review exploit: SHA256SUMS with tarball three times is fatal" "duplicate checksum entries" \
+  scripts/release-promote-verify.sh "$CAND_A" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+
+# B. SHA256SUMS has tarball + DEB + an unrelated filename; RPM is missing. The
+# missing artifact's manifest key is dropped too, mirroring the review exploit:
+# an attacker controls both SHA256SUMS and candidate.manifest, so the old
+# verifier accepted this (the DEB/RPM bytes would go unpublished-unverified)
+# while the hardened verifier must reject it.
+CAND_B="$WORK/cand-unrelated"
+cp -r "$CAND" "$CAND_B"
+TAR_NAME="$(basename "$CAND_B"/*.tar.gz)"
+TAR_SHA="$(sha_of "$CAND_B" "$TAR_NAME")"
+DEB_NAME="$(basename "$CAND_B"/*.deb)"
+DEB_SHA="$(sha_of "$CAND_B" "$DEB_NAME")"
+printf 'fake-unrelated\n' > "$CAND_B/unrelated.bin"
+EVIL_SHA="$(sha256sum "$CAND_B/unrelated.bin" | awk '{print $1}')"
+printf '%s  %s\n%s  %s\n%s  %s\n' "$TAR_SHA" "$TAR_NAME" "$DEB_SHA" "$DEB_NAME" "$EVIL_SHA" "unrelated.bin" > "$CAND_B/SHA256SUMS"
+grep -Ev '^rpm=' "$CAND_B/candidate.manifest" > "$CAND_B/manifest.tmp"
+mv "$CAND_B/manifest.tmp" "$CAND_B/candidate.manifest"
+expect_fail "SHA256SUMS with an unrelated filename (RPM missing) is fatal" "no checksum entry" \
+  scripts/release-promote-verify.sh "$CAND_B" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+
+# C. Duplicate checksum entry for one expected artifact.
+CAND_C="$WORK/cand-dup-sha"
+cp -r "$CAND" "$CAND_C"
+TAR_NAME="$(basename "$CAND_C"/*.tar.gz)"
+TAR_SHA="$(sha_of "$CAND_C" "$TAR_NAME")"
+DEB_NAME="$(basename "$CAND_C"/*.deb)"
+DEB_SHA="$(sha_of "$CAND_C" "$DEB_NAME")"
+RPM_NAME="$(basename "$CAND_C"/*.rpm)"
+RPM_SHA="$(sha_of "$CAND_C" "$RPM_NAME")"
+printf '%s  %s\n%s  %s\n%s  %s\n%s  %s\n' "$TAR_SHA" "$TAR_NAME" "$TAR_SHA" "$TAR_NAME" \
+  "$DEB_SHA" "$DEB_NAME" "$RPM_SHA" "$RPM_NAME" > "$CAND_C/SHA256SUMS"
+expect_fail "duplicate SHA256SUMS entry for one artifact is fatal" "must contain exactly 3 entries" \
+  scripts/release-promote-verify.sh "$CAND_C" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+
+# D. Manifest missing tarball=, deb= or rpm= is fatal (one case per artifact key).
+for miss in tarball deb rpm; do
+  CAND_D="$WORK/cand-manifest-missing-$miss"
+  cp -r "$CAND" "$CAND_D"
+  grep -v "^${miss}=" "$CAND_D/candidate.manifest" > "$CAND_D/manifest.tmp"
+  mv "$CAND_D/manifest.tmp" "$CAND_D/candidate.manifest"
+  expect_fail "candidate.manifest missing $miss= is fatal" "is missing $miss" \
+    scripts/release-promote-verify.sh "$CAND_D" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+done
+
+# E. Manifest artifact filename does not match the actual artifact.
+CAND_E="$WORK/cand-manifest-wrong-name"
+cp -r "$CAND" "$CAND_E"
+sed -i 's/^tarball=[^ ]*/tarball=other.tar.gz/' "$CAND_E/candidate.manifest"
+expect_fail "manifest tarball filename mismatch is fatal" "!= actual artifact" \
+  scripts/release-promote-verify.sh "$CAND_E" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+
+# F. Manifest artifact checksum does not match SHA256SUMS.
+CAND_F="$WORK/cand-manifest-bad-sha"
+cp -r "$CAND" "$CAND_F"
+sed -i 's/^deb=\([^ ]*\) [0-9a-f]\{64\}/deb=\1 0000000000000000000000000000000000000000000000000000000000000000/' "$CAND_F/candidate.manifest"
+expect_fail "manifest checksum mismatch is fatal" "checksum" \
+  scripts/release-promote-verify.sh "$CAND_F" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+
+# G. Duplicate manifest artifact key is fatal.
+CAND_G="$WORK/cand-manifest-dup"
+cp -r "$CAND" "$CAND_G"
+grep '^rpm=' "$CAND_G/candidate.manifest" >> "$CAND_G/candidate.manifest"
+expect_fail "duplicate manifest artifact key is fatal" "duplicate rpm" \
+  scripts/release-promote-verify.sh "$CAND_G" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+
+# H. SHA256SUMS filename containing a directory/path-traversal path is fatal
+# (covers path traversal and absolute / directory-qualified names).
+for badname in "../../evil" "/etc/passwd" "subdir/artifact"; do
+  CAND_H="$WORK/cand-bad-path-$RANDOM"
+  cp -r "$CAND" "$CAND_H"
+  TAR_NAME="$(basename "$CAND_H"/*.tar.gz)"
+  TAR_SHA="$(sha_of "$CAND_H" "$TAR_NAME")"
+  DEB_NAME="$(basename "$CAND_H"/*.deb)"
+  DEB_SHA="$(sha_of "$CAND_H" "$DEB_NAME")"
+  RPM_NAME="$(basename "$CAND_H"/*.rpm)"
+  RPM_SHA="$(sha_of "$CAND_H" "$RPM_NAME")"
+  printf '%s  %s\n%s  %s\n%s  %s\n' "$TAR_SHA" "$badname" "$DEB_SHA" "$DEB_NAME" "$RPM_SHA" "$RPM_NAME" > "$CAND_H/SHA256SUMS"
+  expect_fail "SHA256SUMS path '$badname' is fatal" "invalid artifact path" \
+    scripts/release-promote-verify.sh "$CAND_H" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+done
+
+# Manifest unrecognized keys are fatal: the producer contract is exactly the
+# five keys above, so an unrelated metadata line must never be tolerated.
+CAND_UK="$WORK/cand-manifest-unknown"
+cp -r "$CAND" "$CAND_UK"
+printf 'unrelated=something\n' >> "$CAND_UK/candidate.manifest"
+expect_fail "manifest unrecognized key is fatal" "unrecognized entry" \
+  scripts/release-promote-verify.sh "$CAND_UK" "$VERSION" "$SOURCE_SHA" "v$VERSION"
+
 # --- T9: artifact resolver ----------------------------------------------------------
 for type in deb rpm tar; do
   resolved="$(scripts/release-candidate-artifact.sh "$CAND" "$type")"
