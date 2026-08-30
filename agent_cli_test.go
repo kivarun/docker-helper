@@ -1525,14 +1525,19 @@ func TestPullCLITruncatedFailure(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("expected exit 1, got %d", exitCode)
 	}
-	if !strings.Contains(out.String(), "retained tail") {
-		t.Errorf("expected retained output in stdout, got: %s", out.String())
+	// On failure the retained docker output and the truncation warning both
+	// belong on stderr.
+	if !strings.Contains(stderr.String(), "retained tail") {
+		t.Errorf("expected retained output in stderr, got: %s", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "pull output was truncated") {
 		t.Errorf("expected truncation warning in stderr, got: %s", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "docker pull failed") {
 		t.Errorf("expected error message in stderr, got: %s", stderr.String())
+	}
+	if out.String() != "" {
+		t.Errorf("expected empty stdout on failure, got: %s", out.String())
 	}
 }
 

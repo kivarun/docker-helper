@@ -942,9 +942,13 @@ Docker invocation runs `docker --config <dir> login --username <user>
 --password-stdin <registry>`. The password is passed via stdin, never
 in argv, environment, logs, or audit records.
 
-On success, the endpoint returns HTTP 200. On failure, it returns HTTP
-400 with `code: registry_login_failed`. The Docker output is never
-returned to the client.
+On success, the endpoint returns HTTP 200. On failure, it returns a
+classified status/code: HTTP 401 `registry_auth_denied` for authentication
+denial, HTTP 502 `registry_unavailable` for registry/backend failure, or HTTP
+400 `registry_login_failed` for unrecognized failures. The Docker output is
+never returned to the client; only a sanitized category message is sent, and
+only a bounded amount of stderr is captured (never logged or returned) to
+support classification.
 
 ### Audit
 
@@ -1235,10 +1239,15 @@ Current error codes (non-exhaustive):
 | `invalid_workdir` | `POST /run` | workdir is not an absolute path |
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
-| `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot |
+| `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
-| `docker_pull_failed` | `POST /pull` | docker pull returned non-zero |
+| `docker_pull_failed` | `POST /pull` | docker pull returned non-zero and the failure is not classified |
+| `image_not_found` | `POST /pull` | docker pull: image/repository not found |
+| `pull_access_denied` | `POST /pull` | docker pull: authentication/authorization denied |
+| `registry_unavailable` | `POST /pull`, `POST /registry/login` | registry/network/backend failure |
+| `registry_auth_denied` | `POST /registry/login` | docker login: authentication/authorization denied |
+| `registry_login_failed` | `POST /registry/login` | docker login failed and the failure is not classified |
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
 
 `GET /sessions` emits `session.list`. `GET /health` intentionally emits no
