@@ -1,17 +1,109 @@
+# release.yml — Release-2 publication pipeline.
+#
+# Hard invariant: no release artifact may ever be published unless the EXACT
+# bytes being published passed the required UAT. The pipeline is
+#
+#   prepare / version validation
+#        -> checks + SELinux policy checks
+#        -> artifact gate (candidate build ONCE + full required UAT matrix)
+#        -> promote the SAME bytes (no rebuild after UAT)
+#
+# Production publication is tag-triggered (push v*). The candidate set is built
+# exactly once by the artifact gate producer (the SAME reusable gate that the
+# ordinary full UAT runs — see .github/workflows/artifact-gate.yml), every
+# required UAT consumer installs those exact bytes, and the promote job only
+# downloads, verifies and publishes them. Promote never constructs anything.
+#
+# Safe dry-run path: workflow_dispatch (with a UAT version such as 2.0.0-uat)
+# runs the EXACT same candidate build + full UAT gate and then a promotion
+# verification step. The event itself makes dry-run non-publishing: the promote
+# (publication) job is gated on `github.event_name == 'push'`, so a
+# workflow_dispatch can never call `gh release create` and never creates a tag.
+# There is deliberately no `publish=false` convention that could be inverted.
+#
+# Rerun semantics: candidate identity is per attempt (see artifact-gate.yml for
+# the producer's artifact naming). A failed downstream-job rerun re-consumes the
+# SAME candidate bytes; re-running all jobs produces a complete NEW candidate
+# set that must pass the gate again before promotion. The promote job verifies
+# source SHA == GITHUB_SHA, version == tag version, the producer SHA256SUMS and
+# the exact expected file set before publishing.
+
 name: Release
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      uat_version:
+        description: 'UAT version for the dry-run candidate set (e.g. 2.0.0-uat); dry-run never creates a tag or a GitHub Release'
+        required: false
+        default: '2.0.0-uat'
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+
+    env:
+      # `inputs` is undefined for the push (tag) event; the short-circuiting
+      # expressions below yield '' so the bash never references it on push.
+      EVENT: ${{ github.event_name }}
+      UAT_VERSION_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.uat_version || '' }}
+
+    steps:
+      - name: Derive version/tag from event
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # Safe dry-run path: refuse anything except main; never tag/release.
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "error: release dry-run requires the main branch (ref=$GITHUB_REF)" >&2
+              exit 1
+            fi
+            VERSION="$UAT_VERSION_INPUT"
+            if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+              echo "error: invalid uat_version '$VERSION' (expected MAJOR.MINOR.PATCH[-PRERELEASE])" >&2
+              exit 1
+            fi
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            if printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-'; then
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+              echo "error: invalid release tag: $TAG" >&2
+              echo "expected: vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE" >&2
+              exit 1
+            fi
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            if printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-'; then
+              echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
@@ -41,6 +133,9 @@ jobs:
       - name: Whitespace errors
         run: git diff --check
 
+      - name: Release pipeline helper tests
+        run: bash scripts/test-release-pipeline.sh
+
   selinux-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -54,189 +149,113 @@ jobs:
           sudo apt-get install -y checkpolicy semodule-utils
           scripts/check-selinux-policy.sh
 
-  release:
-    needs: [checks, selinux-policy]
+  # The artifact gate is the ONE canonical producer + full required UAT matrix
+  # (same gate the ordinary full UAT runs). The candidate set is built here and
+  # every consumer below installs those exact bytes.
+  gate:
+    needs: [prepare, checks, selinux-policy]
+    uses: ./.github/workflows/artifact-gate.yml
+    with:
+      uat_version: ${{ needs.prepare.outputs.version }}
+      scope: full
+
+  # PRODUCTION publication. Tag-triggered (push v*); NEVER runs on
+  # workflow_dispatch. Promotion means PROMOTION, not construction: this job
+  # only downloads the candidate set built before UAT, verifies it and calls
+  # `gh release create`. It must not contain any build step (no Go build, no
+  # bundle/package/policy builders, no nFPM, no regenerated manpages/completion,
+  # no regenerated SHA256SUMS).
+  promote:
+    needs: [prepare, checks, selinux-policy, gate]
+    if: ${{ github.event_name == 'push' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
-          cache: true
+          ref: ${{ github.sha }}
 
-      - name: Extract version from tag
-        id: version
+      - name: Verify the tag points at the run SHA
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          # Strip leading 'v'
-          VERSION="${TAG#v}"
-          # Validate: MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-PRERELEASE
-          if ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
-            echo "error: invalid release tag: $TAG" >&2
-            echo "expected: vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE" >&2
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.tag }}"
+          git fetch origin tag "$TAG" --depth 1
+          TAG_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          [ "$TAG_SHA" = "$GITHUB_SHA" ] || {
+            echo "error: tag $TAG points at $TAG_SHA, expected $GITHUB_SHA" >&2
             exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          # Determine if prerelease
-          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-'; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
+          }
+          echo "tag $TAG -> $TAG_SHA (matches GITHUB_SHA)"
 
-      - name: Verify tag checkout
+      - name: Download candidate set (built BEFORE UAT)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.gate.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Verify candidate bytes (promotion only — no build)
         run: |
-          ACTUAL_HEAD="$(git rev-parse HEAD)"
-          if [ "$ACTUAL_HEAD" != "$GITHUB_SHA" ]; then
-            echo "error: HEAD mismatch" >&2
-            echo "  actual HEAD:   $ACTUAL_HEAD" >&2
-            echo "  expected SHA:  $GITHUB_SHA" >&2
-            exit 1
-          fi
+          scripts/release-promote-verify.sh /tmp/candidate \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ github.sha }}" \
+            "${{ needs.prepare.outputs.tag }}"
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools checkpolicy semodule-utils
-
-      - name: Clean dist
-        run: rm -rf dist
-
-      - name: Install nFPM
-        run: |
-          NFPM_VERSION=2.47.0
-          NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
-          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
-          curl -fsSL -o "$NFPM_TARBALL" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
-          echo "${NFPM_SHA256}  ${NFPM_TARBALL}" | sha256sum --check -
-          tar xzf "$NFPM_TARBALL" nfpm
-          chmod +x nfpm
-          sudo mv nfpm /usr/local/bin/
-          NFPM_VER="$(nfpm --version)"
-          if ! echo "$NFPM_VER" | grep -qF "2.47.0"; then
-            echo "error: nFPM version mismatch: expected 2.47.0, got: $NFPM_VER" >&2
-            exit 1
-          fi
-          echo "nFPM version verified: $NFPM_VER"
-
-      - name: Build release bundle
-        run: ./build-bundle.sh "${{ steps.version.outputs.version }}"
-
-      - name: Build native packages
-        run: ./build-packages.sh "${{ steps.version.outputs.version }}"
-
-      - name: Verify tarball
-        run: |
-          TARBALL="dist/docker-helper-${{ steps.version.outputs.version }}-linux-amd64.tar.gz"
-          if [ ! -f "$TARBALL" ]; then
-            echo "error: tarball not found: $TARBALL" >&2
-            exit 1
-          fi
-          tar tzf "$TARBALL" > /dev/null
-
-      - name: Verify binary version
-        run: |
-          if [ ! -f "dist/docker-helper" ]; then
-            echo "error: dist/docker-helper not found" >&2
-            exit 1
-          fi
-          ACTUAL_VERSION="$(dist/docker-helper version)"
-          EXPECTED_VERSION="${{ steps.version.outputs.version }}"
-          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
-            echo "error: version mismatch: expected '$EXPECTED_VERSION', got '$ACTUAL_VERSION'" >&2
-            exit 1
-          fi
-
-      - name: Identify package files
-        id: packages
-        run: |
-          shopt -s nullglob
-          debs=(dist/*.deb)
-          rpms=(dist/*.rpm)
-          if [ "${#debs[@]}" -ne 1 ]; then
-            echo "error: expected exactly 1 .deb in dist/, found ${#debs[@]}" >&2
-            [ "${#debs[@]}" -gt 0 ] && echo "  found: ${debs[*]}" >&2
-            exit 1
-          fi
-          if [ "${#rpms[@]}" -ne 1 ]; then
-            echo "error: expected exactly 1 .rpm in dist/, found ${#rpms[@]}" >&2
-            [ "${#rpms[@]}" -gt 0 ] && echo "  found: ${rpms[*]}" >&2
-            exit 1
-          fi
-          DEB="${debs[0]}"
-          RPM="${rpms[0]}"
-          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
-          echo "rpm=$RPM" >> "$GITHUB_OUTPUT"
-          echo "deb_basename=$(basename "$DEB")" >> "$GITHUB_OUTPUT"
-          echo "rpm_basename=$(basename "$RPM")" >> "$GITHUB_OUTPUT"
-
-      - name: Verify DEB
-        run: |
-          DEB="${{ steps.packages.outputs.deb }}"
-          dpkg-deb --info "$DEB" | grep -q "Package: docker-helper"
-          dpkg-deb --info "$DEB" | grep -q "Architecture: amd64"
-          dpkg-deb --contents "$DEB" | grep -q "/usr/bin/docker-helper"
-          dpkg-deb --contents "$DEB" | grep -q "/usr/lib/systemd/system/docker-helper.service"
-          dpkg-deb --contents "$DEB" | grep -q "/etc/apparmor.d/docker-helper-system"
-          dpkg-deb --contents "$DEB" | grep -q "/usr/share/man/man1/docker-helper.1.gz"
-          dpkg-deb --contents "$DEB" | grep -q "/usr/share/man/man5/docker-helper-config.5.gz"
-          dpkg-deb --contents "$DEB" | grep -q "/usr/share/doc/docker-helper/LICENSE"
-
-      - name: Install rpm for verification
-        run: |
-          sudo apt-get install -y rpm
-
-      - name: Verify RPM
-        run: |
-          RPM="${{ steps.packages.outputs.rpm }}"
-          RPM_NAME="$(rpm -qp --queryformat '%{NAME}' "$RPM")"
-          RPM_ARCH="$(rpm -qp --queryformat '%{ARCH}' "$RPM")"
-          if [ "$RPM_NAME" != "docker-helper" ]; then
-            echo "error: RPM name mismatch: expected docker-helper, got $RPM_NAME" >&2
-            exit 1
-          fi
-          if [ "$RPM_ARCH" != "x86_64" ]; then
-            echo "error: RPM arch mismatch: expected x86_64, got $RPM_ARCH" >&2
-            exit 1
-          fi
-          rpm -qpl "$RPM" | grep -q "/usr/bin/docker-helper"
-          rpm -qpl "$RPM" | grep -q "/usr/lib/systemd/system/docker-helper.service"
-          rpm -qpl "$RPM" | grep -q "/etc/apparmor.d/docker-helper-system"
-          rpm -qpl "$RPM" | grep -q "/usr/share/man/man1/docker-helper.1.gz"
-          rpm -qpl "$RPM" | grep -q "/usr/share/man/man5/docker-helper-config.5.gz"
-          rpm -qpl "$RPM" | grep -q "/usr/share/doc/docker-helper/LICENSE"
-          RPM_LICENSE="$(rpm -qp --queryformat '%{LICENSE}' "$RPM")"
-          if [ "$RPM_LICENSE" != "GPL-3.0-only" ]; then
-            echo "error: RPM license mismatch: expected GPL-3.0-only, got $RPM_LICENSE" >&2
-            exit 1
-          fi
-
-      - name: Generate SHA256SUMS
-        run: |
-          cd dist
-          TARBALL="docker-helper-${{ steps.version.outputs.version }}-linux-amd64.tar.gz"
-          DEB="${{ steps.packages.outputs.deb_basename }}"
-          RPM="${{ steps.packages.outputs.rpm_basename }}"
-          sha256sum "$TARBALL" "$DEB" "$RPM" > SHA256SUMS
-          sha256sum --check SHA256SUMS
-
-      - name: Create GitHub Release
+      - name: Publish the exact tested bytes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=( /tmp/candidate/*.tar.gz )
+          debs=( /tmp/candidate/*.deb )
+          rpms=( /tmp/candidate/*.rpm )
+          [ "${#tarballs[@]}" -eq 1 ] && [ "${#debs[@]}" -eq 1 ] && [ "${#rpms[@]}" -eq 1 ] || {
+            echo "error: candidate artifacts missing or ambiguous (expected exactly one of each)" >&2
+            exit 1
+          }
           ARGS=()
-          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
+          if [ "${{ needs.prepare.outputs.prerelease }}" = "true" ]; then
             ARGS+=(--prerelease)
           fi
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "${{ steps.version.outputs.tag }}" \
+          gh release create "${{ needs.prepare.outputs.tag }}" \
+            --title "${{ needs.prepare.outputs.tag }}" \
             --generate-notes \
             "${ARGS[@]}" \
-            "dist/docker-helper-${{ steps.version.outputs.version }}-linux-amd64.tar.gz" \
-            "${{ steps.packages.outputs.deb }}" \
-            "${{ steps.packages.outputs.rpm }}" \
-            "dist/SHA256SUMS"
+            "${tarballs[0]}" \
+            "${debs[0]}" \
+            "${rpms[0]}" \
+            "/tmp/candidate/SHA256SUMS"
+
+  # SAFE DRY-RUN. workflow_dispatch only: runs the same candidate build + full
+  # UAT gate, then downloads the SAME candidate set and runs the promotion
+  # verification. It NEVER creates a tag and NEVER calls `gh release create`.
+  promote-dry-run:
+    needs: [prepare, checks, selinux-policy, gate]
+    if: ${{ github.event_name == 'workflow_dispatch' && !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download candidate set (built BEFORE UAT)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.gate.outputs.candidate-name }}
+          path: /tmp/candidate
+
+      - name: Promotion verification (dry run — NO release, NO tag, NO build)
+        run: |
+          scripts/release-promote-verify.sh /tmp/candidate \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ github.sha }}"
+          echo
+          echo "=== release dry-run verification complete ==="
+          echo "event:              ${{ github.event_name }}"
+          echo "candidate artifact: ${{ needs.gate.outputs.candidate-name }}"
+          echo "publish step:       SKIPPED (workflow_dispatch dry-run)"
+          echo "tag created:        NO"
+          echo "github release:     NO"
