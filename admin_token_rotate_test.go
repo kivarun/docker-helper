@@ -646,7 +646,7 @@ func TestAdminTokenRotateCLIHuman(t *testing.T) {
 	}
 }
 
-func TestAdminTokenRotateCLIJson(t *testing.T) {
+func TestAdminTokenRotateCLIJSON(t *testing.T) {
 	endpoint, tokenPath := startRotateCLITestServer(t, "test-token")
 
 	var stdout, stderr bytes.Buffer

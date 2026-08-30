@@ -369,7 +369,7 @@ func TestCAPrepareFixesRegularFileHashEntry(t *testing.T) {
 	}
 }
 
-func TestCAPrepareRestoresPemMode(t *testing.T) {
+func TestCAPrepareRestoresPEMMode(t *testing.T) {
 	runtimeSubDir, caPath, preparedDir := setupPreparedCA(t)
 
 	caFile := filepath.Join(preparedDir, "ca.pem")
@@ -397,7 +397,7 @@ func TestCAPrepareRestoresPemMode(t *testing.T) {
 	}
 }
 
-func TestCAPrepareFixesPemSymlink(t *testing.T) {
+func TestCAPrepareFixesPEMSymlink(t *testing.T) {
 	runtimeSubDir, caPath, preparedDir := setupPreparedCA(t)
 
 	caFile := filepath.Join(preparedDir, "ca.pem")

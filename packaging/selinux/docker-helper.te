@@ -334,6 +334,14 @@ allow docker_helper_t docker_helper_workspace_t:lnk_file { read };
 #        interpreter (python3.13 at bin_t), even though the script exec
 #        transitions the child to semanage_t.
 #
+# Accepted trade-off: the interpreter has no narrower stable type on Tumbleweed
+# (semanage_exec_t labels the script, not its interpreter; bin_t is the generic
+# /usr/bin label). A narrower executable-specific type would require a custom
+# fcontext/relabel of /usr/bin/python3.* keyed to the interpreter version
+# (python3.13 vs python3.14), which is distro/version coupling and worse than
+# the bounded bin_t file-permission grant below (exec only, no process
+# transition/entrypoint, no generic policy-store access).
+#
 # NoNewPrivileges=true in docker-helper.service means the transition requires
 # process2:nnp_transition (mirrors the existing init_t -> docker_helper_t rule).
 type_transition docker_helper_t semanage_exec_t:process semanage_t;

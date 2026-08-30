@@ -753,7 +753,7 @@ func TestSessionDeleteHTTPError(t *testing.T) {
 
 // ---------- apiError structured error ----------
 
-func TestApiErrorStructured(t *testing.T) {
+func TestAPIErrorStructured(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 	tokenPath := filepath.Join(dir, "admin.token")
@@ -800,7 +800,7 @@ func TestApiErrorStructured(t *testing.T) {
 	}
 }
 
-func TestApiErrorMalformedBody(t *testing.T) {
+func TestAPIErrorMalformedBody(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 	tokenPath := filepath.Join(dir, "admin.token")
@@ -842,7 +842,7 @@ func TestApiErrorMalformedBody(t *testing.T) {
 	}
 }
 
-func TestApiErrorEmptyBody(t *testing.T) {
+func TestAPIErrorEmptyBody(t *testing.T) {
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "test.sock")
 	tokenPath := filepath.Join(dir, "admin.token")
@@ -878,7 +878,7 @@ func TestApiErrorEmptyBody(t *testing.T) {
 
 // ---------- transport error remains distinguishable ----------
 
-func TestTransportErrorNotApiError(t *testing.T) {
+func TestTransportErrorNotAPIError(t *testing.T) {
 	client := newUnixAPIClient("/nonexistent/path.sock", func() (string, error) {
 		return "token", nil
 	}, nil)
