@@ -95,31 +95,48 @@ preferences. No cleanup was performed merely for style.
   onboarding instead of creating a competing user endpoint;
 - `reload` command uses operator client.
 
-## Phase 8: system service / packaging — implementation completed, acceptance pending
+## Phase 8: system service / packaging — completed
 
 Implementation completed:
 - systemd system service unit;
 - mandatory system-mode AppArmor or enforcing SELinux integration;
 - DEB/RPM native packaging;
-- package lifecycle scriptlets;
+- package lifecycle scriptlets (idempotent MAC cleanup on final erase);
 - manpages (docker-helper.1, docker-helper-config.5);
 - Bash completion;
 - release workflow publishes tar.gz, DEB, RPM, SHA256SUMS.
 
-Acceptance pending:
-- privileged Ubuntu DEB lifecycle (install/upgrade/remove/purge);
-- privileged openSUSE RPM lifecycle (install/upgrade/erase);
-- coexistence with user-mode installation;
-- full Release 2 acceptance matrix.
+Release 2 acceptance (actual UAT ownership):
+
+- DEB lifecycle `install(rc.22) -> upgrade(candidate) -> reinstall -> remove ->
+  purge` on the Ubuntu/AppArmor package consumer, exercised against real
+  scriptlet semantics (`scripts/uat-release2-acceptance.sh`, scenario F).
+- RPM lifecycle `install(rc.22) -> upgrade(candidate) -> reinstall -> final
+  erase` under BOTH MAC backends: Tumbleweed RPM/AppArmor and Tumbleweed
+  RPM/SELinux (`scripts/uat-package-lifecycle-rpm.sh`).
+- The rc.22 baseline package is an immutable test fixture with a pinned,
+  independently-verified SHA-256 (`scripts/uat-rc22-fixture.sh`); only the
+  needed DEB/RPM is downloaded and its bytes are verified before install.
+- User/system coexistence, loopback HTTP (`127.0.0.1:52375`), principal
+  credential/audit/registry acceptance, and bounded restart/shutdown with
+  active operations on the Ubuntu/AppArmor consumer
+  (`scripts/uat-release2-acceptance.sh`, scenarios A-E).
+- All acceptance scenarios are fail-closed: PASS may continue, FAIL fails the
+  gate, BLOCKED (a required scenario not exercised) fails the gate.
 
 ### SELinux backend
 
 The backend-neutral detector, fail-closed confinement check, systemd context,
 policy module, RPM lifecycle integration, and custom MCS-constrained container
 domain are implemented. OpenSUSE enforcing UAT has driven the current
-permission set. Fedora/RHEL-family acceptance, `/opt`
-workspace behavior, and cross-distribution module/package lifecycle remain
-release gates. See [docs/selinux-support-plan.md](selinux-support-plan.md).
+permission set. The accepted distribution contract for Release 2 is Ubuntu
+(DEB) + openSUSE (RPM); Fedora/RHEL-family acceptance and cross-distribution
+module/package lifecycle are explicitly NOT Release 2 gates (no RHEL-family
+target is committed). The SELinux `/opt` workspace contract (an operator-owned
+fcontext boundary is required; docker-helper never creates a helper-owned
+boundary under `/opt`) is implemented and covered by unit tests
+(`mac_lifecycle_test.go`). See
+[docs/selinux-support-plan.md](selinux-support-plan.md).
 
 SELinux confines the daemon and container domains but does not provide
 per-path allowed-root isolation. The canonical docker-helper path check remains
@@ -407,8 +424,10 @@ operational experience justifies it.
 ## Workstream 7: native distribution and manuals
 
 - Build native DEB and RPM packages.
-- Keep openSUSE and Ubuntu as important targets; select the exact RHEL-family
-  target before final package acceptance. Fedora is not currently committed.
+- Accepted Release 2 distribution contract: Ubuntu (DEB, AppArmor) and openSUSE
+  (RPM, AppArmor and SELinux). No RHEL-family target is selected or committed;
+  Fedora/RHEL-family package/lifecycle acceptance is deferred beyond Release 2
+  and is not a release gate.
 - Standalone native DEB/RPM artifacts are the Release 2 deliverable.
   Package repositories and update channels are deferred until after package
   format/lifecycle acceptance or a later distribution slice.
@@ -432,23 +451,55 @@ state remains user-mode state.
 
 ## Workstream 8: Release 2 acceptance
 
-Run the complete regression and system acceptance pass:
+The Release 2 acceptance contract is closed by the artifact-gate UAT jobs,
+which consume the exact candidate produced by the gate producer. Every
+mandatory scenario is fail-closed (PASS -> continue, FAIL -> gate fails,
+BLOCKED / not exercised -> gate fails). The v2.0.0-rc.22 package is the
+immutable upgrade-baseline test fixture (pinned, independently-verified
+SHA-256; bytes verified before install; no private "previous release" is
+built; mutable release metadata is never trusted at runtime).
 
-- gofmt;
+Local validation at final HEAD:
+- gofmt -l . (must be empty);
 - go test ./...;
 - go test -race ./...;
 - go vet ./...;
 - git diff --check;
-- existing user-mode install/start/session/pull/build/run/registry workflows;
-- system package install/upgrade/remove;
-- principal create/show/set and allowed-root add/remove;
+- scripts/check-selinux-policy.sh;
+- bash scripts/test-release-pipeline.sh.
+
+Installed-system acceptance (Ubuntu DEB/AppArmor consumer,
+`scripts/uat-release2-acceptance.sh`):
+- DEB native lifecycle install(rc.22) -> upgrade(candidate) -> reinstall ->
+  remove -> purge, exercising real scriptlet semantics (version, daemon
+  health, config/state persistence, package-owned MAC artifacts, conffile
+  cleanup on purge);
+- loopback HTTP on `127.0.0.1:52375` (health, authenticated operator op,
+  principal session flow, session-authenticated operation, same authorization
+  result as the Unix transport; `--endpoint http://127.0.0.1:52375`);
 - multiple credentials per principal and independent revocation;
-- cross-principal authorization negative tests;
-- system Unix socket and `127.0.0.1:52375` HTTP;
-- container UID/GID ownership behavior;
-- audit attribution by principal;
-- bounded restart/shutdown with active operations;
-- coexistence of user and system deployment profiles.
+- principal_name in real operation audit (structured audit stream, no secret
+  leakage);
+- registry login end-to-end with session isolation (self-contained local
+  authenticated registry; Docker daemon config is harness-owned and restored);
+- bounded restart/shutdown with active operations (no resume, no helper
+  subprocess/mount-pin/runtime leak, fresh operation afterwards);
+- coexistence of user and system deployment profiles (user-mode daemon started
+  before system mode, distinct paths/sockets/state, default endpoint selects
+  the user socket, explicit --system selects the system daemon, no cross
+  consumption of tokens/state).
+
+Installed-system acceptance (Tumbleweed RPM consumers,
+`scripts/uat-package-lifecycle-rpm.sh`):
+- RPM native lifecycle install(rc.22) -> upgrade(candidate) -> reinstall ->
+  final erase under BOTH AppArmor and SELinux (the exact-candidate black-box
+  consumers each run their own lifecycle stage);
+- package-owned MAC artifacts correct at each step; no stale active profile /
+  SELinux module after erase; idempotent MAC cleanup (no cross-MAC uninstall
+  warnings).
+
+Ordinary black-box, SELinux regressions, and tarball/AppArmor + tarball/SELinux
+stages keep their existing ownership in the artifact gate.
 
 Before resuming the broad matrix, resolve the pre-UAT blockers recorded in
 [`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/): credential
