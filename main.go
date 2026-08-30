@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -409,13 +410,158 @@ func main() {
 	}
 }
 
+// HTTP connection-lifetime bounds.
+//
+// These bound the three confirmed resource-retention cases (slow request body,
+// idle keep-alive connection, slow response reader) without imposing any
+// timeout on legitimate handler computation such as a long synchronous docker
+// pull. They are deliberate production constants, not configuration.
+const (
+	// serverReadHeaderTimeout bounds reading the request headers.
+	serverReadHeaderTimeout = 10 * time.Second
+	// serverReadTimeout bounds reading the complete request including the
+	// body. Request bodies are capped at maxRequestBody (16 KiB), so 30s is
+	// generous for legitimate local API traffic while terminating slow-body
+	// senders.
+	serverReadTimeout = 30 * time.Second
+	// serverIdleTimeout bounds how long a completed keep-alive connection may
+	// sit idle before it is closed, so it cannot hold an FD/goroutine forever.
+	serverIdleTimeout = 30 * time.Second
+	// serverResponseDeliveryTimeout bounds delivering the response from the
+	// FIRST response write until the handler completes. It deliberately does
+	// not bound pre-response handler computation.
+	serverResponseDeliveryTimeout = 30 * time.Second
+)
+
+// serverTimeouts groups the HTTP connection-lifetime bounds. The zero value
+// disables the corresponding net/http timeout, matching http.Server
+// semantics. This is an unexported test seam: production uses
+// productionServerTimeouts and focused tests use millisecond-scale values.
+// These are not product configuration.
+type serverTimeouts struct {
+	readHeader       time.Duration
+	read             time.Duration
+	idle             time.Duration
+	responseDelivery time.Duration
+}
+
+func productionServerTimeouts() serverTimeouts {
+	return serverTimeouts{
+		readHeader:       serverReadHeaderTimeout,
+		read:             serverReadTimeout,
+		idle:             serverIdleTimeout,
+		responseDelivery: serverResponseDeliveryTimeout,
+	}
+}
+
 // newHTTPServer creates the production HTTP server with operational
-// ErrorLog bridged to the configured operational logger.
+// ErrorLog bridged to the configured operational logger and the production
+// connection-lifetime bounds.
 func newHTTPServer(handler http.Handler) *http.Server {
+	return newHTTPServerWithTimeouts(handler, productionServerTimeouts())
+}
+
+// newHTTPServerWithTimeouts creates an HTTP server with explicit connection
+// lifetime bounds. Production goes through newHTTPServer; focused
+// connection-lifecycle tests supply millisecond-scale values through this
+// unexported seam.
+func newHTTPServerWithTimeouts(handler http.Handler, to serverTimeouts) *http.Server {
+	if to.responseDelivery > 0 {
+		handler = boundResponseDelivery(handler, to.responseDelivery)
+	}
 	return &http.Server{
 		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: to.readHeader,
+		ReadTimeout:       to.read,
+		IdleTimeout:       to.idle,
 		ErrorLog: slog.NewLogLogger(
 			opLog(context.Background()).Handler(), slog.LevelError),
 	}
+}
+
+// boundResponseDelivery wraps handler so a single response-delivery deadline
+// starts at the FIRST response write (WriteHeader or Write) and runs for
+// window. Handler computation before the first write is NOT bounded: long
+// synchronous operations such as a docker pull may run for any duration. The
+// net/http server clears the connection write deadline after each request in
+// its keep-alive loop, so an expired deadline cannot poison the next request
+// on the same connection.
+func boundResponseDelivery(handler http.Handler, window time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(&deliveryBoundedWriter{
+			ResponseWriter: w,
+			window:         window,
+		}, r)
+	})
+}
+
+// deliveryBoundedWriter arms the response-delivery deadline on the first
+// response write. It forwards the optional interfaces net/http exposes
+// (Flusher, Hijacker, Pusher, ReaderFrom) so existing handler behavior is
+// preserved, and exposes Unwrap so http.ResponseController can reach the
+// underlying writer to arm the deadline on the real connection.
+type deliveryBoundedWriter struct {
+	http.ResponseWriter
+	window      time.Duration
+	deadlineSet bool
+}
+
+// Unwrap lets http.ResponseController and other unwrapping machinery reach the
+// underlying ResponseWriter.
+func (w *deliveryBoundedWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// arm arms the response-delivery deadline exactly once, on the first write.
+func (w *deliveryBoundedWriter) arm() {
+	if w.deadlineSet {
+		return
+	}
+	w.deadlineSet = true
+	if w.window > 0 {
+		_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(w.window))
+	}
+}
+
+func (w *deliveryBoundedWriter) WriteHeader(status int) {
+	w.arm()
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *deliveryBoundedWriter) Write(p []byte) (int, error) {
+	w.arm()
+	return w.ResponseWriter.Write(p)
+}
+
+// Flush forwards http.Flusher when the underlying writer supports it.
+func (w *deliveryBoundedWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack forwards http.Hijacker when the underlying writer supports it.
+func (w *deliveryBoundedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("hijack not supported")
+}
+
+// Push forwards http.Pusher when the underlying writer supports it.
+func (w *deliveryBoundedWriter) Push(target string, opts *http.PushOptions) error {
+	if p, ok := w.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+// ReadFrom forwards io.ReaderFrom when the underlying writer supports it so
+// io.Copy into the wrapped writer keeps its optimized path.
+func (w *deliveryBoundedWriter) ReadFrom(r io.Reader) (int64, error) {
+	w.arm()
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(w.ResponseWriter, r)
 }
