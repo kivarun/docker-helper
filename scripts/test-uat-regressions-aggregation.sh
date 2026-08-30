@@ -64,28 +64,45 @@ source "$LIB"
 
 # selinux_stage_accept (extracted from the SELinux VM lib; sourced in a
 # subshell so the lib's `set -euo pipefail`/harness source cannot disturb
-# this test process).
+# this test process). The production contract is
+# selinux_stage_accept BB SELREG MP LIFECYCLE: every mandatory SELinux stage
+# must be PASS (fail-closed) for the job to be eligible for success.
 stage_accept() {
   ( SCRIPT_DIR="$SRC_DIR/scripts" \
       source "$SRC_DIR/scripts/uat-vm-opensuse-selinux-lib.sh" \
-      && selinux_stage_accept "$1" "$2" "$3" )
+      && selinux_stage_accept "$1" "$2" "$3" "$4" )
 }
-stage_accept PASS PASS PASS && ok "VM: all three stages PASS -> eligible for success" \
-  || bad "VM: all three stages PASS -> eligible for success"
-if stage_accept PASS PASS BLOCKED; then
+stage_accept PASS PASS PASS PASS && ok "VM: all four stages PASS -> eligible for success" \
+  || bad "VM: all four stages PASS -> eligible for success"
+if stage_accept PASS PASS PASS BLOCKED; then
+  bad "VM: LIFECYCLE_RESULT=BLOCKED must be a failure"
+else
+  ok "VM: LIFECYCLE_RESULT=BLOCKED -> failure"
+fi
+if stage_accept PASS PASS PASS FAIL; then
+  bad "VM: LIFECYCLE_RESULT=FAIL must be a failure"
+else
+  ok "VM: LIFECYCLE_RESULT=FAIL -> failure"
+fi
+if stage_accept PASS PASS BLOCKED PASS; then
   bad "VM: MP_RESULT=BLOCKED must be a failure"
 else
   ok "VM: MP_RESULT=BLOCKED -> failure"
 fi
-if stage_accept PASS PASS FAIL; then
+if stage_accept PASS PASS FAIL PASS; then
   bad "VM: MP_RESULT=FAIL must be a failure"
 else
   ok "VM: MP_RESULT=FAIL -> failure"
 fi
-if stage_accept PASS FAIL PASS; then
+if stage_accept PASS FAIL PASS PASS; then
   bad "VM: SELREG_RESULT=FAIL must be a failure"
 else
   ok "VM: SELREG_RESULT=FAIL -> failure"
+fi
+if stage_accept FAIL PASS PASS PASS; then
+  bad "VM: BB_RESULT=FAIL must be a failure"
+else
+  ok "VM: BB_RESULT=FAIL -> failure"
 fi
 
 # --- Part 2: the real runners end-to-end with stubbed external commands ------
