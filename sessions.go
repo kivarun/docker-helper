@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -117,6 +118,20 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 	return nil, err
 }
 
+// workspaceErrorMessage extracts a user-actionable message for a session
+// creation failure. The internal ErrInvalidWorkspace wrapping suffix is
+// removed so the client sees the specific actionable cause (for example a
+// missing or non-directory workspace, or a workspace outside the allowed
+// roots) while preserving the invalid_workspace error code.
+func workspaceErrorMessage(err error) string {
+	msg := err.Error()
+	suffix := ": " + ErrInvalidWorkspace.Error()
+	if strings.HasSuffix(msg, suffix) {
+		return strings.TrimSuffix(msg, suffix)
+	}
+	return "invalid workspace"
+}
+
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
@@ -177,12 +192,15 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 		if errors.Is(err, ErrInvalidWorkspace) {
 			// Log the internal cause to the operational log.
-			// The client receives the generic invalid_workspace response.
+			// The client receives the specific actionable cause (missing
+			// directory, not a directory, outside an allowed root, no allowed
+			// roots) with the same invalid_workspace code, without exposing
+			// internal implementation detail.
 			opLog(ctx).Warn("session creation rejected",
 				slog.String("operation", "session_create"),
 				slog.String("error", err.Error()),
 			)
-			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", "invalid workspace")
+			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", workspaceErrorMessage(err))
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),

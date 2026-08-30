@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -237,8 +238,67 @@ func TestErrorContractInvalidWorkspace(t *testing.T) {
 	if resp.Code != "invalid_workspace" {
 		t.Errorf("expected code 'invalid_workspace', got %q", resp.Code)
 	}
-	if resp.Message != "invalid workspace" {
-		t.Errorf("unexpected message: %q", resp.Message)
+	// The client must receive an actionable cause, not the generic fallback,
+	// so the user can tell a missing workspace from other validation failures.
+	if resp.Message == "invalid workspace" {
+		t.Errorf("expected an actionable workspace message, got generic %q", resp.Message)
+	}
+	if resp.Message == "" {
+		t.Error("expected non-empty workspace message")
+	}
+}
+
+// TestErrorContractWorkspaceMessageDistinct verifies that distinct workspace
+// failure causes yield distinct actionable messages (not a shared generic
+// "invalid workspace"), proving the client can act on the actual problem.
+func TestErrorContractWorkspaceMessageDistinct(t *testing.T) {
+	app := newTestAppWithAdminTokenAndStaging(t)
+
+	root := app.Config.AllowedRoots[0]
+	ws := testWorkspaceDir(t, root)
+	filePath := filepath.Join(ws, "regular-file.txt")
+	if err := os.WriteFile(filePath, []byte("x"), 0600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	create := func(workspace string) string {
+		t.Helper()
+		reqBody, _ := json.Marshal(map[string]string{"workspace": workspace})
+		req := httptest.NewRequest(http.MethodPost, "/sessions", bytes.NewReader(reqBody))
+		withAdminToken(req)
+		w := httptest.NewRecorder()
+		app.handleCreateSession(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", w.Code)
+		}
+		var resp response
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.Code != "invalid_workspace" {
+			t.Fatalf("expected code 'invalid_workspace', got %q", resp.Code)
+		}
+		return resp.Message
+	}
+
+	// A regular file is not a directory.
+	fileMsg := create(filePath)
+	if !strings.Contains(fileMsg, "not a directory") {
+		t.Errorf("expected not-a-directory cause, got %q", fileMsg)
+	}
+
+	// An existing directory outside the allowed root.
+	outside := filepath.Join(filepath.Dir(root), "outside-dir")
+	if err := os.MkdirAll(outside, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outsideMsg := create(outside)
+	if !strings.Contains(outsideMsg, "allowed root") {
+		t.Errorf("expected allowed-root cause, got %q", outsideMsg)
+	}
+
+	if fileMsg == outsideMsg {
+		t.Error("distinct causes must yield distinct messages")
 	}
 }
 
