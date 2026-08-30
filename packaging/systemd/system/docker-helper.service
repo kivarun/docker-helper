@@ -16,6 +16,11 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 UMask=0077
+# Explicit PATH contract: must stay exactly synchronized with dockerCLISearchPath
+# in selinux_deploy.go. The daemon resolves the Docker CLI over this PATH, and
+# system init relabels that same executable (dockerCLIExecutable) for enforcing
+# SELinux; the two lookup rules must never diverge.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 
 ConfigurationDirectory=docker-helper
 ConfigurationDirectoryMode=0755

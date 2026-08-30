@@ -762,6 +762,70 @@ func TestInitSystemSELinuxDockerCLIRelabelIsExactPath(t *testing.T) {
 	}
 }
 
+// TestDockerCLIExecutableDeterministicOrder verifies the SELinux deploy Docker
+// CLI resolver returns the first executable "docker" in dockerCLISearchPath
+// order, deterministically.
+func TestDockerCLIExecutableDeterministicOrder(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	if err := os.WriteFile(filepath.Join(dirs[0], "docker"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirs[1], "docker"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origSearch := dockerCLISearchPath
+	dockerCLISearchPath = dirs
+	defer func() { dockerCLISearchPath = origSearch }()
+
+	got, err := dockerCLIExecutable()
+	if err != nil {
+		t.Fatalf("dockerCLIExecutable: %v", err)
+	}
+	want := filepath.Join(dirs[0], "docker")
+	if got != want {
+		t.Errorf("dockerCLIExecutable = %q, want first search-path match %q", got, want)
+	}
+}
+
+// TestDockerCLIExecutableSkipsNonExecutable verifies the resolver skips
+// non-executable and non-regular candidates and falls through to the next
+// search-path directory.
+func TestDockerCLIExecutableSkipsNonExecutable(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	if err := os.WriteFile(filepath.Join(dirs[0], "docker"), []byte("not executable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dirs[1], "docker"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	origSearch := dockerCLISearchPath
+	dockerCLISearchPath = dirs
+	defer func() { dockerCLISearchPath = origSearch }()
+
+	got, err := dockerCLIExecutable()
+	if err != nil {
+		t.Fatalf("dockerCLIExecutable: %v", err)
+	}
+	want := filepath.Join(dirs[1], "docker")
+	if got != want {
+		t.Errorf("dockerCLIExecutable = %q, want executable fallback %q", got, want)
+	}
+}
+
+// TestDockerCLIExecutableNotFound verifies the resolver errors consistently when
+// no executable candidate exists anywhere in the search path.
+func TestDockerCLIExecutableNotFound(t *testing.T) {
+	origSearch := dockerCLISearchPath
+	dockerCLISearchPath = []string{t.TempDir()}
+	defer func() { dockerCLISearchPath = origSearch }()
+
+	if _, err := dockerCLIExecutable(); err == nil {
+		t.Error("dockerCLIExecutable must error when no executable docker is found")
+	}
+}
+
 // TestInitSystemSELinuxDockerCLIRelabelFailureFatal verifies that a Docker CLI
 // relabel failure under enforcing SELinux system mode makes init fail and
 // leaves no partial initialization (no admin token).

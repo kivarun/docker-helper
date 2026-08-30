@@ -1196,6 +1196,36 @@ func TestSystemUnitFile(t *testing.T) {
 	}
 }
 
+// TestSystemUnitPATHMatchesSELinuxResolver verifies the system unit declares an
+// explicit PATH exactly equal to dockerCLISearchPath (selinux_deploy.go). The
+// daemon resolves the Docker CLI over its process PATH and system init relabels
+// that same executable for enforcing SELinux; if the two ever diverged, the
+// relabeled executable and the executed executable could differ.
+func TestSystemUnitPATHMatchesSELinuxResolver(t *testing.T) {
+	path := "packaging/systemd/system/docker-helper.service"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("system unit %s not found: %v", path, err)
+	}
+
+	var declared string
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Environment=PATH=") {
+			declared = strings.TrimPrefix(trimmed, "Environment=PATH=")
+			break
+		}
+	}
+	if declared == "" {
+		t.Fatal("system unit must declare an explicit Environment=PATH= contract")
+	}
+
+	want := strings.Join(dockerCLISearchPath, ":")
+	if declared != want {
+		t.Errorf("unit PATH = %q, want %q (must equal dockerCLISearchPath)", declared, want)
+	}
+}
+
 // TestSystemUnitNoMountNamespace verifies that the system unit does not
 // enable any directive that creates a separate mount namespace. A separate
 // mount namespace hides mount pins created by docker-helper from dockerd,
