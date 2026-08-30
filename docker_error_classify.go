@@ -52,7 +52,7 @@ func classifyDockerError(output string) dockerErrorKind {
 		strings.Contains(lower, "no such manifest") ||
 		strings.Contains(lower, "repository does not exist") ||
 		strings.Contains(lower, "name does not exist") ||
-		strings.Contains(lower, "not found") {
+		strings.Contains(lower, "manifest for ") && strings.Contains(lower, "not found") {
 		return dockerErrorImageNotFound
 	}
 
