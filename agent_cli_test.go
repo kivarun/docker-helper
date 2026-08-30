@@ -410,7 +410,9 @@ func TestRunFailedDiagnostics(t *testing.T) {
 	}
 }
 
-// TestPullFailedPreservesOutput verifies that failed pull preserves Docker output.
+// TestPullFailedPreservesOutput verifies that failed pull preserves Docker
+// output and routes it to stderr with the summary error (errors belong on
+// stderr), while stdout stays clean on failure.
 func TestPullFailedPreservesOutput(t *testing.T) {
 	out, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "invalid:tag"}, "", func(s *agentCLITestServer) {
 		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
@@ -428,12 +430,69 @@ func TestPullFailedPreservesOutput(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("expected exit 1, got %d", exitCode)
 	}
-	// Output goes to stdout, error message to stderr
-	if !strings.Contains(out.String(), "invalid reference") {
-		t.Errorf("expected Docker output in stdout, got: %s", out.String())
+	// Docker error output and summary error both go to stderr on failure.
+	if !strings.Contains(stderr.String(), "invalid reference") {
+		t.Errorf("expected Docker output in stderr, got: %s", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "docker pull failed") {
 		t.Errorf("expected error message in stderr, got: %s", stderr.String())
+	}
+	if out.String() != "" {
+		t.Errorf("expected empty stdout on failure, got: %s", out.String())
+	}
+}
+
+// TestPullStreamContractSuccess verifies the pull CLI stdout contract on
+// success: successful pull progress goes to stdout and stderr stays clean.
+func TestPullStreamContractSuccess(t *testing.T) {
+	out, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "alpine:3.24"}, "", func(s *agentCLITestServer) {
+		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":      true,
+				"message": "image pulled successfully",
+				"output":  "Status: pulled\n",
+			})
+		})
+	})
+	if exitCode != 0 {
+		t.Errorf("expected exit 0, got %d", exitCode)
+	}
+	if !strings.Contains(out.String(), "pulled") {
+		t.Errorf("expected pull output on stdout, got: %s", out.String())
+	}
+	if stderr.String() != "" {
+		t.Errorf("expected empty stderr on success, got: %s", stderr.String())
+	}
+}
+
+// TestPullStreamContractFailure verifies the pull CLI stderr contract on
+// failure: docker diagnostics and the classification message go to stderr and
+// stdout stays clean.
+func TestPullStreamContractFailure(t *testing.T) {
+	out, stderr, exitCode := runAgentCLITestWithServer(t, []string{"pull", "invalid:tag"}, "", func(s *agentCLITestServer) {
+		s.handlePull(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok":      false,
+				"code":    "image_not_found",
+				"message": "image not found",
+				"output":  "Error response from daemon: manifest unknown\n",
+			})
+		})
+	})
+	if exitCode != 1 {
+		t.Errorf("expected exit 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "manifest unknown") {
+		t.Errorf("expected docker diagnostic on stderr, got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "image not found") {
+		t.Errorf("expected classification message on stderr, got: %s", stderr.String())
+	}
+	if out.String() != "" {
+		t.Errorf("expected empty stdout on failure, got: %s", out.String())
 	}
 }
 

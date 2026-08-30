@@ -278,7 +278,15 @@ var pullCommand = &Command{
 
 				resp, err := c.pull(pullRequest{Image: image})
 				if resp != nil && resp.Output != "" {
-					fmt.Fprint(stdout, resp.Output)
+					// On success, pull progress is the requested command
+					// result and stays on stdout (docker-pull compatible and
+					// preserved for scripts). On failure, the docker error
+					// diagnostic is routed to stderr with the summary error.
+					if err != nil {
+						fmt.Fprint(stderr, resp.Output)
+					} else {
+						fmt.Fprint(stdout, resp.Output)
+					}
 				}
 
 				if resp != nil && resp.Truncated {
