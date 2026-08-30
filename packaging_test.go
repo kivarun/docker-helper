@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -6893,6 +6894,63 @@ func TestReleaseWorkflowRaceBeforeBuild(t *testing.T) {
 	}
 	if !strings.Contains(promoteJob, "needs: [prepare, checks, selinux-policy, gate]") {
 		t.Fatal("promote job must depend on the gate")
+	}
+}
+
+// TestWorkflowActionsPinnedToImmutableShas is the deterministic supply-chain
+// guard for the repository workflows: every external GitHub Action reference
+// must be pinned to a full 40-hex commit SHA (with the human-readable tag
+// retained in a trailing comment). Only local reusable workflow references
+// (`uses: ./.github/workflows/...`) may stay tag-free. Mutable external refs
+// (`actions/foo@v7`, `@main`, `@latest`, ...) are rejected.
+func TestWorkflowActionsPinnedToImmutableShas(t *testing.T) {
+	files, err := filepath.Glob(".github/workflows/*.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no workflow files found under .github/workflows/")
+	}
+
+	hex40 := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for lineNo, raw := range strings.Split(string(data), "\n") {
+			trimmed := strings.TrimSpace(raw)
+			if !strings.Contains(trimmed, "uses:") {
+				continue
+			}
+			// Take everything after "uses:", drop any trailing YAML comment.
+			ref := strings.TrimSpace(strings.SplitN(trimmed, "uses:", 2)[1])
+			if idx := strings.Index(ref, " #"); idx >= 0 {
+				ref = strings.TrimSpace(ref[:idx])
+			}
+			location := fmt.Sprintf("%s:%d", f, lineNo+1)
+
+			// Local reusable workflows stay local and are not external actions.
+			if strings.HasPrefix(ref, "./") {
+				continue
+			}
+
+			// External action must be owner/action@<40-hex-sha>.
+			at := strings.LastIndex(ref, "@")
+			if at <= 0 || at == len(ref)-1 {
+				t.Errorf("%s: mutable external Action reference (must be <owner>/<action>@<40-hex sha> with a '# <tag>' comment): %q", location, ref)
+				continue
+			}
+			sha := ref[at+1:]
+			if !hex40.MatchString(sha) {
+				t.Errorf("%s: external Action reference is not pinned to a 40-hex commit SHA: %q", location, ref)
+				continue
+			}
+			// The human-readable release/major tag must be retained in a comment.
+			if !strings.Contains(trimmed, " # ") {
+				t.Errorf("%s: pinned Action must retain its tag in a trailing comment ('uses: %s # vN'): %q", location, ref, trimmed)
+			}
+		}
 	}
 }
 

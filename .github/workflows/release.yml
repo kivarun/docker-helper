@@ -45,7 +45,7 @@ on:
 # Least privilege: every job except the publishing `promote` job runs with
 # `contents: read`. `gh release create` requires `contents: write`, so only the
 # `promote` job requests it (job-level). Artifacts are downloaded with
-# actions/download-artifact@v4, which uses the internal runtime JWT for
+# actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4, which uses the internal runtime JWT for
 # same-run artifacts and does not require `actions: read`; nothing else in the
 # pipeline needs elevated permissions.
 permissions:
@@ -112,9 +112,9 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -147,7 +147,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: SELinux policy syntax
         run: |
@@ -184,7 +184,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
 
@@ -201,7 +201,7 @@ jobs:
           echo "tag $TAG -> $TAG_SHA (matches GITHUB_SHA)"
 
       - name: Download candidate set (built BEFORE UAT)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.gate.outputs.candidate-name }}
           path: /tmp/candidate
@@ -249,12 +249,12 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
 
       - name: Download candidate set (built BEFORE UAT)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ needs.gate.outputs.candidate-name }}
           path: /tmp/candidate
