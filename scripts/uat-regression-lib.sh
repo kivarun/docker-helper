@@ -19,8 +19,40 @@
 # BLOCKED is valid ONLY when a real prerequisite (no service, no docker, no
 # root) prevents execution. A previous regression's failure is never a reason
 # to BLOCK a later group.
+#
+# Mandatory-runner aggregation (fail-closed): a mandatory UAT runner returns
+# nonzero when ANY group is FAIL or BLOCKED — a BLOCKED group means the
+# required scenario was NOT successfully exercised, which is not acceptable for
+# Release-2. Exit semantics (shared by both collect-all runners):
+#   all PASS                -> 0
+#   one or more BLOCKED,
+#     no FAIL               -> 2
+#   one or more FAIL        -> 1
 
 # --- result accounting -------------------------------------------------------
+
+# reg_classify_rc RC: map a group's exit code to its verdict label.
+#   0 = PASS, 1 = FAIL, 2 = BLOCKED, anything else = FAIL.
+reg_classify_rc() {
+  case "$1" in
+    0) printf 'PASS\n' ;;
+    2) printf 'BLOCKED\n' ;;
+    *) printf 'FAIL\n' ;;
+  esac
+}
+
+# reg_aggregate_exit FAIL_COUNT BLOCKED_COUNT: the runner's final exit status
+# from its per-group accounting (fail-closed; see the contract above).
+reg_aggregate_exit() {
+  local fail_count="${1:-0}" blocked_count="${2:-0}"
+  if [ "$fail_count" -gt 0 ]; then
+    printf '1\n'
+  elif [ "$blocked_count" -gt 0 ]; then
+    printf '2\n'
+  else
+    printf '0\n'
+  fi
+}
 
 reg_init() {
   REG_NAME="$1"

@@ -12,7 +12,10 @@
 #
 # Exit codes of the individual regression scripts (contract):
 #   0 = PASS, 1 = FAIL, 2 = BLOCKED.
-# Exit status of this runner: 0 when no regression failed, nonzero otherwise.
+# Exit status of this runner (fail-closed, see uat-regression-lib.sh):
+#   0 = all groups PASS; 2 = one or more BLOCKED and none FAIL; 1 = any FAIL.
+# A BLOCKED group means the required scenario was NOT exercised, so it fails
+# the runner too.
 
 set -uo pipefail
 
@@ -21,6 +24,8 @@ say()  { printf '\n%s %s\n' "$PREFIX" "$*"; }
 info() { printf '%s %s\n' "$PREFIX" "$*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/uat-regression-lib.sh
+source "$SCRIPT_DIR/uat-regression-lib.sh"
 
 [ "$(id -u)" -eq 0 ] || { echo "error: must run as root" >&2; exit 1; }
 [ "$(getenforce 2>/dev/null || true)" = "Enforcing" ] || { echo "error: SELinux not enforcing" >&2; exit 1; }
@@ -255,7 +260,8 @@ avc_evidence() { # label
 
 declare -A RESULT
 declare -A RC_OF
-FAILED=0
+FAIL_COUNT=0
+BLOCKED_COUNT=0
 for entry in "${REGRESSIONS[@]}"; do
   num="${entry%%:*}"
   rest="${entry#*:}"
@@ -272,14 +278,15 @@ for entry in "${REGRESSIONS[@]}"; do
   timeout 900 bash "$SCRIPT_DIR/$script"
   rc=$?
   RC_OF[$num]=$rc
-  case "$rc" in
-    0) RESULT[$num]="PASS";;
-    2) RESULT[$num]="BLOCKED";;
-    124) RESULT[$num]="FAIL"; echo "  (group $num timed out after 900s)" >&2;;
-    *) RESULT[$num]="FAIL";;
+  RESULT[$num]="$(reg_classify_rc "$rc")"
+  case "${RESULT[$num]}" in
+    BLOCKED) BLOCKED_COUNT=$((BLOCKED_COUNT+1));;
+    FAIL)
+      FAIL_COUNT=$((FAIL_COUNT+1))
+      [ "$rc" = 124 ] && echo "  (group $num timed out after 900s)" >&2
+      ;;
   esac
   if [ "${RESULT[$num]}" = "FAIL" ]; then
-    FAILED=1
     echo "--- bounded evidence for group $num ($label) ---" >&2
     journalctl -u docker-helper.service -n 40 --no-pager 2>/dev/null | tail -40 >&2 || true
     avc_evidence "group $num ($label)"
@@ -297,5 +304,11 @@ for entry in "${REGRESSIONS[@]}"; do
 done
 echo "======================================================================"
 
-[ "$FAILED" = 0 ] || echo "RESULT: at least one regression FAILED" >&2
-exit "$FAILED"
+# Fail-closed exit: any FAIL -> 1; else any BLOCKED -> 2; else 0.
+FINAL_RC="$(reg_aggregate_exit "$FAIL_COUNT" "$BLOCKED_COUNT")"
+if [ "$FINAL_RC" = 1 ]; then
+  echo "RESULT: at least one mandatory regression FAILED" >&2
+elif [ "$FINAL_RC" = 2 ]; then
+  echo "RESULT: at least one mandatory regression BLOCKED (required scenario not exercised)" >&2
+fi
+exit "$FINAL_RC"

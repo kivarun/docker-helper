@@ -103,6 +103,14 @@ record_stage() { # name result
   SELINUX_STAGES="${SELINUX_STAGES}$(printf '%-28s %s\n' "$1" "$2")"
 }
 
+# selinux_stage_accept BB_RESULT SELREG_RESULT MP_RESULT: overall acceptance of
+# the normal SELinux UAT (fail-closed). Every gating stage must be PASS: a
+# BLOCKED stage means the required scenario was NOT exercised, which is not
+# acceptable for Release-2. Returns 0 only when all three are PASS.
+selinux_stage_accept() {
+  [ "$1" = "PASS" ] && [ "$2" = "PASS" ] && [ "$3" = "PASS" ]
+}
+
 # ---------------------------------------------------------------------------
 # 1-5. SELinux host construction: create/start the VM, bootstrap SELinux
 # userspace + targeted policy, select security=selinux enforcing through the

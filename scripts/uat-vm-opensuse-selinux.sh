@@ -181,7 +181,7 @@ else
   MP_EC=$?
   if [ "$MP_EC" = 2 ]; then
     MP_RESULT=BLOCKED
-    log "SELinux mount-pin regression BLOCKED inside the guest (docker socket blocker; inconclusive, recorded)"
+    log "SELinux mount-pin regression BLOCKED inside the guest (scenario not exercised; recorded, fails the job)"
   else
     log "SELinux mount-pin regression FAILED inside the guest (recorded; continuing)"
   fi
@@ -238,15 +238,17 @@ echo "total:            ${TOTAL}s"
 echo "---- SELinux job stages ----"
 printf '%s\n' "$SELINUX_STAGES"
 echo "============================="
-# A stage BLOCKED (exit 2) means a real prerequisite prevented the exercise
-# (here: the known docker socket blocker making the mount-pin run unable to
-# remain active) — inconclusive, not a product failure. Only a FAIL counts.
-if [ "$BB_RESULT" = "PASS" ] && [ "$SELREG_RESULT" = "PASS" ] && [ "$MP_RESULT" != "FAIL" ]; then
+# Fail-closed acceptance: every gating stage must be PASS. A BLOCKED stage
+# (exit 2) means the required scenario was NOT successfully exercised, which
+# is not acceptable for Release-2 — the historical docker socket blocker that
+# once justified treating BLOCKED as success is closed, so it must not remain
+# encoded as acceptance semantics.
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"
   exit 0
 fi
-echo "RESULT: at least one SELinux job stage FAILED (see summary above)"
+echo "RESULT: at least one SELinux job stage FAILED or BLOCKED (see summary above)"
 echo "=============================================================="
 exit 1

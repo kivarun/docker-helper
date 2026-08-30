@@ -44,6 +44,11 @@ jobs:
       - name: Release pipeline helper tests
         run: bash scripts/test-release-pipeline.sh
 
+      - name: UAT fail-closed semantics tests
+        run: |
+          bash scripts/test-uat-opensuse-repo.sh
+          bash scripts/test-uat-regressions-aggregation.sh
+
   selinux-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5
