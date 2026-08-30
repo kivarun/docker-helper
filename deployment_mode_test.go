@@ -169,7 +169,7 @@ func TestSystemModeSocketAndDB(t *testing.T) {
 	}
 }
 
-func TestDOCKER_HELPER_CONFIGOverride(t *testing.T) {
+func TestDockerHelperConfigEnvOverride(t *testing.T) {
 	orig := EffectiveUID
 	defer func() { EffectiveUID = orig }()
 	EffectiveUID = func() int { return 0 }
