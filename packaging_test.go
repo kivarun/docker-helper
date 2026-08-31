@@ -7079,8 +7079,9 @@ func TestReleaseLeastPrivilegePermissions(t *testing.T) {
 }
 
 // TestSyncReleaseToMainLeastPrivilege verifies sync-release-to-main.yml runs
-// repository-controlled code only with contents: read and keeps the write job
-// to a minimal merge+push with no repository-controlled test/build steps.
+// repository-controlled code only with contents: read, keeps the write job to a
+// minimal merge+push with no repository-controlled test/build steps, and makes
+// the write job push only the exact merge tree the read-only job validated.
 func TestSyncReleaseToMainLeastPrivilege(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/sync-release-to-main.yml")
 	if err != nil {
@@ -7133,6 +7134,293 @@ func TestSyncReleaseToMainLeastPrivilege(t *testing.T) {
 	if !strings.Contains(pushJob, "git push origin main") {
 		t.Error("merge-push job must push to main")
 	}
+
+	// The validation job must export the exact main SHA it validated against and
+	// the exact resulting merged tree SHA, so the write job can push only the
+	// tested tree.
+	if !strings.Contains(validationJob, "outputs:") ||
+		!strings.Contains(validationJob, "main_sha") ||
+		!strings.Contains(validationJob, "tree_sha") {
+		t.Error("validation job must declare outputs for main_sha and tree_sha")
+	}
+	prepare := findStepBlock(validationJob, "Record validated main SHA and merged tree SHA")
+	if prepare == "" {
+		t.Fatal("validation job must record the validated main SHA and merged tree SHA")
+	}
+	prepareRun := extractRunBlock(prepare)
+	if !strings.Contains(prepareRun, `main_sha="$(git rev-parse HEAD)"`) {
+		t.Error("validation step must record the exact main SHA it validates against")
+	}
+	if !strings.Contains(prepareRun, "git merge --no-ff") {
+		t.Error("validation step must prepare the merge locally")
+	}
+	if !strings.Contains(prepareRun, `tree_sha="$(git rev-parse HEAD^{tree})"`) {
+		t.Error("validation step must record the exact merged tree SHA")
+	}
+	if !strings.Contains(prepareRun, "GITHUB_OUTPUT") {
+		t.Error("validation step must export main_sha and tree_sha via GITHUB_OUTPUT")
+	}
+
+	// The write job must pin to the exact validated main SHA and tree SHA rather
+	// than refetch and silently merge against a newer main.
+	if !strings.Contains(pushJob, "needs.validation.outputs.main_sha") {
+		t.Error("merge-push job must consume the validated main SHA from the validation job")
+	}
+	if !strings.Contains(pushJob, "needs.validation.outputs.tree_sha") {
+		t.Error("merge-push job must consume the validated tree SHA from the validation job")
+	}
+
+	// Fail closed when origin/main advanced after validation.
+	guard := findStepBlock(pushJob, "Fail closed if main advanced after validation")
+	if guard == "" {
+		t.Fatal("merge-push job must fail closed when origin/main advanced after validation")
+	}
+	guardRun := extractRunBlock(guard)
+	if !strings.Contains(guardRun, "origin/main") || !strings.Contains(guardRun, "needs.validation.outputs.main_sha") {
+		t.Error("main-advance guard must compare origin/main against the validated main SHA")
+	}
+	if !strings.Contains(guardRun, "exit 1") {
+		t.Error("main-advance guard must fail the job (exit 1) on a changed main")
+	}
+
+	// Reconstruct the merge against the exact validated main SHA and verify tree
+	// identity before pushing.
+	reconstruct := findStepBlock(pushJob, "Reconstruct merge and verify tree identity")
+	if reconstruct == "" {
+		t.Fatal("merge-push job must reconstruct the merge and verify tree identity")
+	}
+	reconstructRun := extractRunBlock(reconstruct)
+	if !strings.Contains(reconstructRun, `git switch -C main "${{ needs.validation.outputs.main_sha }}"`) {
+		t.Error("reconstruction must check out the exact validated main SHA, not a refetched main")
+	}
+	if strings.Contains(reconstructRun, "origin/main") {
+		t.Error("reconstruction must not merge against a refetched origin/main")
+	}
+	if !strings.Contains(reconstructRun, "git merge --no-ff") {
+		t.Error("reconstruction must re-run the merge")
+	}
+	if !strings.Contains(reconstructRun, "git rev-parse HEAD^{tree}") ||
+		!strings.Contains(reconstructRun, "needs.validation.outputs.tree_sha") {
+		t.Error("reconstruction must compare the reconstructed tree SHA against the validated tree SHA")
+	}
+	if !strings.Contains(reconstructRun, "exit 1") {
+		t.Error("reconstruction must fail closed (exit 1) when the tree differs from the validated tree")
+	}
+
+	// Push must come only after the tree-identity verification.
+	pushIdx := strings.Index(pushJob, "git push origin main")
+	verifyIdx := strings.Index(pushJob, "Reconstruct merge and verify tree identity")
+	if pushIdx < 0 || verifyIdx < 0 || pushIdx < verifyIdx {
+		t.Error("merge-push job must verify tree identity before pushing to main")
+	}
+}
+
+// TestSyncReleaseToMainMergeTreeIdentity proves the write-job guarantees of
+// sync-release-to-main.yml against real git semantics in throwaway repos:
+//   - validated-tree identity: the write job's reconstruction of the merge tree
+//     matches the tree the validation job validated, and the pushed tree is that
+//     exact validated tree;
+//   - changed main between validation and write: the main-advance guard fails
+//     closed and nothing is pushed;
+//   - fail-closed on tree difference: even if the main-advance guard were
+//     removed and the write job merged against a refetched newer main, the
+//     tree-identity check refuses to push a tree that differs from the tested
+//     tree.
+func TestSyncReleaseToMainMergeTreeIdentity(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	t.Run("unchanged main pushes the validated tree", func(t *testing.T) {
+		origin, release := seedSyncRepo(t)
+		mainSHA, treeSHA := simulateSyncValidation(t, origin, release)
+
+		wc := t.TempDir()
+		cloneSyncRepo(t, wc, origin)
+		out, err := runBashIn(t, wc, syncWriteShell(mainSHA, treeSHA, release, "MAIN_SHA", true))
+		if err != nil {
+			t.Fatalf("expected write job to succeed against unchanged main: %v\n%s", err, out)
+		}
+
+		// The pushed merge commit must be a --no-ff merge whose tree is exactly
+		// the tree the validation job validated.
+		head := strings.Fields(strings.TrimSpace(gitAt(t, origin, "rev-list", "--parents", "-n", "1", "main")))
+		if len(head) != 3 {
+			t.Errorf("expected a two-parent merge commit, got %d fields: %v", len(head)-1, head)
+		}
+		pushedTree := strings.TrimSpace(gitAt(t, origin, "rev-parse", "main^{tree}"))
+		if pushedTree != treeSHA {
+			t.Errorf("pushed tree %s does not match validated tree %s", pushedTree, treeSHA)
+		}
+	})
+
+	t.Run("main advanced between validation and write fails closed", func(t *testing.T) {
+		origin, release := seedSyncRepo(t)
+		mainSHA, treeSHA := simulateSyncValidation(t, origin, release)
+
+		advanceSyncMain(t, origin)
+		wc := t.TempDir()
+		cloneSyncRepo(t, wc, origin)
+		before := strings.TrimSpace(gitAt(t, origin, "rev-parse", "main"))
+
+		out, err := runBashIn(t, wc, syncWriteShell(mainSHA, treeSHA, release, "MAIN_SHA", true))
+		if err == nil {
+			t.Fatalf("expected write job to fail closed when main advanced; succeeded:\n%s", out)
+		}
+		if !strings.Contains(out, "advanced after validation") {
+			t.Errorf("failure must be the main-advance guard; got:\n%s", out)
+		}
+		if after := strings.TrimSpace(gitAt(t, origin, "rev-parse", "main")); after != before {
+			t.Errorf("write job must not push when main advanced; origin/main changed %s -> %s", before, after)
+		}
+	})
+
+	t.Run("reconstructed tree differs from validated tree fails closed", func(t *testing.T) {
+		origin, release := seedSyncRepo(t)
+		mainSHA, treeSHA := simulateSyncValidation(t, origin, release)
+
+		advanceSyncMain(t, origin)
+		wc := t.TempDir()
+		cloneSyncRepo(t, wc, origin)
+		before := strings.TrimSpace(gitAt(t, origin, "rev-parse", "main"))
+
+		// Regression scenario: the main-advance guard is absent and the job
+		// merges against a refetched newer main (checkoutRef "origin/main").
+		// The tree-identity check must still fail closed instead of pushing a
+		// different, untested merge.
+		out, err := runBashIn(t, wc, syncWriteShell(mainSHA, treeSHA, release, "origin/main", false))
+		if err == nil {
+			t.Fatalf("expected tree-identity check to fail closed; succeeded:\n%s", out)
+		}
+		if !strings.Contains(out, "differs from validated tree") {
+			t.Errorf("failure must be the tree-identity check; got:\n%s", out)
+		}
+		if after := strings.TrimSpace(gitAt(t, origin, "rev-parse", "main")); after != before {
+			t.Errorf("write job must not push a tree differing from the validated tree; origin/main changed %s -> %s", before, after)
+		}
+	})
+}
+
+// seedSyncRepo creates a bare origin with a linear main history and a release
+// branch commit on top; it returns the origin path and the release commit SHA.
+func seedSyncRepo(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	origin := filepath.Join(dir, "origin.git")
+	gitAt(t, dir, "init", "--bare", origin)
+	work := filepath.Join(dir, "seed")
+	gitAt(t, dir, "init", work)
+	gitAt(t, work, "config", "user.name", "test")
+	gitAt(t, work, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(work, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitAt(t, work, "add", ".")
+	gitAt(t, work, "commit", "-m", "base")
+	gitAt(t, work, "branch", "-M", "main")
+	gitAt(t, work, "remote", "add", "origin", origin)
+	gitAt(t, work, "push", "-u", "origin", "main")
+	gitAt(t, work, "checkout", "-b", "release/1")
+	if err := os.WriteFile(filepath.Join(work, "release.txt"), []byte("release\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitAt(t, work, "add", ".")
+	gitAt(t, work, "commit", "-m", "release change")
+	gitAt(t, work, "push", "-u", "origin", "release/1")
+	release := strings.TrimSpace(gitAt(t, work, "rev-parse", "HEAD"))
+	return origin, release
+}
+
+// simulateSyncValidation mirrors the validation job's prepare step: it checks
+// out origin/main, records the exact main SHA, merges the release commit with
+// --no-ff, and records the exact resulting tree SHA.
+func simulateSyncValidation(t *testing.T, origin, release string) (string, string) {
+	t.Helper()
+	wc := t.TempDir()
+	cloneSyncRepo(t, wc, origin)
+	gitAt(t, wc, "fetch", "origin", "main")
+	gitAt(t, wc, "switch", "-C", "main", "origin/main")
+	mainSHA := strings.TrimSpace(gitAt(t, wc, "rev-parse", "HEAD"))
+	gitAt(t, wc, "merge", "--no-ff", release, "-m", "merge release commit "+release)
+	treeSHA := strings.TrimSpace(gitAt(t, wc, "rev-parse", "HEAD^{tree}"))
+	return mainSHA, treeSHA
+}
+
+// advanceSyncMain simulates origin/main advancing after validation.
+func advanceSyncMain(t *testing.T, origin string) {
+	t.Helper()
+	wc := t.TempDir()
+	gitAt(t, wc, "init")
+	gitAt(t, wc, "remote", "add", "origin", origin)
+	gitAt(t, wc, "config", "user.name", "test")
+	gitAt(t, wc, "config", "user.email", "test@example.com")
+	gitAt(t, wc, "fetch", "origin", "main")
+	gitAt(t, wc, "switch", "-C", "main", "origin/main")
+	if err := os.WriteFile(filepath.Join(wc, "advance.txt"), []byte("advance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitAt(t, wc, "add", ".")
+	gitAt(t, wc, "commit", "-m", "advance main")
+	gitAt(t, wc, "push", "origin", "main")
+}
+
+// cloneSyncRepo clones origin into the existing empty directory dst and sets a
+// git identity for later merge commits.
+func cloneSyncRepo(t *testing.T, dst, origin string) {
+	t.Helper()
+	gitAt(t, filepath.Dir(dst), "clone", "-q", origin, dst)
+	gitAt(t, dst, "config", "user.name", "test")
+	gitAt(t, dst, "config", "user.email", "test@example.com")
+}
+
+// syncWriteShell returns the merge-push job's shell sequence as a bash script.
+// checkoutRef "MAIN_SHA" mirrors the workflow (check out the validated main);
+// "origin/main" simulates the regression where the job merges against a
+// refetched newer main. withGuard false removes the main-advance guard.
+func syncWriteShell(mainSHA, treeSHA, release, checkoutRef string, withGuard bool) string {
+	var guard string
+	if withGuard {
+		guard = `
+current_main="$(git rev-parse origin/main)"
+if [ "$current_main" != "MAIN_SHA" ]; then
+  echo "origin/main advanced after validation: expected MAIN_SHA, got $current_main" >&2
+  exit 1
+fi
+`
+	}
+	script := fmt.Sprintf(`set -e
+git fetch origin main
+%sgit switch -C main "%s"
+git merge --no-ff "%s" -m "merge release commit %s"
+tree_sha="$(git rev-parse HEAD^{tree})"
+if [ "$tree_sha" != "%s" ]; then
+  echo "reconstructed tree $tree_sha differs from validated tree %s" >&2
+  exit 1
+fi
+git push origin main
+`, guard, checkoutRef, release, release, treeSHA, treeSHA)
+	return strings.ReplaceAll(script, "MAIN_SHA", mainSHA)
+}
+
+// gitAt runs git with the given working directory and returns combined output.
+func gitAt(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// runBashIn runs a bash script with the given working directory.
+func runBashIn(t *testing.T, dir, script string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // TestArtifactGateConsumersNoRebuild verifies every consumer of the artifact

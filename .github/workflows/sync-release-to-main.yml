@@ -17,11 +17,16 @@ permissions:
 
 jobs:
   # validation runs repository-controlled code (gofmt, go test, go vet) with
-  # contents: read only. It prepares the merge locally and validates the merged
-  # tree without any remote write.
+  # contents: read only. It prepares the merge locally, validates the merged
+  # tree without any remote write, and exports the exact main SHA it validated
+  # against plus the exact resulting merged tree SHA.
   validation:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    outputs:
+      main_sha: ${{ steps.prepare.outputs.main_sha }}
+      tree_sha: ${{ steps.prepare.outputs.tree_sha }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -41,13 +46,16 @@ jobs:
       - name: Fetch main
         run: git fetch origin main
 
-      - name: Checkout main
-        run: git switch -C main origin/main
-
-      - name: Merge release commit (local only, no remote write)
+      - name: Record validated main SHA and merged tree SHA
+        id: prepare
         run: |
+          git switch -C main origin/main
+          main_sha="$(git rev-parse HEAD)"
           git merge --no-ff "${{ github.sha }}" \
             -m "merge release commit ${{ github.sha }}"
+          tree_sha="$(git rev-parse HEAD^{tree})"
+          echo "main_sha=$main_sha" >> "$GITHUB_OUTPUT"
+          echo "tree_sha=$tree_sha" >> "$GITHUB_OUTPUT"
 
       - name: Formatting
         run: |
@@ -66,8 +74,10 @@ jobs:
       - name: Whitespace errors
         run: git diff --check
 
-  # push performs only the merge + push (git operations, no repository-controlled
-  # scripts) after the validation job passed under contents: read.
+  # push pins to the exact main SHA validated by the read-only job, reconstructs
+  # the merge, and pushes only when the reconstructed tree SHA matches the
+  # validated tree SHA. It performs only git operations (no repository-controlled
+  # test/build scripts) after receiving write permission.
   merge-push:
     needs: validation
     runs-on: ubuntu-latest
@@ -89,13 +99,28 @@ jobs:
       - name: Fetch main
         run: git fetch origin main
 
-      - name: Checkout main
-        run: git switch -C main origin/main
-
-      - name: Merge release commit
+      # Fail closed if origin/main advanced after validation: pushing a merge
+      # against a newer main would produce a tree the validation job never tested.
+      - name: Fail closed if main advanced after validation
         run: |
+          current_main="$(git rev-parse origin/main)"
+          if [ "$current_main" != "${{ needs.validation.outputs.main_sha }}" ]; then
+            echo "origin/main advanced after validation: expected ${{ needs.validation.outputs.main_sha }}, got $current_main" >&2
+            exit 1
+          fi
+
+      # Reconstruct the merge against the exact validated main SHA and verify the
+      # resulting tree is identical to the tree validation ran its checks on.
+      - name: Reconstruct merge and verify tree identity
+        run: |
+          git switch -C main "${{ needs.validation.outputs.main_sha }}"
           git merge --no-ff "${{ github.sha }}" \
             -m "merge release commit ${{ github.sha }}"
+          tree_sha="$(git rev-parse HEAD^{tree})"
+          if [ "$tree_sha" != "${{ needs.validation.outputs.tree_sha }}" ]; then
+            echo "reconstructed tree $tree_sha differs from validated tree ${{ needs.validation.outputs.tree_sha }}" >&2
+            exit 1
+          fi
 
       - name: Push to main
         run: git push origin main
