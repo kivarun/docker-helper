@@ -7078,6 +7078,63 @@ func TestReleaseLeastPrivilegePermissions(t *testing.T) {
 	}
 }
 
+// TestSyncReleaseToMainLeastPrivilege verifies sync-release-to-main.yml runs
+// repository-controlled code only with contents: read and keeps the write job
+// to a minimal merge+push with no repository-controlled test/build steps.
+func TestSyncReleaseToMainLeastPrivilege(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/sync-release-to-main.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// Workflow-level baseline must be read-only.
+	wfPerms := workflowPermissionsBlock(content)
+	if !strings.Contains(wfPerms, "contents: read") {
+		t.Error("sync-release-to-main.yml must set workflow-level contents: read")
+	}
+	if strings.Contains(wfPerms, "contents: write") {
+		t.Error("sync-release-to-main.yml must not grant workflow-level contents: write")
+	}
+
+	// The validation job runs the repository-controlled checks and must not
+	// declare write permission.
+	validationJob := findJobSection(content, "validation")
+	if validationJob == "" {
+		t.Fatal("sync-release-to-main.yml must contain a validation job")
+	}
+	if block := jobPermissionsBlock(validationJob); strings.Contains(block, "contents: write") {
+		t.Error("validation job must not declare contents: write")
+	}
+	for _, check := range []string{"gofmt", "go test", "go vet", "git diff --check"} {
+		if !strings.Contains(validationJob, check) {
+			t.Errorf("validation job must run %s", check)
+		}
+	}
+
+	// The merge-push job is the single writer: it depends on validation,
+	// requests contents: write, and performs only git merge/push — never
+	// repository-controlled test/build commands.
+	pushJob := findJobSection(content, "merge-push")
+	if pushJob == "" {
+		t.Fatal("sync-release-to-main.yml must contain a merge-push job")
+	}
+	if !strings.Contains(pushJob, "needs: validation") {
+		t.Error("merge-push job must depend on the validation job")
+	}
+	if block := jobPermissionsBlock(pushJob); !strings.Contains(block, "contents: write") {
+		t.Error("merge-push job must declare permissions: contents: write (git push requires it)")
+	}
+	for _, banned := range []string{"gofmt", "go test", "go vet", "git diff --check", "setup-go", "build-bundle.sh"} {
+		if strings.Contains(pushJob, banned) {
+			t.Errorf("merge-push job must not run repository-controlled step %q after gaining write", banned)
+		}
+	}
+	if !strings.Contains(pushJob, "git push origin main") {
+		t.Error("merge-push job must push to main")
+	}
+}
+
 // TestArtifactGateConsumersNoRebuild verifies every consumer of the artifact
 // gate downloads the candidate set, resolves its artifact from the producer
 // SHA256SUMS and never builds locally (no setup-go, no build scripts).

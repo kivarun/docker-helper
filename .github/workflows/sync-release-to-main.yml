@@ -9,11 +9,17 @@ concurrency:
   group: sync-release-to-main
   cancel-in-progress: false
 
+# Least privilege: the workflow baseline is contents: read. Only the minimal
+# push job requests contents: write, and it performs no repository-controlled
+# test/build steps after receiving write permission.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  sync:
+  # validation runs repository-controlled code (gofmt, go test, go vet) with
+  # contents: read only. It prepares the merge locally and validates the merged
+  # tree without any remote write.
+  validation:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -38,7 +44,7 @@ jobs:
       - name: Checkout main
         run: git switch -C main origin/main
 
-      - name: Merge release commit
+      - name: Merge release commit (local only, no remote write)
         run: |
           git merge --no-ff "${{ github.sha }}" \
             -m "merge release commit ${{ github.sha }}"
@@ -59,6 +65,37 @@ jobs:
 
       - name: Whitespace errors
         run: git diff --check
+
+  # push performs only the merge + push (git operations, no repository-controlled
+  # scripts) after the validation job passed under contents: read.
+  merge-push:
+    needs: validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch main
+        run: git fetch origin main
+
+      - name: Checkout main
+        run: git switch -C main origin/main
+
+      - name: Merge release commit
+        run: |
+          git merge --no-ff "${{ github.sha }}" \
+            -m "merge release commit ${{ github.sha }}"
 
       - name: Push to main
         run: git push origin main
