@@ -562,7 +562,7 @@ type effectiveConfigValues struct {
 	LogLevel              string // default "info"
 	AuditEnabled          bool   // derived from mode/log_level unless explicit
 	AuditEnabledSource    string // "explicit", "system_default", or "log_level"
-	ShutdownTimeout       string // default "25s" (maximum; leaves systemd TimeoutStopSec=30s margin)
+	ShutdownTimeout       string // default "30s" (maximum; leaves systemd TimeoutStopSec=45s margin)
 	OperationRetentionTTL string // default "10m"
 	OperationMaxCompleted int    // default 200
 	OperationLogMaxBytes  int64  // default 4194304
@@ -583,7 +583,7 @@ func resolveEffectiveConfig(fc fileConfig) effectiveConfigValues {
 	auditSource := resolveAuditSource(fc.AuditEnabled, mode)
 	shutdownTimeout := fc.ShutdownTimeout
 	if shutdownTimeout == "" {
-		shutdownTimeout = "25s"
+		shutdownTimeout = "30s"
 	}
 	operationRetentionTTL := fc.OperationRetentionTTL
 	if operationRetentionTTL == "" {
@@ -627,20 +627,20 @@ func parseDurationPositive(s, name string) (time.Duration, error) {
 
 // maxShutdownTimeout is the documented maximum shutdown_timeout. The internal
 // graceful shutdown budget (HTTP drain + operation termination) must always
-// fit inside the shipped systemd TimeoutStopSec=30s, leaving a 5s margin for
+// fit inside the shipped systemd TimeoutStopSec=45s, leaving a 15s margin for
 // the final force-cleanup / process-exit phase after the budget expires.
-const maxShutdownTimeout = 25 * time.Second
+const maxShutdownTimeout = 30 * time.Second
 
 // parseShutdownTimeout parses and bounds shutdown_timeout. Values above
 // maxShutdownTimeout are rejected so the internal budget always leaves the
-// documented systemd margin (TimeoutStopSec=30s).
+// documented systemd margin (TimeoutStopSec=45s).
 func parseShutdownTimeout(s string) (time.Duration, error) {
 	d, err := parseDurationPositive(s, "shutdown_timeout")
 	if err != nil {
 		return 0, err
 	}
 	if d > maxShutdownTimeout {
-		return 0, fmt.Errorf("shutdown_timeout %s exceeds the maximum %s (must fit inside systemd TimeoutStopSec=30s with a force-cleanup margin)", d, maxShutdownTimeout)
+		return 0, fmt.Errorf("shutdown_timeout %s exceeds the maximum %s (must fit inside systemd TimeoutStopSec=45s with a force-cleanup margin)", d, maxShutdownTimeout)
 	}
 	return d, nil
 }
@@ -794,7 +794,7 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 			AllowedRoots:          []string{canonRoot},
 			SessionTTL:            "12h",
 			Level:                 "info",
-			ShutdownTimeout:       "25s",
+			ShutdownTimeout:       "30s",
 			OperationRetentionTTL: "10m",
 			OperationMaxCompleted: ptrOf(200),
 			OperationLogMaxBytes:  ptrOf(int64(4 * 1024 * 1024)),

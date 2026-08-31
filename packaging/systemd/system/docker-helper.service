@@ -14,7 +14,7 @@ ExecStart=/usr/bin/docker-helper serve
 ExecReload=/usr/bin/docker-helper reload --system
 Restart=on-failure
 RestartSec=5s
-TimeoutStopSec=30s
+TimeoutStopSec=45s
 UMask=0077
 # Explicit PATH contract: must stay exactly synchronized with dockerCLISearchPath
 # in selinux_deploy.go. The daemon resolves the Docker CLI over this PATH, and

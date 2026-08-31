@@ -93,11 +93,11 @@ depends on deployment mode: in system mode (effective UID 0) audit is always
 The audit stream covers authentication, session, principal, credential,
 admin, and Docker-operation events.
 .TP
-.B shutdown_timeout (string, optional, default="25s", maximum="25s")
-Graceful shutdown timeout using Go duration syntax. The maximum is 25s: the
+.B shutdown_timeout (string, optional, default="30s", maximum="30s")
+Graceful shutdown timeout using Go duration syntax. The maximum is 30s: the
 internal graceful shutdown budget (HTTP drain + operation termination) must
-always fit inside the shipped systemd \fBTimeoutStopSec=30s\fR, leaving a 5s
-margin for final force cleanup and process exit. Values above 25s are
+always fit inside the shipped systemd \fBTimeoutStopSec=45s\fR, leaving a 15s
+margin for final force cleanup and process exit. Values above 30s are
 rejected by validation (startup, reload, and \fBconfig set\fR).
 .TP
 .B operation_retention_ttl (string, optional, default="10m")
@@ -218,7 +218,7 @@ The RPM contains the policy module; the DEB does not install an SELinux module.
   "session_ttl": "1h",
   "log_level": "debug",
   "audit_enabled": true,
-  "shutdown_timeout": "25s",
+  "shutdown_timeout": "30s",
   "operation_retention_ttl": "72h",
   "operation_max_completed": 5000,
   "operation_log_max_bytes": 52428800,

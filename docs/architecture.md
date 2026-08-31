@@ -543,13 +543,13 @@ docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 - helper-owned build/run processes and containers are never left unmanaged
   after shutdown.
 
-After `TimeoutStopSec=30s`, systemd sends SIGKILL if any processes
+After `TimeoutStopSec=45s`, systemd sends SIGKILL if any processes
 remain. The internal `shutdown_timeout` budget is therefore bounded: its
-maximum is `25s` (the default too), so the internal graceful budget always
-fits inside `TimeoutStopSec=30s` with a 5s margin for the final
-force-cleanup / process-exit phase. Validation rejects any value above `25s`
+maximum is `30s` (the default too), so the internal graceful budget always
+fits inside `TimeoutStopSec=45s` with a 15s margin for the final
+force-cleanup / process-exit phase. Validation rejects any value above `30s`
 at startup, on reload, and in `config set`; the shipped system and user
-units both carry `TimeoutStopSec=30s`.
+units both carry `TimeoutStopSec=45s`.
 
 The shutdown budget is read from the daemon's *current* configuration at the
 moment shutdown begins: a `shutdown_timeout` changed via reload is honored by

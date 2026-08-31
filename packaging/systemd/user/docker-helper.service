@@ -9,7 +9,7 @@ ExecStart=%h/.local/bin/docker-helper serve
 ExecReload=%h/.local/bin/docker-helper reload
 Restart=on-failure
 RestartSec=5s
-TimeoutStopSec=30s
+TimeoutStopSec=45s
 UMask=0077
 
 StandardOutput=journal

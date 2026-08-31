@@ -71,8 +71,8 @@ and cancel are implemented.
 
 ### 2. Shutdown timeout
 
-`shutdown_timeout` is configurable (default and maximum 25s; the budget must
-fit inside the shipped systemd `TimeoutStopSec=30s`). Shutdown direction:
+`shutdown_timeout` is configurable (default and maximum 30s; the budget must
+fit inside the shipped systemd `TimeoutStopSec=45s`). Shutdown direction:
 
 - stop accepting new operations;
 - HTTP drain and operation termination share one overall shutdown deadline;
