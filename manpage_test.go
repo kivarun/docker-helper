@@ -50,3 +50,41 @@ func TestManpageRoffDirectivesOwnLine(t *testing.T) {
 		}
 	}
 }
+
+// TestManpageNoLegacyAdminPath verifies the man pages document the admin token
+// via the root-level admin-token command and contain no reference to the
+// legacy `admin token rotate` CLI path.
+func TestManpageNoLegacyAdminPath(t *testing.T) {
+	man1, err := os.ReadFile("docs/man/docker-helper.1")
+	if err != nil {
+		t.Fatalf("cannot read docs/man/docker-helper.1: %v", err)
+	}
+	content := string(man1)
+
+	if !strings.Contains(content, "docker-helper admin-token rotate") {
+		t.Error("man page must document docker-helper admin-token rotate")
+	}
+	for _, legacy := range []string{"docker-helper admin token rotate", ".SS Admin Commands", "admin token rotate commands"} {
+		if strings.Contains(content, legacy) {
+			t.Errorf("man page must not contain legacy CLI path %q", legacy)
+		}
+	}
+}
+
+// TestDocsNoLegacyAdminPath verifies operator-facing docs and help sources
+// contain no reference to the legacy `admin token rotate` CLI path.
+func TestDocsNoLegacyAdminPath(t *testing.T) {
+	files := []string{
+		"README.md",
+		"docs/architecture.md",
+	}
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), "admin token rotate") {
+			t.Errorf("%s must not contain the legacy 'admin token rotate' CLI path", path)
+		}
+	}
+}

@@ -249,9 +249,9 @@ func TestCompletionDeepNestedSubcommands(t *testing.T) {
 
 func TestCompletionAdminTokenSubcommands(t *testing.T) {
 	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "admin", "token", ""})
+	results := runCompletion(t, script, []string{"docker-helper", "admin-token", ""})
 	if len(results) == 0 {
-		t.Error("expected admin token subcommand completions")
+		t.Error("expected admin-token subcommand completions")
 		return
 	}
 	found := false
@@ -262,7 +262,47 @@ func TestCompletionAdminTokenSubcommands(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("expected 'rotate' in admin token completions: %v", results)
+		t.Errorf("expected 'rotate' in admin-token completions: %v", results)
+	}
+	// Only rotate may be offered under admin-token.
+	if len(results) != 1 || results[0] != "rotate" {
+		t.Errorf("admin-token must complete only rotate, got: %v", results)
+	}
+}
+
+// TestCompletionNoLegacyAdminHierarchy verifies root completion offers
+// admin-token and never the legacy admin/token hierarchy.
+func TestCompletionNoLegacyAdminHierarchy(t *testing.T) {
+	script := completionScript(t)
+
+	// Root completion must offer admin-token and not admin.
+	results := runCompletion(t, script, []string{"docker-helper", ""})
+	if !slices.Contains(results, "admin-token") {
+		t.Error("root completion must offer admin-token")
+	}
+	if slices.Contains(results, "admin") {
+		t.Error("root completion must NOT offer admin")
+	}
+
+	// Prefix "a" must yield admin-token, not admin.
+	results = runCompletion(t, script, []string{"docker-helper", "a"})
+	for _, r := range results {
+		if r == "admin" {
+			t.Error("prefix 'a' must NOT complete the legacy admin command")
+		}
+	}
+	if !slices.Contains(results, "admin-token") {
+		t.Error("prefix 'a' must complete admin-token")
+	}
+
+	// The legacy hierarchy must not resolve: completing under 'admin' yields
+	// nothing (admin is not a command, so no token subcommand).
+	results = runCompletion(t, script, []string{"docker-helper", "admin", "token", ""})
+	if slices.Contains(results, "rotate") {
+		t.Error("legacy 'admin token' hierarchy must not offer rotate")
+	}
+	if slices.Contains(results, "token") {
+		t.Error("legacy 'admin' must not offer token")
 	}
 }
 

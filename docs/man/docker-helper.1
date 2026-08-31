@@ -211,9 +211,9 @@ Reads the token from stdin (hidden input on terminal) and stores it
 at ${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token
 with mode 0600. Must not be run as root.
 With \-\-force, replaces an existing credential atomically.
-.SS Admin Commands
+.SS Admin Token Commands
 .TP
-.B docker-helper admin token rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
+.B docker-helper admin-token rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
 Rotate the admin token. Requires the current admin token
 (\fB\-\-token-file\fR is the client auth source, not the destination).
 The new token is shown once on stdout; the old token is invalid
@@ -268,7 +268,7 @@ The presence of \fBXDG_RUNTIME_DIR\fR alone does not select a user socket;
 agent commands fall back to the system socket when no user-mode daemon is
 present. \fB\-\-system\fR and \fB\-\-endpoint\fR are mutually exclusive.
 .SH OPERATOR ENDPOINT SELECTION
-For reload, session, principal, credential, and admin token rotate commands, select the target daemon:
+For reload, session, principal, credential, and admin-token rotate commands, select the target daemon:
 .IP \(bu 4
 \fB\-\-system\fR: Connect to system daemon (default for system mode)
 .IP \(bu 4

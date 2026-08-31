@@ -254,7 +254,7 @@ func TestBlackBoxFlagAfterPositionalDiagnostic(t *testing.T) {
 	// A flag-like token explicitly terminated by "--" must keep the ordinary
 	// rejection message (it is an intentional positional, not a misplaced flag).
 	var stdout2, stderr2 bytes.Buffer
-	code = runCommandWithWriters([]string{"admin", "token", "rotate", "--", "-x"}, &stdout2, &stderr2)
+	code = runCommandWithWriters([]string{"admin-token", "rotate", "--", "-x"}, &stdout2, &stderr2)
 	if code != 2 {
 		t.Errorf("expected exit code 2, got %d", code)
 	}
@@ -478,6 +478,117 @@ func TestHelpNoWorkspaceRoot(t *testing.T) {
 	rootCommand.dispatch([]string{"--help"}, []string{}, &stdout, &stderr)
 	if strings.Contains(stdout.String(), "workspace-root") {
 		t.Error("root help must NOT expose workspace-root")
+	}
+}
+
+// TestRootHelpAdminTokenEntry verifies root help advertises the root-level
+// admin-token operator command with its summary.
+func TestRootHelpAdminTokenEntry(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "admin-token") {
+		t.Error("root help must contain the admin-token command")
+	}
+	// The admin-token entry must appear under Operator commands with its
+	// summary on the same line.
+	opSection := out[strings.Index(out, "Operator commands:"):]
+	if end := strings.Index(opSection, "\n\n"); end >= 0 {
+		opSection = opSection[:end]
+	}
+	foundEntry := false
+	for _, line := range strings.Split(opSection, "\n") {
+		if strings.Contains(line, "admin-token") && strings.Contains(line, "Manage the admin token") {
+			foundEntry = true
+			break
+		}
+	}
+	if !foundEntry {
+		t.Error("root help must list 'admin-token  Manage the admin token' under Operator commands")
+	}
+}
+
+// TestRootHelpNoAdminCommand verifies root help no longer contains the old
+// root-level "admin" command (the admin token is now managed via admin-token).
+func TestRootHelpNoAdminCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	out := stdout.String()
+	// The command-list formatting is "  <name padded to 10> <summary>"; a
+	// root-level "admin" command would render as "  admin " (name followed by
+	// space/padding). "admin-token" does not contain "  admin ".
+	if strings.Contains(out, "  admin ") {
+		t.Error("root help must NOT contain a root-level admin command")
+	}
+	// `docker-helper admin --help` must be an unknown command.
+	var stdout2, stderr2 bytes.Buffer
+	code = runCommandWithWriters([]string{"admin", "--help"}, &stdout2, &stderr2)
+	if code != 2 {
+		t.Errorf("admin --help: expected exit 2, got %d", code)
+	}
+	if !strings.Contains(stderr2.String(), "unknown command") {
+		t.Errorf("admin --help: expected unknown command error, got: %s", stderr2.String())
+	}
+}
+
+// TestAdminTokenHelpOnlyRotate verifies `docker-helper admin-token --help`
+// lists exactly the rotate subcommand.
+func TestAdminTokenHelpOnlyRotate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"admin-token", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "rotate") {
+		t.Error("admin-token --help must list the rotate subcommand")
+	}
+	if !strings.Contains(out, "Rotate the admin token") {
+		t.Error("admin-token --help must show the rotate summary")
+	}
+	// Only rotate may be listed as a subcommand.
+	lines := strings.Split(out, "\n")
+	inSub := false
+	for _, line := range lines {
+		if strings.Contains(line, "Subcommands:") {
+			inSub = true
+			continue
+		}
+		if inSub && strings.TrimSpace(line) == "" {
+			break
+		}
+		if inSub && strings.HasPrefix(strings.TrimSpace(line), "rotate") {
+			continue
+		}
+		if inSub && strings.TrimSpace(line) != "" {
+			t.Errorf("admin-token --help must only list rotate, got extra subcommand line: %q", line)
+		}
+	}
+}
+
+// TestAdminTokenOldPathUnknown verifies the legacy `docker-helper admin token
+// rotate` path does not resolve (no alias/deprecated compatibility path).
+func TestAdminTokenOldPathUnknown(t *testing.T) {
+	for _, args := range [][]string{
+		{"admin", "token", "rotate"},
+		{"admin", "token", "rotate", "--json"},
+		{"help", "admin", "token", "rotate"},
+		{"admin", "token"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters(args, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("%v: expected exit 2, got %d", args, code)
+		}
+		if !strings.Contains(stderr.String(), "unknown command") {
+			t.Errorf("%v: expected unknown command error, got: %s", args, stderr.String())
+		}
 	}
 }
 

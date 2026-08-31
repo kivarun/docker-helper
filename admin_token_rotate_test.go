@@ -633,7 +633,7 @@ func TestAdminTokenRotateCLIHuman(t *testing.T) {
 	endpoint, tokenPath := startRotateCLITestServer(t, "test-token")
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"admin", "token", "rotate", "--endpoint", endpoint, "--token-file", tokenPath}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"admin-token", "rotate", "--endpoint", endpoint, "--token-file", tokenPath}, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
@@ -650,7 +650,7 @@ func TestAdminTokenRotateCLIJSON(t *testing.T) {
 	endpoint, tokenPath := startRotateCLITestServer(t, "test-token")
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"admin", "token", "rotate", "--endpoint", endpoint, "--token-file", tokenPath, "--json"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"admin-token", "rotate", "--endpoint", endpoint, "--token-file", tokenPath, "--json"}, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr: %s)", code, stderr.String())
@@ -681,7 +681,7 @@ func TestAdminTokenRotateCLIAuthFailure(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"admin", "token", "rotate", "--endpoint", endpoint, "--token-file", wrongPath}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"admin-token", "rotate", "--endpoint", endpoint, "--token-file", wrongPath}, &stdout, &stderr)
 
 	if code == 0 {
 		t.Fatal("expected non-zero exit on auth failure")

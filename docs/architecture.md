@@ -415,9 +415,9 @@ for full syntax:
 - `credential` — Manage Principal credentials. Subcommands: `create`, `list`,
   `revoke`, `install`. `credential create --name` is optional and uses the
   literal name `default` when omitted.
-- `admin` — Administrative operations. Subcommand: `token rotate` (rotate
-  the admin token; requires the current token, new token shown once, old
-  token invalid immediately, no restart).
+- `admin-token` — Manage the admin token. Subcommand: `rotate` (rotate the
+  admin token; requires the current token, new token shown once, old token
+  invalid immediately, no restart).
 - `apparmor` — Manage/check AppArmor roots for an AppArmor system deployment.
 
 ### General commands

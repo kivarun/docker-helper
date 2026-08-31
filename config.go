@@ -855,7 +855,7 @@ func initCore(allowedRoot string, stdout, stderr io.Writer) (*initCoreResult, er
 		fmt.Fprintln(stderr, "admin.token already exists at:")
 		fmt.Fprintln(stderr, adminTokenPath)
 		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "Will not overwrite. Use `docker-helper admin token rotate` to replace it.")
+		fmt.Fprintln(stderr, "Will not overwrite. Use `docker-helper admin-token rotate` to replace it.")
 		return nil, errors.New("admin.token already exists")
 	}
 
@@ -923,7 +923,7 @@ func initSystem(allowedRoot string, stdout, stderr io.Writer,
 		fmt.Fprintln(stderr, "admin.token already exists at:")
 		fmt.Fprintln(stderr, adminTokenPath)
 		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "Will not overwrite. Use `docker-helper admin token rotate` to replace it.")
+		fmt.Fprintln(stderr, "Will not overwrite. Use `docker-helper admin-token rotate` to replace it.")
 		return errors.New("admin.token already exists")
 	}
 

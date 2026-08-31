@@ -7,16 +7,8 @@ import (
 	"io"
 )
 
-var adminCommand = &Command{
-	Name:    "admin",
-	Summary: "Administrative operations",
-	Subcommands: []*Command{
-		adminTokenCommand,
-	},
-}
-
 var adminTokenCommand = &Command{
-	Name:    "token",
+	Name:    "admin-token",
 	Summary: "Manage the admin token",
 	Subcommands: []*Command{
 		adminTokenRotateCommand,
@@ -26,7 +18,7 @@ var adminTokenCommand = &Command{
 var adminTokenRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate the admin token",
-	Usage:      "docker-helper admin token rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
+	Usage:      "docker-helper admin-token rotate [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
