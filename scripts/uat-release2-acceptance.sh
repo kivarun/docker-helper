@@ -258,9 +258,13 @@ else
   acc_fail "credential B stopped working after A revoked"
 fi
 
-# No credential secret appears in list/show/audit/log output.
-LIST_OUT="$(dh credential list --system "$A_PRINC" 2>&1)"
-if printf '%s\n' "$LIST_OUT" | grep -q 'dhc_'; then
+# No credential secret appears in list/show/audit/log output. The list must
+# succeed first — a failed list yields no output and would vacuously "leak
+# nothing".
+LIST_OUT="$(dh credential list --system "$A_PRINC" 2>&1)"; LIST_EC=$?
+if [ "$LIST_EC" -ne 0 ]; then
+  acc_fail "credential list failed (rc=$LIST_EC); leak check cannot proceed: $(printf '%s\n' "$LIST_OUT" | redact | tail -3)"
+elif printf '%s\n' "$LIST_OUT" | grep -q 'dhc_'; then
   acc_fail "credential list leaked a credential secret"
 else
   acc_ok "credential list shows no credential secrets"
@@ -323,23 +327,36 @@ else
 fi
 
 # Legacy/non-principal semantics: an admin (global) session run must omit
-# principal_name.
-ADMIN_SESS_JSON="$(dh session create --system --workspace "$A_WORKSPACE/ws" --json 2>/dev/null)" \
-  && ADMIN_SESS_TOKEN="$(printf '%s' "$ADMIN_SESS_JSON" | json_field token)"
-if [ -n "${ADMIN_SESS_TOKEN:-}" ]; then
+# principal_name. The negative assertion is only meaningful after the run
+# actually succeeded AND produced a run.start audit event attributed to this
+# session; otherwise an empty/missing event would falsely look like "no
+# principal_name".
+ADMIN_SESS_JSON="$(dh session create --system --workspace "$A_WORKSPACE/ws" --json 2>/dev/null)"
+ADMIN_SESS_ID="$(printf '%s' "$ADMIN_SESS_JSON" | json_field id)"
+ADMIN_SESS_TOKEN="$(printf '%s' "$ADMIN_SESS_JSON" | json_field token)"
+if [ -z "$ADMIN_SESS_ID" ] || [ -z "$ADMIN_SESS_TOKEN" ]; then
+  acc_blocked "could not create admin session for legacy audit check"
+else
   BEFORE2="$(date -u +'%Y-%m-%d %H:%M:%S')"
   sleep 0.1
-  DOCKER_HELPER_SESSION_TOKEN="$ADMIN_SESS_TOKEN" \
-    dh run --image alpine:3.24 -- sh -ec 'true' >/dev/null 2>&1 || true
-  ADMIN_EVENT="$(journalctl --utc -u docker-helper.service --since "$BEFORE2" --no-pager 2>/dev/null \
-    | grep '"stream":"audit"' | grep '"event":"run.start"' | tail -1 || true)"
-  if printf '%s\n' "$ADMIN_EVENT" | grep -q 'principal_name'; then
-    acc_fail "legacy admin-session audit unexpectedly carries principal_name"
+  ADMIN_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$ADMIN_SESS_TOKEN" \
+    dh run --image alpine:3.24 -- sh -ec 'true' 2>&1)"
+  ADMIN_RUN_EC=$?
+  if [ "$ADMIN_RUN_EC" -ne 0 ]; then
+    acc_fail "admin-session run failed (rc=$ADMIN_RUN_EC); legacy audit check cannot proceed: $(printf '%s\n' "$ADMIN_RUN_OUT" | redact | tail -3)"
   else
-    acc_ok "legacy admin-session audit omits principal_name (unchanged semantics)"
+    ADMIN_EVENT="$(journalctl --utc -u docker-helper.service --since "$BEFORE2" --no-pager 2>/dev/null \
+      | grep '"stream":"audit"' | grep '"event":"run.start"' | tail -1 || true)"
+    if [ -z "$ADMIN_EVENT" ]; then
+      acc_fail "no run.start audit event recorded for the admin-session run"
+    elif ! printf '%s\n' "$ADMIN_EVENT" | grep -q "\"session_id\":\"$ADMIN_SESS_ID\""; then
+      acc_fail "admin-session run.start audit event lacks session_id=$ADMIN_SESS_ID: $ADMIN_EVENT"
+    elif printf '%s\n' "$ADMIN_EVENT" | grep -q 'principal_name'; then
+      acc_fail "legacy admin-session audit unexpectedly carries principal_name"
+    else
+      acc_ok "legacy admin-session audit omits principal_name (unchanged semantics)"
+    fi
   fi
-else
-  acc_blocked "could not create admin session for legacy audit check"
 fi
 
 # ==============================================================================
@@ -486,12 +503,21 @@ if [ "$REG_UP" = 1 ]; then
     docker logs --tail 15 uat-registry-r2ac 2>&1 | sed 's/^/    registry-log: /' | redact >&2 || true
   fi
 
-  # 3-4. Session A has no registry credentials -> private pull must FAIL.
-  if DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
-      dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' >/dev/null 2>&1; then
+  # 3-4. Session A has no registry credentials -> private pull must FAIL with
+  #      a registry authentication/authorization denial. Any other failure
+  #      (Docker/helper runtime, network) is an unexpected error, NOT proof of
+  #      the no-credentials path. The markers mirror docker-helper's own
+  #      classifyDockerError auth-denial set.
+  A_NOAUTH_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
+    dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
+  A_NOAUTH_EC=$?
+  if [ "$A_NOAUTH_EC" -eq 0 ]; then
     acc_fail "private pull unexpectedly succeeded without registry credentials (session A)"
+  elif printf '%s\n' "$A_NOAUTH_OUT" | grep -qiE \
+      'unauthorized|authentication required|401|pull access denied|denied: requested access|authorization failed'; then
+    acc_ok "private pull fails for session A without registry credentials (auth denial)"
   else
-    acc_ok "private pull fails for session A without registry credentials"
+    acc_fail "private pull failed for session A but not for a registry auth reason (rc=$A_NOAUTH_EC): $(printf '%s\n' "$A_NOAUTH_OUT" | redact | tail -3)"
   fi
 
   # 5. docker-helper registry login for session A (password via stdin).
@@ -514,13 +540,21 @@ if [ "$REG_UP" = 1 ]; then
   #    cached the image in the local Docker daemon, so remove the cached image
   #    first (harness-owned cleanup): otherwise session B would "succeed" by
   #    reusing the local cache without ever contacting the registry, which is
-  #    not what the isolation contract proves.
+  #    not what the isolation contract proves. The expected failure must be a
+  #    registry authentication/authorization denial — any other failure
+  #    (Docker/helper runtime, network) is an unexpected error, not proof of
+  #    isolation.
   docker rmi "$REG_ADDR/uat/private:v1" >/dev/null 2>&1 || true
-  if DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_B" \
-      dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' >/dev/null 2>&1; then
+  B_ISO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_B" \
+    dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
+  B_ISO_EC=$?
+  if [ "$B_ISO_EC" -eq 0 ]; then
     acc_fail "session B unexpectedly pulled the private image (isolation broken)"
+  elif printf '%s\n' "$B_ISO_OUT" | grep -qiE \
+      'unauthorized|authentication required|401|pull access denied|denied: requested access|authorization failed'; then
+    acc_ok "session B cannot pull the private image (isolation holds: auth denial)"
   else
-    acc_ok "session B cannot pull the private image (isolation holds)"
+    acc_fail "session B pull failed but not for a registry auth reason (rc=$B_ISO_EC): $(printf '%s\n' "$B_ISO_OUT" | redact | tail -3)"
   fi
 
   # 8. Registry password absent from journal/audit, operation output, host config.
@@ -533,13 +567,19 @@ if [ "$REG_UP" = 1 ]; then
   fi
   # Session A (which holds the registry credentials) re-pulls the image after
   # the isolation check removed the local cache; its output is the successful
-  # authenticated path, i.e. the strongest place a password could leak.
+  # authenticated path, i.e. the strongest place a password could leak. The
+  # run MUST succeed first — a failed pull cannot leak the password through
+  # its output, so the absence-of-leak assertion is only meaningful after the
+  # authenticated pull/run actually succeeded.
   OP_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
     dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
-  if printf '%s\n' "$OP_OUT" | grep -q "$PASS_MARKER"; then
+  OP_EC=$?
+  if [ "$OP_EC" -ne 0 ]; then
+    acc_fail "authenticated re-pull (session A) failed (rc=$OP_EC): $(printf '%s\n' "$OP_OUT" | redact | tail -3)"
+  elif printf '%s\n' "$OP_OUT" | grep -q "$PASS_MARKER"; then
     acc_fail "registry password leaked into operation output"
   else
-    acc_ok "registry password absent from operation output"
+    acc_ok "authenticated re-pull succeeded; registry password absent from operation output"
   fi
   HOST_DOCKER_CFG="$HOME/.docker/config.json"
   if [ -f "$HOST_DOCKER_CFG" ] && grep -q "127.0.0.1:$REG_PORT" "$HOST_DOCKER_CFG"; then
@@ -850,9 +890,12 @@ if [ "$E_USER_READY" = 1 ]; then
     && DEFAULT_SESS="$(printf '%s' "$DEFAULT_SESS_JSON" | json_field id)"
   if [ -n "${DEFAULT_SESS:-}" ]; then
     # The default-endpoint session must live in the USER daemon, not the
-    # system daemon.
-    SYS_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token 2>/dev/null)"
-    if printf '%s\n' "$SYS_LIST" | grep -q "$DEFAULT_SESS"; then
+    # system daemon. The system session list must succeed first — a failed
+    # list would vacuously "not contain" the session.
+    SYS_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token 2>&1)"; SYS_LIST_EC=$?
+    if [ "$SYS_LIST_EC" -ne 0 ]; then
+      acc_fail "system session list failed (rc=$SYS_LIST_EC); default-endpoint leak check cannot proceed"
+    elif printf '%s\n' "$SYS_LIST" | grep -q "$DEFAULT_SESS"; then
       acc_fail "default endpoint session leaked into the system daemon"
     else
       acc_ok "user's default endpoint selected the existing user socket (not the system daemon)"
