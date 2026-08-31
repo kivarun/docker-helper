@@ -514,7 +514,7 @@ if [ "$REG_UP" = 1 ]; then
   if [ "$A_NOAUTH_EC" -eq 0 ]; then
     acc_fail "private pull unexpectedly succeeded without registry credentials (session A)"
   elif printf '%s\n' "$A_NOAUTH_OUT" | grep -qiE \
-      'unauthorized|authentication required|401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
+      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
     acc_ok "private pull fails for session A without registry credentials (auth denial)"
   else
     acc_fail "private pull failed for session A but not for a registry auth reason (rc=$A_NOAUTH_EC): $(printf '%s\n' "$A_NOAUTH_OUT" | redact | tail -3)"
@@ -551,7 +551,7 @@ if [ "$REG_UP" = 1 ]; then
   if [ "$B_ISO_EC" -eq 0 ]; then
     acc_fail "session B unexpectedly pulled the private image (isolation broken)"
   elif printf '%s\n' "$B_ISO_OUT" | grep -qiE \
-      'unauthorized|authentication required|401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
+      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
     acc_ok "session B cannot pull the private image (isolation holds: auth denial)"
   else
     acc_fail "session B pull failed but not for a registry auth reason (rc=$B_ISO_EC): $(printf '%s\n' "$B_ISO_OUT" | redact | tail -3)"

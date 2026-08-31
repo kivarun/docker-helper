@@ -7423,6 +7423,41 @@ func runBashIn(t *testing.T, dir, script string) (string, error) {
 	return string(out), err
 }
 
+// TestRelease2AcceptanceAuthMarkersAlignWithProduction verifies the Release-2
+// acceptance script's registry auth-denial classifier mirrors production
+// classifyDockerError semantics: it must use the narrow markers (never a bare
+// "401") so an unrelated occurrence of "401" cannot satisfy the auth-denial
+// assertion.
+func TestRelease2AcceptanceAuthMarkersAlignWithProduction(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const prefix = "'unauthorized|authentication required"
+	var markerLines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, prefix) {
+			markerLines = append(markerLines, line)
+		}
+	}
+	if len(markerLines) != 2 {
+		t.Fatalf("expected 2 auth-denial classifier lines (no-credentials + isolation checks), got %d", len(markerLines))
+	}
+
+	bare401 := regexp.MustCompile(`(^|\|)401(\||$)`)
+	for _, line := range markerLines {
+		if bare401.MatchString(line) {
+			t.Errorf("auth-denial classifier must not contain a bare 401 alternative: %s", strings.TrimSpace(line))
+		}
+		for _, m := range []string{"401 unauthorized", "failed with status: 401", "no basic auth credentials"} {
+			if !strings.Contains(line, m) {
+				t.Errorf("auth-denial classifier missing production marker %q: %s", m, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
 // TestArtifactGateConsumersNoRebuild verifies every consumer of the artifact
 // gate downloads the candidate set, resolves its artifact from the producer
 // SHA256SUMS and never builds locally (no setup-go, no build scripts).
