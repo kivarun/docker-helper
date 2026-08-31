@@ -100,12 +100,15 @@ func withDaemonInstanceLock(lockPath string, fn func() error) error {
 // In user mode, tcpListener is nil and only unixListener is served.
 // In system mode, both listeners are served concurrently.
 // A signal or error on ANY listener triggers shutdown of all.
+// shutdownTimeout is resolved at the moment shutdown begins, so the budget
+// always reflects the ACTUAL App configuration (a reload may have changed
+// shutdown_timeout since daemon startup).
 func serveHTTPUntilShutdown(
 	signalCtx context.Context,
 	server *http.Server,
 	unixListener net.Listener,
 	tcpListener net.Listener,
-	timeout time.Duration,
+	shutdownTimeout func() time.Duration,
 	onShutdown func(),
 ) (shutdownCtx context.Context, shutdownCancel func(), drainDone <-chan error, err error) {
 	var wg sync.WaitGroup
@@ -142,6 +145,7 @@ func serveHTTPUntilShutdown(
 		if onShutdown != nil {
 			onShutdown()
 		}
+		timeout := shutdownTimeout()
 		shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), timeout)
 
 		go func() {
@@ -342,7 +346,9 @@ func runDaemon(stdout, stderr io.Writer) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
-		shutdownCtx, shutdownCancel, drainDone, err := serveHTTPUntilShutdown(ctx, server, unixListener, tcpListener, cfg.ShutdownTimeout, func() {
+		shutdownCtx, shutdownCancel, drainDone, err := serveHTTPUntilShutdown(ctx, server, unixListener, tcpListener, func() time.Duration {
+			return app.getConfig().ShutdownTimeout
+		}, func() {
 			// Shutdown triggered (signal or Serve error) — close the operation
 			// gate so no new operations are accepted.
 			if app.OperationSupervisor != nil {

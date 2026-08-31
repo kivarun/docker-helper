@@ -434,7 +434,7 @@ Configuration fields:
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
 | `audit_enabled` | boolean | Override audit behavior (default: `true` in system mode; in user mode, `true` only when `log_level` is `debug`) |
-| `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `30s`) |
+| `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `25s`; maximum `25s` so the budget always fits inside systemd `TimeoutStopSec=30s` with a 5s force-cleanup margin) |
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log and synchronous pull output (bounded buffer, default: `4194304` = 4 MiB) |
@@ -577,7 +577,9 @@ HTTP address (default `127.0.0.1:52375`).
 
 On SIGINT or SIGTERM, docker-helper stops accepting new connections and
 waits for in-flight HTTP requests to complete, up to the configured
-`shutdown_timeout` (default 30 seconds).
+`shutdown_timeout` (default and maximum 25 seconds). The shipped systemd
+units use `TimeoutStopSec=30s`, leaving a 5-second margin after the internal
+graceful budget for final force cleanup and process exit.
 
 #### Manual foreground run
 

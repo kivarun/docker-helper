@@ -691,7 +691,7 @@ func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainCh, serveDoneErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
+		_, shutdownCancel, drainCh, serveDoneErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return 30 * time.Second }, nil)
 		<-drainCh
 		shutdownCancel()
 		serveDone <- serveDoneErr
@@ -730,7 +730,7 @@ func TestGracefulShutdownAllowsSubsequentStart(t *testing.T) {
 			}
 			defer listener.Close()
 			defer os.Remove(socketPath)
-			_, shutdownCancel, drainCh, err := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
+			_, shutdownCancel, drainCh, err := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return 30 * time.Second }, nil)
 			<-drainCh
 			shutdownCancel()
 			return err
@@ -772,7 +772,7 @@ func TestServeErrorBeforeShutdown(t *testing.T) {
 
 	serveDone := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainCh, serveDoneErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
+		_, shutdownCancel, drainCh, serveDoneErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return 30 * time.Second }, nil)
 		<-drainCh
 		shutdownCancel()
 		serveDone <- serveDoneErr
@@ -826,7 +826,7 @@ func TestGracefulShutdownDrainsRequestAndHoldsLock(t *testing.T) {
 			defer listener.Close()
 			defer os.Remove(socketPath)
 			close(listenerReady)
-			_, shutdownCancel, drainCh, err := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
+			_, shutdownCancel, drainCh, err := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return 30 * time.Second }, nil)
 			<-drainCh
 			shutdownCancel()
 			return err
@@ -996,7 +996,7 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 
 	go func() {
 		defer close(serverDone)
-		_, shutdownCancel, drainCh, _ := serveHTTPUntilShutdown(signalCtx, server, listener, nil, shutdownTimeout, nil)
+		_, shutdownCancel, drainCh, _ := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return shutdownTimeout }, nil)
 		drainErr = <-drainCh
 		shutdownCancel()
 	}()
@@ -1097,6 +1097,66 @@ func TestGracefulShutdownTimeoutForcesClose(t *testing.T) {
 	}
 }
 
+// TestServeShutdownBudgetReflectsReloadedValue verifies that the shutdown
+// budget is read from the ACTUAL App configuration at the moment shutdown
+// begins, so a reload (setConfig) changes the observed shutdown budget. The
+// daemon startup value must NOT be used after a reload.
+func TestServeShutdownBudgetReflectsReloadedValue(t *testing.T) {
+	// Startup configuration: 2s budget.
+	app := &App{Config: &Config{ShutdownTimeout: 2 * time.Second}}
+
+	// Simulate an operator reload that raises shutdown_timeout to 5s.
+	app.setConfig(&Config{ShutdownTimeout: 5 * time.Second})
+
+	signalCtx, signalCancel := context.WithCancel(context.Background())
+	defer signalCancel()
+
+	server := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	type result struct {
+		shutdownCtx    context.Context
+		shutdownCancel func()
+		drainDone      <-chan error
+		serveErr       error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		sc, scancel, dd, e := serveHTTPUntilShutdown(signalCtx, server, listener, nil,
+			func() time.Duration { return app.getConfig().ShutdownTimeout }, nil)
+		resultCh <- result{sc, scancel, dd, e}
+	}()
+
+	// Trigger shutdown; the budget must now reflect the reloaded 5s.
+	signalCancel()
+	res := <-resultCh
+	defer res.shutdownCancel()
+
+	// The shutdown context deadline must carry the RELOADED 5s budget, never
+	// the 2s value captured at daemon startup.
+	deadline, ok := res.shutdownCtx.Deadline()
+	if !ok {
+		t.Fatal("shutdown context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining > 5*time.Second || remaining < 4*time.Second {
+		t.Fatalf("shutdown budget should reflect reloaded 5s, got %v", remaining)
+	}
+
+	select {
+	case <-res.drainDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("drain did not complete")
+	}
+	if res.serveErr != nil {
+		t.Fatalf("serve error: %v", res.serveErr)
+	}
+}
+
 // TestServerErrorLogGoesToOperational verifies that http.Server.ErrorLog
 // is bridged to the operational logging pipeline so that internal net/http
 // diagnostics appear as structured JSON with stream=operational.
@@ -1153,7 +1213,7 @@ func TestServeHTTPUntilShutdownUserModeServeError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 30*time.Second, nil)
+		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return 30 * time.Second }, nil)
 		if shutdownCancel != nil {
 			<-drainDone
 			shutdownCancel()
@@ -1196,7 +1256,7 @@ func TestServeHTTPUntilShutdownUnixServeError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
+		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, unixListener, tcpListener, func() time.Duration { return 30 * time.Second }, nil)
 		if shutdownCancel != nil {
 			<-drainDone
 			shutdownCancel()
@@ -1242,7 +1302,7 @@ func TestServeHTTPUntilShutdownTCPServeError(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, unixListener, tcpListener, 30*time.Second, nil)
+		_, shutdownCancel, drainDone, serveErr := serveHTTPUntilShutdown(signalCtx, server, unixListener, tcpListener, func() time.Duration { return 30 * time.Second }, nil)
 		if shutdownCancel != nil {
 			<-drainDone
 			shutdownCancel()

@@ -154,7 +154,7 @@ var configSetCommand = &Command{
   session_ttl             positive Go duration, for example 30m or 12h (required)
   log_level               debug, info, warn, or error
   audit_enabled           true or false
-  shutdown_timeout        positive Go duration, for example 30s (default 30s)
+  shutdown_timeout        positive Go duration, up to 25s (default 25s; must fit inside systemd TimeoutStopSec=30s)
   operation_retention_ttl positive Go duration, for example 10m (default 10m)
   operation_max_completed positive integer (default 200)
   operation_log_max_bytes positive integer, bytes (default 4194304 = 4 MiB)
@@ -200,7 +200,7 @@ var configUnsetCommand = &Command{
 	Help: `Unsettable fields:
   log_level               removing it restores the effective default info
   audit_enabled           removing it restores behavior derived from log_level
-  shutdown_timeout        removing it restores the default 30s
+  shutdown_timeout        removing it restores the default 25s
   operation_retention_ttl removing it restores the default 10m
   operation_max_completed removing it restores the default 200
   operation_log_max_bytes removing it restores the default 4 MiB
@@ -850,7 +850,7 @@ func configSet(field, value string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	case "shutdown_timeout":
-		if _, err := parseDurationPositive(value, "shutdown_timeout"); err != nil {
+		if _, err := parseShutdownTimeout(value); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 2
 		}

@@ -299,6 +299,8 @@ func TestConfigSetValidation(t *testing.T) {
 	}{
 		{"invalid duration", []string{"config", "set", "session_ttl", "notaduration"}, "invalid"},
 		{"negative duration", []string{"config", "set", "session_ttl", "-1h"}, "positive"},
+		{"invalid shutdown_timeout", []string{"config", "set", "shutdown_timeout", "notaduration"}, "invalid"},
+		{"shutdown_timeout over maximum", []string{"config", "set", "shutdown_timeout", "30s"}, "exceeds the maximum"},
 		{"invalid log_level", []string{"config", "set", "log_level", "verbose"}, "invalid"},
 		{"invalid audit_enabled", []string{"config", "set", "audit_enabled", "yes"}, "true or false"},
 		{"allowed_root scalar rejected", []string{"config", "set", "allowed_root", "/home/user/work"}, "no longer settable"},
@@ -2007,7 +2009,7 @@ func TestConfigShowEffectiveInvariant(t *testing.T) {
 	checkField("log_level", "info")
 	checkField("audit_enabled", false)
 	checkField("audit_enabled_source", "log_level")
-	checkField("shutdown_timeout", "30s")
+	checkField("shutdown_timeout", "25s")
 	checkField("operation_retention_ttl", "10m")
 	checkField("operation_max_completed", float64(200))
 	checkField("trusted_ca_injection", "disabled")

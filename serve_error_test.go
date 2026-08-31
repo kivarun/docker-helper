@@ -62,7 +62,7 @@ func TestServeErrorPathDrainsAndClosesGate(t *testing.T) {
 	resultCh := make(chan result, 1)
 
 	go func() {
-		sc, scancel, dd, e := serveHTTPUntilShutdown(signalCtx, server, listener, nil, 3*time.Second, func() {
+		sc, scancel, dd, e := serveHTTPUntilShutdown(signalCtx, server, listener, nil, func() time.Duration { return 3 * time.Second }, func() {
 			callbackCalled.Store(true)
 			supervisor.beginShutdown()
 		})
