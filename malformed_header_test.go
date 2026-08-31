@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"net"
@@ -96,8 +97,18 @@ func TestMalformedResponseHeaderErrorEscapesRawInput(t *testing.T) {
 		if err != nil {
 			return
 		}
+		defer conn.Close()
+		// Read the request before responding: the client transport registers
+		// the in-flight request (numExpectedResponses) before writing it, so
+		// once the request arrives the client read loop can no longer treat
+		// our response as an "unsolicited response on idle HTTP channel" and
+		// drop the connection (readLoopPeekFailLocked) — a race that
+		// nondeterministically produced a connection error instead of the
+		// malformed-header parse error being asserted below.
+		if _, err := http.ReadRequest(bufio.NewReader(conn)); err != nil {
+			return
+		}
 		io.WriteString(conn, "HTTP/1.1 200 OK\r\nX-Evil: "+marker+"\x1b[2JX\r\nContent-Length: 0\r\n\r\n")
-		conn.Close()
 	}()
 
 	transport := &http.Transport{
