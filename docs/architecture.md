@@ -536,7 +536,8 @@ docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 - running build/run processes receive graceful SIGTERM;
 - for run, helper-owned containers are cleaned up via cidfile before
   force-killing the Docker CLI process;
-- after the deadline, still-running processes are force-killed;
+- at the reserved force-cleanup window before the deadline, still-running
+  processes are force-killed;
 - the completion goroutine owns `cmd.Wait()` and reaps each process;
 - the lock is held during the entire drain so a second instance cannot
   start until the first fully stops;
@@ -546,8 +547,14 @@ docker-helper installs a signal handler for SIGINT and SIGTERM. On stop:
 After `TimeoutStopSec=45s`, systemd sends SIGKILL if any processes
 remain. The internal `shutdown_timeout` budget is therefore bounded: its
 maximum is `30s` (the default too), so the internal graceful budget always
-fits inside `TimeoutStopSec=45s` with a 15s margin for the final
-force-cleanup / process-exit phase. New values above `30s` are rejected by
+fits inside `TimeoutStopSec=45s`. The last part of the 30s budget is
+reserved by the supervisor for force cleanup, which runs concurrently under
+the shared absolute deadline and must finish by it — force cleanup never
+starts after `shutdown_timeout`. The remaining 15s between the internal
+maximum and `TimeoutStopSec=45s` sits outside the daemon budget and covers
+process final exit, scheduler/kernel/systemd overhead, and systemd's SIGKILL
+fallback if the process still has not exited; it is not intended for the
+regular internal force-cleanup phase. New values above `30s` are rejected by
 `config set`. For Release 1 upgrade compatibility (v1.0.2 accepted any
 positive `shutdown_timeout`), a persisted value above `30s` is loaded but
 bounded to `30s` at startup/reload with an operational warning; `config

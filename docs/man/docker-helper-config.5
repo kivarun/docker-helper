@@ -96,14 +96,17 @@ admin, and Docker-operation events.
 .B shutdown_timeout (string, optional, default="30s", maximum="30s")
 Graceful shutdown timeout using Go duration syntax. The maximum is 30s: the
 internal graceful shutdown budget (HTTP drain + operation termination) must
-always fit inside the shipped systemd \fBTimeoutStopSec=45s\fR, leaving a 15s
-margin for final force cleanup and process exit. New values above 30s are
-rejected by \fBconfig set\fR. For Release 1 upgrade compatibility (v1.0.2
-accepted any positive value), an existing config may contain a value above
-30s; such a value is accepted on startup/reload but bounded to 30s at load,
-with an operational warning, and \fBconfig show\fR reports the bounded
-effective value. Use \fBconfig set shutdown_timeout\fR to lower it within the
-maximum.
+always fit inside the shipped systemd \fBTimeoutStopSec=45s\fR. The last part
+of the 30s budget is reserved for force cleanup, which must finish by the
+\fBshutdown_timeout\fR deadline (force cleanup never starts after the
+deadline); the remaining 15s outside the internal maximum covers process exit
+and systemd's SIGKILL fallback, not the internal force-cleanup phase. New
+values above 30s are rejected by \fBconfig set\fR. For Release 1 upgrade
+compatibility (v1.0.2 accepted any positive value), an existing config may
+contain a value above 30s; such a value is accepted on startup/reload but
+bounded to 30s at load, with an operational warning, and \fBconfig show\fR
+reports the bounded effective value. Use \fBconfig set shutdown_timeout\fR to
+lower it within the maximum.
 .TP
 .B operation_retention_ttl (string, optional, default="10m")
 Completed operation retention period using Go duration syntax.

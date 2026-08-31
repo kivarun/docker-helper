@@ -639,8 +639,11 @@ func parseDurationPositive(s, name string) (time.Duration, error) {
 
 // maxShutdownTimeout is the documented maximum shutdown_timeout. The internal
 // graceful shutdown budget (HTTP drain + operation termination) must always
-// fit inside the shipped systemd TimeoutStopSec=45s, leaving a 15s margin for
-// the final force-cleanup / process-exit phase after the budget expires.
+// fit inside the shipped systemd TimeoutStopSec=45s. The last part of the
+// budget is reserved for force cleanup, which must finish by the
+// shutdown_timeout deadline; the remaining 15s outside the internal maximum
+// covers process exit and systemd's SIGKILL fallback, not the internal
+// force-cleanup phase.
 const maxShutdownTimeout = 30 * time.Second
 
 // resolveShutdownTimeout returns the effective shutdown_timeout for a configured
@@ -675,7 +678,7 @@ func parseShutdownTimeout(s string) (time.Duration, error) {
 		return 0, err
 	}
 	if d > maxShutdownTimeout {
-		return 0, fmt.Errorf("shutdown_timeout %s exceeds the maximum %s (must fit inside systemd TimeoutStopSec=45s with a force-cleanup margin)", d, maxShutdownTimeout)
+		return 0, fmt.Errorf("shutdown_timeout %s exceeds the maximum %s (must fit inside systemd TimeoutStopSec=45s, leaving headroom for process exit)", d, maxShutdownTimeout)
 	}
 	return d, nil
 }
