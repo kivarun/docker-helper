@@ -359,6 +359,13 @@ that Principal's `default` Launcher when no Launcher is selected explicitly; an
 admin can name a Principal and resolve that Principal's `default` Launcher.
 Explicit authorized selectors remain available when the default is not desired.
 
+Release 2.1 also includes a small operator-UX parity item for mandatory-access
+control diagnostics: add `docker-helper selinux check` as the SELinux-side
+counterpart to the existing `docker-helper apparmor check`. This command is
+diagnostics only; it must not select the active MAC backend or create a second
+runtime authority. Backend selection and fail-closed system-mode enforcement
+remain owned by the existing backend-neutral MAC detection/confinement path.
+
 These flows do not add desired state, managed-container lifecycle, restart
 policy, interactive exec, networking, port publishing, or resource-limit
 semantics.
