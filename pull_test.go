@@ -474,6 +474,7 @@ func TestClassifyDockerError(t *testing.T) {
 		{"pull access denied for repo, repository does not exist", dockerErrorAuthDenied},
 		{"unauthorized: authentication required", dockerErrorAuthDenied},
 		{"failed with status: 401 Unauthorized", dockerErrorAuthDenied},
+		{"no basic auth credentials", dockerErrorAuthDenied},
 		{"dial tcp: lookup registry-1.docker.io: no such host", dockerErrorNetwork},
 		{"connection refused", dockerErrorNetwork},
 		{"some unrelated error text", dockerErrorUnknown},

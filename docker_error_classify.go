@@ -44,7 +44,8 @@ func classifyDockerError(output string) dockerErrorKind {
 		strings.Contains(lower, "failed with status: 401") ||
 		strings.Contains(lower, "pull access denied") ||
 		strings.Contains(lower, "denied: requested access") ||
-		strings.Contains(lower, "authorization failed") {
+		strings.Contains(lower, "authorization failed") ||
+		strings.Contains(lower, "no basic auth credentials") {
 		return dockerErrorAuthDenied
 	}
 
