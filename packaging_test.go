@@ -1357,6 +1357,83 @@ func TestUserUnitStillExists(t *testing.T) {
 	}
 }
 
+// activeTimeoutStopSec returns the values of active (non-commented)
+// TimeoutStopSec= directives in a systemd unit, in file order.
+func activeTimeoutStopSec(content string) []string {
+	var vals []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "TimeoutStopSec=") {
+			vals = append(vals, strings.TrimPrefix(trimmed, "TimeoutStopSec="))
+		}
+	}
+	return vals
+}
+
+// timeoutStopSecViolation validates the Release 2 stop-timeout contract for a
+// systemd unit: exactly one active TimeoutStopSec= directive with the value
+// 45s (the internal shutdown budget is max 30s; the extra 15s is the external
+// process-exit / SIGKILL-fallback margin, never the internal force-cleanup
+// phase). Returns "" when the unit complies, otherwise a violation
+// description. Commented directives are not active.
+func timeoutStopSecViolation(content string) string {
+	vals := activeTimeoutStopSec(content)
+	if len(vals) != 1 {
+		return fmt.Sprintf("expected exactly one active TimeoutStopSec= directive, got %v", vals)
+	}
+	if vals[0] != "45s" {
+		return fmt.Sprintf("TimeoutStopSec=%s, want 45s", vals[0])
+	}
+	return ""
+}
+
+// TestSystemdTimeoutStopSecContract pins the TimeoutStopSec=45s contract on
+// both shipped units and proves the assertion logic catches wrong values
+// (e.g. 30s), a missing directive, duplicate active directives, and commented
+// directives (which are not active).
+func TestSystemdTimeoutStopSecContract(t *testing.T) {
+	units := []string{
+		"packaging/systemd/system/docker-helper.service",
+		"packaging/systemd/user/docker-helper.service",
+	}
+	for _, path := range units {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("cannot read unit %s: %v", path, err)
+		}
+		if v := timeoutStopSecViolation(string(data)); v != "" {
+			t.Errorf("%s: %s", path, v)
+		}
+		if vals := activeTimeoutStopSec(string(data)); len(vals) != 1 || vals[0] != "45s" {
+			t.Errorf("%s: active TimeoutStopSec values = %v, want exactly [45s]", path, vals)
+		}
+	}
+
+	// Fail-closed proof: each fixture must be rejected by the same assertion
+	// logic that validates the shipped units.
+	fixtures := []struct {
+		name    string
+		content string
+		want    string // expected violation substring
+	}{
+		{"wrong value", "# comment\nTimeoutStopSec=30s\n", "want 45s"},
+		{"other value", "TimeoutStopSec=60s\n", "want 45s"},
+		{"missing directive", "[Service]\nExecStart=/usr/bin/docker-helper serve\n", "exactly one active"},
+		{"duplicate directives", "TimeoutStopSec=45s\nTimeoutStopSec=45s\n", "exactly one active"},
+		{"commented directive not active", "# TimeoutStopSec=45s\n", "exactly one active"},
+		{"empty", "", "exactly one active"},
+	}
+	for _, tc := range fixtures {
+		got := timeoutStopSecViolation(tc.content)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("fixture %q: violation = %q, want substring %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // --- System AppArmor profile tests ---
 
 // TestSystemAppArmorProfileFile verifies the system AppArmor profile:
