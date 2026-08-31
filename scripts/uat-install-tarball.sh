@@ -96,6 +96,19 @@ install_apply() {
     || fail_uat "could not create bundle extract directory"
   BUNDLE_DIR="$extract_root/docker-helper-${VERSION}-linux-amd64"
 
+  # 0. Independent canonical-ownership check: every archive entry (files AND
+  #    directories) must carry numeric ownership 0:0. The producer records this
+  #    contract, but the UAT re-verifies it independently so a regression to
+  #    runner UID/GID leaks fails here, not in production.
+  local own_bad ent_count
+  own_bad="$(tar tzvf "$ARTIFACT_PATH" 2>&1 | awk '!($2 == "0/0") { print $2 "\t" $6 }')" \
+    || fail_uat "could not inspect tarball ownership of $ARTIFACT_PATH"
+  ent_count="$(tar tzvf "$ARTIFACT_PATH" 2>&1 | wc -l)"
+  [ "$ent_count" -gt 0 ] \
+    || fail_uat "tarball has no parseable entries — ownership cannot be verified: $ARTIFACT_PATH"
+  [ -z "$own_bad" ] || fail_uat "tarball entries not owned 0:0:"$'\n'"$own_bad"
+  info "tarball canonical ownership 0:0 verified for all $ent_count entries"
+
   # 1. The archive must extract successfully.
   tar xzf "$ARTIFACT_PATH" -C "$extract_root" \
     || fail_uat "tar extraction of $ARTIFACT_PATH failed"

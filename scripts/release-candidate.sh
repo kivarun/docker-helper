@@ -106,6 +106,14 @@ BIN_VERSION="$("$DIST_DIR/docker-helper" version)"
 
 tar tzf "$TARBALL" >/dev/null 2>&1 || fail "tarball is corrupt or unreadable: $TARBALL"
 
+# --- Verify tarball canonical numeric ownership --------------------------------
+# Every archive entry (files AND directories) must carry canonical numeric
+# ownership 0:0 so the release tarball is byte-identical in ownership regardless
+# of the build environment. Fail closed on any non-root entry.
+NON_ROOT_OWN="$(tar tzvf "$TARBALL" | awk '!($2 == "0/0") { print $2 "\t" $6 }')"
+[ -z "$NON_ROOT_OWN" ] || fail "tarball entries not owned 0:0:"$'\n'"$NON_ROOT_OWN"
+echo "OK: tarball entries (files and directories) owned 0:0"
+
 # --- Verify DEB identity -------------------------------------------------------
 
 # NOTE: grep is used WITHOUT -q here. With set -o pipefail, `grep -q` closes the

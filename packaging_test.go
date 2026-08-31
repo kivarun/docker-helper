@@ -476,6 +476,18 @@ func TestBuildBundleScriptContent(t *testing.T) {
 			t.Errorf("build-bundle.sh must bundle %s", s)
 		}
 	}
+	// Must create the tarball with canonical numeric ownership 0:0 independent
+	// of the build environment (runner UID/GID must never leak into the archive).
+	if !strings.Contains(content, "--owner=0 --group=0 --numeric-owner") {
+		t.Error("build-bundle.sh must create the tarball with --owner=0 --group=0 --numeric-owner")
+	}
+	// Must fail closed when any archive entry (files or directories) is not 0:0.
+	if !strings.Contains(content, `$2 == "0/0"`) {
+		t.Error("build-bundle.sh must verify every archive entry is owned 0:0")
+	}
+	if !strings.Contains(content, "not owned 0:0") {
+		t.Error("build-bundle.sh must fail with an ownership-specific message on non-root entries")
+	}
 }
 
 // TestBuildBundleSELinuxArtifact verifies build-bundle.sh verifies the SELinux

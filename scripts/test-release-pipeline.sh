@@ -70,7 +70,8 @@ mkdir -p "$D"
   printf '#!/usr/bin/env bash\necho "%s"\n' "${FAKE_BIN_VERSION:-$VERSION}" > "$D/docker-helper"
   chmod +x "$D/docker-helper"
   printf 'bundle-content\n' > "$D/bundle-content.txt"
-  tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" -C "$D" bundle-content.txt
+  tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
+    --owner=0 --group=0 --numeric-owner -C "$D" bundle-content.txt
 EOF
   cat > "$repo/build-packages.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -205,8 +206,10 @@ printf '#!/usr/bin/env bash\necho "%s"\n' "$VERSION" > "$D/docker-helper"
 chmod +x "$D/docker-helper"
 printf 'a\n' > "$D/bundle-a.txt"
 printf 'b\n' > "$D/bundle-b.txt"
-tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" -C "$D" bundle-a.txt
-tar czf "$D/docker-helper-${VERSION}-linux-amd64.extra.tar.gz" -C "$D" bundle-b.txt
+tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
+  --owner=0 --group=0 --numeric-owner -C "$D" bundle-a.txt
+tar czf "$D/docker-helper-${VERSION}-linux-amd64.extra.tar.gz" \
+  --owner=0 --group=0 --numeric-owner -C "$D" bundle-b.txt
 EOF
 chmod +x "$REPO2/build-bundle.sh"
 ( cd "$REPO2" && scripts/release-candidate.sh "$VERSION" "$SOURCE_SHA" ) >/dev/null 2>&1
@@ -225,6 +228,28 @@ if [ $? -ne 0 ]; then
 else
   bad "producer must fail when the built binary version mismatches VERSION"
 fi
+
+# --- T-own: non-root archive ownership is fatal ----------------------------------
+# Regression: build-bundle.sh used to record the builder's UID/GID in the
+# tarball. A mock builder that reproduces that leak (explicit non-root numeric
+# ownership, as a root-less runner produces) must fail closed in the producer.
+REPO_OWN="$WORK/repo-bad-ownership"
+make_repo "$REPO_OWN"
+cat > "$REPO_OWN/build-bundle.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="${1:?}"
+D="$(cd "$(dirname "$0")" && pwd)/dist"
+mkdir -p "$D"
+printf '#!/usr/bin/env bash\necho "%s"\n' "$VERSION" > "$D/docker-helper"
+chmod +x "$D/docker-helper"
+printf 'bundle-content\n' > "$D/bundle-content.txt"
+tar czf "$D/docker-helper-${VERSION}-linux-amd64.tar.gz" \
+  --owner=12345 --group=12345 --numeric-owner -C "$D" bundle-content.txt
+EOF
+chmod +x "$REPO_OWN/build-bundle.sh"
+expect_fail "producer rejects a tarball with non-root archive ownership" "not owned 0:0" \
+  bash -c "cd '$REPO_OWN' && scripts/release-candidate.sh '$VERSION' '$SOURCE_SHA'"
 
 # --- T4: promotion verification happy path + producer SHA256SUMS reused ----------
 SHA_BEFORE="$(sha256sum "$CAND/SHA256SUMS" | awk '{print $1}')"

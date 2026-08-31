@@ -142,7 +142,11 @@ cp "$OUT_DIR/completions/docker-helper" "$BUNDLE_DIR/completions/docker-helper"
 
 echo "=== Creating tarball ==="
 
+# Canonical numeric ownership 0:0: the release tarball must carry the same
+# UID/GID regardless of the build environment (a root-less runner or a local
+# developer machine must not leak its UID/GID into the shipped artifact).
 tar czf "$TARBALL" \
+  --owner=0 --group=0 --numeric-owner \
   -C "$OUT_DIR" \
   "docker-helper-${VERSION}-linux-amd64"
 
@@ -223,6 +227,17 @@ for expected in "${EXPECTED_PATHS[@]}"; do
   fi
 done
 echo "OK: tarball contains all required paths"
+
+# Check canonical numeric ownership: every archive entry — files AND
+# directories — must be owned 0:0, independent of the build environment.
+# GNU tar with --numeric-owner lists the owner as <uid>/<gid> (0/0).
+NON_ROOT_OWN=$(tar tzvf "$TARBALL" | awk '!($2 == "0/0") { print $2 "\t" $6 }')
+if [[ -n "$NON_ROOT_OWN" ]]; then
+  echo "FAIL: tarball entries are not owned 0:0:" >&2
+  echo "$NON_ROOT_OWN" >&2
+  exit 1
+fi
+echo "OK: all tarball entries (files and directories) owned 0:0"
 
 # Check executable bits for files that must be executable.
 for f in docker-helper install.sh uninstall.sh install-system.sh uninstall-system.sh; do
