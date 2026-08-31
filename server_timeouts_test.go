@@ -386,6 +386,72 @@ func TestServerKeepAliveResponseDeadlineReset(t *testing.T) {
 	}
 }
 
+// H. FLUSH-ARMED SLOW CLIENT: the handler's first response write is Flush()
+// (no WriteHeader/Write before it). A non-reading client blocks that flush; the
+// response-delivery deadline armed at the flush must unblock it. Without the
+// arm in Flush, a flush-only handler would block forever.
+func TestServerFirstResponseFlushArmsDeliveryDeadline(t *testing.T) {
+	const deliveryWindow = 200 * time.Millisecond
+	to := serverTimeouts{
+		readHeader:       time.Second,
+		read:             5 * time.Second,
+		idle:             time.Second,
+		responseDelivery: deliveryWindow,
+	}
+	mux := http.NewServeMux()
+	flushReturned := make(chan struct{})
+	mux.HandleFunc("/flush", func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		close(flushReturned)
+	})
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	})
+	server := newHTTPServerWithTimeouts(mux, to)
+	pl := newPipeListener()
+	go server.Serve(pl) //nolint:errcheck
+	defer server.Close()
+
+	// Non-reading client: request the flush-only endpoint, then never read.
+	client := pl.Dial()
+	defer client.Close()
+	if _, err := fmt.Fprintf(client, "GET /flush HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	select {
+	case <-flushReturned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("flush-only handler blocked forever: Flush did not arm the delivery deadline")
+	}
+	elapsed := time.Since(start)
+	if elapsed < deliveryWindow/2 {
+		t.Fatalf("flush unblocked too early (%v), not via delivery deadline", elapsed)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("flush not unblocked within delivery bound: %v", elapsed)
+	}
+
+	// Server remains healthy for a fresh connection.
+	okClient := pl.Dial()
+	defer okClient.Close()
+	req, _ := http.NewRequest("GET", "http://x/ok", nil)
+	if err := req.Write(okClient); err != nil {
+		t.Fatal(err)
+	}
+	okClient.SetReadDeadline(time.Now().Add(3 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(okClient), req)
+	if err != nil {
+		t.Fatalf("server unhealthy after flush-armed slow client: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "ok" {
+		t.Fatalf("server unhealthy after flush-armed slow client: body = %q", body)
+	}
+}
+
 // G. EXISTING HEADER BOUND: the production server must keep ReadHeaderTimeout
 // at 10s, and the production connection-lifetime bounds must be applied.
 func TestProductionServerReadHeaderTimeoutPreserved(t *testing.T) {

@@ -539,8 +539,11 @@ func (w *deliveryBoundedWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
-// Flush forwards http.Flusher when the underlying writer supports it.
+// Flush forwards http.Flusher when the underlying writer supports it. A flush
+// is a response write, so it arms the response-delivery deadline like
+// WriteHeader, Write, and ReadFrom do.
 func (w *deliveryBoundedWriter) Flush() {
+	w.arm()
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
