@@ -117,6 +117,37 @@ json_field() { # field
   grep -oP "\"$1\": \"\K[^\"]+" | head -1
 }
 
+# classify_registry_failure STREAM — the single classifier for a captured
+# docker CLI failure stream in the registry scenarios. Emits one of:
+#   network — a network/backend marker is present (checked FIRST). This is
+#             NEVER proof of a registry auth/authorization denial, even if an
+#             auth marker also appears below.
+#   auth    — a registry auth/authorization-denial marker is present and no
+#             network marker matched.
+#   unknown — neither; NOT proof of a registry auth/authorization denial.
+# Markers mirror production classifyDockerError (docker_error_classify.go) and
+# are matched case-insensitively. Fail-closed: only "auth" may satisfy an
+# auth-denial acceptance assertion.
+classify_registry_failure() {
+  local stream="$1" lower
+  lower="$(printf '%s\n' "$stream" | tr '[:upper:]' '[:lower:]')"
+
+  if printf '%s\n' "$lower" | grep -qE \
+      'dial tcp|connection refused|no such host|i\/o timeout|tls handshake timeout|connection reset|proxyconnect|net\/http: request canceled'; then
+    printf 'network\n'
+    return 0
+  fi
+
+  if printf '%s\n' "$lower" | grep -qE \
+      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
+    printf 'auth\n'
+    return 0
+  fi
+
+  printf 'unknown\n'
+  return 0
+}
+
 SOCK="/run/docker-helper/docker-helper.sock"
 HTTP_ENDPOINT="http://127.0.0.1:52375"
 CRED_DIR="/tmp/uat-r2ac"
@@ -506,16 +537,18 @@ if [ "$REG_UP" = 1 ]; then
   # 3-4. Session A has no registry credentials -> private pull must FAIL with
   #      a registry authentication/authorization denial. Any other failure
   #      (Docker/helper runtime, network) is an unexpected error, NOT proof of
-  #      the no-credentials path. The markers mirror docker-helper's own
-  #      classifyDockerError auth-denial set.
+  #      the no-credentials path. The classifier is fail-closed: only its
+  #      "auth" result may satisfy this assertion (network/unknown cannot).
   A_NOAUTH_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_A" \
     dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
   A_NOAUTH_EC=$?
+  A_NOAUTH_KIND="$(classify_registry_failure "$A_NOAUTH_OUT")"
   if [ "$A_NOAUTH_EC" -eq 0 ]; then
     acc_fail "private pull unexpectedly succeeded without registry credentials (session A)"
-  elif printf '%s\n' "$A_NOAUTH_OUT" | grep -qiE \
-      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
+  elif [ "$A_NOAUTH_KIND" = auth ]; then
     acc_ok "private pull fails for session A without registry credentials (auth denial)"
+  elif [ "$A_NOAUTH_KIND" = network ]; then
+    acc_fail "private pull failed for session A with a network error, not a registry auth denial (rc=$A_NOAUTH_EC): $(printf '%s\n' "$A_NOAUTH_OUT" | redact | tail -3)"
   else
     acc_fail "private pull failed for session A but not for a registry auth reason (rc=$A_NOAUTH_EC): $(printf '%s\n' "$A_NOAUTH_OUT" | redact | tail -3)"
   fi
@@ -543,16 +576,19 @@ if [ "$REG_UP" = 1 ]; then
   #    not what the isolation contract proves. The expected failure must be a
   #    registry authentication/authorization denial — any other failure
   #    (Docker/helper runtime, network) is an unexpected error, not proof of
-  #    isolation.
+  #    isolation. The classifier is fail-closed: only its "auth" result may
+  #    satisfy this assertion (network/unknown cannot).
   docker rmi "$REG_ADDR/uat/private:v1" >/dev/null 2>&1 || true
   B_ISO_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$C_TOKEN_B" \
     dh run --image "$REG_ADDR/uat/private:v1" -- sh -ec 'true' 2>&1)"
   B_ISO_EC=$?
+  B_ISO_KIND="$(classify_registry_failure "$B_ISO_OUT")"
   if [ "$B_ISO_EC" -eq 0 ]; then
     acc_fail "session B unexpectedly pulled the private image (isolation broken)"
-  elif printf '%s\n' "$B_ISO_OUT" | grep -qiE \
-      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
+  elif [ "$B_ISO_KIND" = auth ]; then
     acc_ok "session B cannot pull the private image (isolation holds: auth denial)"
+  elif [ "$B_ISO_KIND" = network ]; then
+    acc_fail "session B pull failed with a network error, not a registry auth denial (rc=$B_ISO_EC): $(printf '%s\n' "$B_ISO_OUT" | redact | tail -3)"
   else
     acc_fail "session B pull failed but not for a registry auth reason (rc=$B_ISO_EC): $(printf '%s\n' "$B_ISO_OUT" | redact | tail -3)"
   fi

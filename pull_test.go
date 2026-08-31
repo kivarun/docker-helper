@@ -477,6 +477,9 @@ func TestClassifyDockerError(t *testing.T) {
 		{"no basic auth credentials", dockerErrorAuthDenied},
 		{"dial tcp: lookup registry-1.docker.io: no such host", dockerErrorNetwork},
 		{"connection refused", dockerErrorNetwork},
+		// Network markers are checked first: a mixed stream that also carries
+		// an auth marker must classify as network, never as an auth denial.
+		{"proxyconnect tcp: connection refused; failed with status: 401 Unauthorized", dockerErrorNetwork},
 		{"some unrelated error text", dockerErrorUnknown},
 		{"", dockerErrorUnknown},
 	}

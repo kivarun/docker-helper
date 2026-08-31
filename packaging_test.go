@@ -7423,36 +7423,189 @@ func runBashIn(t *testing.T, dir, script string) (string, error) {
 	return string(out), err
 }
 
-// TestRelease2AcceptanceAuthMarkersAlignWithProduction verifies the Release-2
-// acceptance script's registry auth-denial classifier mirrors production
-// classifyDockerError semantics: it must use the narrow markers (never a bare
-// "401") so an unrelated occurrence of "401" cannot satisfy the auth-denial
-// assertion.
-func TestRelease2AcceptanceAuthMarkersAlignWithProduction(t *testing.T) {
+// extractShellFunction returns the source of a top-level function named name
+// from a shell script. The function must have its body indented and close with
+// a "}" at column 0.
+func extractShellFunction(t *testing.T, path, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", path, err)
+	}
+	lines := strings.Split(string(data), "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, name+"() {") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("shell function %s not found in %s", name, path)
+	}
+	var b strings.Builder
+	for _, line := range lines[start:] {
+		b.WriteString(line)
+		b.WriteString("\n")
+		if line == "}" {
+			break
+		}
+	}
+	return b.String()
+}
+
+// TestRelease2AcceptanceClassifierPriority runs the shipped
+// classify_registry_failure helper over the required registry-failure vectors
+// and proves the network-first priority: a mixed stream carrying both network
+// and auth markers must classify as network, never as an auth denial. Only
+// "auth" may satisfy an auth-denial acceptance assertion (fail-closed).
+func TestRelease2AcceptanceClassifierPriority(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/uat-release2-acceptance.sh", "classify_registry_failure")
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"auth only", "unauthorized: authentication required", "auth"},
+		{"network only", "dial tcp: lookup registry-1.docker.io: no such host", "network"},
+		{"network plus auth", "proxyconnect tcp: connection refused; failed with status: 401 Unauthorized", "network"},
+		{"unknown", "some unrelated error text", "unknown"},
+		{"no basic auth credentials", "no basic auth credentials", "auth"},
+		{"failed with status 401", "failed with status: 401 Unauthorized", "auth"},
+	}
+	var sb strings.Builder
+	sb.WriteString(fn)
+	sb.WriteString("\n")
+	for _, tc := range cases {
+		fmt.Fprintf(&sb, "printf 'RESULT:%s='; classify_registry_failure %q\n", tc.name, tc.input)
+	}
+	out, err := runBashIn(t, ".", sb.String())
+	if err != nil {
+		t.Fatalf("bash classifier run failed: %v\n%s", err, out)
+	}
+	for _, tc := range cases {
+		re := regexp.MustCompile(`RESULT:` + regexp.QuoteMeta(tc.name) + `=(\S+)`)
+		m := re.FindStringSubmatch(out)
+		if m == nil {
+			t.Errorf("case %q: no classifier result in output:\n%s", tc.name, out)
+			continue
+		}
+		if m[1] != tc.want {
+			t.Errorf("case %q: classify_registry_failure = %q, want %q", tc.name, m[1], tc.want)
+		}
+	}
+}
+
+// productionClassifyMarkers returns the network and auth marker sets used by
+// production classifyDockerError, parsed from its source so the acceptance
+// helper cannot silently drift from production.
+func productionClassifyMarkers(t *testing.T) (network, auth []string) {
+	t.Helper()
+	data, err := os.ReadFile("docker_error_classify.go")
+	if err != nil {
+		t.Fatalf("cannot read docker_error_classify.go: %v", err)
+	}
+	markerRe := regexp.MustCompile(`strings\.Contains\(lower, "([^"]+)"\)`)
+	current := "network"
+	for _, line := range strings.Split(string(data), "\n") {
+		switch {
+		case strings.Contains(line, "return dockerErrorNetwork"):
+			current = "auth"
+			continue
+		case strings.Contains(line, "return dockerErrorAuthDenied"):
+			current = "image-not-found"
+			continue
+		}
+		if m := markerRe.FindStringSubmatch(line); m != nil {
+			switch current {
+			case "network":
+				network = append(network, m[1])
+			case "auth":
+				auth = append(auth, m[1])
+			}
+		}
+	}
+	return network, auth
+}
+
+// scriptClassifierMarkers returns the network and auth marker sets used by the
+// classify_registry_failure helper in the Release-2 acceptance script.
+func scriptClassifierMarkers(t *testing.T) (network, auth []string) {
+	t.Helper()
+	fn := extractShellFunction(t, "scripts/uat-release2-acceptance.sh", "classify_registry_failure")
+	re := regexp.MustCompile(`grep -qE[^']*'([^']+)'`)
+	var got []string
+	for _, m := range re.FindAllStringSubmatch(fn, -1) {
+		got = append(got, m[1])
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected network+auth marker regexes in classify_registry_failure, got %d", len(got))
+	}
+	unescape := func(s string) string { return strings.ReplaceAll(s, `\/`, `/`) }
+	for _, m := range strings.Split(unescape(got[0]), "|") {
+		network = append(network, strings.TrimSpace(m))
+	}
+	for _, m := range strings.Split(unescape(got[1]), "|") {
+		auth = append(auth, strings.TrimSpace(m))
+	}
+	return network, auth
+}
+
+// TestRelease2AcceptanceClassifierSingleOwner verifies the Release-2
+// acceptance script uses exactly one registry-failure classifier
+// (classify_registry_failure) in both the no-credentials and isolation checks,
+// with no ad-hoc marker regex left in the checks, and that the helper's
+// network/auth marker sets exactly match production classifyDockerError.
+func TestRelease2AcceptanceClassifierSingleOwner(t *testing.T) {
 	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
+	content := string(data)
 
-	const prefix = "'unauthorized|authentication required"
-	var markerLines []string
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.Contains(line, prefix) {
-			markerLines = append(markerLines, line)
+	// Both registry checks must route through the shared helper.
+	if n := strings.Count(content, "classify_registry_failure \"$A_NOAUTH_OUT\""); n != 1 {
+		t.Errorf("no-credentials check must call classify_registry_failure once, got %d", n)
+	}
+	if n := strings.Count(content, "classify_registry_failure \"$B_ISO_OUT\""); n != 1 {
+		t.Errorf("isolation check must call classify_registry_failure once, got %d", n)
+	}
+	// The helper must be invoked by name, not re-implemented inline: no
+	// remaining ad-hoc auth-denial marker regex outside the helper body.
+	if strings.Contains(strings.ReplaceAll(content, extractShellFunction(t, "scripts/uat-release2-acceptance.sh", "classify_registry_failure"), ""), "unauthorized|authentication required") {
+		t.Error("ad-hoc auth-denial marker regex must not remain outside classify_registry_failure")
+	}
+
+	// The helper's marker sets must exactly match production.
+	prodNet, prodAuth := productionClassifyMarkers(t)
+	scriptNet, scriptAuth := scriptClassifierMarkers(t)
+	slicesEqual := func(a, b []string) bool {
+		if len(a) != len(b) {
+			return false
 		}
+		set := make(map[string]bool, len(a))
+		for _, s := range a {
+			set[s] = true
+		}
+		for _, s := range b {
+			if !set[s] {
+				return false
+			}
+		}
+		return true
 	}
-	if len(markerLines) != 2 {
-		t.Fatalf("expected 2 auth-denial classifier lines (no-credentials + isolation checks), got %d", len(markerLines))
+	if !slicesEqual(prodNet, scriptNet) {
+		t.Errorf("classifier network markers mismatch production\ngot:  %v\nwant: %v", scriptNet, prodNet)
 	}
-
+	if !slicesEqual(prodAuth, scriptAuth) {
+		t.Errorf("classifier auth markers mismatch production\ngot:  %v\nwant: %v", scriptAuth, prodAuth)
+	}
+	// Neither marker set may contain a bare "401" alternative.
 	bare401 := regexp.MustCompile(`(^|\|)401(\||$)`)
-	for _, line := range markerLines {
-		if bare401.MatchString(line) {
-			t.Errorf("auth-denial classifier must not contain a bare 401 alternative: %s", strings.TrimSpace(line))
-		}
-		for _, m := range []string{"401 unauthorized", "failed with status: 401", "no basic auth credentials"} {
-			if !strings.Contains(line, m) {
-				t.Errorf("auth-denial classifier missing production marker %q: %s", m, strings.TrimSpace(line))
+	for _, set := range [][]string{scriptNet, scriptAuth} {
+		for _, m := range set {
+			if bare401.MatchString(m) {
+				t.Errorf("classifier marker %q must not be a bare 401", m)
 			}
 		}
 	}
