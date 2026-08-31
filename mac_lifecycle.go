@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -122,7 +123,7 @@ func (c *sessionMACCoordinator) CreateSessionBinding(workspace string, sessionID
 		if newlyCreated {
 			if rbErr := c.driver.removeBoundary(coverage.Boundary); rbErr != nil {
 				// Removal failed: KEEP ownership metadata for retry on next startup.
-				slog.Warn("MAC boundary removal failed during rollback, ownership preserved for retry",
+				opLog(context.Background()).Warn("MAC boundary removal failed during rollback, ownership preserved for retry",
 					slog.String("boundary", coverage.Boundary),
 					slog.String("error", rbErr.Error()))
 			} else {
@@ -261,7 +262,7 @@ func (c *sessionMACCoordinator) ReconcileLiveSessions() error {
 
 	// Clean up stale docker-helper-owned boundaries left by earlier failures.
 	if err := c.cleanupStaleBoundaries(); err != nil {
-		slog.Warn("stale MAC boundary cleanup failed", slog.String("error", err.Error()))
+		opLog(context.Background()).Warn("stale MAC boundary cleanup failed", slog.String("error", err.Error()))
 	}
 
 	return nil
@@ -279,7 +280,7 @@ func (c *sessionMACCoordinator) importHelperOwnedBoundaries() error {
 	}
 	for _, boundary := range boundaries {
 		if err := c.recordBoundaryOwnership(boundary); err != nil {
-			slog.Warn("failed to record helper-owned boundary during import",
+			opLog(context.Background()).Warn("failed to record helper-owned boundary during import",
 				slog.String("boundary", boundary),
 				slog.String("error", err.Error()))
 		}
@@ -317,7 +318,7 @@ func (c *sessionMACCoordinator) conditionalReleaseBoundary(boundary string, help
 
 	if err := c.driver.removeBoundary(boundary); err != nil {
 		// Failed removal: keep ownership metadata for retry on next startup.
-		slog.Warn("MAC boundary removal failed, ownership preserved for retry",
+		opLog(context.Background()).Warn("MAC boundary removal failed, ownership preserved for retry",
 			slog.String("boundary", boundary),
 			slog.String("error", err.Error()))
 		return
@@ -345,7 +346,7 @@ func (c *sessionMACCoordinator) retryDeferredBoundaries() {
 		// Check if we own this boundary.
 		owned, err := c.isBoundaryOwnedByHelper(boundary)
 		if err != nil {
-			slog.Warn("cannot verify deferred boundary ownership for retry",
+			opLog(context.Background()).Warn("cannot verify deferred boundary ownership for retry",
 				slog.String("boundary", boundary),
 				slog.String("error", err.Error()))
 			continue
@@ -356,7 +357,7 @@ func (c *sessionMACCoordinator) retryDeferredBoundaries() {
 		}
 
 		if err := c.driver.removeBoundary(boundary); err != nil {
-			slog.Warn("deferred MAC boundary removal failed, will retry on next startup",
+			opLog(context.Background()).Warn("deferred MAC boundary removal failed, will retry on next startup",
 				slog.String("boundary", boundary),
 				slog.String("error", err.Error()))
 			continue
@@ -408,7 +409,7 @@ func (c *sessionMACCoordinator) cleanupStaleBoundaries() error {
 			continue
 		}
 		if err := c.driver.removeBoundary(boundary); err != nil {
-			slog.Warn("stale MAC boundary removal failed, will retry on next startup",
+			opLog(context.Background()).Warn("stale MAC boundary removal failed, will retry on next startup",
 				slog.String("boundary", boundary),
 				slog.String("error", err.Error()))
 			continue

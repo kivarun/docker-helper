@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -240,6 +241,65 @@ func insertTestSessionTx(db *sql.DB, sessionID, workspace string) error {
 		sessionID, tokenHash, workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil,
 	)
 	return err
+}
+
+// TestMACLifecycleWarningUsesOperationalLogger verifies that MAC
+// warning/recovery records flow through the operational logger owner (JSONL,
+// stream=operational) rather than a package-global logger, and that they are
+// gated by the current runtime log_level: a reload raising the level
+// suppresses them, and a reload back to warn surfaces them again.
+func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
+	opBuf := new(bytes.Buffer)
+	audBuf := new(bytes.Buffer)
+	initLoggers(opBuf, audBuf, slog.LevelWarn, true)
+	defer logging.reset()
+
+	app, mac, driver := setupTestMACCoordinator(t)
+
+	allowedRoot := app.Config.AllowedRoots[0]
+	workspace := filepath.Join(allowedRoot, "mac-warn-ws")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// triggerWarning creates a session binding, then releases it with boundary
+	// removal failing, forcing the recovery-warning path.
+	triggerWarning := func(sessionID string) {
+		t.Helper()
+		if _, err := mac.CreateSessionBinding(workspace, sessionID, func(cov workspaceMACCoverage) error {
+			return insertTestSessionTx(app.DB, sessionID, workspace)
+		}); err != nil {
+			t.Fatalf("CreateSessionBinding: %v", err)
+		}
+		driver.removeErrors[workspace] = true
+		mac.ReleaseSessionBinding(sessionID)
+	}
+
+	const wantMsg = "MAC boundary removal failed, ownership preserved for retry"
+
+	// Warn level: the recovery warning reaches the operational log.
+	triggerWarning("sess-mac-warn-1")
+	if got := strings.Count(opBuf.String(), wantMsg); got != 1 {
+		t.Fatalf("expected exactly 1 MAC warning at warn level, got %d:\n%s", got, opBuf.String())
+	}
+	// The record must be JSON with stream=operational (the operational owner).
+	if !strings.Contains(opBuf.String(), `"stream":"operational"`) {
+		t.Fatalf("MAC warning must be an operational JSONL record:\n%s", opBuf.String())
+	}
+
+	// Reload raises log_level to error: the same recovery path stays silent.
+	logging.configure(opBuf, audBuf, slog.LevelError, true)
+	triggerWarning("sess-mac-warn-2")
+	if got := strings.Count(opBuf.String(), wantMsg); got != 1 {
+		t.Fatalf("reload to error level must suppress the MAC warning (still %d records):\n%s", got, opBuf.String())
+	}
+
+	// Reload back to warn: the recovery path is logged again.
+	logging.configure(opBuf, audBuf, slog.LevelWarn, true)
+	triggerWarning("sess-mac-warn-3")
+	if got := strings.Count(opBuf.String(), wantMsg); got != 2 {
+		t.Fatalf("expected the MAC warning again after reload back to warn (got %d records):\n%s", got, opBuf.String())
+	}
 }
 
 // TestDBInsertFailurePreservesOwnership verifies that when a session DB insert
