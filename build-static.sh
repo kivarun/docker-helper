@@ -7,7 +7,8 @@
 # If VERSION is not provided, defaults to "dev".
 #
 # Requirements:
-#   - Go 1.23+
+#   - Go 1.23.0 with the go1.26.7 toolchain pinned in go.mod (the go command
+#     honors the toolchain directive automatically)
 #   - musl-gcc (e.g., musl-tools on Debian/Ubuntu)
 #     OR gcc on Alpine (which uses musl natively)
 #   - CGO is required (go-sqlite3)

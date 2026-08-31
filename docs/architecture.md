@@ -782,8 +782,9 @@ on the operation:
   `open_tree` + `move_mount` close the gap (see System-mode mounts
   below).
 - **User-mode run mounts**: only the workspace root may be mounted;
-  security relies on the launcher invariant that the agent cannot
-  replace the workspace directory entry (see User-mode mounts below).
+  security relies on the workspace-parent write invariant that the agent
+  cannot replace the workspace directory entry (see User-mode mounts
+  below).
 
 ### Per-session workspace
 
@@ -1116,10 +1117,10 @@ In user mode, the resolved mount source must equal the canonical
 
 This restriction exists because user mode lacks `CAP_SYS_ADMIN` for
 inode-pinned mounts. The security of the workspace-root mount relies on
-the launcher invariant: the sandboxed agent does not have host-side write
-access to the parent directory of the workspace. Since the agent cannot
-replace the workspace directory entry, the pathname remains stable between
-validation and the Docker bind mount.
+the workspace-parent write invariant: the sandboxed agent does not have
+host-side write access to the parent directory of the workspace. Since the
+agent cannot replace the workspace directory entry, the pathname remains
+stable between validation and the Docker bind mount.
 
 ### Build context
 

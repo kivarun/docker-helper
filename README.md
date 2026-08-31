@@ -102,7 +102,9 @@ After a session token is issued:
 - Docker CLI and access to a running Docker daemon
 
 To build from source, you additionally need:
-- Go 1.23 with CGO enabled and a C compiler
+- Go 1.23.0 with the go1.26.7 toolchain pinned in `go.mod` (the `go` command
+  honors the `toolchain` directive automatically), CGO enabled, and a C
+  compiler
 
 ## Docker access
 
@@ -288,7 +290,8 @@ system-install path.
 
 ### Manual installation
 
-Build from source and place the binary in `~/.local/bin`:
+Build from source and place the binary in `~/.local/bin` (the `go` command
+uses the Go version and `go1.26.7` toolchain pinned in `go.mod`):
 
 ```bash
 go build -o docker-helper .

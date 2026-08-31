@@ -439,10 +439,12 @@ operational experience justifies it.
   - `docker-helper-config(5)`.
 - Add Bash completion for commands, subcommands, and flags, and ship it with
   native packages and generic release artifacts.
-- Trusted CA injection is currently configuration-driven through a validated
-  `trusted_ca_path` and `trusted_ca_injection=auto`. Before Release 2, settle
-  the confined source contract: document a helper-owned readable location or
-  complete the previously accepted managed-import workflow.
+- Trusted CA injection is configuration-driven through a validated
+  `trusted_ca_path` and `trusted_ca_injection=auto`. The confined source
+  contract is resolved: `trusted_ca_path` may reference a regular file
+  anywhere on the host, CA preflight propagates validation errors before
+  configuration is persisted, and the black-box UAT covers the full
+  control + positive trusted-CA E2E.
 - Add package/service upgrade tests, including an existing Release 1 user-mode
   installation on the same machine.
 
@@ -501,13 +503,13 @@ Installed-system acceptance (Tumbleweed RPM consumers,
 Ordinary black-box, SELinux regressions, and tarball/AppArmor + tarball/SELinux
 stages keep their existing ownership in the artifact gate.
 
-Before resuming the broad matrix, resolve the pre-UAT blockers recorded in
-[`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/): credential
-bootstrap, CA preflight error propagation, the SELinux `/opt` contract, release
-job policy-build dependencies, the RPM target/dependency decision, and the
-confined trusted-CA source contract. Bound synchronous Docker subprocess output
-and settle the logging/audit-schema findings before declaring those contracts
-stable.
+The pre-UAT blockers recorded in
+[`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/) are resolved:
+credential bootstrap, CA preflight error propagation, the SELinux `/opt`
+contract, release job policy-build dependencies, the RPM target/dependency
+decision, and the confined trusted-CA source contract. Synchronous Docker
+subprocess output is bounded, and the logging/audit-schema findings are
+settled.
 
 Reconcile README, architecture, roadmap, agent skill, package documentation, and
 manual pages with the implemented behavior before creating `release/2.0`.
