@@ -301,6 +301,7 @@ func TestConfigSetValidation(t *testing.T) {
 		{"negative duration", []string{"config", "set", "session_ttl", "-1h"}, "positive"},
 		{"invalid shutdown_timeout", []string{"config", "set", "shutdown_timeout", "notaduration"}, "invalid"},
 		{"shutdown_timeout over maximum", []string{"config", "set", "shutdown_timeout", "45s"}, "exceeds the maximum"},
+		{"shutdown_timeout legacy 60s still rejected", []string{"config", "set", "shutdown_timeout", "60s"}, "exceeds the maximum"},
 		{"invalid log_level", []string{"config", "set", "log_level", "verbose"}, "invalid"},
 		{"invalid audit_enabled", []string{"config", "set", "audit_enabled", "yes"}, "true or false"},
 		{"allowed_root scalar rejected", []string{"config", "set", "allowed_root", "/home/user/work"}, "no longer settable"},

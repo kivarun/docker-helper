@@ -437,7 +437,7 @@ Configuration fields:
 | `session_ttl` | duration | Session lifetime, e.g. `12h` (required) |
 | `log_level` | string | `debug`, `info`, `warn`, `error` (default: `info`) |
 | `audit_enabled` | boolean | Override audit behavior (default: `true` in system mode; in user mode, `true` only when `log_level` is `debug`) |
-| `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `30s`; maximum `30s` so the budget always fits inside systemd `TimeoutStopSec=45s` with a 15s force-cleanup margin) |
+| `shutdown_timeout` | duration | Graceful shutdown budget for HTTP drain + operation termination (default: `30s`; maximum `30s` so the budget always fits inside systemd `TimeoutStopSec=45s` with a 15s force-cleanup margin). Release 1 configs with a value above `30s` still load but are bounded to `30s` at startup with a warning; `config show` reports the effective value |
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log and synchronous pull output (bounded buffer, default: `4194304` = 4 MiB) |

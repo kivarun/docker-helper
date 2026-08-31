@@ -547,8 +547,11 @@ After `TimeoutStopSec=45s`, systemd sends SIGKILL if any processes
 remain. The internal `shutdown_timeout` budget is therefore bounded: its
 maximum is `30s` (the default too), so the internal graceful budget always
 fits inside `TimeoutStopSec=45s` with a 15s margin for the final
-force-cleanup / process-exit phase. Validation rejects any value above `30s`
-at startup, on reload, and in `config set`; the shipped system and user
+force-cleanup / process-exit phase. New values above `30s` are rejected by
+`config set`. For Release 1 upgrade compatibility (v1.0.2 accepted any
+positive `shutdown_timeout`), a persisted value above `30s` is loaded but
+bounded to `30s` at startup/reload with an operational warning; `config
+show` reports the bounded effective value. The shipped system and user
 units both carry `TimeoutStopSec=45s`.
 
 The shutdown budget is read from the daemon's *current* configuration at the

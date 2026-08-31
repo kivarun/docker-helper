@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
@@ -341,7 +342,18 @@ func loadAndPrepareRuntimeConfig() (*Config, error) {
 		return nil, err
 	}
 
-	shutdownTimeout, err := parseShutdownTimeout(ec.ShutdownTimeout)
+	// Resolve shutdown_timeout, bounding legacy Release 1 values above the
+	// documented maximum so the internal budget always fits the systemd margin.
+	shutdownTimeoutStr, clamped := resolveShutdownTimeout(fc.ShutdownTimeout)
+	if clamped {
+		opLog(context.Background()).Warn(
+			"shutdown_timeout exceeds the maximum and is bounded to it",
+			slog.String("configured", fc.ShutdownTimeout),
+			slog.String("effective", shutdownTimeoutStr),
+			slog.String("maximum", maxShutdownTimeout.String()),
+		)
+	}
+	shutdownTimeout, err := parseDurationPositive(shutdownTimeoutStr, "shutdown_timeout")
 	if err != nil {
 		return nil, err
 	}
@@ -562,7 +574,7 @@ type effectiveConfigValues struct {
 	LogLevel              string // default "info"
 	AuditEnabled          bool   // derived from mode/log_level unless explicit
 	AuditEnabledSource    string // "explicit", "system_default", or "log_level"
-	ShutdownTimeout       string // default "30s" (maximum; leaves systemd TimeoutStopSec=45s margin)
+	ShutdownTimeout       string // effective value (default/maximum "30s"; legacy >max bounded)
 	OperationRetentionTTL string // default "10m"
 	OperationMaxCompleted int    // default 200
 	OperationLogMaxBytes  int64  // default 4194304
@@ -581,10 +593,10 @@ func resolveEffectiveConfig(fc fileConfig) effectiveConfigValues {
 	mode := resolveDeploymentMode()
 	auditEnabled := resolveAuditEnabled(fc.AuditEnabled, slogLevel, mode)
 	auditSource := resolveAuditSource(fc.AuditEnabled, mode)
-	shutdownTimeout := fc.ShutdownTimeout
-	if shutdownTimeout == "" {
-		shutdownTimeout = "30s"
-	}
+	// shutdown_timeout: default is the maximum "30s"; legacy Release 1 values
+	// above the maximum are bounded to it so config show reflects the effective
+	// runtime value (see resolveShutdownTimeout).
+	shutdownTimeout, _ := resolveShutdownTimeout(fc.ShutdownTimeout)
 	operationRetentionTTL := fc.OperationRetentionTTL
 	if operationRetentionTTL == "" {
 		operationRetentionTTL = "10m"
@@ -631,9 +643,32 @@ func parseDurationPositive(s, name string) (time.Duration, error) {
 // the final force-cleanup / process-exit phase after the budget expires.
 const maxShutdownTimeout = 30 * time.Second
 
-// parseShutdownTimeout parses and bounds shutdown_timeout. Values above
-// maxShutdownTimeout are rejected so the internal budget always leaves the
-// documented systemd margin (TimeoutStopSec=45s).
+// resolveShutdownTimeout returns the effective shutdown_timeout for a configured
+// string: the configured value when it is within maxShutdownTimeout, otherwise
+// the maximum. Release 1 (v1.0.2) accepted any positive shutdown_timeout, so an
+// upgraded config may legitimately contain a value above the maximum; the daemon
+// bounds it so the internal budget always fits the systemd TimeoutStopSec margin,
+// without ever keeping the oversized configured value as a second runtime copy.
+// Absent values resolve to the maximum (the documented default). The second
+// return reports whether the value was bounded.
+func resolveShutdownTimeout(s string) (string, bool) {
+	if s == "" {
+		return maxShutdownTimeout.String(), false
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return s, false
+	}
+	if d > maxShutdownTimeout {
+		return maxShutdownTimeout.String(), true
+	}
+	return s, false
+}
+
+// parseShutdownTimeout parses shutdown_timeout and rejects values above
+// maxShutdownTimeout. It is the strict boundary for NEW operator input
+// (`docker-helper config set`); persisted configs are read through
+// resolveShutdownTimeout, which bounds legacy Release 1 values instead.
 func parseShutdownTimeout(s string) (time.Duration, error) {
 	d, err := parseDurationPositive(s, "shutdown_timeout")
 	if err != nil {
@@ -1217,13 +1252,17 @@ func validateRawConfig(raw map[string]json.RawMessage) error {
 		_ = b
 	}
 
-	// Validate shutdown_timeout if present.
+	// Validate shutdown_timeout if present. Any positive duration is accepted
+	// here (Release 1 v1.0.2 allowed any positive value, so an upgraded config
+	// may exceed the runtime maximum); the runtime bound is applied by
+	// resolveShutdownTimeout at the effective/load boundary, and NEW operator
+	// input above the maximum is rejected by `config set`.
 	if v, ok := raw["shutdown_timeout"]; ok {
 		var s string
 		if err := json.Unmarshal(v, &s); err != nil {
 			return fmt.Errorf("shutdown_timeout must be a JSON string")
 		}
-		if _, err := parseShutdownTimeout(s); err != nil {
+		if _, err := parseDurationPositive(s, "shutdown_timeout"); err != nil {
 			return err
 		}
 	}
