@@ -83,7 +83,7 @@
 #   UAT_REPO_DIR     host checkout of docker-helper (default: repo root of this script)
 #   UAT_RPM          path to the exact prebuilt RPM artifact
 #   UAT_RPM_SHA256   expected SHA-256 produced by the build job
-#   UAT_VERSION      version string (default 2.0.0-uat)
+#   UAT_VERSION      version string (default 2.1.0-uat)
 #   UAT_KEEP         keep the VM/workdir on failure for debugging
 #
 # Exit 0 = full openSUSE/SELinux black-box UAT + mount-pin regression passed
@@ -99,7 +99,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UAT_REPO_DIR="${UAT_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 UAT_RPM="${UAT_RPM:-}"
 UAT_RPM_SHA256="${UAT_RPM_SHA256:-}"
-VERSION="${UAT_VERSION:-2.0.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 KEEP="${UAT_KEEP:-}"
 
 [ -n "$UAT_RPM" ] || fail "UAT_RPM is required (exact prebuilt RPM artifact)"
@@ -108,19 +108,20 @@ KEEP="${UAT_KEEP:-}"
 [ -f "$UAT_REPO_DIR/scripts/uat-blackbox.sh" ] \
   || fail "UAT_REPO_DIR has no scripts/uat-blackbox.sh: $UAT_REPO_DIR"
 
-# The v2.0.0-rc.22 package is an immutable TEST FIXTURE for the real RPM
-# upgrade baseline. This file owns its pinned SHA-256 (independently verified
-# against the published rc.22 SHA256SUMS before pinning) and the
-# download+verify boundary; the guest lifecycle re-verifies before install.
-# shellcheck source=scripts/uat-rc22-fixture.sh
-source "$SCRIPT_DIR/uat-rc22-fixture.sh"
+# The v2.0.0 package is an immutable TEST FIXTURE for the real RPM
+# upgrade baseline. This file owns the download+verify boundary only; the
+# baseline version, URL and pinned SHA-256 are owned by the single fixture
+# owner (scripts/uat-upgrade-baseline-fixture.sh). The guest lifecycle
+# re-verifies before install.
+# shellcheck source=scripts/uat-upgrade-baseline-fixture.sh
+source "$SCRIPT_DIR/uat-upgrade-baseline-fixture.sh"
 
-RC22_RPM_PATH=""
-if rc22_fetch_rpm /tmp/uat-rc22-docker-helper.rpm >/tmp/rc22-rpm.path 2>/dev/null; then
-  RC22_RPM_PATH="$(cat /tmp/rc22-rpm.path)"
-  log "rc.22 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
+BASELINE_RPM_PATH=""
+if upgrade_baseline_fetch_rpm /tmp/uat-baseline-docker-helper.rpm >/tmp/baseline-rpm.path 2>/dev/null; then
+  BASELINE_RPM_PATH="$(cat /tmp/baseline-rpm.path)"
+  log "v2.0.0 baseline RPM downloaded and SHA-256 verified (pinned fixture)"
 else
-  fail "could not download/verify the rc.22 baseline RPM (pinned fixture)"
+  fail "could not download/verify the v2.0.0 baseline RPM (pinned fixture)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ vm_selinux_bootstrap
 log "== 6. transfer repo + RPM into the guest =="
 vm_selinux_transfer_repo
 vm_selinux_transfer_artifact "docker-helper.rpm" "$UAT_RPM"
-vm_selinux_transfer_artifact "docker-helper-rc22.rpm" "$RC22_RPM_PATH"
+vm_selinux_transfer_artifact "docker-helper-baseline.rpm" "$BASELINE_RPM_PATH"
 
 # ---------------------------------------------------------------------------
 # 6b-7a. two-stage Docker preparation + Docker SELinux health gate
@@ -232,13 +233,13 @@ record_stage "SELinux regressions (1-5)" "$SELREG_RESULT"
 
 
 # ---------------------------------------------------------------------------
-# 8d. RPM lifecycle under SELinux (install rc.22 -> upgrade candidate ->
-#     reinstall -> erase)
+# 8d. RPM lifecycle under SELinux (install v2.0.0 baseline -> upgrade candidate
+#     -> reinstall -> erase)
 # ---------------------------------------------------------------------------
-log "== 8d. RPM/SELinux lifecycle (rc.22 -> candidate, SELinux host) =="
+log "== 8d. RPM/SELinux lifecycle (v2.0.0 -> candidate, SELinux host) =="
 LIFECYCLE_RESULT=FAIL
 if run_guest_capture "RPM/SELinux lifecycle inside the guest" \
-  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_RC22_RPM=/opt/uat-import/docker-helper-rc22.rpm UAT_RC22_RPM_SHA256=$RC22_RPM_SHA256 UAT_PRINCIPAL=opc scripts/uat-package-lifecycle-rpm.sh"; then
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_UPGRADE_BASELINE_RPM=/opt/uat-import/docker-helper-baseline.rpm UAT_UPGRADE_BASELINE_RPM_SHA256=$UPGRADE_BASELINE_RPM_SHA256 UAT_UPGRADE_BASELINE_VERSION=$UPGRADE_BASELINE_VERSION UAT_PRINCIPAL=opc scripts/uat-package-lifecycle-rpm.sh"; then
   LIFECYCLE_RESULT=PASS
   log "RPM/SELinux lifecycle passed inside the guest"
 else
@@ -264,7 +265,7 @@ echo "final cmdline:    $CMDLINE_FINAL"
 echo "getenforce:       $GETENF"
 echo "RPM:              $UAT_RPM"
 echo "RPM sha256:       $UAT_RPM_SHA256 (producer, verified by UAT)"
-echo "rc.22 RPM:        $RC22_RPM_PATH (pinned fixture, verified)"
+echo "v2.0.0 baseline RPM: $BASELINE_RPM_PATH (pinned fixture, verified)"
 echo "UAT version:      $VERSION"
 echo "Docker SELinux:   ${DOCKER_HEALTHY:-0}=naturally healthy two-stage setup (container-selinux before Docker)"
 echo "total:            ${TOTAL}s"

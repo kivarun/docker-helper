@@ -132,7 +132,7 @@ EOF
   chmod +x "$repo/shims/dpkg-deb" "$repo/shims/rpm"
 }
 
-VERSION="2.0.0-uat"
+VERSION="2.1.0-uat"
 SOURCE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 REPO="$WORK/repo"

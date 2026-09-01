@@ -114,9 +114,12 @@ Release 2 acceptance (actual UAT ownership):
 - RPM lifecycle `install(rc.22) -> upgrade(candidate) -> reinstall -> final
   erase` under BOTH MAC backends: Tumbleweed RPM/AppArmor and Tumbleweed
   RPM/SELinux (`scripts/uat-package-lifecycle-rpm.sh`).
-- The rc.22 baseline package is an immutable test fixture with a pinned,
-  independently-verified SHA-256 (`scripts/uat-rc22-fixture.sh`); only the
-  needed DEB/RPM is downloaded and its bytes are verified before install.
+- Release 2 historically used `rc.22` as its upgrade fixture: an immutable
+  test fixture with a pinned, independently-verified SHA-256; only the needed
+  DEB/RPM is downloaded and its bytes are verified before install. Post-2.0
+  main uses the generic upgrade-baseline fixture owned by
+  `scripts/uat-upgrade-baseline-fixture.sh` (released stable baseline
+  v2.0.0).
 - User/system coexistence, loopback HTTP (`127.0.0.1:52375`), principal
   credential/audit/registry acceptance, and bounded restart/shutdown with
   active operations on the Ubuntu/AppArmor consumer

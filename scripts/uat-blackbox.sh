@@ -71,7 +71,7 @@
 #   UAT_PLATFORM      platform adapter to exercise (default ubuntu)
 #   UAT_INSTALL       artifact+install adapter pair to exercise (default deb)
 #   UAT_MAC           MAC adapter to exercise (default apparmor)
-#   UAT_VERSION       version string (default 2.0.0-uat)
+#   UAT_VERSION       version string (default 2.1.0-uat)
 #   UAT_ALLOWED_ROOT  global allowed root (default: platform-provided)
 #   UAT_WORKSPACE     session workspace (default $UAT_ALLOWED_ROOT/uat-workspace)
 #   UAT_PRINCIPAL     OS user mapped to the docker-helper principal (default: platform-provided)
@@ -93,7 +93,7 @@
 
 set -uo pipefail
 
-VERSION="${UAT_VERSION:-2.0.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 TLS_PORT="${UAT_TLS_PORT:-8443}"
 KEEP="${UAT_KEEP:-}"
 INSTALL="${UAT_INSTALL:-deb}"

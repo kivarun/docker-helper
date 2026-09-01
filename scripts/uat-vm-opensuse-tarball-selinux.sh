@@ -63,7 +63,7 @@
 #   UAT_REPO_DIR     host checkout of docker-helper (default: repo root of this script)
 #   UAT_TARBALL      path to the exact prebuilt release tarball artifact
 #   UAT_TARBALL_SHA256 expected SHA-256 produced by the tarball build job
-#   UAT_VERSION      version string (default 2.0.0-uat)
+#   UAT_VERSION      version string (default 2.1.0-uat)
 #   UAT_KEEP         keep the VM/workdir on failure for debugging
 #
 # Exit 0 = openSUSE/AppArmor-independent SELinux tarball black-box UAT passed
@@ -79,7 +79,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UAT_REPO_DIR="${UAT_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 UAT_TARBALL="${UAT_TARBALL:-}"
 UAT_TARBALL_SHA256="${UAT_TARBALL_SHA256:-}"
-VERSION="${UAT_VERSION:-2.0.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 KEEP="${UAT_KEEP:-}"
 
 [ -n "$UAT_TARBALL" ] || fail "UAT_TARBALL is required (exact prebuilt release tarball artifact)"

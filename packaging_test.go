@@ -8011,3 +8011,168 @@ func TestReleaseReadmeIncludesCurlSnippet(t *testing.T) {
 		t.Error("release README must list apparmor/local/curl in contents")
 	}
 }
+
+// =============================================================================
+// Upgrade-baseline fixture invariants (Stage 0.1)
+// =============================================================================
+
+// upgradeBaselineFixturePath is the single owner of the v2.0.0 upgrade-baseline
+// version, URLs and pinned SHA-256s.
+const upgradeBaselineFixturePath = "scripts/uat-upgrade-baseline-fixture.sh"
+
+var upgradeBaselinePinned = []string{
+	"81a95a312f2cabec0d2ca26a71944f0dfbc78bcef22345c1608fb17091d7b4ed", // DEB
+	"b48983d3c4d9cc373246807b195141c77a00b1ac4de107e0e88eeea1828b5dbc", // RPM
+}
+
+// upgradeBaselineLiveDrivers are the live UAT lifecycle drivers that consume
+// the upgrade-baseline fixture.
+var upgradeBaselineLiveDrivers = []string{
+	"scripts/uat-release2-acceptance.sh",
+	"scripts/uat-package-lifecycle-rpm.sh",
+	"scripts/uat-vm-opensuse-apparmor.sh",
+	"scripts/uat-vm-opensuse-selinux.sh",
+}
+
+// TestUpgradeBaselineSingleOwner verifies the v2.0.0 baseline version and the
+// pinned DEB/RPM SHA-256s live only in the single fixture owner and are not
+// duplicated in any live UAT lifecycle driver.
+func TestUpgradeBaselineSingleOwner(t *testing.T) {
+	fixture, err := os.ReadFile(upgradeBaselineFixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureContent := string(fixture)
+
+	for _, must := range []string{
+		`UPGRADE_BASELINE_VERSION="2.0.0"`,
+		"UPGRADE_BASELINE_DEB_SHA256=\"" + upgradeBaselinePinned[0] + "\"",
+		"UPGRADE_BASELINE_RPM_SHA256=\"" + upgradeBaselinePinned[1] + "\"",
+	} {
+		if !strings.Contains(fixtureContent, must) {
+			t.Errorf("upgrade-baseline fixture must define %s", must)
+		}
+	}
+
+	for _, d := range upgradeBaselineLiveDrivers {
+		data, err := os.ReadFile(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		for _, hash := range upgradeBaselinePinned {
+			if strings.Contains(content, hash) {
+				t.Errorf("%s must not duplicate the pinned baseline SHA-256 (%s); the fixture is the single owner", d, hash)
+			}
+		}
+	}
+}
+
+// TestUpgradeBaselineExactIdentity verifies the exact v2.0.0 DEB and RPM
+// expected hashes are pinned in the fixture owner.
+func TestUpgradeBaselineExactIdentity(t *testing.T) {
+	fixture, err := os.ReadFile(upgradeBaselineFixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(fixture)
+
+	expected := map[string]string{
+		"UPGRADE_BASELINE_DEB_SHA256": upgradeBaselinePinned[0],
+		"UPGRADE_BASELINE_RPM_SHA256": upgradeBaselinePinned[1],
+	}
+	for key, sha := range expected {
+		if !strings.Contains(content, key+"=\""+sha+"\"") {
+			t.Errorf("fixture must pin exact %s = %s", key, sha)
+		}
+	}
+}
+
+// TestUpgradeBaselineGenericVocabulary verifies the live UAT lifecycle scripts
+// do not expose the retired rc.22-specific API/env/function vocabulary.
+func TestUpgradeBaselineGenericVocabulary(t *testing.T) {
+	banned := []string{"RC22_", "rc22_fetch", "UAT_RC22_", "uat-rc22", "rc.22"}
+	for _, d := range upgradeBaselineLiveDrivers {
+		data, err := os.ReadFile(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		for _, b := range banned {
+			if strings.Contains(content, b) {
+				t.Errorf("%s must not expose retired fixture vocabulary %q", d, b)
+			}
+		}
+	}
+}
+
+// TestUpgradeBaselineLifecycleSemantics verifies the DEB and RPM lifecycle
+// scripts expect the stable v2.0.0 baseline and a 2.1.x UAT candidate (a real
+// forward upgrade).
+func TestUpgradeBaselineLifecycleSemantics(t *testing.T) {
+	deb, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	debContent := string(deb)
+	if !strings.Contains(debContent, "UAT_VERSION:-2.1.0-uat") {
+		t.Error("DEB acceptance must default the candidate to 2.1.0-uat")
+	}
+	if !strings.Contains(debContent, "UPGRADE_BASELINE_VERSION") {
+		t.Error("DEB acceptance must consume the fixture baseline version")
+	}
+	if !strings.Contains(debContent, "upgrade_baseline_fetch_deb") {
+		t.Error("DEB acceptance must resolve the baseline via upgrade_baseline_fetch_deb")
+	}
+
+	rpm, err := os.ReadFile("scripts/uat-package-lifecycle-rpm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpmContent := string(rpm)
+	if !strings.Contains(rpmContent, "UAT_VERSION:-2.1.0-uat") {
+		t.Error("RPM lifecycle must default the candidate to 2.1.0-uat")
+	}
+	if !strings.Contains(rpmContent, "UAT_UPGRADE_BASELINE_VERSION") {
+		t.Error("RPM lifecycle must consume the fixture baseline version")
+	}
+	if !strings.Contains(rpmContent, "UAT_UPGRADE_BASELINE_RPM_SHA256") {
+		t.Error("RPM lifecycle must consume the fixture baseline RPM SHA-256")
+	}
+}
+
+// TestUpgradeBaselineWorkflowRecovery verifies artifact-gate.yml propagates
+// optional repository variables that override ONLY the baseline artifact SOURCE
+// (URL) for recovery, while the pinned hashes/version can never come from
+// mutable GitHub workflow variables.
+func TestUpgradeBaselineWorkflowRecovery(t *testing.T) {
+	gate, err := os.ReadFile(".github/workflows/artifact-gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(gate)
+
+	// The optional URL source may be propagated from repository variables.
+	for _, v := range []string{
+		"UAT_UPGRADE_BASELINE_DEB_URL",
+		"UAT_UPGRADE_BASELINE_RPM_URL",
+	} {
+		if !strings.Contains(content, "vars."+v) {
+			t.Errorf("artifact-gate.yml must propagate optional repository variable %s for recovery", v)
+		}
+	}
+
+	// The pinned hashes/version are source-owned identity and must NOT be
+	// sourced from mutable workflow variables: the ONLY repository variables
+	// referenced may be the two URL source overrides.
+	varsRe := regexp.MustCompile(`vars\.[A-Z0-9_]+`)
+	allowed := map[string]bool{
+		"vars.UAT_UPGRADE_BASELINE_DEB_URL": true,
+		"vars.UAT_UPGRADE_BASELINE_RPM_URL": true,
+	}
+	for _, ref := range varsRe.FindAllString(content, -1) {
+		if !allowed[ref] {
+			t.Errorf("artifact-gate.yml must not source baseline identity from repository variable %s", ref)
+		}
+	}
+}

@@ -10,8 +10,8 @@
 #   C  registry login end-to-end + session isolation (self-contained registry)
 #   D  bounded restart/shutdown with active operations
 #   E  user-mode + system-mode deployment coexistence
-#   F  DEB native lifecycle: install(rc.22) -> upgrade(candidate) ->
-#      reinstall(candidate) -> remove -> purge
+#   F  DEB native lifecycle: install(upgrade baseline v2.0.0) ->
+#      upgrade(candidate) -> reinstall(candidate) -> remove -> purge
 #
 # Contract for every scenario:
 #   PASS    -> gate may continue
@@ -19,25 +19,25 @@
 #   BLOCKED -> a required prerequisite is unavailable -> gate fails
 # Exit status: 0 = all PASS, 1 = any FAIL, 2 = any BLOCKED (and none FAIL).
 #
-# The v2.0.0-rc.22 package is an immutable TEST FIXTURE for the real upgrade
+# The v2.0.0 package is an immutable TEST FIXTURE for the real upgrade
 # baseline: the needed DEB is downloaded from the published release, its pinned
 # SHA-256 is verified strictly BEFORE installation, and mutable release
 # metadata is never trusted at runtime. No private "previous release" is built.
 #
 # Env inputs:
-#   UAT_VERSION          candidate version string (e.g. 2.0.0-rc.23)
+#   UAT_VERSION          candidate version string (e.g. 2.1.0-uat)
 #   UAT_ARTIFACT_PATH    exact candidate .deb produced by the gate (required)
 #   UAT_ARTIFACT_SHA256  expected SHA-256 of the candidate .deb (required)
 #   UAT_ALLOWED_ROOT     global allowed root (default /home)
 #
-# The rc.22 baseline fixture (URL + pinned SHA-256) is owned by
-# scripts/uat-rc22-fixture.sh.
+# The upgrade-baseline fixture (URL + pinned SHA-256) is owned by
+# scripts/uat-upgrade-baseline-fixture.sh.
 #
 # Requires: root, systemd, Docker, dpkg. Exits as above.
 
 set -uo pipefail
 
-VERSION="${UAT_VERSION:-2.0.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home}"
 ARTIFACT_PATH_IN="${UAT_ARTIFACT_PATH:-}"
 ARTIFACT_SHA256_IN="${UAT_ARTIFACT_SHA256:-}"
@@ -47,8 +47,8 @@ say()  { printf '\n%s %s\n' "$PREFIX" "$*"; }
 info() { printf '%s %s\n' "$PREFIX" "$*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/uat-rc22-fixture.sh
-source "$SCRIPT_DIR/uat-rc22-fixture.sh"
+# shellcheck source=scripts/uat-upgrade-baseline-fixture.sh
+source "$SCRIPT_DIR/uat-upgrade-baseline-fixture.sh"
 
 # redact masks bearer-token values (admin/session dht_, credential dhc_) in a
 # captured stream so they never reach the CI log. Session IDs (dhs_) and
@@ -986,63 +986,63 @@ rm -rf "$E_XDG_RUNTIME"
 systemctl stop docker-helper.service >/dev/null 2>&1 || true
 
 # ==============================================================================
-# scenario F: DEB lifecycle install(rc.22) -> upgrade(candidate) -> reinstall
-#             -> remove -> purge
+# scenario F: DEB lifecycle install(upgrade baseline v2.0.0) -> upgrade
+#             (candidate) -> reinstall(candidate) -> remove -> purge
 # ==============================================================================
 scenario "F: DEB lifecycle"
 
-RC22_DEB=""
-RC22_PKG_VERSION="2.0.0~rc.22"
+BASELINE_DEB=""
+BASELINE_VERSION="$UPGRADE_BASELINE_VERSION"
 
-# Download the immutable rc.22 baseline fixture (only the DEB is needed) and
-# verify its pinned SHA-256 strictly before installation.
-if rc22_fetch_deb /tmp/r2ac-rc22.deb >/dev/null 2>&1; then
-  RC22_DEB="/tmp/r2ac-rc22.deb"
-  acc_ok "rc.22 baseline DEB downloaded and SHA-256 verified (pinned fixture)"
+# Resolve the immutable v2.0.0 upgrade-baseline fixture (only the DEB is
+# needed) and verify its pinned SHA-256 strictly before installation.
+if upgrade_baseline_fetch_deb /tmp/r2ac-baseline.deb >/dev/null 2>&1; then
+  BASELINE_DEB="/tmp/r2ac-baseline.deb"
+  acc_ok "v2.0.0 baseline DEB resolved and SHA-256 verified (pinned fixture)"
 else
-  acc_blocked "could not download/verify the rc.22 baseline DEB (pinned fixture)"
+  acc_blocked "could not resolve/verify the v2.0.0 baseline DEB (pinned fixture)"
 fi
 
-if [ -z "$RC22_DEB" ]; then
-  acc_blocked "rc.22 baseline DEB unavailable; DEB lifecycle not exercised"
+if [ -z "$BASELINE_DEB" ]; then
+  acc_blocked "v2.0.0 baseline DEB unavailable; DEB lifecycle not exercised"
 else
   # clean slate: the candidate is currently installed from the earlier phases
   dpkg -P docker-helper >/dev/null 2>&1 || true
   rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
-  # --- install (rc.22 baseline) -------------------------------------------
-  if dpkg -i "$RC22_DEB" >/tmp/r2ac-f-install.log 2>&1; then
-    acc_ok "rc.22 DEB installed"
+  # --- install (v2.0.0 baseline) ------------------------------------------
+  if dpkg -i "$BASELINE_DEB" >/tmp/r2ac-f-install.log 2>&1; then
+    acc_ok "v2.0.0 DEB installed"
   else
-    acc_fail "rc.22 DEB install failed (see /tmp/r2ac-f-install.log)"
+    acc_fail "v2.0.0 DEB install failed (see /tmp/r2ac-f-install.log)"
   fi
-  if [ "$(docker-helper version)" = "$RC22_VERSION" ]; then
-    acc_ok "rc.22 binary version installed ($RC22_VERSION)"
+  if [ "$(docker-helper version)" = "$BASELINE_VERSION" ]; then
+    acc_ok "v2.0.0 binary version installed ($BASELINE_VERSION)"
   else
-    acc_fail "installed binary version is not $RC22_VERSION: $(docker-helper version)"
+    acc_fail "installed binary version is not $BASELINE_VERSION: $(docker-helper version)"
   fi
-  if dpkg -s docker-helper 2>/dev/null | grep -q "Version: $RC22_PKG_VERSION"; then
-    acc_ok "dpkg reports package version $RC22_PKG_VERSION"
+  if dpkg -s docker-helper 2>/dev/null | grep -q "Version: $BASELINE_VERSION"; then
+    acc_ok "dpkg reports package version $BASELINE_VERSION"
   else
-    acc_fail "dpkg package version is not $RC22_PKG_VERSION"
+    acc_fail "dpkg package version is not $BASELINE_VERSION"
   fi
 
   # Seed operator/principal state BEFORE the upgrade to prove persistence.
   docker-helper init --allowed-root "$ALLOWED_ROOT" >/dev/null 2>&1 \
-    && acc_ok "system init on rc.22 baseline" || acc_fail "system init failed on rc.22 baseline"
+    && acc_ok "system init on v2.0.0 baseline" || acc_fail "system init failed on v2.0.0 baseline"
   systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
   for _ in $(seq 1 30); do
     systemctl is-active --quiet docker-helper.service && break
     sleep 1
   done
-  wait_health "$SOCK" || acc_fail "rc.22 daemon not healthy"
+  wait_health "$SOCK" || acc_fail "v2.0.0 daemon not healthy"
   F_USER="uatr2life"
   F_CRED="$CRED_DIR/life.tok"
-  set_up_principal "$F_USER" "$F_CRED" || acc_fail "lifecycle principal setup failed (rc.22)"
+  set_up_principal "$F_USER" "$F_CRED" || acc_fail "lifecycle principal setup failed (v2.0.0)"
   F_PRINC_ID="$GLOBAL_CRED_ID"
   F_SESSION_ID="$GLOBAL_SESSION_ID"
 
-  # --- upgrade (rc.22 -> candidate) ----------------------------------------
+  # --- upgrade (v2.0.0 -> candidate) ---------------------------------------
   if dpkg -i "$ARTIFACT_PATH_IN" >/tmp/r2ac-f-upgrade.log 2>&1; then
     acc_ok "upgrade to candidate DEB completed"
   else

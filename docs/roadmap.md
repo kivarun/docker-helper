@@ -394,15 +394,20 @@ change the Release-2 gate or the already-defined Launcher ownership model above.
   end-to-end exact-artifact UAT as the authoritative package proof and without
   turning environment skips into unconditional failures on ordinary developer
   machines.
-- **Upgrade baseline fixture lifecycle.** The rc.22 incident showed that a
-  pinned SHA protects integrity but GitHub Release asset availability is still
-  an external availability dependency. For 2.1: replace the rc.22-specific
-  naming with an explicit "upgrade baseline fixture" abstraction; use the
-  released stable v2.0.0 as the natural baseline for testing upgrades to 2.1
-  candidates; keep exact artifact hashes pinned and verified before
-  installation; define a durable availability/recovery strategy for the
-  canonical baseline bytes; do not rebuild historical baseline bytes privately;
-  and do not make `rc.22` a permanent architectural concept.
+- **Upgrade baseline fixture lifecycle (implemented).** The rc.22 incident
+  showed that a pinned SHA protects integrity but GitHub Release asset
+  availability is still an external availability dependency. This is resolved
+  on main: the rc.22-specific naming is replaced by an explicit "upgrade
+  baseline fixture" abstraction
+  (`scripts/uat-upgrade-baseline-fixture.sh`), which is the single owner of the
+  baseline version, DEB/RPM URLs and pinned SHA-256s; the released stable
+  v2.0.0 is the natural baseline for testing upgrades to 2.1 candidates; exact
+  artifact hashes are pinned and verified before installation; and a durable
+  availability/recovery strategy (optional explicit local PATH or URL source
+  overrides that must still contain the same exact bytes, fail-closed, with
+  pinned hashes never overridable) covers the canonical baseline bytes. The
+  baseline package is never rebuilt privately, mutable release metadata is
+  never trusted, and `rc.22` is not a permanent architectural concept.
 - **`trusted_ca_path` confined preflight / diagnostics.** For 2.1 investigate
   operator diagnostics/preflight that can detect likely system-mode MAC
   readability problems earlier, especially when changing config while the

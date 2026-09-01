@@ -56,6 +56,16 @@
 # transition, trusted-CA restart/relabel): those blockers are closed and the
 # production SELinux path is covered by the full gate. The bounded SELinux
 # developer diagnostic is the scope=selinux run (openSUSE SELinux job only).
+#
+# Upgrade-baseline recovery source: the pinned baseline version and SHA-256s
+# are owned by scripts/uat-upgrade-baseline-fixture.sh and can never come from
+# GitHub variables. The optional repository variables below
+# (UAT_UPGRADE_BASELINE_DEB_URL / UAT_UPGRADE_BASELINE_RPM_URL) may override
+# only the artifact SOURCE, so an administrator can mirror/stage the exact same
+# known bytes when the canonical URL is unavailable. Normal state (variables
+# unset) -> canonical v2.0.0 release URLs. An explicit override must contain
+# the SAME exact bytes (the pinned SHA is always verified before use). No
+# secrets are involved.
 
 name: Release artifact gate
 
@@ -63,7 +73,7 @@ on:
   workflow_call:
     inputs:
       uat_version:
-        description: 'Version string baked into the candidate artifacts (e.g. 2.0.0-uat)'
+        description: 'Version string baked into the candidate artifacts (e.g. 2.1.0-uat)'
         required: true
         type: string
       scope:
@@ -184,6 +194,7 @@ jobs:
           sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
             UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
             UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" \
+            UAT_UPGRADE_BASELINE_DEB_URL="${{ vars.UAT_UPGRADE_BASELINE_DEB_URL }}" \
             scripts/uat-release2-acceptance.sh
 
   # Ubuntu tarball / AppArmor (hosted ubuntu-24.04). Exact candidate tarball.
@@ -293,6 +304,7 @@ jobs:
           UAT_RPM="$UAT_RPM" \
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
           UAT_VERSION="${{ inputs.uat_version }}" \
+          UAT_UPGRADE_BASELINE_RPM_URL="${{ vars.UAT_UPGRADE_BASELINE_RPM_URL }}" \
           scripts/uat-vm-opensuse-apparmor.sh
 
   # Tumbleweed RPM / SELinux (QEMU/KVM). Exact candidate RPM.
@@ -330,6 +342,7 @@ jobs:
           UAT_RPM="$UAT_RPM" \
           UAT_RPM_SHA256="$UAT_RPM_SHA256" \
           UAT_VERSION="${{ inputs.uat_version }}" \
+          UAT_UPGRADE_BASELINE_RPM_URL="${{ vars.UAT_UPGRADE_BASELINE_RPM_URL }}" \
           scripts/uat-vm-opensuse-selinux.sh
 
   # Tumbleweed tarball / SELinux (QEMU/KVM). Exact candidate tarball.

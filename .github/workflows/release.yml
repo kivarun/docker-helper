@@ -14,7 +14,7 @@
 # required UAT consumer installs those exact bytes, and the promote job only
 # downloads, verifies and publishes them. Promote never constructs anything.
 #
-# Safe dry-run path: workflow_dispatch (with a UAT version such as 2.0.0-uat)
+# Safe dry-run path: workflow_dispatch (with a UAT version such as 2.1.0-uat)
 # runs the EXACT same candidate build + full UAT gate and then a promotion
 # verification step. The event itself makes dry-run non-publishing: the promote
 # (publication) job is gated on `github.event_name == 'push'`, so a
@@ -37,9 +37,9 @@ on:
   workflow_dispatch:
     inputs:
       uat_version:
-        description: 'UAT version for the dry-run candidate set (e.g. 2.0.0-uat); dry-run never creates a tag or a GitHub Release'
+        description: 'UAT version for the dry-run candidate set (e.g. 2.1.0-uat); dry-run never creates a tag or a GitHub Release'
         required: false
-        default: '2.0.0-uat'
+        default: '2.1.0-uat'
         type: string
 
 # Least privilege: every job except the publishing `promote` job runs with
@@ -142,6 +142,11 @@ jobs:
       - name: Release pipeline helper tests
         run: bash scripts/test-release-pipeline.sh
 
+      - name: UAT fail-closed semantics tests
+        run: |
+          bash scripts/test-uat-opensuse-repo.sh
+          bash scripts/test-uat-regressions-aggregation.sh
+          bash scripts/test-upgrade-baseline-fixture.sh
   selinux-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 5

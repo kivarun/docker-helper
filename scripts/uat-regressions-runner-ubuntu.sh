@@ -33,7 +33,7 @@
 # the runner too.
 #
 # Env inputs:
-#   UAT_VERSION            version string (default 2.0.0-uat)
+#   UAT_VERSION            version string (default 2.1.0-uat)
 #   UAT_ALLOWED_ROOT       global allowed root for init (default /home)
 #   UAT_ARTIFACT_PATH      exact prebuilt candidate .deb (consumed, never built)
 #   UAT_ARTIFACT_SHA256    expected SHA-256 of the candidate .deb (required when
@@ -53,7 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=scripts/uat-regression-lib.sh
 source "$SCRIPT_DIR/uat-regression-lib.sh"
-VERSION="${UAT_VERSION:-2.0.0-uat}"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
 ALLOWED_ROOT="${UAT_ALLOWED_ROOT:-/home}"
 UAT_ARTIFACT_PATH_IN="${UAT_ARTIFACT_PATH:-}"
 UAT_ARTIFACT_SHA256_IN="${UAT_ARTIFACT_SHA256:-}"

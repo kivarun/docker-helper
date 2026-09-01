@@ -7,10 +7,10 @@
 #   Tumbleweed RPM / SELinux    (driven by uat-vm-opensuse-selinux.sh)
 #
 # Lifecycle:
-#   install (v2.0.0-rc.22 baseline) -> upgrade (candidate) ->
+#   install (v2.0.0 upgrade baseline) -> upgrade (candidate) ->
 #   reinstall (candidate) -> final erase
 #
-# The v2.0.0-rc.22 package is an immutable TEST FIXTURE for the real upgrade
+# The v2.0.0 package is an immutable TEST FIXTURE for the real upgrade
 # baseline: only the RPM is transferred into the guest, its pinned SHA-256 is
 # verified strictly before installation, and mutable release metadata is never
 # trusted at runtime. No private "previous release" is built in the consumer.
@@ -28,11 +28,12 @@
 #     cross-MAC warning); a really-removed backend artifact is really gone.
 #
 # Env inputs:
-#   UAT_RPM             exact candidate RPM path inside the guest (required)
-#   UAT_RPM_SHA256      expected candidate RPM SHA-256 (required)
-#   UAT_VERSION         candidate version string (e.g. 2.0.0-rc.23)
-#   UAT_RC22_RPM        rc.22 baseline RPM path inside the guest (required)
-#   UAT_RC22_RPM_SHA256 pinned rc.22 RPM SHA-256 (required, verified fixture)
+#   UAT_RPM                            exact candidate RPM path inside the guest (required)
+#   UAT_RPM_SHA256                     expected candidate RPM SHA-256 (required)
+#   UAT_VERSION                        candidate version string (e.g. 2.1.0-uat)
+#   UAT_UPGRADE_BASELINE_RPM           v2.0.0 upgrade-baseline RPM path inside the guest (required)
+#   UAT_UPGRADE_BASELINE_RPM_SHA256    pinned v2.0.0 RPM SHA-256 (required, verified fixture)
+#   UAT_UPGRADE_BASELINE_VERSION       v2.0.0 baseline version string (required, fixture-owned)
 #   UAT_ALLOWED_ROOT    global allowed root (default: principal home)
 #   UAT_PRINCIPAL       OS user mapped to the principal (default: opc)
 #
@@ -40,12 +41,12 @@
 
 set -uo pipefail
 
-VERSION="${UAT_VERSION:-2.0.0-uat}"
-RC22_VERSION="2.0.0-rc.22"
+VERSION="${UAT_VERSION:-2.1.0-uat}"
+BASELINE_VERSION="${UAT_UPGRADE_BASELINE_VERSION:-}"
 CANDIDATE_RPM="${UAT_RPM:-}"
 CANDIDATE_SHA256="${UAT_RPM_SHA256:-}"
-RC22_RPM="${UAT_RC22_RPM:-}"
-RC22_SHA256="${UAT_RC22_RPM_SHA256:-}"
+BASELINE_RPM="${UAT_UPGRADE_BASELINE_RPM:-}"
+BASELINE_SHA256="${UAT_UPGRADE_BASELINE_RPM_SHA256:-}"
 PRINCIPAL="${UAT_PRINCIPAL:-opc}"
 
 PREFIX="[rpm-lifecycle]"
@@ -62,9 +63,10 @@ redact() {
 [ -n "$CANDIDATE_RPM" ] || { echo "error: UAT_RPM is required" >&2; exit 1; }
 [ -f "$CANDIDATE_RPM" ] || { echo "error: UAT_RPM not a regular file: $CANDIDATE_RPM" >&2; exit 1; }
 [ -n "$CANDIDATE_SHA256" ] || { echo "error: UAT_RPM_SHA256 is required" >&2; exit 1; }
-[ -n "$RC22_RPM" ] || { echo "error: UAT_RC22_RPM is required" >&2; exit 1; }
-[ -f "$RC22_RPM" ] || { echo "error: UAT_RC22_RPM not a regular file: $RC22_RPM" >&2; exit 1; }
-[ -n "$RC22_SHA256" ] || { echo "error: UAT_RC22_RPM_SHA256 is required" >&2; exit 1; }
+[ -n "$BASELINE_RPM" ] || { echo "error: UAT_UPGRADE_BASELINE_RPM is required" >&2; exit 1; }
+[ -f "$BASELINE_RPM" ] || { echo "error: UAT_UPGRADE_BASELINE_RPM not a regular file: $BASELINE_RPM" >&2; exit 1; }
+[ -n "$BASELINE_SHA256" ] || { echo "error: UAT_UPGRADE_BASELINE_RPM_SHA256 is required" >&2; exit 1; }
+[ -n "$BASELINE_VERSION" ] || { echo "error: UAT_UPGRADE_BASELINE_VERSION is required" >&2; exit 1; }
 
 # Verify both exact-byte identities once, up front.
 CANDIDATE_ACTUAL="$(sha256sum "$CANDIDATE_RPM" | awk '{print $1}')"
@@ -72,9 +74,9 @@ CANDIDATE_ACTUAL="$(sha256sum "$CANDIDATE_RPM" | awk '{print $1}')"
   echo "error: candidate RPM SHA-256 mismatch (expected $CANDIDATE_SHA256, got $CANDIDATE_ACTUAL)" >&2
   exit 1
 }
-RC22_ACTUAL="$(sha256sum "$RC22_RPM" | awk '{print $1}')"
-[ "$RC22_ACTUAL" = "$RC22_SHA256" ] || {
-  echo "error: rc.22 baseline RPM SHA-256 mismatch (expected $RC22_SHA256, got $RC22_ACTUAL)" >&2
+BASELINE_ACTUAL="$(sha256sum "$BASELINE_RPM" | awk '{print $1}')"
+[ "$BASELINE_ACTUAL" = "$BASELINE_SHA256" ] || {
+  echo "error: v2.0.0 baseline RPM SHA-256 mismatch (expected $BASELINE_SHA256, got $BASELINE_ACTUAL)" >&2
   exit 1
 }
 
@@ -138,18 +140,18 @@ rpm -e docker-helper >/dev/null 2>&1 || true
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
 # ---------------------------------------------------------------------------
-# 1. install (rc.22 baseline)
+# 1. install (v2.0.0 upgrade baseline)
 # ---------------------------------------------------------------------------
-scenario "1. install v2.0.0-rc.22 baseline RPM"
-if rpm -i "$RC22_RPM" >/tmp/rpm-life-install.log 2>&1; then
-  acc_ok "rc.22 RPM installed"
+scenario "1. install v2.0.0 baseline RPM"
+if rpm -i "$BASELINE_RPM" >/tmp/rpm-life-install.log 2>&1; then
+  acc_ok "v2.0.0 RPM installed"
 else
-  acc_fail "rc.22 RPM install failed (see /tmp/rpm-life-install.log)"
+  acc_fail "v2.0.0 RPM install failed (see /tmp/rpm-life-install.log)"
 fi
-if [ "$(docker-helper version)" = "$RC22_VERSION" ]; then
-  acc_ok "rc.22 binary version installed ($RC22_VERSION)"
+if [ "$(docker-helper version)" = "$BASELINE_VERSION" ]; then
+  acc_ok "v2.0.0 binary version installed ($BASELINE_VERSION)"
 else
-  acc_fail "installed binary version is not $RC22_VERSION: $(docker-helper version)"
+  acc_fail "installed binary version is not $BASELINE_VERSION: $(docker-helper version)"
 fi
 if rpm -q docker-helper >/dev/null 2>&1; then
   acc_ok "rpm records the docker-helper package"
@@ -159,10 +161,10 @@ fi
 
 INIT_OUT="$(docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)"; INIT_EC=$?
 if [ "$INIT_EC" -eq 0 ]; then
-  acc_ok "system init on rc.22 baseline"
+  acc_ok "system init on v2.0.0 baseline"
 else
   printf '%s\n' "$INIT_OUT" | redact >&2
-  acc_fail "system init failed on rc.22 baseline"
+  acc_fail "system init failed on v2.0.0 baseline"
 fi
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
@@ -171,11 +173,11 @@ for _i in $(seq 1 30); do
   sleep 1
 done
 if systemctl is-active --quiet docker-helper.service && wait_health; then
-  acc_ok "rc.22 daemon healthy"
+  acc_ok "v2.0.0 daemon healthy"
 else
-  acc_fail "rc.22 daemon not healthy"
+  acc_fail "v2.0.0 daemon not healthy"
 fi
-verify_confined && acc_ok "rc.22 daemon confined by package-owned MAC artifact" || acc_fail "rc.22 daemon not confined"
+verify_confined && acc_ok "v2.0.0 daemon confined by package-owned MAC artifact" || acc_fail "v2.0.0 daemon not confined"
 
 # Seed operator/principal state BEFORE the upgrade to prove persistence.
 F_USER="$PRINCIPAL"
@@ -191,16 +193,16 @@ if dh principal create --system "$F_USER" >/dev/null 2>&1; then
   F_SESS_JSON="$(dh session create --system --token-file "$F_CRED" --workspace "$F_WS" --json 2>/dev/null)"
   F_SESSION_ID="$(printf '%s' "$F_SESS_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
   [ -n "$F_CRED_ID" ] && [ -n "$F_SESSION_ID" ] \
-    && acc_ok "seeded principal/credential/session state on rc.22" \
-    || acc_fail "could not seed principal/credential/session state on rc.22"
+    && acc_ok "seeded principal/credential/session state on v2.0.0" \
+    || acc_fail "could not seed principal/credential/session state on v2.0.0"
 else
-  acc_fail "principal create failed on rc.22 baseline"
+  acc_fail "principal create failed on v2.0.0 baseline"
 fi
 
 # ---------------------------------------------------------------------------
-# 2. upgrade (rc.22 -> candidate)
+# 2. upgrade (v2.0.0 -> candidate)
 # ---------------------------------------------------------------------------
-scenario "2. upgrade rc.22 -> candidate ($VERSION)"
+scenario "2. upgrade v2.0.0 -> candidate ($VERSION)"
 WAS_ACTIVE=0
 systemctl is-active --quiet docker-helper.service && WAS_ACTIVE=1
 UPG_LOG="/tmp/rpm-life-upgrade.log"
