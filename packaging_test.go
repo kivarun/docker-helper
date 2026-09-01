@@ -7110,6 +7110,67 @@ func TestReleaseDryRunNonPublishing(t *testing.T) {
 	}
 }
 
+// TestUATBlackboxTriggerPolicy verifies the intended UAT trigger policy:
+//   - uat-blackbox.yml is workflow_dispatch-only (no push trigger), so ordinary
+//     pushes to main run only CI;
+//   - ci.yml keeps the main-branch push trigger;
+//   - release.yml keeps the single v* tag-triggered full artifact-gate
+//     publication path, never duplicated by a tag trigger in uat-blackbox.yml;
+//   - manual UAT remains available through the explicit full / selinux scope
+//     inputs passed straight to the gate.
+func TestUATBlackboxTriggerPolicy(t *testing.T) {
+	uat, err := os.ReadFile(".github/workflows/uat-blackbox.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uatContent := string(uat)
+
+	// Manual UAT must remain available via workflow_dispatch with an explicit
+	// scope passed straight to the gate (no github.event_name branching).
+	if !strings.Contains(uatContent, "workflow_dispatch:") {
+		t.Error("uat-blackbox.yml must keep a workflow_dispatch trigger for manual UAT")
+	}
+	if !strings.Contains(uatContent, "scope: ${{ inputs.scope }}") {
+		t.Error("uat-blackbox.yml must pass the explicit workflow_dispatch scope input directly to the gate")
+	}
+	if !strings.Contains(uatContent, "uat_version: ${{ inputs.uat_version }}") {
+		t.Error("uat-blackbox.yml must pass the explicit workflow_dispatch uat_version input directly to the gate")
+	}
+	if strings.Contains(uatContent, "github.event_name") {
+		t.Error("uat-blackbox.yml must not branch on github.event_name (workflow is workflow_dispatch-only)")
+	}
+
+	// No automatic push trigger and no tag trigger: ordinary pushes run only
+	// CI, and release.yml is the single release publication path.
+	if strings.Contains(uatContent, "push:") {
+		t.Error("uat-blackbox.yml must not have a push trigger (UAT is workflow_dispatch-only)")
+	}
+	if strings.Contains(uatContent, "tags:") || strings.Contains(uatContent, "'v*'") {
+		t.Error("uat-blackbox.yml must not add a tag trigger (release.yml owns tag-triggered release UAT)")
+	}
+
+	ci, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciContent := string(ci)
+	if !strings.Contains(ciContent, "push:") || !strings.Contains(ciContent, "branches: [main]") {
+		t.Error("ci.yml must keep the main-branch push trigger (ordinary pushes run CI)")
+	}
+
+	release, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseContent := string(release)
+	if !strings.Contains(releaseContent, "tags:") || !strings.Contains(releaseContent, "'v*'") {
+		t.Error("release.yml must keep the v* tag trigger as the release publication path")
+	}
+	if !strings.Contains(releaseContent, "scope: full") {
+		t.Error("release.yml must run the artifact gate with scope=full")
+	}
+}
+
 // TestReleaseLeastPrivilegePermissions verifies the release pipeline runs at
 // least privilege: workflow-level `contents: read` only, with `contents: write`
 // granted to exactly one job — `promote`, the only job that publishes (via

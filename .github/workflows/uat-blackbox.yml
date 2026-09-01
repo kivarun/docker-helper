@@ -16,8 +16,6 @@ on:
         required: false
         default: '2.1.0-uat'
         type: string
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -29,17 +27,16 @@ permissions:
 # it. See artifact-gate.yml for the producer/consumer graph and the candidate
 # identity / retry semantics.
 #
-#   workflow_dispatch (scope=input)  -> gate with that scope (full | selinux)
-#   push to main (scope=push)        -> gate with scope=push (producer + Ubuntu
-#                                       DEB and tarball consumers; no heavy VMs
-#                                       on every commit)
+# UAT is workflow_dispatch-only with an explicit full / selinux scope. Ordinary
+# pushes to main run only CI (.github/workflows/ci.yml), and tag-triggered
+# release UAT is owned solely by release.yml (the single publication path).
 #
 # The explicit profile set (no Cartesian product of meaningless combinations):
 #
 #   platform  install   MAC       runner
-#   ubuntu    deb       apparmor  ubuntu-24.04                 (hosted, full+push)
-#   ubuntu    tarball   apparmor  ubuntu-24.04                 (hosted, full+push)
-#   ubuntu    deb       apparmor  ubuntu-24.04 regressions 3-9 (hosted, full only)
+#   ubuntu    deb       apparmor  ubuntu-24.04                 (hosted, full)
+#   ubuntu    tarball   apparmor  ubuntu-24.04                 (hosted, full)
+#   ubuntu    deb       apparmor  ubuntu-24.04 regressions 3-9 (hosted, full)
 #   opensuse  rpm       apparmor  ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full)
 #   opensuse  rpm       selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full/selinux)
 #   opensuse  tarball   selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full)
@@ -57,7 +54,5 @@ jobs:
   artifact-gate:
     uses: ./.github/workflows/artifact-gate.yml
     with:
-      # The push path must never reference `inputs` (undefined for push), so the
-      # expressions short-circuit to the defaults.
-      uat_version: ${{ github.event_name == 'workflow_dispatch' && inputs.uat_version || '2.1.0-uat' }}
-      scope: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'push' }}
+      uat_version: ${{ inputs.uat_version }}
+      scope: ${{ inputs.scope }}
