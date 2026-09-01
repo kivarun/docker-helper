@@ -7171,6 +7171,57 @@ func TestUATBlackboxTriggerPolicy(t *testing.T) {
 	}
 }
 
+// TestArtifactGateScopeContract verifies the reusable artifact gate accepts
+// exactly the full and selinux scopes: the retired scope=push is gone from the
+// live workflow contract, an unsupported scope fails the workflow explicitly
+// (not by silently disabling every consumer), and both supported scopes keep
+// their consumer branches.
+func TestArtifactGateScopeContract(t *testing.T) {
+	gate, err := os.ReadFile(".github/workflows/artifact-gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(gate)
+
+	// The retired push scope must be gone from the live contract (no obsolete
+	// "push-triggered subset" wording, no push branch, no full | push | selinux).
+	for _, banned := range []string{"scope=push", "push-triggered", "full | push | selinux", "inputs.scope == 'push'"} {
+		if strings.Contains(content, banned) {
+			t.Errorf("artifact-gate.yml must not expose or accept the retired push scope (%q)", banned)
+		}
+	}
+	if strings.Contains(content, "'push'") {
+		t.Error("artifact-gate.yml must not reference the retired push scope")
+	}
+
+	// The supported scope set is exactly full | selinux.
+	if !strings.Contains(content, "full | selinux") {
+		t.Error("artifact-gate.yml scope input must document full | selinux only")
+	}
+
+	// The gate must fail closed: an explicit validate-scope job rejects any
+	// unsupported value with exit 1, and the producer depends on it so nothing
+	// is built for an invalid scope.
+	if !strings.Contains(content, "validate-scope") {
+		t.Error("artifact-gate.yml must have an explicit validate-scope job that fails closed")
+	}
+	if !strings.Contains(content, "exit 1") {
+		t.Error("artifact-gate.yml validate-scope must fail the workflow on an unsupported scope")
+	}
+	producer := findJobSection(content, "producer")
+	if !strings.Contains(producer, "needs: validate-scope") {
+		t.Error("producer job must depend on validate-scope so an invalid scope fails before building")
+	}
+
+	// Both supported scopes remain supported by their consumer branches.
+	if !strings.Contains(content, "inputs.scope == 'full'") {
+		t.Error("artifact-gate.yml must keep the full scope consumer branch")
+	}
+	if !strings.Contains(content, "inputs.scope == 'selinux'") {
+		t.Error("artifact-gate.yml must keep the selinux scope consumer branch")
+	}
+}
+
 // TestReleaseLeastPrivilegePermissions verifies the release pipeline runs at
 // least privilege: workflow-level `contents: read` only, with `contents: write`
 // granted to exactly one job — `promote`, the only job that publishes (via

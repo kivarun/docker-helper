@@ -3,8 +3,7 @@
 #
 # This is the ONE canonical definition of the artifact gate. It is called by:
 #
-#   * uat-blackbox.yml  — ordinary full UAT (workflow_dispatch) and the
-#                         lightweight push-triggered subset (scope=push);
+#   * uat-blackbox.yml  — manual full/selinux UAT (workflow_dispatch);
 #   * release.yml       — the release pipeline, which calls this SAME gate with
 #                         scope=full and then only promotes after it.
 #
@@ -77,7 +76,7 @@ on:
         required: true
         type: string
       scope:
-        description: 'Which consumers to run (full | push | selinux)'
+        description: 'Which consumers to run (full | selinux)'
         required: false
         default: 'full'
         type: string
@@ -91,10 +90,29 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Scope validation (fail closed). The reusable gate supports exactly the
+  # full and selinux scopes; any other value fails the workflow explicitly
+  # instead of relying on every consumer `if:` becoming false. The producer
+  # depends on this job so an invalid scope fails before anything is built.
+  # ---------------------------------------------------------------------------
+  validate-scope:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Reject unsupported scope
+        run: |
+          case "${{ inputs.scope }}" in
+            full|selinux) echo "artifact-gate scope '${{ inputs.scope }}' is supported" ;;
+            *) echo "error: unsupported artifact-gate scope '${{ inputs.scope }}' (supported: full, selinux)" >&2; exit 1 ;;
+          esac
+
+  # ---------------------------------------------------------------------------
   # Canonical release-candidate producer. The ONLY job that builds release
   # artifacts; all consumers (and release promotion) consume its staged bytes.
   # ---------------------------------------------------------------------------
   producer:
+    needs: validate-scope
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -155,7 +173,7 @@ jobs:
 
   # Ubuntu DEB / AppArmor (hosted ubuntu-24.04). Exact candidate DEB.
   uat-blackbox-ubuntu:
-    if: inputs.scope == 'full' || inputs.scope == 'push'
+    if: inputs.scope == 'full'
     needs: producer
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -199,7 +217,7 @@ jobs:
 
   # Ubuntu tarball / AppArmor (hosted ubuntu-24.04). Exact candidate tarball.
   uat-blackbox-ubuntu-tarball:
-    if: inputs.scope == 'full' || inputs.scope == 'push'
+    if: inputs.scope == 'full'
     needs: producer
     runs-on: ubuntu-24.04
     timeout-minutes: 30
