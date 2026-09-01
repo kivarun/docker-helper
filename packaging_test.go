@@ -12,6 +12,79 @@ import (
 	"testing"
 )
 
+// Packaging-integration mode is a TEST-ONLY contract: setting
+// DOCKER_HELPER_PACKAGING_INTEGRATION=1 turns a missing required packaging
+// tool into a hard test failure, so CI's dedicated packaging-integration job
+// proves the packaging integration tests actually executed instead of silently
+// skipping. Production code must never read this variable.
+const packagingIntegrationEnv = "DOCKER_HELPER_PACKAGING_INTEGRATION"
+
+func packagingIntegrationMode() bool {
+	return os.Getenv(packagingIntegrationEnv) == "1"
+}
+
+// packagingToolStatus is how a packaging tool's availability is handled under
+// the current mode.
+type packagingToolStatus int
+
+const (
+	packagingToolOK packagingToolStatus = iota
+	packagingToolSkip
+	packagingToolFail
+)
+
+// packagingToolPolicy resolves a packaging tool under the current mode:
+// OK when present; otherwise SKIP in normal mode and FAIL in
+// packaging-integration mode. The caller (requirePackagingTool or
+// packagingInspectTool) applies the returned status. Keeping the decision in
+// one function makes the mode contract behaviorally testable.
+func packagingToolPolicy(t *testing.T, tool string) (path string, status packagingToolStatus, err error) {
+	t.Helper()
+	path, err = exec.LookPath(tool)
+	if err != nil {
+		if packagingIntegrationMode() {
+			return "", packagingToolFail, err
+		}
+		return "", packagingToolSkip, err
+	}
+	return path, packagingToolOK, nil
+}
+
+// requirePackagingTool makes a packaging tool mandatory for the test: in
+// normal mode a missing tool skips the test (developer-friendly); in
+// packaging-integration mode a missing required tool fails the test so a
+// toolchain regression cannot silently drop packaging coverage.
+func requirePackagingTool(t *testing.T, tool string) {
+	t.Helper()
+	_, status, err := packagingToolPolicy(t, tool)
+	switch status {
+	case packagingToolOK:
+	case packagingToolSkip:
+		t.Skipf("packaging tool %q not available, skipping: %v", tool, err)
+	case packagingToolFail:
+		t.Fatalf("required packaging tool %q missing in packaging-integration mode: %v", tool, err)
+	}
+}
+
+// packagingInspectTool resolves an optional package-inspection tool (for
+// example dpkg-deb or rpm). Outside packaging-integration mode a missing tool
+// is logged and the caller skips that optional sub-verification; in
+// packaging-integration mode a missing inspection tool fails the test because
+// the inspection is part of the packaging-integration contract.
+func packagingInspectTool(t *testing.T, tool string) string {
+	t.Helper()
+	path, status, err := packagingToolPolicy(t, tool)
+	switch status {
+	case packagingToolOK:
+		return path
+	case packagingToolSkip:
+		t.Logf("%s not available, skipping optional verification", tool)
+	case packagingToolFail:
+		t.Fatalf("required packaging inspection tool %q missing in packaging-integration mode: %v", tool, err)
+	}
+	return ""
+}
+
 // TestScriptSyntax verifies every shipped script has valid shell syntax.
 func TestScriptSyntax(t *testing.T) {
 	tests := []struct {
@@ -3332,9 +3405,7 @@ func TestBuildPackagesScriptContent(t *testing.T) {
 // verifies metadata: contents, modes, dependencies, conffiles/config flags.
 // Skipped only when nfpm is unavailable.
 func TestPackageMetadataIntegration(t *testing.T) {
-	if _, err := exec.LookPath("nfpm"); err != nil {
-		t.Skip("nfpm not installed, skipping package metadata integration test")
-	}
+	requirePackagingTool(t, "nfpm")
 
 	testVersion := "0.0.0"
 	tmpDir := t.TempDir()
@@ -3420,26 +3491,20 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	}
 
 	// Verify DEB with dpkg-deb.
-	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+	if dpkgDeb := packagingInspectTool(t, "dpkg-deb"); dpkgDeb != "" {
 		verifyDEBPackage(t, dpkgDeb, debFile)
-	} else {
-		t.Log("dpkg-deb not available, skipping DEB verification")
 	}
 
 	// Verify RPM with rpm.
-	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+	if rpmPath := packagingInspectTool(t, "rpm"); rpmPath != "" {
 		verifyRPMPackage(t, rpmPath, rpmFile)
-	} else {
-		t.Log("rpm not available, skipping RPM verification")
 	}
 }
 
 // TestPackageSELinuxPayloadSeparation verifies that the SELinux policy module
 // is included in the RPM but NOT in the DEB (DEB is AppArmor-only).
 func TestPackageSELinuxPayloadSeparation(t *testing.T) {
-	if _, err := exec.LookPath("nfpm"); err != nil {
-		t.Skip("nfpm not installed, skipping SELinux payload separation test")
-	}
+	requirePackagingTool(t, "nfpm")
 
 	testVersion := "0.0.0"
 	tmpDir := t.TempDir()
@@ -3504,25 +3569,21 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	rpmFile := filepath.Join(tmpDir, "docker-helper-"+testVersion+"-1.x86_64.rpm")
 
 	// Verify DEB does NOT contain SELinux policy.
-	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+	if dpkgDeb := packagingInspectTool(t, "dpkg-deb"); dpkgDeb != "" {
 		cmd := exec.Command(dpkgDeb, "--contents", debFile)
 		out, _ := cmd.CombinedOutput()
 		if strings.Contains(string(out), "/usr/share/selinux/docker_helper.pp") {
 			t.Error("DEB must NOT contain /usr/share/selinux/docker_helper.pp (DEB is AppArmor-only)")
 		}
-	} else {
-		t.Log("dpkg-deb not available, skipping DEB SELinux payload check")
 	}
 
 	// Verify RPM DOES contain SELinux policy.
-	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+	if rpmPath := packagingInspectTool(t, "rpm"); rpmPath != "" {
 		cmd := exec.Command(rpmPath, "-qpl", rpmFile)
 		out, _ := cmd.CombinedOutput()
 		if !strings.Contains(string(out), "/usr/share/selinux/docker_helper.pp") {
 			t.Error("RPM must contain /usr/share/selinux/docker_helper.pp")
 		}
-	} else {
-		t.Log("rpm not available, skipping RPM SELinux payload check")
 	}
 }
 
@@ -3924,9 +3985,7 @@ func verifyRPMModesPerms(t *testing.T, modeOutput string) {
 // TestPackageBuildIntegration runs the full build-packages.sh pipeline
 // and verifies the resulting packages. Skipped when nfpm is unavailable.
 func TestPackageBuildIntegration(t *testing.T) {
-	if _, err := exec.LookPath("nfpm"); err != nil {
-		t.Skip("nfpm not installed, skipping package build integration test")
-	}
+	requirePackagingTool(t, "nfpm")
 
 	hasCC := false
 	if _, err := exec.LookPath("musl-gcc"); err == nil {
@@ -3938,13 +3997,14 @@ func TestPackageBuildIntegration(t *testing.T) {
 		}
 	}
 	if !hasCC {
+		if packagingIntegrationMode() {
+			t.Fatal("required packaging tool musl-gcc (or Alpine gcc) missing in packaging-integration mode")
+		}
 		t.Skip("musl-gcc (or Alpine gcc) not available, skipping full package build pipeline")
 	}
 
-	// Skip if SELinux build tools are not available (checkmodule is required by build-packages.sh).
-	if _, err := exec.LookPath("checkmodule"); err != nil {
-		t.Skip("checkmodule not available, skipping full package build pipeline (requires SELinux build tools)")
-	}
+	// checkmodule is required by build-packages.sh.
+	requirePackagingTool(t, "checkmodule")
 
 	// Clean up dist/ to avoid stale artifacts.
 	if err := os.RemoveAll("dist"); err != nil {
@@ -3986,17 +4046,13 @@ func TestPackageBuildIntegration(t *testing.T) {
 	}
 
 	// Verify DEB.
-	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+	if dpkgDeb := packagingInspectTool(t, "dpkg-deb"); dpkgDeb != "" {
 		verifyDEBPackage(t, dpkgDeb, debFile)
-	} else {
-		t.Log("dpkg-deb not available, skipping DEB verification")
 	}
 
 	// Verify RPM.
-	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+	if rpmPath := packagingInspectTool(t, "rpm"); rpmPath != "" {
 		verifyRPMPackage(t, rpmPath, rpmFile)
-	} else {
-		t.Log("rpm not available, skipping RPM verification")
 	}
 }
 
@@ -5028,12 +5084,8 @@ func TestBuildSelinuxPolicyHelperToolsRequired(t *testing.T) {
 // it produces a non-empty docker_helper.pp, removing stale policy output first.
 // Skipped when the SELinux build tools are unavailable.
 func TestBuildSelinuxPolicyHelperProducesPP(t *testing.T) {
-	if _, err := exec.LookPath("checkmodule"); err != nil {
-		t.Skip("checkmodule not installed, skipping policy build test")
-	}
-	if _, err := exec.LookPath("semodule_package"); err != nil {
-		t.Skip("semodule_package not installed, skipping policy build test")
-	}
+	requirePackagingTool(t, "checkmodule")
+	requirePackagingTool(t, "semodule_package")
 
 	outDir := t.TempDir()
 	// Plant stale policy artifacts; they must never satisfy the build.
@@ -6229,9 +6281,7 @@ func TestRpmPostremovePreservesState(t *testing.T) {
 // TestPackageMetadataScripts verifies that the built packages contain the
 // lifecycle scripts. Skipped when nfpm is unavailable.
 func TestPackageMetadataScripts(t *testing.T) {
-	if _, err := exec.LookPath("nfpm"); err != nil {
-		t.Skip("nfpm not installed, skipping package metadata scripts test")
-	}
+	requirePackagingTool(t, "nfpm")
 
 	tmpDir := t.TempDir()
 
@@ -6286,7 +6336,7 @@ func TestPackageMetadataScripts(t *testing.T) {
 	rpmFile := filepath.Join(tmpDir, "docker-helper-0.0.0-1.x86_64.rpm")
 
 	// Verify DEB scripts.
-	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+	if dpkgDeb := packagingInspectTool(t, "dpkg-deb"); dpkgDeb != "" {
 		controlDir := filepath.Join(tmpDir, "deb-control")
 		if err := os.MkdirAll(controlDir, 0755); err != nil {
 			t.Fatal(err)
@@ -6306,12 +6356,10 @@ func TestPackageMetadataScripts(t *testing.T) {
 				t.Errorf("DEB script must be executable: %s (mode %o)", script, info.Mode())
 			}
 		}
-	} else {
-		t.Log("dpkg-deb not available, skipping DEB script verification")
 	}
 
 	// Verify RPM scripts.
-	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+	if rpmPath := packagingInspectTool(t, "rpm"); rpmPath != "" {
 		cmd := exec.Command(rpmPath, "-qp", "--scripts", rpmFile)
 		out, _ := cmd.CombinedOutput()
 		scriptStr := string(out)
@@ -6320,8 +6368,6 @@ func TestPackageMetadataScripts(t *testing.T) {
 				t.Errorf("RPM must contain scriptlet: %s", section)
 			}
 		}
-	} else {
-		t.Log("rpm not available, skipping RPM script verification")
 	}
 }
 
@@ -6330,9 +6376,7 @@ func TestPackageMetadataScripts(t *testing.T) {
 // --- Build script tests ---
 
 func TestBuildManpagesScriptBuilds(t *testing.T) {
-	if _, err := exec.LookPath("gzip"); err != nil {
-		t.Skip("gzip not available, skipping manpage build test")
-	}
+	requirePackagingTool(t, "gzip")
 
 	cmd := exec.Command("bash", "build-manpages.sh")
 	out, err := cmd.CombinedOutput()
@@ -6370,9 +6414,7 @@ func TestBuildManpagesScriptBuilds(t *testing.T) {
 // --- Package metadata integration for man pages ---
 
 func TestPackageMetadataManPages(t *testing.T) {
-	if _, err := exec.LookPath("nfpm"); err != nil {
-		t.Skip("nfpm not installed, skipping package metadata man pages test")
-	}
+	requirePackagingTool(t, "nfpm")
 
 	tmpDir := t.TempDir()
 
@@ -6448,7 +6490,7 @@ func TestPackageMetadataManPages(t *testing.T) {
 	rpmFile := filepath.Join(tmpDir, "docker-helper-0.0.0-1.x86_64.rpm")
 
 	// Verify DEB contains man pages with exact paths and mode.
-	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+	if dpkgDeb := packagingInspectTool(t, "dpkg-deb"); dpkgDeb != "" {
 		cmd := exec.Command(dpkgDeb, "--contents", debFile)
 		out, _ := cmd.CombinedOutput()
 		outStr := string(out)
@@ -6466,12 +6508,10 @@ func TestPackageMetadataManPages(t *testing.T) {
 				}
 			}
 		}
-	} else {
-		t.Log("dpkg-deb not available, skipping DEB man page verification")
 	}
 
 	// Verify RPM contains man pages with exact paths and mode.
-	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+	if rpmPath := packagingInspectTool(t, "rpm"); rpmPath != "" {
 		cmd := exec.Command(rpmPath, "-qpl", rpmFile)
 		out, _ := cmd.CombinedOutput()
 		outStr := string(out)
@@ -6505,17 +6545,13 @@ func TestPackageMetadataManPages(t *testing.T) {
 				t.Errorf("RPM man page mode wrong for %s: expected %s, got %s", path, expected, actual)
 			}
 		}
-	} else {
-		t.Log("rpm not available, skipping RPM man page verification")
 	}
 }
 
 // TestPackageBashCompletion verifies that the built packages contain the
 // Bash completion script at the correct path.
 func TestPackageBashCompletion(t *testing.T) {
-	if _, err := exec.LookPath("nfpm"); err != nil {
-		t.Skip("nfpm not installed, skipping package bash completion test")
-	}
+	requirePackagingTool(t, "nfpm")
 
 	tmpDir := t.TempDir()
 
@@ -6591,25 +6627,21 @@ func TestPackageBashCompletion(t *testing.T) {
 	rpmFile := filepath.Join(tmpDir, "docker-helper-0.0.0-1.x86_64.rpm")
 
 	// Verify DEB contains bash completion.
-	if dpkgDeb, err := exec.LookPath("dpkg-deb"); err == nil {
+	if dpkgDeb := packagingInspectTool(t, "dpkg-deb"); dpkgDeb != "" {
 		cmd := exec.Command(dpkgDeb, "--contents", debFile)
 		out, _ := cmd.CombinedOutput()
 		if !strings.Contains(string(out), "/usr/share/bash-completion/completions/docker-helper") {
 			t.Error("DEB missing /usr/share/bash-completion/completions/docker-helper")
 		}
-	} else {
-		t.Log("dpkg-deb not available, skipping DEB completion verification")
 	}
 
 	// Verify RPM contains bash completion.
-	if rpmPath, err := exec.LookPath("rpm"); err == nil {
+	if rpmPath := packagingInspectTool(t, "rpm"); rpmPath != "" {
 		cmd := exec.Command(rpmPath, "-qpl", rpmFile)
 		out, _ := cmd.CombinedOutput()
 		if !strings.Contains(string(out), "/usr/share/bash-completion/completions/docker-helper") {
 			t.Error("RPM missing /usr/share/bash-completion/completions/docker-helper")
 		}
-	} else {
-		t.Log("rpm not available, skipping RPM completion verification")
 	}
 }
 
