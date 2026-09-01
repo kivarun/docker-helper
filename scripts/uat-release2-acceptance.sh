@@ -129,17 +129,16 @@ json_field() { # field
 # are matched case-insensitively. Fail-closed: only "auth" may satisfy an
 # auth-denial acceptance assertion.
 classify_registry_failure() {
-  local stream="$1" lower
-  lower="$(printf '%s\n' "$stream" | tr '[:upper:]' '[:lower:]')"
+  local stream="$1"
 
-  if printf '%s\n' "$lower" | grep -qE \
-      'dial tcp|connection refused|no such host|i\/o timeout|tls handshake timeout|connection reset|proxyconnect|net\/http: request canceled'; then
+  if grep -qiE \
+      'dial tcp|connection refused|no such host|i\/o timeout|tls handshake timeout|connection reset|proxyconnect|net\/http: request canceled' <<<"$stream"; then
     printf 'network\n'
     return 0
   fi
 
-  if printf '%s\n' "$lower" | grep -qE \
-      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials'; then
+  if grep -qiE \
+      'unauthorized|authentication required|401 unauthorized|failed with status: 401|pull access denied|denied: requested access|authorization failed|no basic auth credentials' <<<"$stream"; then
     printf 'auth\n'
     return 0
   fi

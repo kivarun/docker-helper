@@ -7500,6 +7500,17 @@ func runBashIn(t *testing.T, dir, script string) (string, error) {
 	return string(out), err
 }
 
+// runBashScriptIn runs a bash script file with the given working directory.
+// Used when the script content would exceed the per-argument size limit of a
+// single `bash -c` argv string (e.g. large embedded test payloads).
+func runBashScriptIn(t *testing.T, dir, scriptPath string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // extractShellFunction returns the source of a top-level function named name
 // from a shell script. The function must have its body indented and close with
 // a "}" at column 0.
@@ -7550,13 +7561,44 @@ func TestRelease2AcceptanceClassifierPriority(t *testing.T) {
 		{"no basic auth credentials", "no basic auth credentials", "auth"},
 		{"failed with status 401", "failed with status: 401 Unauthorized", "auth"},
 	}
+	// The long mixed case places a network marker first, fills the stream with
+	// more than 1 MiB of non-marker content, then appends an auth marker. Under
+	// production semantics (set -uo pipefail) a producer-pipe implementation of
+	// the classifier would let grep -q exit early, SIGPIPE the producer, and
+	// misreport this as auth. It must classify as network.
+	const longFiller = "benign registry stream filler line that matches no marker.\n"
+	longMixed := "dial tcp: connection refused\n" +
+		strings.Repeat(longFiller, (1<<20)/len(longFiller)+1) +
+		"failed with status: 401 Unauthorized\n"
+	cases = append(cases, struct {
+		name  string
+		input string
+		want  string
+	}{"long network plus auth", longMixed, "network"})
 	var sb strings.Builder
+	sb.WriteString("set -uo pipefail\n")
 	sb.WriteString(fn)
 	sb.WriteString("\n")
 	for _, tc := range cases {
 		fmt.Fprintf(&sb, "printf 'RESULT:%s='; classify_registry_failure %q\n", tc.name, tc.input)
 	}
-	out, err := runBashIn(t, ".", sb.String())
+	// Run from a temp file rather than `bash -c`: the long mixed case embeds
+	// > 1 MiB of filler, which exceeds the per-argument size limit of a single
+	// argv string.
+	script := sb.String()
+	f, err := os.CreateTemp("", "classifier-*.sh")
+	if err != nil {
+		t.Fatalf("create temp classifier script: %v", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(script); err != nil {
+		f.Close()
+		t.Fatalf("write temp classifier script: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close temp classifier script: %v", err)
+	}
+	out, err := runBashScriptIn(t, ".", f.Name())
 	if err != nil {
 		t.Fatalf("bash classifier run failed: %v\n%s", err, out)
 	}
@@ -7610,7 +7652,7 @@ func productionClassifyMarkers(t *testing.T) (network, auth []string) {
 func scriptClassifierMarkers(t *testing.T) (network, auth []string) {
 	t.Helper()
 	fn := extractShellFunction(t, "scripts/uat-release2-acceptance.sh", "classify_registry_failure")
-	re := regexp.MustCompile(`grep -qE[^']*'([^']+)'`)
+	re := regexp.MustCompile(`grep -qiE[^']*'([^']+)'`)
 	var got []string
 	for _, m := range re.FindAllStringSubmatch(fn, -1) {
 		got = append(got, m[1])
