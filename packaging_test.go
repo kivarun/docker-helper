@@ -7743,16 +7743,32 @@ func markerSetsEqual(a, b []string) bool {
 // would wrongly accept this pair.
 func TestRelease2AcceptanceClassifierMarkerExactMatch(t *testing.T) {
 	prodNet, _ := productionClassifyMarkers(t)
-	if len(prodNet) < 2 {
-		t.Fatalf("need at least two production network markers to exercise duplicate+missing alignment, got %d", len(prodNet))
+
+	// The duplicate+missing fixture must be built from two DISTINCT markers.
+	// If every production marker is identical there is no way to both drop one
+	// marker and substitute a different one, so the test cannot exercise the
+	// multiset-mismatch it is meant to protect.
+	base := prodNet[0]
+	distinct := -1
+	for i, m := range prodNet {
+		if m != base {
+			distinct = i
+			break
+		}
 	}
-	// Drop the first production marker and duplicate the second in its place:
-	// same length, every element present in production, but not an exact match.
+	if distinct < 0 {
+		t.Fatalf("marker alignment test needs at least two distinct production network markers, got only %q", base)
+	}
+
+	// Drop prodNet[0] and duplicate prodNet[distinct] in its place: same length,
+	// every element present in production, but not an exact multiset match. A
+	// set-based comparison would wrongly accept this pair.
 	scriptNet := append([]string(nil), prodNet...)
-	scriptNet[0] = scriptNet[1]
+	scriptNet[0] = scriptNet[distinct]
 	if markerSetsEqual(prodNet, scriptNet) {
-		t.Fatalf("marker alignment must reject a set that duplicates %q and drops %q (multiset mismatch)", prodNet[1], prodNet[0])
+		t.Fatalf("marker alignment must reject a set that duplicates %q and drops %q (multiset mismatch)", prodNet[distinct], prodNet[0])
 	}
+
 	// Sanity: an exact copy of the production markers must still align.
 	if !markerSetsEqual(prodNet, append([]string(nil), prodNet...)) {
 		t.Fatalf("marker alignment must accept an exact copy of production markers")
