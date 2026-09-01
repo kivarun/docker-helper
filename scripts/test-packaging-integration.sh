@@ -25,6 +25,16 @@ export DOCKER_HELPER_PACKAGING_INTEGRATION=1
 
 # Anchored to the exact packaging integration tests so this script never runs
 # the entire repository test suite a second time and never silently matches
-# zero tests.
-go test ./... \
-  -run '^(TestPackageMetadataIntegration|TestPackageSELinuxPayloadSeparation|TestPackageBuildIntegration|TestBuildSelinuxPolicyHelperProducesPP|TestPackageMetadataScripts|TestBuildManpagesScriptBuilds|TestPackageMetadataManPages|TestPackageBashCompletion)$'
+# zero tests. With required-tool mode on, a missing required tool fails each
+# test; a run that fails to execute the expected number of tests also fails
+# closed (guards against a renamed/missing test silently dropping out).
+output="$(go test ./... -v \
+  -run '^(TestPackageMetadataIntegration|TestPackageSELinuxPayloadSeparation|TestPackageBuildIntegration|TestBuildSelinuxPolicyHelperProducesPP|TestPackageMetadataScripts|TestBuildManpagesScriptBuilds|TestPackageMetadataManPages|TestPackageBashCompletion)$' 2>&1)" \
+  || { printf '%s\n' "$output"; exit 1; }
+
+ran="$(printf '%s\n' "$output" | grep -c -- '--- PASS')"
+if [ "$ran" -lt 8 ]; then
+  printf '%s\n' "$output"
+  echo "error: packaging integration test group ran $ran of 8 expected tests" >&2
+  exit 1
+fi
