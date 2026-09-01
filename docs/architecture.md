@@ -457,6 +457,17 @@ command exits with a non-zero status. If rollback and reload after rollback
 succeed, config.json and the daemon are synchronized. If the reload after
 rollback fails, they may diverge until the next manual reload or restart.
 
+In system mode with the daemon stopped, a successful mutation that changes an
+active trusted-CA configuration (`trusted_ca_injection=auto` with a source
+path) persists the validated config and prints a warning to stderr: the CA
+file was validated locally, but confined MAC readability cannot be verified
+until daemon startup, and startup fails closed if the source is not readable
+under the active MAC policy. The warning is stderr-only and never claims any
+MAC policy allows the source; it is a diagnostic, not a second MAC
+authority. When the daemon is running, reload under daemon confinement is the
+authoritative proof, and a reload/CA-preparation failure still rolls the
+change back (see Trusted CA injection).
+
 `docker-helper config unset FIELD` — removes an optional field to restore
 its default. `allowed_roots` and `session_ttl` are required and cannot be
 unset. Reports `unset` or `unchanged`. The same transactional rollback

@@ -410,12 +410,18 @@ change the Release-2 gate or the already-defined Launcher ownership model above.
   pinned hashes never overridable) covers the canonical baseline bytes. The
   baseline package is never rebuilt privately, mutable release metadata is
   never trusted, and `rc.22` is not a permanent architectural concept.
-- **`trusted_ca_path` confined preflight / diagnostics.** For 2.1 investigate
-  operator diagnostics/preflight that can detect likely system-mode MAC
-  readability problems earlier, especially when changing config while the
-  daemon is stopped. This is diagnostics only: it must not create a second
-  MAC-policy authority; backend selection/enforcement remains owned by the
-  existing backend-neutral MAC path.
+- **`trusted_ca_path` confined preflight / diagnostics (implemented).**
+  In system mode with the daemon stopped, a successful config mutation that
+  changes an active trusted-CA configuration (`trusted_ca_injection=auto`)
+  persists the validated config and prints a warning to stderr that the CA
+  file was validated but confined MAC readability cannot be verified until
+  daemon startup, and that startup fails closed if the source is not readable
+  under the active MAC policy. The warning is stderr-only; the successful
+  stdout contract is unchanged. When the daemon is running, reload under
+  confinement remains the authoritative proof, and reload/CA-preparation
+  failures still roll back. This is diagnostics only: it does not create a
+  second MAC-policy authority; backend selection/enforcement remains owned by
+  the existing backend-neutral MAC path.
 - **X.509/OpenSSL subject-hash independent verification (implemented).**
   The custom `computeOpenSSLSubjectHash` canonicalizer is verified against the
   independent `openssl x509 -hash -noout` oracle. A checked-in semantic

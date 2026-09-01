@@ -140,6 +140,17 @@ be read. When the daemon is stopped, \fBconfig set trusted_ca_path\fR validates
 the file locally but cannot prove the future confined daemon will be allowed
 to read it, so a later daemon start may fail closed on MAC access.
 .RE
+.RS 4
+When the system daemon is stopped and a successful \fBconfig set\fR changes an
+active trusted CA configuration (\fBtrusted_ca_injection\fR="auto" with a source
+path), the command persists the validated config and prints a warning to
+stderr: the CA file was validated, but confined MAC readability cannot be
+verified until daemon startup, and startup fails closed if the source is not
+readable under the active MAC policy. The warning is stderr-only; the
+successful stdout contract (\fBupdated\fR/\fBunchanged\fR) is unchanged. When the
+daemon is running, reload under confinement is authoritative: a reload that
+cannot read the source fails and rolls the change back, with no warning.
+.RE
 .TP
 .B http_address (string, optional, default="127.0.0.1:52375")
 Loopback TCP listen address for system mode. The host must be exactly

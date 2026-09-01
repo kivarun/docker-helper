@@ -573,6 +573,16 @@ daemon will be allowed to read the path under the active MAC policy, so the
 config may be persisted successfully and a later daemon start can fail closed
 because of MAC access.
 
+When the system daemon is stopped and a successful change enables or modifies
+an active trusted CA configuration (`trusted_ca_injection=auto` with a source
+path), the CLI persists the validated config and prints a warning to stderr:
+the CA file was validated, but confined MAC readability cannot be verified
+until daemon startup, and startup fails closed if the source is not readable
+under the active MAC policy. This is a warning, not an error; the successful
+stdout contract (`updated`/`unchanged`) is unchanged. When the system daemon
+is running, reload under confinement is authoritative: a reload that cannot
+read the source fails and rolls the change back, with no warning.
+
 **Computed/output-only fields** are read-only and must not be added to
 config.json. If present, configuration validation and daemon startup fail:
 
