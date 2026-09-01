@@ -117,8 +117,8 @@ var opensslSubjectHashCorpus = []opensslSubjectHashCase{
 	// CN=BMPString("Te" + U+20AC €)
 	{name: "BMPString non-ASCII", rawSubject: corpusBytes("3011310f300d06035504031e060054006520ac"), expected: "61f5c7a4"},
 	// UniversalString non-BMP
-	// CN=UniversalString('T' + U+1F600)
-	{name: "UniversalString non-BMP", rawSubject: corpusBytes("30133111300f06035504031c08000000540000f600"), expected: "897d775e"},
+	// CN=UniversalString('T' + U+1F600) — UTF-32BE 00 01 F6 00 (real non-BMP)
+	{name: "UniversalString non-BMP", rawSubject: corpusBytes("30133111300f06035504031c08000000540001f600"), expected: "3c9f142c"},
 	// non-ASCII UTF-8 text
 	// CN=UTF8String("日本語テスト")
 	{name: "non-ASCII UTF-8 text", rawSubject: corpusBytes("301d311b301906035504030c12e697a5e69cace8aa9ee38386e382b9e38388"), expected: "6ca7f5bd"},
