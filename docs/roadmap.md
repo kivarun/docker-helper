@@ -433,8 +433,8 @@ Release 3 is reserved for the larger runtime architecture:
 
 - managed containers with explicit create, start, stop, restart, inspect, and
   logs operations;
+- synchronous non-interactive exec with bounded direct output;
 - interactive exec over WebSocket;
-- non-interactive exec through the existing operation status/log model;
 - per-Session networking;
 - narrow Launcher-governed port publishing for deliberate external exposure;
 - explicit CPU, memory, and related resource limits.
@@ -445,6 +445,14 @@ recovery, reconciliation, or restart-policy semantics.
 Begin Release 3 with binding lifecycle, ownership, API, failure, cleanup, and
 compatibility contracts. Do not let implementation convenience create a second
 runtime owner beside the existing Session/operation lifecycle.
+
+Release 3 foundation documents:
+
+- [`release-3-scope.md`](release-3-scope.md) — binding scope and exclusions;
+- [`release-3-decomposition.md`](release-3-decomposition.md) — work packages and dependencies;
+- [`release-3-operation-model.md`](release-3-operation-model.md) — durable execution contract;
+- [`release-3-managed-container-domain.md`](release-3-managed-container-domain.md) — identity, ownership, and lifetime;
+- [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.
 
 ## 4.0 / use-case driven
 
