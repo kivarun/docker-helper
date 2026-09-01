@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -7698,25 +7699,10 @@ func TestRelease2AcceptanceClassifierSingleOwner(t *testing.T) {
 	// The helper's marker sets must exactly match production.
 	prodNet, prodAuth := productionClassifyMarkers(t)
 	scriptNet, scriptAuth := scriptClassifierMarkers(t)
-	slicesEqual := func(a, b []string) bool {
-		if len(a) != len(b) {
-			return false
-		}
-		set := make(map[string]bool, len(a))
-		for _, s := range a {
-			set[s] = true
-		}
-		for _, s := range b {
-			if !set[s] {
-				return false
-			}
-		}
-		return true
-	}
-	if !slicesEqual(prodNet, scriptNet) {
+	if !markerSetsEqual(prodNet, scriptNet) {
 		t.Errorf("classifier network markers mismatch production\ngot:  %v\nwant: %v", scriptNet, prodNet)
 	}
-	if !slicesEqual(prodAuth, scriptAuth) {
+	if !markerSetsEqual(prodAuth, scriptAuth) {
 		t.Errorf("classifier auth markers mismatch production\ngot:  %v\nwant: %v", scriptAuth, prodAuth)
 	}
 	// Neither marker set may contain a bare "401" alternative.
@@ -7727,6 +7713,49 @@ func TestRelease2AcceptanceClassifierSingleOwner(t *testing.T) {
 				t.Errorf("classifier marker %q must not be a bare 401", m)
 			}
 		}
+	}
+}
+
+// markerSetsEqual reports whether two marker slices are equal as multisets:
+// the same elements with the same multiplicity. A set-style membership check
+// would accept a duplicated marker standing in for a missing one, so the
+// alignment check uses exact multiset equality instead.
+func markerSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ac := append([]string(nil), a...)
+	bc := append([]string(nil), b...)
+	sort.Strings(ac)
+	sort.Strings(bc)
+	for i := range ac {
+		if ac[i] != bc[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestRelease2AcceptanceClassifierMarkerExactMatch proves the classifier
+// marker-alignment check rejects a multiset where one production marker is
+// missing and another is duplicated in its place, even though lengths match
+// and every script marker is present in production. A set-based comparison
+// would wrongly accept this pair.
+func TestRelease2AcceptanceClassifierMarkerExactMatch(t *testing.T) {
+	prodNet, _ := productionClassifyMarkers(t)
+	if len(prodNet) < 2 {
+		t.Fatalf("need at least two production network markers to exercise duplicate+missing alignment, got %d", len(prodNet))
+	}
+	// Drop the first production marker and duplicate the second in its place:
+	// same length, every element present in production, but not an exact match.
+	scriptNet := append([]string(nil), prodNet...)
+	scriptNet[0] = scriptNet[1]
+	if markerSetsEqual(prodNet, scriptNet) {
+		t.Fatalf("marker alignment must reject a set that duplicates %q and drops %q (multiset mismatch)", prodNet[1], prodNet[0])
+	}
+	// Sanity: an exact copy of the production markers must still align.
+	if !markerSetsEqual(prodNet, append([]string(nil), prodNet...)) {
+		t.Fatalf("marker alignment must accept an exact copy of production markers")
 	}
 }
 
