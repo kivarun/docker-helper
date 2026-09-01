@@ -85,6 +85,26 @@ func packagingInspectTool(t *testing.T, tool string) string {
 	return ""
 }
 
+// writeDummyManPages creates dummy compressed man page files under tmpDir/man
+// and returns their paths. nfpm.yaml references dist/man/*.gz, so every nfpm
+// build test must provision them (content is not verified by these tests).
+func writeDummyManPages(t *testing.T, tmpDir string) (man1, man5 string) {
+	t.Helper()
+	manDir := filepath.Join(tmpDir, "man")
+	if err := os.MkdirAll(manDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	man1 = filepath.Join(manDir, "docker-helper.1.gz")
+	man5 = filepath.Join(manDir, "docker-helper-config.5.gz")
+	if err := os.WriteFile(man1, []byte("dummy-man-1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(man5, []byte("dummy-man-5"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return man1, man5
+}
+
 // TestScriptSyntax verifies every shipped script has valid shell syntax.
 func TestScriptSyntax(t *testing.T) {
 	tests := []struct {
@@ -3429,6 +3449,9 @@ func TestPackageMetadataIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create dummy compressed man pages (required by nfpm.yaml).
+	man1, man5 := writeDummyManPages(t, tmpDir)
+
 	// Create a temporary nFPM config that uses the dummy binary and tmp output.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -3438,6 +3461,9 @@ func TestPackageMetadataIntegration(t *testing.T) {
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
 	// Replace dist/docker_helper.pp with the dummy PP path (RPM-only section).
 	configContent = strings.ReplaceAll(configContent, "src: dist/docker_helper.pp", "src: "+dummyPP)
+	// Replace dist/man/*.gz with the dummy man page paths.
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+man1)
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+man5)
 	// Replace dist/completions/docker-helper with the dummy completion path.
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	// Replace ${VERSION} with test version.
@@ -3528,6 +3554,9 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create dummy compressed man pages (required by nfpm.yaml).
+	man1, man5 := writeDummyManPages(t, tmpDir)
+
 	// Create a temporary nFPM config.
 	nfpmData, err := os.ReadFile("packaging/nfpm.yaml")
 	if err != nil {
@@ -3535,6 +3564,8 @@ func TestPackageSELinuxPayloadSeparation(t *testing.T) {
 	}
 	configContent := strings.ReplaceAll(string(nfpmData), "src: dist/docker-helper", "src: "+dummyBin)
 	configContent = strings.ReplaceAll(configContent, "src: dist/docker_helper.pp", "src: "+dummyPP)
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper.1.gz", "src: "+man1)
+	configContent = strings.ReplaceAll(configContent, "src: dist/man/docker-helper-config.5.gz", "src: "+man5)
 	configContent = strings.ReplaceAll(configContent, "src: dist/completions/docker-helper", "src: "+dummyCompletion)
 	configContent = strings.ReplaceAll(configContent, "${VERSION}", testVersion)
 
