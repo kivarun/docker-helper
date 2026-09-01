@@ -180,7 +180,15 @@ A successful command reports either "updated" or "unchanged".
 If the daemon is running, the change is applied immediately,
 except for startup-only fields such as http_address.
 If the daemon is not running, the change is written to disk and
-will apply on the next start.`,
+will apply on the next start.
+
+In system mode, when the daemon is stopped, a change to an ACTIVE
+trusted CA configuration (trusted_ca_injection=auto with a source path)
+is persisted with a warning on stderr: the CA file was validated locally,
+but confined MAC readability cannot be verified until daemon startup, and
+startup fails closed if the source is not readable under the active MAC
+policy. When the daemon is running, reload under confinement is
+authoritative and reload failures roll back the change.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -1049,6 +1057,14 @@ type removableRoot struct {
 	Identity string // EvalSymlinks result or cleaned abs on ENOENT
 }
 
+// trustedCAPreflightWarning is printed to stderr when a successful system-mode
+// config mutation changed an ACTIVE trusted-CA configuration while the daemon
+// was stopped. The CA bytes were validated locally, but the future confined
+// daemon's readability of the source was not proven. It is a warning, not an
+// error, and it never claims that any MAC policy allows the source.
+const trustedCAPreflightWarning = `warning: trusted CA file validated, but daemon is not running; confined MAC readability cannot be verified until daemon startup
+startup will fail closed if the configured source is not readable under the active MAC policy`
+
 // executeConfigTransaction is the shared config mutation transaction executor.
 // It owns the entire read-modify-write-reload-rollback lifecycle under a
 // single process-level lock.
@@ -1084,6 +1100,10 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+
+	// Snapshot the pre-mutation trusted-CA configuration so the daemon-stopped
+	// diagnostic can detect whether this mutation changed an active CA config.
+	oldCAInj, oldCAPath := effectiveTrustedCAFromRaw(raw)
 
 	// Check for ambiguous schema before migration (fail closed).
 	hasLegacy := raw["allowed_root"] != nil
@@ -1188,6 +1208,10 @@ func executeConfigTransaction(stdout, stderr io.Writer, writeFn configWriter, mu
 			fmt.Fprint(stdout, result.Message)
 		}
 		fmt.Fprintln(stdout, "daemon not running; change will apply on next start")
+		newCAInj, newCAPath := effectiveTrustedCAFromRaw(raw)
+		if trustedCAPreflightWarningRequired(resolveDeploymentMode(), oldCAInj, oldCAPath, newCAInj, newCAPath) {
+			fmt.Fprintln(stderr, trustedCAPreflightWarning)
+		}
 		return 0
 	case reloadRejected, reloadTransportError:
 		// Print the initial reload failure reason first.

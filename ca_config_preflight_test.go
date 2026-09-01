@@ -693,3 +693,272 @@ func TestLoadAndPrepareRuntimeConfigUserModeAcceptsArbitraryCA(t *testing.T) {
 		t.Error("TrustedCAPreparedDir should be set")
 	}
 }
+
+// setupSystemCAConfigPreflightTest creates a system-mode config environment
+// with the daemon stopped (reload reports daemon-not-running), returning the
+// config path and a valid generated CA path. Callers write their own initial
+// config with writeCAConfig after obtaining the paths.
+func setupSystemCAConfigPreflightTest(t *testing.T) (configPath, caPath string) {
+	t.Helper()
+	configPath, caPath = setupCAConfigPreflightTest(t)
+
+	// Mock system mode.
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 0 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+
+	// Daemon is stopped: any reload attempt reports daemon-not-running.
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		return reloadOutcome{reloadDaemonNotRunning, nil}
+	}
+	t.Cleanup(func() { attemptReload = origAttemptReload })
+
+	return configPath, caPath
+}
+
+// assertTrustedCAPreflightWarning asserts the confined-readability warning is
+// present on stderr and absent from stdout.
+func assertTrustedCAPreflightWarning(t *testing.T, stdout, stderr string) {
+	t.Helper()
+	if !strings.Contains(stderr, "trusted CA file validated") {
+		t.Errorf("expected confined-readability warning in stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stderr, "fail closed") {
+		t.Errorf("expected fail-closed notice in stderr, got: %q", stderr)
+	}
+	if strings.Contains(stdout, "trusted CA file validated") {
+		t.Errorf("warning must not appear on stdout, got: %q", stdout)
+	}
+}
+
+// assertNoTrustedCAPreflightWarning asserts no confined-readability warning is
+// present on stderr.
+func assertNoTrustedCAPreflightWarning(t *testing.T, stderr string) {
+	t.Helper()
+	if strings.Contains(stderr, "trusted CA file validated") {
+		t.Errorf("expected no confined-readability warning in stderr, got: %q", stderr)
+	}
+}
+
+func TestTrustedCAPreflightSystemStoppedEnableAuto(t *testing.T) {
+	// System mode, daemon stopped: enabling auto with a valid CA persists the
+	// config, keeps the normal success stdout, and warns on stderr that
+	// confined MAC readability could not be verified.
+	configPath, caPath := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "disabled",
+		"trusted_ca_path":      caPath,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	raw := readConfigJSON(t, configPath)
+	var inj string
+	if err := json.Unmarshal(raw["trusted_ca_injection"], &inj); err != nil {
+		t.Fatal(err)
+	}
+	if inj != "auto" {
+		t.Errorf("trusted_ca_injection = %q, want auto", inj)
+	}
+
+	if !strings.Contains(stdout.String(), "updated trusted_ca_injection=auto") {
+		t.Errorf("expected updated message on stdout, got: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "daemon not running") {
+		t.Errorf("expected daemon-not-running message on stdout, got: %q", stdout.String())
+	}
+	assertTrustedCAPreflightWarning(t, stdout.String(), stderr.String())
+}
+
+func TestTrustedCAPreflightSystemStoppedReplacePathWhileAuto(t *testing.T) {
+	// System mode, daemon stopped: replacing trusted_ca_path while auto is
+	// active persists the config and warns on stderr.
+	configPath, caPath := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "auto",
+		"trusted_ca_path":      caPath,
+	})
+	newCAPath := filepath.Join(filepath.Dir(caPath), "second-ca.crt")
+	generateTestCAPEM(t, newCAPath)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", newCAPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	raw := readConfigJSON(t, configPath)
+	var path string
+	if err := json.Unmarshal(raw["trusted_ca_path"], &path); err != nil {
+		t.Fatal(err)
+	}
+	if path != newCAPath {
+		t.Errorf("trusted_ca_path = %q, want %q", path, newCAPath)
+	}
+	if !strings.Contains(stdout.String(), "updated trusted_ca_path="+newCAPath) {
+		t.Errorf("expected updated message on stdout, got: %q", stdout.String())
+	}
+	assertTrustedCAPreflightWarning(t, stdout.String(), stderr.String())
+}
+
+func TestTrustedCAPreflightSystemStoppedSetPathWhileDisabled(t *testing.T) {
+	// Setting trusted_ca_path while injection remains disabled must succeed
+	// without the confined-readability warning.
+	configPath, caPath := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "disabled",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", caPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	raw := readConfigJSON(t, configPath)
+	var path string
+	if err := json.Unmarshal(raw["trusted_ca_path"], &path); err != nil {
+		t.Fatal(err)
+	}
+	if path != caPath {
+		t.Errorf("trusted_ca_path = %q, want %q", path, caPath)
+	}
+	assertNoTrustedCAPreflightWarning(t, stderr.String())
+}
+
+func TestTrustedCAPreflightSystemStoppedDisableInjection(t *testing.T) {
+	// Disabling injection must succeed without the confined-readability warning.
+	configPath, caPath := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "auto",
+		"trusted_ca_path":      caPath,
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "disabled"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	raw := readConfigJSON(t, configPath)
+	var inj string
+	if err := json.Unmarshal(raw["trusted_ca_injection"], &inj); err != nil {
+		t.Fatal(err)
+	}
+	if inj != "disabled" {
+		t.Errorf("trusted_ca_injection = %q, want disabled", inj)
+	}
+	assertNoTrustedCAPreflightWarning(t, stderr.String())
+}
+
+func TestTrustedCAPreflightUserModeNoWarning(t *testing.T) {
+	// User mode must never emit the confined-readability warning, even when
+	// enabling auto with the daemon stopped.
+	configPath, caPath := setupCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "disabled",
+		"trusted_ca_path":      caPath,
+	})
+
+	origUID := EffectiveUID
+	EffectiveUID = func() int { return 1000 }
+	t.Cleanup(func() { EffectiveUID = origUID })
+
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		return reloadOutcome{reloadDaemonNotRunning, nil}
+	}
+	t.Cleanup(func() { attemptReload = origAttemptReload })
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	assertNoTrustedCAPreflightWarning(t, stderr.String())
+}
+
+func TestTrustedCAPreflightSystemStoppedUnrelatedMutationNoWarning(t *testing.T) {
+	// An unrelated config mutation while an active trusted-CA config is
+	// unchanged must not emit the confined-readability warning.
+	configPath, caPath := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "auto",
+		"trusted_ca_path":      caPath,
+	})
+	newRoot := testAllowedRootDir(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "allowed-root", "add", newRoot}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	raw := readConfigJSON(t, configPath)
+	var roots []string
+	if err := json.Unmarshal(raw["allowed_roots"], &roots); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(roots, newRoot) {
+		t.Errorf("allowed_roots = %v, want it to contain %s", roots, newRoot)
+	}
+	assertNoTrustedCAPreflightWarning(t, stderr.String())
+}
+
+func TestTrustedCAPreflightSystemStoppedInvalidCAFailsClosed(t *testing.T) {
+	// A CA that fails local preflight must fail before the write, leave the
+	// config byte-for-byte unchanged, and never emit the warning (the warning
+	// is only for successful persisted mutations).
+	configPath, _ := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "disabled",
+	})
+
+	badCAPath := filepath.Join(filepath.Dir(configPath), "bad-ca.crt")
+	if err := os.WriteFile(badCAPath, []byte("not valid PEM data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runCommandWithWriters([]string{"config", "set", "trusted_ca_path", badCAPath}, &stdout, &stderr); code != 0 {
+		t.Fatalf("set path: expected 0, got %d", code)
+	}
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Errorf("expected empty stdout, got: %q", stdout.String())
+	}
+	assertNoTrustedCAPreflightWarning(t, stderr.String())
+	newBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, newBytes) {
+		t.Error("config.json should be byte-for-byte unchanged")
+	}
+}

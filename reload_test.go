@@ -2487,3 +2487,88 @@ func TestReloadNoGlobalRootMACVerification(t *testing.T) {
 		t.Errorf("AllowedRoot not updated: got %q, want /opt", currentConfig.AllowedRoots[0])
 	}
 }
+
+// TestTrustedCAPreflightDaemonRunningReloadSuccessNoWarning proves that a
+// successful reload (daemon running, reload accepted) never emits the
+// confined-readability warning: reload under daemon confinement is the
+// authoritative proof, so nothing needs the stopped-daemon diagnostic.
+func TestTrustedCAPreflightDaemonRunningReloadSuccessNoWarning(t *testing.T) {
+	configPath, caPath := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "disabled",
+		"trusted_ca_path":      caPath,
+	})
+
+	// Daemon running: reload is accepted.
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome { return reloadOutcome{reloadSuccess, nil} }
+	t.Cleanup(func() { attemptReload = origAttemptReload })
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated trusted_ca_injection=auto") {
+		t.Errorf("expected updated on stdout, got: %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "daemon not running") {
+		t.Errorf("must not print daemon-not-running on successful reload, got: %q", stdout.String())
+	}
+	assertNoTrustedCAPreflightWarning(t, stderr.String())
+}
+
+// TestTrustedCAPreflightDaemonRunningReloadFailureRollsBack proves that a
+// daemon-side reload/CA-preparation failure is not downgraded to a warning:
+// the command fails, the config is rolled back byte-for-byte, and no
+// misleading success or "cannot verify" warning is emitted.
+func TestTrustedCAPreflightDaemonRunningReloadFailureRollsBack(t *testing.T) {
+	configPath, caPath := setupSystemCAConfigPreflightTest(t)
+	writeCAConfig(t, configPath, map[string]any{
+		"allowed_root":         testAllowedRootDir(t),
+		"session_ttl":          "12h",
+		"trusted_ca_injection": "disabled",
+		"trusted_ca_path":      caPath,
+	})
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Daemon running but rejects the reload (CA preparation failure under
+	// confinement). The rollback reload succeeds, as in the real contract.
+	caPrepErr := fmt.Errorf("trusted CA preparation failed: permission denied")
+	calls := 0
+	origAttemptReload := attemptReload
+	attemptReload = func() reloadOutcome {
+		calls++
+		if calls == 1 {
+			return reloadOutcome{reloadRejected, caPrepErr}
+		}
+		return reloadOutcome{reloadSuccess, nil}
+	}
+	t.Cleanup(func() { attemptReload = origAttemptReload })
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"config", "set", "trusted_ca_injection", "auto"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d: stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "updated") {
+		t.Error("must not print success on reload rejection")
+	}
+	if !strings.Contains(stderr.String(), "rolled back") {
+		t.Errorf("expected rollback notice in stderr, got: %q", stderr.String())
+	}
+	assertNoTrustedCAPreflightWarning(t, stderr.String())
+
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, restored) {
+		t.Error("config.json should be byte-for-byte restored after rollback")
+	}
+}

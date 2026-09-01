@@ -1399,3 +1399,36 @@ func validateCAConfigWithHasher(
 
 	return nil
 }
+
+// effectiveTrustedCAFromRaw resolves the effective trusted-CA injection mode
+// and configured source path from a raw config map. A missing
+// trusted_ca_injection means the default "disabled"; a missing
+// trusted_ca_path means no source is configured.
+func effectiveTrustedCAFromRaw(raw map[string]json.RawMessage) (injection, path string) {
+	if v, ok := raw["trusted_ca_injection"]; ok {
+		_ = json.Unmarshal(v, &injection)
+	}
+	if injection == "" {
+		injection = "disabled"
+	}
+	if v, ok := raw["trusted_ca_path"]; ok {
+		_ = json.Unmarshal(v, &path)
+	}
+	return injection, path
+}
+
+// trustedCAPreflightWarningRequired reports whether a successful config
+// mutation needs the trusted-CA confined-readability warning. It is true only
+// in system mode when the mutation changed an ACTIVE trusted-CA configuration
+// (trusted_ca_injection=auto with a source path) from oldInj/oldPath to
+// newInj/newPath. It never predicts MAC policy; it only reports that confined
+// readability was not proven because the daemon was not running.
+func trustedCAPreflightWarningRequired(mode DeploymentMode, oldInj, oldPath, newInj, newPath string) bool {
+	if mode != ModeSystem {
+		return false
+	}
+	if newInj != "auto" || newPath == "" {
+		return false
+	}
+	return oldInj != "auto" || oldPath != newPath
+}
