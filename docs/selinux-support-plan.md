@@ -1,8 +1,10 @@
 # SELinux support: decision, implementation, and acceptance
 
 This document is the binding SELinux design record for Release 2. The runtime,
-policy, systemd, and RPM integration are implemented. Cross-distribution
-acceptance is not complete.
+policy, systemd, and RPM integration are implemented, and Release-2 SELinux
+acceptance is complete against openSUSE Tumbleweed. Additional
+RHEL/Fedora-family acceptance is deferred by explicit Release-2 scope choice,
+not by an unfinished Release-2 gate.
 
 ## 1. System-mode MAC contract
 

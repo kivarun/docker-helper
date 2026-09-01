@@ -128,9 +128,17 @@ Absolute path to a regular file containing exactly one PEM-encoded
 X.509 CA certificate. No additional PEM blocks or content. Required when
 \fBtrusted_ca_injection\fR is set to "auto".
 .RS 4
-The source may be located anywhere on the host; there is no requirement
-that it live under \fI/etc/docker-helper/\fR. The file must be a regular
-file readable by the daemon and contain exactly one valid CA certificate.
+In user mode any readable absolute path works. In system mode the confined
+daemon must also be permitted to read the path under the active AppArmor or
+SELinux policy; the supported locations are the helper-owned
+\fI/etc/docker-helper/\fR config tree and the standard system CA-bundle paths
+the shipped policy permits. Paths outside the shipped policy are the
+operator's responsibility to make readable under that MAC policy. The file
+must be a regular file readable by the daemon and contain exactly one valid CA
+certificate. Preparation, start, and reload fail closed when the source cannot
+be read. When the daemon is stopped, \fBconfig set trusted_ca_path\fR validates
+the file locally but cannot prove the future confined daemon will be allowed
+to read it, so a later daemon start may fail closed on MAC access.
 .RE
 .TP
 .B http_address (string, optional, default="127.0.0.1:52375")

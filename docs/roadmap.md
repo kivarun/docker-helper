@@ -302,21 +302,26 @@ Implemented contract:
    `install-system.sh` for system mode;
 - native packages and release artifacts include Bash completion and manuals;
 - trusted CA injection is configured through `trusted_ca_path` and
-  `trusted_ca_injection=auto`. The CA source may be any absolute host path
-  in both user and system mode. Managed CA import and broader source support
-  are post-Release-2.
+  `trusted_ca_injection=auto`. `trusted_ca_path` is an absolute path to the
+  accepted CA file. In user mode any readable absolute path works. In system
+  mode the confined daemon must also be permitted to read the source under the
+  active MAC backend, so the supported locations are the helper-owned
+  `/etc/docker-helper` config tree and the system CA-bundle paths the shipped
+  AppArmor/SELinux policy permits; paths outside that policy are the operator's
+  responsibility to make readable under the active MAC policy. Managed CA
+  import and broader source support are post-Release-2.
 
 Release 2 remains local. Non-loopback listeners, TLS, uploaded build contexts,
 and remote image-only runs are deferred to Release 4 or later and remain
 use-case driven.
 
-Outstanding work is stabilization and release acceptance, not capability
-expansion: finish the naming and abstraction cleanup identified by the
-[project-wide review](project-wide-naming-architecture-review-2026-08-24.md),
-complete the consolidated regression review of the fixes recorded in
-[`docs/release-2-audit-2026-08-21/`](release-2-audit-2026-08-21/), finish
-package lifecycle and cross-distribution SELinux/AppArmor UAT, and reconcile
-the final support matrix.
+Release 2 implementation workstreams are complete. The naming/architecture
+review findings required for Release 2 are closed, the consolidated regression
+review is complete, DEB/RPM/tarball lifecycle and enforcing AppArmor/SELinux
+UAT are covered by the release gate, and the Release-2 support matrix is
+settled. The remaining action is final validation and publication of the stable
+release. See [`docs/release-2-plan.md`](release-2-plan.md) and its closure
+record rather than a per-item history here.
 
 Explicitly outside Release 2:
 
@@ -373,6 +378,52 @@ semantics.
 The binding concept, migration direction, and expected CLI/HTTP/database/test
 work are recorded in
 [`docs/release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md).
+
+### Post-2.0 validation and hardening follow-ups
+
+Recorded for Release 2.1 after the stable v2.0.0 is published. None of these
+change the Release-2 gate or the already-defined Launcher ownership model above.
+
+- **Packaging integration tests / CI tooling.** Several packaging-oriented Go
+  tests currently skip when `nfpm`/`checkpolicy`/`semodule_package`/`musl-gcc`
+  are unavailable in the Go-test jobs. Release 2 product correctness is already
+  covered by exact-artifact package UAT, so the Release-2 CI workflow is not
+  changed here. For 2.1: remove the "green by skip everywhere" ambiguity — either
+  provide the required tooling to an appropriate Go integration-test job or
+  establish a dedicated packaging integration-test job — while preserving
+  end-to-end exact-artifact UAT as the authoritative package proof and without
+  turning environment skips into unconditional failures on ordinary developer
+  machines.
+- **Upgrade baseline fixture lifecycle.** The rc.22 incident showed that a
+  pinned SHA protects integrity but GitHub Release asset availability is still
+  an external availability dependency. For 2.1: replace the rc.22-specific
+  naming with an explicit "upgrade baseline fixture" abstraction; use the
+  released stable v2.0.0 as the natural baseline for testing upgrades to 2.1
+  candidates; keep exact artifact hashes pinned and verified before
+  installation; define a durable availability/recovery strategy for the
+  canonical baseline bytes; do not rebuild historical baseline bytes privately;
+  and do not make `rc.22` a permanent architectural concept.
+- **`trusted_ca_path` confined preflight / diagnostics.** For 2.1 investigate
+  operator diagnostics/preflight that can detect likely system-mode MAC
+  readability problems earlier, especially when changing config while the
+  daemon is stopped. This is diagnostics only: it must not create a second
+  MAC-policy authority; backend selection/enforcement remains owned by the
+  existing backend-neutral MAC path.
+- **X.509/OpenSSL subject-hash independent verification.** For 2.1 add
+  independent verification of the custom subject-name canonicalizer: a
+  differential corpus generated/verified against supported OpenSSL versions;
+  include difficult names (multi-valued RDNs, whitespace, non-ASCII, and
+  T61/BMP/Universal strings where applicable); add a fuzz target around the
+  DER/subject parsing boundary. Production runtime must not gain an `openssl`
+  executable dependency merely to satisfy the test.
+- **Minor historical-document hygiene** may be cleaned during 2.1 when touching
+  those documents, but is not Release-2 work.
+
+The larger test/package architectural debt stays out of 2.1 and remains later
+architectural/test work, especially before or with Release 3: package-main
+decomposition; splitting the large `packaging_test.go` architecture; broad
+conversion of source-text cross-language assertions; and global test-suite
+consolidation/parallelization.
 
 ## 3.0
 

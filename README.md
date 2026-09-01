@@ -441,7 +441,7 @@ Configuration fields:
 | `operation_retention_ttl` | duration | How long completed operations are kept (default: `10m`) |
 | `operation_max_completed` | int | Max completed operations retained in memory (default: `200`) |
 | `operation_log_max_bytes` | int | Max bytes retained per operation log and synchronous pull output (bounded buffer, default: `4194304` = 4 MiB) |
-| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). The source may be located anywhere on the host. |
+| `trusted_ca_path` | string | Absolute path to a single PEM X.509 CA certificate file (optional, required when `trusted_ca_injection` is `auto`). In user mode any readable absolute path works. In system mode the confined daemon must also be permitted to read the path under the active MAC policy; use the helper-owned `/etc/docker-helper` config tree or a system CA-bundle location the shipped policy permits (see "Trusted CA injection"). |
 | `trusted_ca_injection` | string | `"disabled"` or `"auto"` (default: `"disabled"`). When `auto`, injects CA into containers via `POST /run`. |
 | `http_address` | string | Loopback TCP listen address `127.0.0.1:PORT`, system mode only, restart required (default: `127.0.0.1:52375`) |
 
@@ -501,7 +501,9 @@ X.509 CA certificate. Injection only affects containers started via
 
 #### User mode
 
-User mode accepts any absolute path to a readable CA file.
+In user mode the daemon runs as the invoking user and is not confined by the
+system-mode MAC boundary, so `trusted_ca_path` accepts any readable absolute
+path to a CA file.
 
 ```bash
 docker-helper config set trusted_ca_path /absolute/path/to/company-root-ca.pem
@@ -510,8 +512,13 @@ docker-helper config set trusted_ca_injection auto
 
 #### System mode
 
-System mode accepts any absolute path to a readable CA file, just like user
-mode. The source does not have to live under `/etc/docker-helper`.
+In system mode the confined daemon must also be permitted to read the CA
+source under the active AppArmor or SELinux policy. "Readable by the invoking
+(unconfined) CLI" is not the same contract as "supported by the confined system
+daemon". The shipped policy reads CA material from the helper-owned
+`/etc/docker-helper` config tree and from the standard system CA-bundle
+locations; the portable, always-supported location is
+`/etc/docker-helper`.
 
 ```bash
 sudo install -m 0644 company-root-ca.crt /etc/docker-helper/company-root-ca.crt
@@ -530,13 +537,20 @@ sudo docker-helper config set trusted_ca_path /etc/docker-helper/company-root-ca
 sudo docker-helper config set trusted_ca_injection auto
 ```
 
-The CA source may also be an arbitrary host path, for example a certificate
-managed by the distribution CA bundle:
+A source under a standard system CA-bundle location that the active policy
+permits also works, for example a certificate managed by the distribution CA
+bundle on a path the shipped policy reads (such as the `/var/lib/ca-certificates`
+tree under AppArmor):
 
 ```bash
 sudo docker-helper config set trusted_ca_path /var/lib/ca-certificates/pem/RCA-CA.pem
 sudo docker-helper config set trusted_ca_injection auto
 ```
+
+Paths outside the shipped policy are the operator's responsibility to make
+readable under that MAC policy (for example with an explicit AppArmor rule or
+an appropriate SELinux label). There is no silent downgrade: daemon
+preparation, start, and reload fail closed when the CA source cannot be read.
 
 #### Disable
 
@@ -548,10 +562,16 @@ docker-helper config unset trusted_ca_path
 Each command triggers a daemon reload automatically when the daemon is
 running.
 
-In system mode, the source file must also be readable under the active AppArmor
-or SELinux policy. Arbitrary host locations are not a portable confined-system
-contract; use a helper-owned operator-controlled location until the Release 2
-source lifecycle is finalized.
+In system mode the source file must also be readable under the active AppArmor
+or SELinux policy; arbitrary host locations are not a portable confined-system
+contract — use the helper-owned `/etc/docker-helper` config tree or a system
+CA-bundle location the shipped policy permits.
+
+`config set trusted_ca_path` performs its own local validation from the CLI.
+If the daemon is stopped, that validation cannot prove the future confined
+daemon will be allowed to read the path under the active MAC policy, so the
+config may be persisted successfully and a later daemon start can fail closed
+because of MAC access.
 
 **Computed/output-only fields** are read-only and must not be added to
 config.json. If present, configuration validation and daemon startup fail:
@@ -1084,6 +1104,16 @@ On an enforcing SELinux system, the systemd service runs in
   use the dedicated `docker_helper_workspace_t` SELinux type.
   MAC preparation occurs at session creation time for the concrete workspace,
   not when the root is added.
+
+- Exact `/opt` may be selected as a global authorization root, but it cannot
+  itself become the helper-owned recursive SELinux workspace boundary.
+  docker-helper never creates a recursive `semanage fcontext` boundary or
+  relabels `/opt/**` for exact `/opt`. A concrete workspace under `/opt` (for
+  example `/opt/docker-helper-workspaces`) receives its own
+  `docker_helper_workspace_t` boundary; if an operator-compatible boundary
+  already exists at `/opt`, it is used as coverage but never claimed or
+  deleted. Authorization roots, workspaces, and the SELinux fcontext/MAC
+  boundary are distinct concepts.
 
 - Previously managed roots may retain the `docker_helper_workspace_t` label
   after an authorization change, because existing sessions can still reference

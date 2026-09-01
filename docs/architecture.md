@@ -1223,10 +1223,16 @@ into containers started via `POST /run`:
     supported. Other CA-related environment variables like `SSL_CERT_FILE`,
     `REQUESTS_CA_BUNDLE`, or `CURL_CA_BUNDLE` are not used.
 
-The configured `trusted_ca_path` may be any absolute host path; there is no
-requirement that the source live under `/etc/docker-helper`. The file must be
-readable by the daemon. Existing Release 1 / earlier Release 2 configurations
-continue to work without migration or copying the CA.
+`trusted_ca_path` is an absolute path to the accepted CA file. In user mode any
+readable absolute path works. In system mode the confined daemon must also be
+permitted to read the source under the active MAC backend, so the supported
+locations are the helper-owned `/etc/docker-helper` config tree (always
+readable by the confined daemon) and the standard system CA-bundle paths the
+shipped AppArmor/SELinux policy permits. Paths outside the shipped policy are
+the operator's responsibility to make readable under that MAC policy. There is
+no silent downgrade: CA preparation and daemon start/reload fail closed when
+the source cannot be read. Existing Release 1 / earlier Release 2
+configurations continue to work without migration or copying the CA.
 
 ## Error handling
 
