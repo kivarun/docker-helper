@@ -144,11 +144,16 @@ func parseX509RawSubject(raw []byte) ([]x509NameRDN, error) {
 	if len(raw) < 2 || raw[0] != 0x30 {
 		return nil, fmt.Errorf("x509 name: not a SEQUENCE")
 	}
-	_, off, err := parseDERLength(raw, 1)
+	outerLen, off, err := parseDERLength(raw, 1)
 	if err != nil {
 		return nil, err
 	}
-	content := raw[off:]
+	// The declared outer SEQUENCE content must fit within the buffer; without
+	// this bound check a hostile length would panic on the slice below.
+	if outerLen < 0 || outerLen > len(raw)-off {
+		return nil, fmt.Errorf("x509 name: SEQUENCE length out of bounds")
+	}
+	content := raw[off : off+outerLen]
 
 	var rdns []x509NameRDN
 	pos := 0
@@ -159,6 +164,11 @@ func parseX509RawSubject(raw []byte) ([]x509NameRDN, error) {
 		setLen, setOff, err := parseDERLength(content, pos+1)
 		if err != nil {
 			return nil, err
+		}
+		// parseDERLength guarantees setLen >= 0; the subtraction form avoids
+		// integer overflow when setOff+setLen could wrap.
+		if setLen > len(content)-setOff {
+			return nil, fmt.Errorf("x509 name: SET length out of bounds")
 		}
 		setContent := content[setOff : setOff+setLen]
 		pos = setOff + setLen
@@ -173,6 +183,9 @@ func parseX509RawSubject(raw []byte) ([]x509NameRDN, error) {
 			if err != nil {
 				return nil, err
 			}
+			if attrLen > len(setContent)-attrOff {
+				return nil, fmt.Errorf("x509 name: attribute length out of bounds")
+			}
 			attrContent := setContent[attrOff : attrOff+attrLen]
 			spos = attrOff + attrLen
 
@@ -182,6 +195,9 @@ func parseX509RawSubject(raw []byte) ([]x509NameRDN, error) {
 			oidLen, oidOff, err := parseDERLength(attrContent, 1)
 			if err != nil {
 				return nil, err
+			}
+			if oidLen > len(attrContent)-oidOff {
+				return nil, fmt.Errorf("x509 name: OID length out of bounds")
 			}
 			oidBytes := attrContent[oidOff : oidOff+oidLen]
 			attrContent = attrContent[oidOff+oidLen:]
@@ -193,6 +209,9 @@ func parseX509RawSubject(raw []byte) ([]x509NameRDN, error) {
 			valLen, valOff, err := parseDERLength(attrContent, 1)
 			if err != nil {
 				return nil, err
+			}
+			if valLen > len(attrContent)-valOff {
+				return nil, fmt.Errorf("x509 name: value length out of bounds")
 			}
 			valBytes := attrContent[valOff : valOff+valLen]
 
@@ -218,13 +237,19 @@ func parseDERLength(data []byte, offset int) (length int, valueOffset int, err e
 		return b, offset, nil
 	}
 	n := b & 0x7f
-	if n == 0 || offset+n > len(data) {
+	// DER lengths are practically bounded; cap the length-byte count at 8 so a
+	// hostile long-form marker cannot force a 64-bit shift overflow to wrap
+	// negative. The remaining bounds are enforced by the callers.
+	if n == 0 || n > 8 || offset+n > len(data) {
 		return 0, 0, fmt.Errorf("x509 name: invalid length encoding")
 	}
 	length = 0
 	for i := 0; i < n; i++ {
 		length = length<<8 | int(data[offset])
 		offset++
+	}
+	if length < 0 {
+		return 0, 0, fmt.Errorf("x509 name: invalid length encoding")
 	}
 	return length, offset, nil
 }
