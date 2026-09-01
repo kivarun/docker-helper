@@ -98,16 +98,36 @@ upgrade_baseline_fetch_url() {
 }
 
 # upgrade_baseline_source_from SRC SHA DEST — use/copy a caller-owned local
-# source into DEST only after exact verification. The caller-owned source is
-# NEVER deleted on validation failure.
+# source into DEST only after exact verification.
+#   - the caller-owned SRC is NEVER deleted or modified;
+#   - SRC is copied to a temporary file adjacent to DEST;
+#   - the TEMP file (the exact bytes that become DEST) is verified against the
+#     pinned SHA;
+#   - only after successful verification is TEMP atomically renamed to DEST;
+#   - TEMP is removed on every failure;
+#   - if SRC and DEST are already the same file, SRC is verified in place and
+#     returned without being removed or copied.
 upgrade_baseline_source_from() {
-  local src="$1" sha="$2" dest="$3"
-  if ! upgrade_baseline_verify "$src" "$sha"; then
-    # caller-owned source file is intentionally left untouched on failure.
+  local src="$1" sha="$2" dest="$3" tmp
+  if [ -e "$dest" ] && [ "$src" -ef "$dest" ]; then
+    # SRC == DEST: verify in place and return; never remove/copy the file.
+    upgrade_baseline_verify "$src" "$sha" || return 1
+    printf '%s' "$dest"
+    return 0
+  fi
+  tmp="$(mktemp "${dest}.XXXXXX" 2>/dev/null)" || return 1
+  if ! cp "$src" "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
     return 1
   fi
-  rm -f "$dest" 2>/dev/null || true
-  cp "$src" "$dest" || return 1
+  if ! upgrade_baseline_verify "$tmp" "$sha"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$dest" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
   printf '%s' "$dest"
 }
 

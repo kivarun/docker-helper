@@ -10,8 +10,10 @@
 #
 #   * upgrade_baseline_verify — strict exact-byte check (the SHA is always the
 #     authority);
-#   * upgrade_baseline_source_from — local PATH source: copy only after exact
-#     verification; caller-owned source is NEVER deleted on rejection;
+#   * upgrade_baseline_source_from — local PATH source: copy to a temp file
+#     adjacent to DEST, verify the TEMP bytes, then atomically rename; the
+#     caller-owned source is NEVER deleted/modified; SRC == DEST is verified in
+#     place;
 #   * upgrade_baseline_fetch_url — download to temp + verify + atomic rename,
 #     no partial download left behind;
 #   * upgrade_baseline_fetch_deb / upgrade_baseline_fetch_rpm — deterministic
@@ -107,6 +109,70 @@ if run_fixture_fn upgrade_baseline_source_from "$WORK/exact.bin" "$EXACT_SHA" "$
   fi
 else
   bad "local exact baseline rejected"
+fi
+
+# --- T2b: local PATH source — SRC == DEST verified in place, never removed ----
+cp "$WORK/exact.bin" "$WORK/same.bin"
+SAME_BEFORE="$(sha256sum "$WORK/same.bin" | awk '{print $1}')"
+if run_fixture_fn upgrade_baseline_source_from "$WORK/same.bin" "$EXACT_SHA" "$WORK/same.bin" >/dev/null; then
+  if [ -f "$WORK/same.bin" ] \
+      && [ "$(sha256sum "$WORK/same.bin" | awk '{print $1}')" = "$SAME_BEFORE" ]; then
+    ok "SRC == DEST succeeds without deleting/modifying the file"
+  else
+    bad "SRC == DEST deleted or modified the file"
+  fi
+else
+  bad "SRC == DEST was rejected"
+fi
+if ls "$WORK"/same.bin.* >/dev/null 2>&1; then
+  bad "leftover temp file after SRC == DEST"
+else
+  ok "no temp file left behind after SRC == DEST"
+fi
+
+# --- T2c: local PATH source — SRC == DEST with wrong hash rejected, intact ----
+if run_fixture_fn upgrade_baseline_source_from "$WORK/same.bin" "$WRONG_SHA" "$WORK/same.bin" >/dev/null; then
+  bad "SRC == DEST with wrong hash was accepted"
+else
+  ok "SRC == DEST with wrong hash rejected"
+fi
+if [ -f "$WORK/same.bin" ] \
+    && [ "$(sha256sum "$WORK/same.bin" | awk '{print $1}')" = "$SAME_BEFORE" ]; then
+  ok "SRC == DEST file intact after wrong-hash rejection"
+else
+  bad "SRC == DEST file modified/deleted after wrong-hash rejection"
+fi
+
+# --- T2d: destination is the verified temp boundary, not a pre-copy SRC check --
+# A cp shim corrupts the copied bytes. A verify-SRC-then-copy implementation
+# would still land the (unverified) copy in DEST; the temp+verify+rename
+# boundary must reject it and leave neither DEST nor a temp file behind.
+mkdir -p "$WORK/shim-cp"
+cat > "$WORK/shim-cp/cp" <<'SHIM'
+#!/usr/bin/env bash
+set -u
+last=""
+for a in "$@"; do last="$a"; done
+printf 'corrupted copy bytes\n' > "$last"
+SHIM
+chmod +x "$WORK/shim-cp/cp"
+# Run inside a subshell so the corrupting cp is scoped to this test only: a
+# command-prefixed function call would not reliably restore PATH on every bash
+# version and could leak shim-cp into later tests' cp lookups.
+if ( PATH="$WORK/shim-cp:$PATH"; run_fixture_fn upgrade_baseline_source_from "$WORK/exact.bin" "$EXACT_SHA" "$WORK/corrupt.bin" ) >/dev/null; then
+  bad "copy with unverified destination bytes was accepted"
+else
+  ok "copy with unverified destination bytes rejected (verified temp boundary)"
+fi
+if [ ! -e "$WORK/corrupt.bin" ]; then
+  ok "no unverified destination written"
+else
+  bad "unverified destination left behind"
+fi
+if ls "$WORK"/corrupt.bin.* >/dev/null 2>&1; then
+  bad "leftover temp file after rejected copy"
+else
+  ok "no temp file left after rejected copy"
 fi
 
 # --- T3: local PATH source — wrong hash rejected, caller source preserved -----
