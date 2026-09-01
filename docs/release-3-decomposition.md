@@ -1,0 +1,322 @@
+# Release 3 Decomposition
+
+## Purpose
+
+This document decomposes Release 3 into architectural work packages and defines the dependencies between them.
+
+It does not define the final HTTP API, CLI syntax, database schema, or Docker Engine calls. Those contracts are produced by the design documents identified below.
+
+## Architectural center
+
+Release 3 introduces one new durable user-visible domain object: the **Managed Container**.
+
+A Managed Container:
+
+- is created within exactly one Session;
+- remains owned by that Session;
+- has a stable docker-helper identity independent of its Docker Engine identifier;
+- persists beyond the operation that created it;
+- is the authorization target for lifecycle, logs, and exec actions.
+
+The surrounding concepts retain narrower roles:
+
+- a **Session** remains the authorization and isolation boundary;
+- a **Session Network** is infrastructure owned by a Session, not a second management plane;
+- an **Operation** is a durable execution record for selected asynchronous work, but does not become container identity or wrap every Command;
+- an **Interactive Stream** transports an authorized exec interaction, but does not introduce separate ownership or authorization.
+
+All Release 3 capabilities attach to this model. No capability may invent a parallel container identity, ownership rule, or authorization path.
+
+## Cross-cutting execution model
+
+Release 3 keeps Request and Response at the transport layer, Command and Query at the application layer, and Operation as the durable execution record created only by selected asynchronous Commands.
+
+The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. These contracts apply to managed-container lifecycle and Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
+
+`build`, the existing one-shot `run`, and non-interactive exec are synchronous Commands with bounded direct results. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
+
+## Work packages
+
+### D0. Cross-cutting Operation foundation
+
+This package introduces the single durable Operation model used by Release 3 and removes `build` and `run` from the current in-memory Operation mechanism. Bounded synchronous process execution remains a separate responsibility.
+
+Responsibilities:
+
+- retire the current build/run Operation types, status/log/cancel workflow, and related retention configuration;
+- move `build` and `run` into bounded synchronous request handling while preserving their normal blocking CLI behavior;
+- define the shared Operation handler boundary for separate `Execute` and `Recover` behavior;
+- define durable admission, terminal outcome, idempotency association, Session ownership, and cascade retention;
+- define atomic execution claiming, restart scanning, worker concurrency, and daemon-shutdown behavior;
+- provide the extension points required by container lifecycle and Session cleanup without introducing a second job abstraction;
+- define explicit HTTP, CLI, configuration, test, and documentation compatibility changes for the synchronous build/run migration.
+
+D0 does not implement Managed Container lifecycle semantics. Those handlers belong to D2 and use the shared foundation.
+
+Completion criterion: `build` and `run` no longer depend on Operation and return bounded synchronous results; and a new durable Operation type can be added through one common handler and persistence model with explicit execution and recovery behavior.
+
+### D1. Managed-container domain core
+
+This package defines the durable object and its relationship with existing Sessions.
+
+Responsibilities:
+
+- stable docker-helper container identity;
+- Session ownership;
+- persistent metadata required for authorization and backend correlation;
+- normalized container specification retained by docker-helper;
+- lookup and ownership verification;
+- projection of backend runtime state into a bounded public status model;
+- integrity metadata that distinguishes docker-helper-owned backend objects from foreign objects.
+
+This package must define behavior when:
+
+- the daemon restarts while a container still exists;
+- the backend container is missing;
+- the backend container was changed outside docker-helper;
+- persistent helper state and backend state disagree;
+- the owning Session expires or is removed.
+
+The package also defines the closed-Session tombstone required to observe cleanup completion. Physical Session deletion cascades to its Managed Containers, Operations, and idempotency records; audit retention remains independent.
+
+Restart handling restores management visibility only. It must not restart, stop, recreate, or otherwise reconcile a container toward a desired state.
+
+Completion criterion: docker-helper can resolve a Managed Container by its own identifier, prove its ownership, report a bounded status, and retain that ability across daemon restart without taking autonomous lifecycle action.
+
+### D2. Lifecycle command service
+
+This package implements the explicit Managed Container lifecycle:
+
+- create;
+- start;
+- stop;
+- restart;
+- inspect status;
+- remove.
+
+Responsibilities:
+
+- authorization before backend access;
+- validation of allowed state transitions;
+- serialization or conflict handling for concurrent commands against one container;
+- bounded timeouts and cancellation behavior;
+- consistent failure and partial-failure semantics;
+- audit attribution;
+- type-specific durable Operation admission, execution, recovery, outcome, and conflict handling through the D0 foundation;
+- cleanup or compensation when creation fails after allocating some resources.
+
+This package must not introduce a second generic job abstraction beside Operation.
+
+Lifecycle mutations return `202 Accepted`. The CLI waits for terminal status by default and may detach, but remains a stateless protocol adapter. Public Operation cancellation is outside Release 3; internal cancellation exists only where deterministic Session teardown requires it.
+
+Inspect status is a Query and creates no Operation.
+
+The design must explicitly define remove semantics, including stopped versus running containers, repeated removal, missing backend objects, and whether any force behavior is exposed.
+
+Completion criterion: every lifecycle mutation has one ownership check, one state-transition contract, one backend execution path, and one externally observable result.
+
+### D3. Session networking
+
+This package provides isolated communication between containers owned by the same Session.
+
+Responsibilities:
+
+- provisioning and identifying the Session-owned network;
+- attaching Managed Containers during creation;
+- same-session name resolution;
+- preventing accidental attachment to another Session's network;
+- backend ownership labels or equivalent integrity markers;
+- network cleanup tied to the chosen Session and container lifetime rules;
+- restart-safe discovery of the existing network without autonomous service reconciliation.
+
+External port publishing is not part of this package.
+
+The design must separately decide outbound connectivity and host access. Session isolation does not by itself imply either unrestricted egress or a fully internal Docker network.
+
+Completion criterion: two containers in one Session can communicate by an approved name, while a container from another Session cannot join or address that network through docker-helper.
+
+### D4. Container logs
+
+This package exposes logs of a Session-owned Managed Container.
+
+Responsibilities:
+
+- target resolution and ownership verification;
+- bounded retrieval options;
+- stable stdout and stderr behavior where the backend can preserve the distinction;
+- limits that prevent unbounded memory use or response growth;
+- consistent behavior for running, stopped, removed, and missing containers;
+- audit behavior appropriate to log access.
+
+Container logs are read from Docker Engine under bounded request and response limits. docker-helper does not persist, rotate, or retain a second copy.
+
+Whether log following is part of Release 3 must be decided explicitly. It must not be added implicitly as a side effect of interactive exec streaming.
+
+Completion criterion: authorized callers can retrieve bounded container logs without receiving direct Docker Engine access or backend-specific identifiers as authority.
+
+### D5. Exec core
+
+This package defines command execution inside a Managed Container independently of transport.
+
+Responsibilities:
+
+- target resolution and ownership verification;
+- command, environment, working-directory, timeout, and cancellation contracts;
+- container-state preconditions;
+- exit status and failure taxonomy;
+- audit attribution;
+- shared execution semantics for non-interactive and interactive modes.
+
+Non-interactive exec reuses the existing synchronous `run` request/response model. It returns bounded stdout, stderr, and exit status directly and creates no Operation.
+
+Interactive exec reuses the same authorization and execution core. It must not be implemented as a separate privileged path.
+
+Active exec instances are transient daemon state. Lifecycle stop, restart, remove, and Session cleanup close exec admission and terminate active processes through container lifecycle action. Exec never blocks teardown and has no restart recovery or output replay contract.
+
+Workload output enters the existing structured JSON logger only when the operator enables the corresponding output-logging option. journald is an operator diagnostic sink, not the client result channel.
+
+Completion criterion: a non-interactive command can run inside an authorized Managed Container with the same bounded synchronous result model as `run`, and both exec modes share one authorization and execution core.
+
+### D6. Interactive WebSocket transport
+
+This package adds streaming transport to an already-authorized interactive exec.
+
+Responsibilities:
+
+- WebSocket upgrade and attachment to one exec instance;
+- stdin, stdout, and stderr framing;
+- TTY and non-TTY behavior;
+- terminal resize when TTY mode is supported;
+- stream close, process exit, cancellation, and disconnect semantics;
+- bounded buffering and backpressure;
+- authorization behavior when a token or Session expires during a stream;
+- audit linkage between the stream and the exec action.
+
+The WebSocket protocol must be docker-helper-owned and versionable. Raw Docker attach framing must not become the public contract.
+
+Completion criterion: interactive exec can be used without exposing a second authorization model, an unbounded relay, or Docker-specific stream framing.
+
+### D7. Resource constraints
+
+This package defines a deliberately bounded resource policy for Managed Containers.
+
+Responsibilities:
+
+- the supported CPU, memory, process, and related limit vocabulary;
+- normalized units and validation;
+- safe defaults where defaults are required;
+- authorization ceilings inherited by the Session;
+- enforcement during container creation;
+- status representation sufficient to inspect the effective limits;
+- stable errors for unsupported or excessive requests.
+
+The public contract exposes docker-helper policy concepts, not arbitrary Docker flags or HostConfig passthrough.
+
+The design must distinguish:
+
+- a caller's requested value;
+- the Session's authorized ceiling;
+- the effective backend value.
+
+Completion criterion: a Session can create a container only within its authorized resource envelope, and the effective limits remain inspectable without exposing the full Docker resource surface.
+
+### D8. External port publishing
+
+This package provides narrow, explicit exposure of selected container ports outside the Session network.
+
+Responsibilities:
+
+- representation of the container port and protocol;
+- policy for host bind addresses;
+- allocation or validation of host ports;
+- collision handling;
+- authorization inherited from the Release 2.1 Launcher and Session model;
+- persistence and inspection of the effective mapping;
+- cleanup and reuse after container removal;
+- audit events for publication and release.
+
+Publishing authority originates outside the untrusted Session through the Release 2.1 delegation model. Release 3 must not create a second delegation mechanism merely for ports.
+
+This package does not expose arbitrary Docker networks, network modes, aliases, routing configuration, or unrestricted host binding.
+
+Completion criterion: an authorized service can be exposed through a narrowly defined mapping, while an untrusted agent cannot freely claim host addresses or ports outside its grant.
+
+### D9. Public surface and release integration
+
+This package integrates the completed domain capabilities into the product surface.
+
+Responsibilities:
+
+- HTTP resource layout and versioned request/response contracts;
+- CLI command hierarchy and output behavior;
+- database migrations and upgrade behavior;
+- stable error codes;
+- audit event vocabulary;
+- configuration and policy documentation;
+- operator, user, and agent-facing documentation;
+- compatibility with the normal blocking Release 2 CLI experience for run and build, while intentionally replacing their asynchronous HTTP Operation workflow;
+- packaging and service-upgrade verification.
+
+The CLI is deliberately thin. It may read explicit configuration and credentials, validate syntax, issue one request, wait or poll transiently, service a WebSocket, and render results. It must not persist execution state, implement local queues or reconciliation, automatically retry ambiguous mutations, or mirror server state machines. Protocol capabilities that require client-side workflow state may remain API-only.
+
+This is a cross-cutting package, not a final polish phase. API, CLI, persistence, audit, and documentation contracts are developed with each capability, then reconciled here before release.
+
+## Dependency structure
+
+The principal dependencies are:
+
+1. D0 is the foundation for every durable Command and replaces, rather than extends, the existing in-memory build/run Operation mechanism.
+2. D1 is the foundation for every Managed Container capability.
+3. D2 depends on D0 and D1; D3 depends on D1. Together they form the minimum managed-container platform.
+4. D4 and D5 depend on stable D1 ownership and D2 lifecycle semantics.
+5. D6 depends on D5; WebSocket transport is not designed before exec semantics.
+6. D7 depends on the D1 creation specification and the authorization envelope inherited by a Session.
+7. D8 depends on D3 networking and the Release 2.1 delegation contract.
+8. D9 spans all packages and closes their public and operational contracts.
+
+The implementation order is therefore:
+
+1. migrate `build` and `run` to bounded synchronous Commands, then implement the D0 durable Operation foundation for lifecycle and Session cleanup;
+2. settle the D1 lifetime, identity, and state-authority decisions;
+3. design D3, D7, and D8 inputs before freezing the container creation contract;
+4. implement the D1 core with Session-network ownership;
+5. implement D2 lifecycle management through D0;
+6. add D4 bounded runtime-backed logs and D5 synchronous non-interactive exec;
+7. add D6 interactive streaming;
+8. add D7 resource constraints and D8 publishing against the already-defined creation contract;
+9. complete D9 release-wide reconciliation and hardening.
+
+D7 and D8 may be implemented later than the core lifecycle, but their required inputs must be designed before the create contract and persistent specification are considered stable.
+
+## Cross-cutting verification
+
+Every work package must cover:
+
+- ownership and cross-Session denial;
+- daemon restart and persistent-state behavior;
+- backend object tampering or disappearance;
+- concurrent and repeated requests;
+- audit attribution without secret disclosure;
+- bounded input, output, time, and resource use;
+- failure cleanup;
+- compatibility with both user and system deployment modes;
+- real-Docker integration tests in addition to unit tests.
+
+Interactive streaming, port allocation, lifecycle mutation, and cleanup require dedicated race and disconnect tests; unit-only coverage is insufficient for these boundaries.
+
+## Design-document split
+
+The decomposition produces the following detailed design documents:
+
+1. `release-3-operation-model.md` — cross-cutting durable execution, recovery, idempotency, retention, and client boundaries;
+2. `release-3-managed-container-domain.md` — identity, ownership, lifetime, persistence, and runtime status;
+3. `release-3-managed-container-lifecycle.md` — commands, transitions, concurrency, and removal;
+4. `release-3-session-networking.md` — isolation, naming, attachment, and cleanup;
+5. `release-3-logs-and-exec.md` — log retrieval and common exec semantics;
+6. `release-3-interactive-streaming.md` — WebSocket and terminal protocol;
+7. `release-3-resource-constraints.md` — supported limits and authorization ceilings;
+8. `release-3-port-publishing.md` — grants, allocation, binding, and collision behavior;
+9. `release-3-api-cli.md` — public surface and compatibility;
+10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
+
+The Operation model and Managed Container domain are the two foundation designs. `release-3-vocabulary-and-implementation-map.md` is their implementation bridge to the Release 2 codebase and the Release 2.1 Launcher design. The next blocking designs are lifecycle semantics and the networking, resource, and publishing inputs that form the immutable container creation contract.
