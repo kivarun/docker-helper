@@ -416,13 +416,30 @@ change the Release-2 gate or the already-defined Launcher ownership model above.
   daemon is stopped. This is diagnostics only: it must not create a second
   MAC-policy authority; backend selection/enforcement remains owned by the
   existing backend-neutral MAC path.
-- **X.509/OpenSSL subject-hash independent verification.** For 2.1 add
-  independent verification of the custom subject-name canonicalizer: a
-  differential corpus generated/verified against supported OpenSSL versions;
-  include difficult names (multi-valued RDNs, whitespace, non-ASCII, and
-  T61/BMP/Universal strings where applicable); add a fuzz target around the
-  DER/subject parsing boundary. Production runtime must not gain an `openssl`
-  executable dependency merely to satisfy the test.
+- **X.509/OpenSSL subject-hash independent verification (implemented).**
+  The custom `computeOpenSSLSubjectHash` canonicalizer is verified against the
+  independent `openssl x509 -hash -noout` oracle. A checked-in semantic
+  differential corpus (`ca_subject_hash_openssl_test.go`) covers simple and
+  multi-valued RDNs, ASCII case folding and all six whitespace classes, string
+  encodings (Printable/UTF8/IA5/T61/BMP/Universal including non-BMP), Unicode
+  edge behavior (non-ASCII next to ASCII uppercase, NBSP not treated as ASCII
+  whitespace), multi-valued RDN SET OF ordering in both input orders,
+  NumericString non-canonicalization, DER length boundaries (127/128/long
+  form), and empty values; expected hashes were generated independently with
+  OpenSSL and never by the implementation. A required-mode live differential
+  test (`DOCKER_HELPER_OPENSSL_DIFFERENTIAL=1`, fail-closed) proves a three-way
+  match (checked-in oracle == live OpenSSL == implementation) against the
+  OpenSSL 3.x shipped on CI Ubuntu 24.04 in the dedicated
+  `x509-openssl-differential` CI job. VisibleString is excluded from the
+  differential corpus because OpenSSL 3.5.x's `openssl x509` refuses to load a
+  certificate whose subject is an ISO646String; it remains covered at unit
+  level. The fuzz target
+  `FuzzComputeOpenSSLSubjectHashRawSubject` hardened the raw-subject
+  parser/canonicalizer: hostile declared DER lengths previously caused
+  slice-bounds panics in `parseX509RawSubject`, now fixed with bounds checks
+  (plus a length-overflow guard in `parseDERLength`) and a permanent regression
+  seed. Production runtime has no `openssl` executable dependency; the external
+  oracle is test-only.
 - **Minor historical-document hygiene** may be cleaned during 2.1 when touching
   those documents, but is not Release-2 work.
 
