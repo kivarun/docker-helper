@@ -6689,15 +6689,17 @@ func TestReleaseWorkflow(t *testing.T) {
 		t.Error("release.yml must call the artifact gate (artifact-gate.yml)")
 	}
 
-	// The gate must own the canonical producer and the pinned nFPM.
+	// The gate must own the canonical producer and consume the pinned nFPM
+	// through its single owner (scripts/install-nfpm.sh), never duplicating the
+	// version/hash and never using @latest.
 	if !strings.Contains(gateContent, "scripts/release-candidate.sh") {
 		t.Error("artifact-gate.yml must run the canonical release-candidate.sh producer")
 	}
-	if !strings.Contains(gateContent, "NFPM_VERSION=2.47.0") {
-		t.Error("artifact-gate.yml must pin NFPM_VERSION=2.47.0")
+	if !strings.Contains(gateContent, "scripts/install-nfpm.sh") {
+		t.Error("artifact-gate.yml must install pinned nFPM through scripts/install-nfpm.sh (single owner)")
 	}
-	if !strings.Contains(gateContent, "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783") {
-		t.Error("artifact-gate.yml must contain pinned nFPM SHA256")
+	if strings.Contains(gateContent, "NFPM_VERSION=") || strings.Contains(gateContent, "NFPM_SHA256=") {
+		t.Error("artifact-gate.yml must not duplicate the pinned nFPM version/hash (owned by scripts/install-nfpm.sh)")
 	}
 	if strings.Contains(gateContent, "@latest") {
 		t.Error("artifact-gate.yml must not use @latest for nFPM")
@@ -7251,6 +7253,157 @@ func TestArtifactGateScopeContract(t *testing.T) {
 	}
 	if !strings.Contains(content, "inputs.scope == 'selinux'") {
 		t.Error("artifact-gate.yml must keep the selinux scope consumer branch")
+	}
+}
+
+// TestPackagingToolModeContract proves the packaging tool requirement mode
+// contract behaviorally: a missing required packaging tool is a SKIP in normal
+// mode and a hard FAIL in packaging-integration mode, while a present tool is
+// accepted in both modes. It exercises the real decision function
+// (packagingToolPolicy) with a tool name that cannot exist on PATH.
+func TestPackagingToolModeContract(t *testing.T) {
+	const missing = "dh-packaging-tool-never-present"
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Fatal("bash must be available to use as the present-tool control")
+	}
+	const present = "bash"
+
+	// Normal mode: a missing required tool must SKIP.
+	t.Setenv(packagingIntegrationEnv, "")
+	if _, status, _ := packagingToolPolicy(t, missing); status != packagingToolSkip {
+		t.Errorf("normal mode must SKIP a missing packaging tool, got status %v", status)
+	}
+
+	// Packaging-integration mode: a missing required tool must FAIL.
+	t.Setenv(packagingIntegrationEnv, "1")
+	if _, status, _ := packagingToolPolicy(t, missing); status != packagingToolFail {
+		t.Errorf("packaging-integration mode must FAIL a missing packaging tool, got status %v", status)
+	}
+
+	// A present tool is OK in both modes.
+	t.Setenv(packagingIntegrationEnv, "")
+	if p, status, _ := packagingToolPolicy(t, present); status != packagingToolOK || p == "" {
+		t.Errorf("a present tool must be OK in normal mode, got status %v path %q", status, p)
+	}
+	t.Setenv(packagingIntegrationEnv, "1")
+	if p, status, _ := packagingToolPolicy(t, present); status != packagingToolOK || p == "" {
+		t.Errorf("a present tool must be OK in packaging-integration mode, got status %v path %q", status, p)
+	}
+}
+
+// TestPackagingIntegrationCIContract verifies the packaging integration proof
+// layer: a dedicated packaging-integration CI job runs the packaging
+// integration test set with required-tool mode enabled (missing required
+// packaging tool = FAIL), while the ordinary checks job stays free of the
+// packaging toolchain so plain go test keeps skipping when tooling is absent.
+// The pinned nFPM identity has exactly one owner (scripts/install-nfpm.sh),
+// consumed by both artifact-gate and packaging-integration.
+func TestPackagingIntegrationCIContract(t *testing.T) {
+	ci, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciContent := string(ci)
+
+	pkgJob := findJobSection(ciContent, "packaging-integration")
+	if pkgJob == "" {
+		t.Fatal("ci.yml must contain a separate packaging-integration job")
+	}
+	if !strings.Contains(pkgJob, "scripts/test-packaging-integration.sh") {
+		t.Error("packaging-integration job must run scripts/test-packaging-integration.sh")
+	}
+	if !strings.Contains(pkgJob, "scripts/install-nfpm.sh") {
+		t.Error("packaging-integration job must install pinned nFPM through scripts/install-nfpm.sh")
+	}
+
+	// The ordinary checks job must not install or run the packaging toolchain:
+	// that is the packaging-integration job's responsibility, and it is what
+	// lets environment-dependent packaging tests keep skipping in ordinary
+	// go test runs.
+	checksJob := findJobSection(ciContent, "checks")
+	if checksJob == "" {
+		t.Fatal("ci.yml must contain a checks job")
+	}
+	for _, banned := range []string{
+		"musl-tools", "checkpolicy", "semodule-utils", "install-nfpm.sh",
+		"test-packaging-integration.sh", "apt-get",
+	} {
+		if strings.Contains(checksJob, banned) {
+			t.Errorf("checks job must not install or run the packaging toolchain (%q)", banned)
+		}
+	}
+
+	// scripts/test-packaging-integration.sh is the CI-facing owner of the
+	// packaging integration test group: it enables required-tool mode and runs
+	// exactly the packaging integration tests via an explicit anchored regexp.
+	integrationScript, err := os.ReadFile("scripts/test-packaging-integration.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrationContent := string(integrationScript)
+	if !strings.Contains(integrationContent, "DOCKER_HELPER_PACKAGING_INTEGRATION=1") {
+		t.Error("scripts/test-packaging-integration.sh must enable DOCKER_HELPER_PACKAGING_INTEGRATION=1")
+	}
+	if !strings.Contains(integrationContent, "-run") {
+		t.Error("scripts/test-packaging-integration.sh must run an explicit -run test regexp, not the full suite")
+	}
+	for _, testName := range []string{
+		"TestPackageMetadataIntegration",
+		"TestPackageSELinuxPayloadSeparation",
+		"TestPackageBuildIntegration",
+		"TestBuildSelinuxPolicyHelperProducesPP",
+		"TestPackageMetadataScripts",
+		"TestBuildManpagesScriptBuilds",
+		"TestPackageMetadataManPages",
+		"TestPackageBashCompletion",
+	} {
+		if !strings.Contains(integrationContent, testName) {
+			t.Errorf("scripts/test-packaging-integration.sh must run %s", testName)
+		}
+	}
+
+	// scripts/install-nfpm.sh is the single owner of the pinned nFPM identity
+	// and must fail closed (HTTPS, SHA verified before install, no latest).
+	installer, err := os.ReadFile("scripts/install-nfpm.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installerContent := string(installer)
+	if !strings.Contains(installerContent, `NFPM_VERSION="2.47.0"`) {
+		t.Error("scripts/install-nfpm.sh must own NFPM_VERSION=2.47.0")
+	}
+	if !strings.Contains(installerContent, `NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"`) {
+		t.Error("scripts/install-nfpm.sh must own the pinned NFPM_SHA256")
+	}
+	if !strings.Contains(installerContent, "https://") {
+		t.Error("scripts/install-nfpm.sh must download nFPM over HTTPS")
+	}
+	if !strings.Contains(installerContent, "sha256sum --check") {
+		t.Error("scripts/install-nfpm.sh must verify the SHA-256 before installing")
+	}
+	if !strings.Contains(installerContent, "releases/download/v${NFPM_VERSION}") {
+		t.Error("scripts/install-nfpm.sh must download a pinned nFPM tag, not 'latest'")
+	}
+
+	// Workflow files must consume the single owner rather than duplicate the
+	// pinned version/hash.
+	for _, path := range []string{".github/workflows/artifact-gate.yml", ".github/workflows/ci.yml"} {
+		wf, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(wf), "NFPM_VERSION=") || strings.Contains(string(wf), "NFPM_SHA256=") {
+			t.Errorf("%s must not duplicate the pinned nFPM version/hash (owned by scripts/install-nfpm.sh)", path)
+		}
+	}
+
+	gate, err := os.ReadFile(".github/workflows/artifact-gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gate), "scripts/install-nfpm.sh") {
+		t.Error("artifact-gate.yml producer must install nFPM through scripts/install-nfpm.sh")
 	}
 }
 

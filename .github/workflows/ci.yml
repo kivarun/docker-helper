@@ -63,6 +63,32 @@ jobs:
           sudo apt-get install -y checkpolicy semodule-utils
           scripts/check-selinux-policy.sh
 
+  packaging-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses:  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install native build/test dependencies
+        run: |
+          sudo -E env "PATH=$PATH" UAT_PLATFORM=ubuntu \
+            scripts/uat-blackbox.sh install-deps
+          sudo apt-get install -y rpm dpkg
+
+      - name: Install pinned nFPM (single owner)
+        run: |
+          scripts/install-nfpm.sh
+
+      - name: Packaging integration tests
+        run: |
+          bash scripts/test-packaging-integration.sh
+
   static-build:
     runs-on: ubuntu-latest
     timeout-minutes: 10

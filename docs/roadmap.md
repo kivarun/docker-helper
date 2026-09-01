@@ -384,16 +384,18 @@ work are recorded in
 Recorded for Release 2.1 after the stable v2.0.0 is published. None of these
 change the Release-2 gate or the already-defined Launcher ownership model above.
 
-- **Packaging integration tests / CI tooling.** Several packaging-oriented Go
-  tests currently skip when `nfpm`/`checkpolicy`/`semodule_package`/`musl-gcc`
-  are unavailable in the Go-test jobs. Release 2 product correctness is already
-  covered by exact-artifact package UAT, so the Release-2 CI workflow is not
-  changed here. For 2.1: remove the "green by skip everywhere" ambiguity — either
-  provide the required tooling to an appropriate Go integration-test job or
-  establish a dedicated packaging integration-test job — while preserving
-  end-to-end exact-artifact UAT as the authoritative package proof and without
-  turning environment skips into unconditional failures on ordinary developer
-  machines.
+- **Packaging integration tests / CI tooling (implemented).** The "green by
+  skip everywhere" ambiguity is removed on main via a settled fail-closed
+  model: a dedicated `packaging-integration` CI job provides the full required
+  packaging toolchain and runs exactly the packaging integration tests
+  (`scripts/test-packaging-integration.sh`) with
+  `DOCKER_HELPER_PACKAGING_INTEGRATION=1`, so a missing required packaging tool
+  is a hard failure there; ordinary developer `go test ./...` keeps skipping
+  environment-dependent packaging tests when tooling is absent. The pinned nFPM
+  identity has one source owner (`scripts/install-nfpm.sh`), consumed by both
+  the artifact gate and the packaging-integration job. Exact-artifact UAT
+  remains the authoritative package acceptance proof; CI and UAT are separate
+  proof layers.
 - **Upgrade baseline fixture lifecycle (implemented).** The rc.22 incident
   showed that a pinned SHA protects integrity but GitHub Release asset
   availability is still an external availability dependency. This is resolved

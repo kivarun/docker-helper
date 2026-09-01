@@ -134,17 +134,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install nFPM (pinned)
+      - name: Install nFPM (pinned, single owner)
         run: |
-          NFPM_VERSION=2.47.0
-          NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
-          NFPM_TARBALL="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
-          curl -fsSL -o "$NFPM_TARBALL" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${NFPM_TARBALL}"
-          echo "${NFPM_SHA256}  ${NFPM_TARBALL}" | sha256sum --check -
-          tar xzf "$NFPM_TARBALL" nfpm
-          chmod +x nfpm
-          sudo mv nfpm /usr/local/bin/
-          nfpm --version | grep -qF "2.47.0"
+          scripts/install-nfpm.sh
 
       - name: Install rpm (RPM identity verification)
         run: |
