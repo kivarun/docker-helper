@@ -9,8 +9,8 @@ It is intended for the operational architect who decomposes design work into exe
 This map is based on:
 
 - repository: `kivarun/docker-helper`;
-- branch: `release/2.0`;
-- commit: [`7e9762576327b625acde45934a15216d1ff0a56b`](https://github.com/kivarun/docker-helper/commit/7e9762576327b625acde45934a15216d1ff0a56b);
+- branch: `main`;
+- commit: [`c840d4e197e86e1b7a190d4dcea7dd795975d8a5`](https://github.com/kivarun/docker-helper/commit/c840d4e197e86e1b7a190d4dcea7dd795975d8a5);
 - Release 2.1 input: `docs/release-2.1-launcher-delegation.md` at the same commit.
 
 Release 2.1 is not implemented at this baseline. Before Release 3 production code begins, this map must be checked against the final Release 2.1 commit. Release 3 must consume the resulting Launcher and Session ownership model rather than implement a second version of it.
@@ -102,14 +102,14 @@ The Release 3 change is therefore an abstraction split, not a persistence adapte
 | `operation.ExitCode` | Docker CLI process exit code. | Type-specific error detail where relevant. | Retain only inside the applicable typed outcome; not every Operation has an exit code. | D0 |
 | `operation.Image`, `Context`, `Dockerfile` | Build/run metadata embedded in the generic object. | Synchronous build/run request and execution data. | Move out of the common record; do not persist it as Operation recovery state. | D0/D9 |
 | `operation.LogBuffer` | Client-visible rolling Operation log. | Not part of Operation. | Remove. Synchronous build/run return bounded output directly. | D0/D9 |
-| `boundedBuffer` | Bounded combined stdout/stderr storage. | Reusable bounded I/O primitive where a synchronous response needs it. | Retain independently if useful for `pull`, synchronous `run`, or exec; rename only if its final responsibility changes. | D5/D9 |
+| `boundedBuffer` | Bounded combined stdout/stderr storage. | Reusable bounded I/O primitive where a synchronous response needs it. | Retain independently if useful for `pull`, synchronous `build`, synchronous `run`, or exec; rename only if its final responsibility changes. | D0/D5/D9 |
 | `newBuildOperation` | Creates an already-running in-memory build Operation. | No equivalent. | Remove when `/build` becomes synchronous. | D0/D9 |
-| `newRunOperation` | Creates an asynchronous `run` Operation. | No equivalent. | Remove when `/run` becomes synchronous. | D5/D9 |
+| `newRunOperation` | Creates an asynchronous `run` Operation. | No equivalent. | Remove when `/run` becomes synchronous. | D0/D9 |
 | `startOperationProcess` | Shared process start for build and run and output attachment. | Bounded synchronous child-process helper, separate from durable Operation execution. | Split or narrow; the common Operation worker does not assume `exec.Cmd`. | D0/D9 |
 | `waitBuildCompletion` | Owns asynchronous build completion. | Synchronous `/build` service path. | Move into the request lifetime and direct response contract. | D0/D9 |
-| `waitRunCompletion` | Owns asynchronous run completion. | Synchronous `/run` service path. | Move into the request lifetime and direct response contract. | D5/D9 |
+| `waitRunCompletion` | Owns asynchronous run completion. | Synchronous `/run` service path. | Move into the request lifetime and direct response contract. | D0/D9 |
 | `operationForSession` | In-memory lookup plus Session-ID equality. | Persistent lookup plus common Operation authorization. | Replace; higher-level Release 2.1 authority must be handled without exposing foreign existence. | D0/D9 |
-| `writeOperationCreated` | HTTP `201` response for `/build` and `/run`. | HTTP `202 Accepted` response for durable Commands. | Replace with an accepted-response helper that sets `Location`. Neither `/build` nor `/run` calls it. | D9 |
+| `writeOperationCreated` | HTTP `201` response for `/build` and `/run`. | HTTP `202 Accepted` response for durable Commands. | Remove from the synchronous build/run path in D0; later add an accepted-response helper that sets `Location`. | D0/D9 |
 
 Working internal boundary names such as `operationStore`, `operationWorker`, `operationHandler`, and `processSupervisor` describe separate responsibilities. They are not permission to create parallel state machines. The architect must choose final names against the code present after Release 2.1 and keep one owner for each responsibility.
 
@@ -262,12 +262,13 @@ Operation may retain `op_`, but ManagedContainerID has no current registry value
 
 ## Executor handoff gate
 
-The operational architect may issue code-reading, test-inventory, and D0/D1 interface-design tasks from this map.
+The operational architect may issue code-reading and D1 interface-design tasks from this map. Ordered D0 implementation and verification tasks are defined in `release-3-d0-execution-plan.md`.
 
 Production implementation tasks that depend on the following must wait until the corresponding blocker is resolved:
 
-- Session/ownership schema: final Release 2.1 implementation;
-- output logging: concrete operator option;
-- Managed Container fixtures and API: final identifier prefix and create contract.
+- D0 durable persistence and D1 ownership: final Release 2.1 Session/ownership schema;
+- D0 synchronous migration: direct output shape, terminal HTTP semantics, and output-limit configuration compatibility from `release-3-d0-execution-plan.md`;
+- D5/D9 output logging: concrete operator option;
+- D1 Managed Container fixtures and API: final identifier prefix and create contract.
 
 When the Release 2.1 commit is available, update the baseline commit and replace every design-only Launcher or Session mapping with the actual symbol, table, column, and migration names before implementation starts.

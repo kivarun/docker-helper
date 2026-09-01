@@ -31,7 +31,7 @@ All Release 3 capabilities attach to this model. No capability may invent a para
 
 Release 3 keeps Request and Response at the transport layer, Command and Query at the application layer, and Operation as the durable execution record created only by selected asynchronous Commands.
 
-The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. These contracts apply to managed-container lifecycle and Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
+The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. The executor-facing implementation sequence is defined in `release-3-d0-execution-plan.md`. These contracts apply to managed-container lifecycle and Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
 
 `build`, the existing one-shot `run`, and non-interactive exec are synchronous Commands with bounded direct results. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
 
@@ -319,4 +319,4 @@ The decomposition produces the following detailed design documents:
 9. `release-3-api-cli.md` — public surface and compatibility;
 10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
 
-The Operation model and Managed Container domain are the two foundation designs. `release-3-vocabulary-and-implementation-map.md` is their implementation bridge to the Release 2 codebase and the Release 2.1 Launcher design. The next blocking designs are lifecycle semantics and the networking, resource, and publishing inputs that form the immutable container creation contract.
+The Operation model and Managed Container domain are the two foundation designs. `release-3-vocabulary-and-implementation-map.md` is their implementation bridge to the Release 2 codebase and the Release 2.1 Launcher design. `release-3-d0-execution-plan.md` turns the common Operation foundation into ordered executor tasks and test gates. The next blocking designs are lifecycle semantics and the networking, resource, and publishing inputs that form the immutable container creation contract.

@@ -192,7 +192,7 @@ For a Managed Container:
 
 - at most one lifecycle mutation is active;
 - `active_mutation_operation_id` records the active mutation transactionally;
-- a competing lifecycle Command returns `container_busy` and the conflicting Operation ID;
+- a competing lifecycle Command returns HTTP `409 Conflict` and the conflicting Operation ID; the stable error-code name is fixed by the API design;
 - the active reference remains durable across daemon restart and is cleared in the same transaction that records terminal status;
 - Queries do not take the lifecycle mutation lock;
 - exec may run only while lifecycle admission permits it and never blocks teardown.
@@ -248,7 +248,7 @@ The common persistence design must support:
 - durable state transitions and timestamps;
 - typed terminal outcome;
 - internal cancellation request data;
-- type-specific recovery data;
+- versioned type-specific input and recovery data;
 - transactional idempotency association;
 - resource-specific active mutation references where required.
 
@@ -256,18 +256,16 @@ Exact tables, columns, indexes, worker-claim mechanics, and migration ordering b
 
 The implementation must retire the current in-memory build/run Operation API and move both Commands into bounded synchronous request handling. Durable Operation persistence and workers are introduced only for managed-container lifecycle and Session cleanup. Live child-process supervision remains separate from the durable record. Changes to existing states, API fields, configuration, and CLI behavior require an explicit compatibility rule; no persisted Release 2 Operation data exists.
 
-The canonical current-to-target symbol, API, configuration, and test migration is recorded in `release-3-vocabulary-and-implementation-map.md`.
+The canonical current-to-target symbol, API, configuration, and test migration is recorded in `release-3-vocabulary-and-implementation-map.md`. Ordered implementation tasks, the target ownership split, dispatcher mechanics, and test gates are defined in `release-3-d0-execution-plan.md`.
 
 ## Decisions deferred to implementation designs
 
-The following remain to be fixed before executor-facing implementation tasks are complete:
+The D0 execution plan fixes the implementation ownership and sequence. The following contract details remain to be fixed in their owning designs before the affected executor tasks begin:
 
-- migration of the existing in-memory build/run Operation API into synchronous Commands without changing the normal blocking CLI experience;
-- normalized Command canonicalization for idempotency fingerprints;
-- exact SQLite schema, indexes, atomic claim, and restart scan;
-- worker concurrency limits and shutdown behavior;
+- direct build/run output fields, terminal HTTP semantics, and output-limit configuration compatibility;
+- final Release 2.1 Session foreign key and ownership symbols used by the Operation migration;
+- type-specific normalized Command input and recovery payloads used for idempotency and restart handling;
 - authorization rules for exposing `initiator_id` and `origin_request_id`;
-- exact representation of type-specific recovery data;
-- stable HTTP and CLI field names and error details.
+- stable HTTP and CLI field names and error details for durable lookup and listing.
 
 Resource-specific Command preconditions, backend calls, and recovery observations are defined in their own detailed designs.
