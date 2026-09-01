@@ -8107,8 +8107,9 @@ func TestUpgradeBaselineGenericVocabulary(t *testing.T) {
 }
 
 // TestUpgradeBaselineLifecycleSemantics verifies the DEB and RPM lifecycle
-// scripts expect the stable v2.0.0 baseline and a 2.1.x UAT candidate (a real
-// forward upgrade).
+// scripts consume the source-owned stable v2.0.0 baseline identity from the
+// single fixture owner (never as caller-controlled env inputs) and expect a
+// 2.1.x UAT candidate (a real forward upgrade).
 func TestUpgradeBaselineLifecycleSemantics(t *testing.T) {
 	deb, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
 	if err != nil {
@@ -8133,11 +8134,38 @@ func TestUpgradeBaselineLifecycleSemantics(t *testing.T) {
 	if !strings.Contains(rpmContent, "UAT_VERSION:-2.1.0-uat") {
 		t.Error("RPM lifecycle must default the candidate to 2.1.0-uat")
 	}
-	if !strings.Contains(rpmContent, "UAT_UPGRADE_BASELINE_VERSION") {
+	if !strings.Contains(rpmContent, "uat-upgrade-baseline-fixture.sh") {
+		t.Error("RPM lifecycle must source the upgrade-baseline fixture owner")
+	}
+	if !strings.Contains(rpmContent, "UPGRADE_BASELINE_VERSION") {
 		t.Error("RPM lifecycle must consume the fixture baseline version")
 	}
-	if !strings.Contains(rpmContent, "UAT_UPGRADE_BASELINE_RPM_SHA256") {
+	if !strings.Contains(rpmContent, "UPGRADE_BASELINE_RPM_SHA256") {
 		t.Error("RPM lifecycle must consume the fixture baseline RPM SHA-256")
+	}
+}
+
+// TestUpgradeBaselineIdentityEnvInputsAbsent verifies the baseline identity
+// (version and RPM SHA-256) can never return as caller-controlled environment
+// inputs in any live lifecycle driver: the only baseline value a driver may
+// supply is the path of the already-transferred RPM artifact
+// (UAT_UPGRADE_BASELINE_RPM).
+func TestUpgradeBaselineIdentityEnvInputsAbsent(t *testing.T) {
+	banned := []string{
+		"UAT_UPGRADE_BASELINE_VERSION",
+		"UAT_UPGRADE_BASELINE_RPM_SHA256",
+	}
+	for _, d := range upgradeBaselineLiveDrivers {
+		data, err := os.ReadFile(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		for _, name := range banned {
+			if strings.Contains(content, name) {
+				t.Errorf("%s must not accept baseline identity env input %s; identity is source-owned by the fixture", d, name)
+			}
+		}
 	}
 }
 

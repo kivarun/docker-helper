@@ -31,27 +31,35 @@
 #   UAT_RPM                            exact candidate RPM path inside the guest (required)
 #   UAT_RPM_SHA256                     expected candidate RPM SHA-256 (required)
 #   UAT_VERSION                        candidate version string (e.g. 2.1.0-uat)
-#   UAT_UPGRADE_BASELINE_RPM           v2.0.0 upgrade-baseline RPM path inside the guest (required)
-#   UAT_UPGRADE_BASELINE_RPM_SHA256    pinned v2.0.0 RPM SHA-256 (required, verified fixture)
-#   UAT_UPGRADE_BASELINE_VERSION       v2.0.0 baseline version string (required, fixture-owned)
+#   UAT_UPGRADE_BASELINE_RPM           v2.0.0 upgrade-baseline RPM path inside the guest (required;
+#                                      the only baseline value supplied by the VM driver)
 #   UAT_ALLOWED_ROOT    global allowed root (default: principal home)
 #   UAT_PRINCIPAL       OS user mapped to the principal (default: opc)
+#
+# The v2.0.0 baseline VERSION and RPM SHA-256 are source-owned identity defined
+# ONLY by scripts/uat-upgrade-baseline-fixture.sh (the single fixture owner),
+# which this script sources below. They are never accepted as caller-controlled
+# environment inputs.
 #
 # Requires: root, systemd, Docker, rpm. Exit 0 = PASS, 1 = FAIL, 2 = BLOCKED.
 
 set -uo pipefail
 
 VERSION="${UAT_VERSION:-2.1.0-uat}"
-BASELINE_VERSION="${UAT_UPGRADE_BASELINE_VERSION:-}"
 CANDIDATE_RPM="${UAT_RPM:-}"
 CANDIDATE_SHA256="${UAT_RPM_SHA256:-}"
 BASELINE_RPM="${UAT_UPGRADE_BASELINE_RPM:-}"
-BASELINE_SHA256="${UAT_UPGRADE_BASELINE_RPM_SHA256:-}"
 PRINCIPAL="${UAT_PRINCIPAL:-opc}"
 
 PREFIX="[rpm-lifecycle]"
 say()  { printf '\n%s %s\n' "$PREFIX" "$*"; }
 info() { printf '%s %s\n' "$PREFIX" "$*"; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/uat-upgrade-baseline-fixture.sh
+source "$SCRIPT_DIR/uat-upgrade-baseline-fixture.sh"
+BASELINE_VERSION="$UPGRADE_BASELINE_VERSION"
+BASELINE_SHA256="$UPGRADE_BASELINE_RPM_SHA256"
 
 redact() {
   sed -E \
@@ -65,8 +73,6 @@ redact() {
 [ -n "$CANDIDATE_SHA256" ] || { echo "error: UAT_RPM_SHA256 is required" >&2; exit 1; }
 [ -n "$BASELINE_RPM" ] || { echo "error: UAT_UPGRADE_BASELINE_RPM is required" >&2; exit 1; }
 [ -f "$BASELINE_RPM" ] || { echo "error: UAT_UPGRADE_BASELINE_RPM not a regular file: $BASELINE_RPM" >&2; exit 1; }
-[ -n "$BASELINE_SHA256" ] || { echo "error: UAT_UPGRADE_BASELINE_RPM_SHA256 is required" >&2; exit 1; }
-[ -n "$BASELINE_VERSION" ] || { echo "error: UAT_UPGRADE_BASELINE_VERSION is required" >&2; exit 1; }
 
 # Verify both exact-byte identities once, up front.
 CANDIDATE_ACTUAL="$(sha256sum "$CANDIDATE_RPM" | awk '{print $1}')"

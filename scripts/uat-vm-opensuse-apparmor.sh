@@ -338,7 +338,7 @@ log "black-box UAT passed inside the guest"
 # ---------------------------------------------------------------------------
 log "== 7b. RPM/AppArmor lifecycle (v2.0.0 -> candidate, AppArmor host) =="
 run_guest_uat "RPM lifecycle inside the guest" \
-  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_PLATFORM=opensuse UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_UPGRADE_BASELINE_RPM=/opt/uat-import/docker-helper-baseline.rpm UAT_UPGRADE_BASELINE_RPM_SHA256=$UPGRADE_BASELINE_RPM_SHA256 UAT_UPGRADE_BASELINE_VERSION=$UPGRADE_BASELINE_VERSION UAT_PRINCIPAL=opc scripts/uat-package-lifecycle-rpm.sh"
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_PLATFORM=opensuse UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_UPGRADE_BASELINE_RPM=/opt/uat-import/docker-helper-baseline.rpm UAT_PRINCIPAL=opc scripts/uat-package-lifecycle-rpm.sh"
 log "RPM/AppArmor lifecycle passed inside the guest"
 
 # ---------------------------------------------------------------------------
