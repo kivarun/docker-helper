@@ -73,13 +73,6 @@ reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; 
 dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
-# The container runs as the principal's unprivileged uid:gid
-# (resolveSessionExecutionIdentity), so the workspace root the container writes
-# into (via the rw:/mnt/rw mount) must be owned by that principal — otherwise a
-# root-owned 0755 directory yields an intermittent EACCES (no AVC). Mirrors the
-# mount-pin regression.
-chown -R "$SEL_P:$SEL_P" "$WS" >/dev/null 2>&1 || { reg_fail "workspace chown to principal failed"; reg_result; }
-
 # --- session creation ---------------------------------------------------------------
 reg_session "$SEL_CRED" "$WS" || {
   reg_fail "session create failed (authorization permits /opt)"
@@ -126,6 +119,14 @@ else
 fi
 
 # --- container RW works ---------------------------------------------------------------
+# The container runs as the principal's unprivileged uid:gid
+# (resolveSessionExecutionIdentity), so the workspace root it writes into must be
+# owned by the principal — otherwise a root-owned 0755 directory yields an EACCES
+# (no AVC). The relabel (session create) already ran over the root-owned workspace,
+# so chown to the principal here, and chown back to root before teardown so the
+# delete-time relabel does not require an un-granted fowner capability.
+chown -R "$SEL_P:$SEL_P" "$WS" >/dev/null 2>&1 || { reg_fail "workspace chown to principal failed"; reg_result; }
+
 RW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$STOK" \
   dh run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec 'echo rw-ok > /mnt/rw/f; cat /mnt/rw/f' 2>&1)"
 RW_EC=$?
@@ -138,6 +139,9 @@ else
 fi
 
 # --- helper-owned Session MAC state released per contract ------------------------------
+# Restore root ownership before teardown so the delete-time restorecon relabel does
+# not need the (un-granted) SELinux fowner capability on the principal-owned tree.
+chown -R root:root "$WS" >/dev/null 2>&1 || true
 if dh session delete --system --id "$SID" >/dev/null 2>&1; then
   reg_ok "session deleted"
 else
