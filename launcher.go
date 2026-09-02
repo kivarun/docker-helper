@@ -2,8 +2,11 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -33,6 +36,19 @@ type Launcher struct {
 	CreatedAt   time.Time
 }
 
+// LauncherWithPrincipal is a Launcher projection carrying its owning Principal
+// name and its canonical allowed roots (empty for inherit scope).
+type LauncherWithPrincipal struct {
+	ID            string
+	PrincipalID   int64
+	PrincipalName string
+	Name          string
+	Enabled       bool
+	ScopeMode     LauncherScopeMode
+	AllowedRoots  []string
+	CreatedAt     time.Time
+}
+
 // launcherIDPrefix and launcherIDEntropyBytes define the single stable Launcher
 // ID format: a random 16-byte (128-bit) value, lowercase-hex encoded and
 // prefixed with "dhl_". The format is analogous to the existing stable
@@ -49,4 +65,428 @@ func generateLauncherID() (string, error) {
 		return "", fmt.Errorf("cannot generate random bytes: %w", err)
 	}
 	return launcherIDPrefix + hex.EncodeToString(b), nil
+}
+
+var (
+	// ErrLauncherNotFound is returned when a Launcher does not exist.
+	ErrLauncherNotFound = errors.New("launcher not found")
+	// ErrLauncherExists is returned when a Launcher name already exists within
+	// the same Principal.
+	ErrLauncherExists = errors.New("launcher already exists")
+	// ErrInvalidLauncherName is returned when a Launcher name is empty/invalid.
+	ErrInvalidLauncherName = errors.New("invalid launcher name")
+	// ErrInvalidScope is returned when a Launcher scope is not inherit/restricted.
+	ErrInvalidScope = errors.New("invalid launcher scope")
+	// ErrInvalidAllowedRoots is returned when restricted roots are missing/invalid.
+	ErrInvalidAllowedRoots = errors.New("invalid launcher allowed roots")
+	// ErrLauncherRootOutsidePrincipal is returned when a Launcher restricted
+	// root is not under the current effective Principal roots.
+	ErrLauncherRootOutsidePrincipal = errors.New("launcher root outside effective principal roots")
+)
+
+// readLauncherAllowedRoots returns the canonical stored roots of a Launcher.
+func readLauncherAllowedRoots(db *sql.DB, launcherID string) ([]string, error) {
+	rows, err := db.Query(
+		`SELECT root_path FROM launcher_allowed_roots WHERE launcher_id = ? ORDER BY root_path`,
+		launcherID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot query launcher allowed roots: %w", err)
+	}
+	defer rows.Close()
+
+	var roots []string
+	for rows.Next() {
+		var root string
+		if err := rows.Scan(&root); err != nil {
+			return nil, fmt.Errorf("cannot scan launcher allowed root: %w", err)
+		}
+		roots = append(roots, root)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate launcher allowed roots: %w", err)
+	}
+	return roots, nil
+}
+
+// scanLauncherBase scans the base launcher columns joined with its Principal
+// username. Columns: id, principal_id, principal_username, name, enabled,
+// scope_mode, created_at.
+func scanLauncherBase(s sqlScanner) (LauncherWithPrincipal, error) {
+	var l LauncherWithPrincipal
+	var enabled int
+	var scope string
+	var createdAt int64
+	if err := s.Scan(&l.ID, &l.PrincipalID, &l.PrincipalName, &l.Name, &enabled, &scope, &createdAt); err != nil {
+		return l, err
+	}
+	l.Enabled = enabled != 0
+	l.ScopeMode = LauncherScopeMode(scope)
+	l.CreatedAt = time.Unix(createdAt, 0)
+	return l, nil
+}
+
+// findLauncherByID looks up a Launcher by ID, joined with its Principal name
+// and its canonical allowed roots.
+func findLauncherByID(db *sql.DB, id string) (*LauncherWithPrincipal, error) {
+	if id == "" {
+		return nil, ErrLauncherNotFound
+	}
+	l, err := scanLauncherBase(db.QueryRow(
+		`SELECT l.id, l.principal_id, p.username, l.name, l.enabled, l.scope_mode, l.created_at
+		 FROM launchers l JOIN principals p ON p.id = l.principal_id
+		 WHERE l.id = ?`,
+		id,
+	))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrLauncherNotFound
+		}
+		return nil, fmt.Errorf("cannot find launcher: %w", err)
+	}
+	roots, err := readLauncherAllowedRoots(db, id)
+	if err != nil {
+		return nil, err
+	}
+	l.AllowedRoots = roots
+	return &l, nil
+}
+
+// findLauncherByPrincipalAndName looks up a Launcher by (principal, name),
+// returning ErrLauncherNotFound when absent.
+func findLauncherByPrincipalAndName(db *sql.DB, principalID int64, name string) (*LauncherWithPrincipal, error) {
+	l, err := scanLauncherBase(db.QueryRow(
+		`SELECT l.id, l.principal_id, p.username, l.name, l.enabled, l.scope_mode, l.created_at
+		 FROM launchers l JOIN principals p ON p.id = l.principal_id
+		 WHERE l.principal_id = ? AND l.name = ?`,
+		principalID, name,
+	))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrLauncherNotFound
+		}
+		return nil, fmt.Errorf("cannot find launcher: %w", err)
+	}
+	roots, err := readLauncherAllowedRoots(db, l.ID)
+	if err != nil {
+		return nil, err
+	}
+	l.AllowedRoots = roots
+	return &l, nil
+}
+
+// listLaunchersForPrincipal returns the Launchers of a Principal ordered by name.
+func listLaunchersForPrincipal(db *sql.DB, principalID int64) ([]LauncherWithPrincipal, error) {
+	rows, err := db.Query(
+		`SELECT l.id, l.principal_id, p.username, l.name, l.enabled, l.scope_mode, l.created_at
+		 FROM launchers l JOIN principals p ON p.id = l.principal_id
+		 WHERE l.principal_id = ?
+		 ORDER BY l.name`,
+		principalID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot list launchers: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LauncherWithPrincipal
+	for rows.Next() {
+		l, err := scanLauncherBase(rows)
+		if err != nil {
+			return nil, fmt.Errorf("cannot scan launcher: %w", err)
+		}
+		roots, err := readLauncherAllowedRoots(db, l.ID)
+		if err != nil {
+			return nil, err
+		}
+		l.AllowedRoots = roots
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate launchers: %w", err)
+	}
+	return out, nil
+}
+
+// readPrincipalAllowedRoots returns the canonical stored roots of a Principal.
+func readPrincipalAllowedRoots(db *sql.DB, principalID int64) ([]string, error) {
+	rows, err := db.Query(
+		`SELECT root_path FROM principal_allowed_roots WHERE principal_id = ? ORDER BY root_path`,
+		principalID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot query principal allowed roots: %w", err)
+	}
+	defer rows.Close()
+
+	var roots []string
+	for rows.Next() {
+		var root string
+		if err := rows.Scan(&root); err != nil {
+			return nil, fmt.Errorf("cannot scan principal allowed root: %w", err)
+		}
+		roots = append(roots, root)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate principal allowed roots: %w", err)
+	}
+	return roots, nil
+}
+
+// effectivePrincipalRoots returns the writable ceiling for a system Principal:
+// the intersection of the global allowed roots and the current Principal
+// allowed roots. Launcher restricted roots must be under this ceiling.
+func effectivePrincipalRoots(db *sql.DB, principalID int64, globalAllowedRoots []string) ([]string, error) {
+	principalRoots, err := readPrincipalAllowedRoots(db, principalID)
+	if err != nil {
+		return nil, err
+	}
+	return intersectAllowedRootScopes(globalAllowedRoots, principalRoots), nil
+}
+
+// validateLauncherAllowedRoots canonicalizes each root using the same canonical
+// path semantics as Principal roots and requires each to be under the current
+// effective Principal roots. Returns the deduplicated canonical set.
+func validateLauncherAllowedRoots(roots []string, effectivePrincipalRoots []string) ([]string, error) {
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
+	}
+	seen := make(map[string]bool)
+	var canonical []string
+	for _, r := range roots {
+		resolved, err := validatePrincipalAllowedRootForAdd(r)
+		if err != nil {
+			return nil, err
+		}
+		if !isWithinAnyAllowedRoot(resolved, effectivePrincipalRoots) {
+			return nil, fmt.Errorf("path %q is not under the effective principal roots: %w", resolved, ErrLauncherRootOutsidePrincipal)
+		}
+		if !seen[resolved] {
+			seen[resolved] = true
+			canonical = append(canonical, resolved)
+		}
+	}
+	return canonical, nil
+}
+
+// normalizeLauncherName trims and validates a Launcher name.
+func normalizeLauncherName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", ErrInvalidLauncherName
+	}
+	return name, nil
+}
+
+// createLauncher creates a Launcher (and its optional singular credential in
+// the same transaction) beneath the given Principal. Restricted roots are
+// canonicalized and validated against the current effective Principal ceiling
+// before any mutation. Returns the Launcher projection and, when
+// issueCredential is true, the issued credential metadata and its bearer secret
+// exactly once.
+func createLauncher(db *sql.DB, principalID int64, principalName, name string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string, issueCredential bool) (*LauncherWithPrincipal, *launcherCredential, string, error) {
+	name, err := normalizeLauncherName(name)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if scope != LauncherScopeInherit && scope != LauncherScopeRestricted {
+		return nil, nil, "", fmt.Errorf("unknown scope %q: %w", scope, ErrInvalidScope)
+	}
+
+	var canonicalRoots []string
+	if scope == LauncherScopeRestricted {
+		effective, err := effectivePrincipalRoots(db, principalID, globalAllowedRoots)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		canonicalRoots, err = validateLauncherAllowedRoots(allowedRoots, effective)
+		if err != nil {
+			return nil, nil, "", err
+		}
+	} else {
+		scope = LauncherScopeInherit
+	}
+
+	id, err := generateLauncherID()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	now := time.Now().Unix()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(
+		`INSERT INTO launchers (id, principal_id, name, enabled, scope_mode, created_at)
+		 VALUES (?, ?, ?, 1, ?, ?)`,
+		id, principalID, name, string(scope), now,
+	)
+	if err != nil {
+		if isSQLiteUniqueError(err) {
+			return nil, nil, "", fmt.Errorf("launcher %q already exists for principal %q: %w", name, principalName, ErrLauncherExists)
+		}
+		return nil, nil, "", fmt.Errorf("cannot create launcher: %w", err)
+	}
+
+	if scope == LauncherScopeRestricted {
+		for _, root := range canonicalRoots {
+			if _, err := tx.Exec(
+				`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
+				id, root,
+			); err != nil {
+				return nil, nil, "", fmt.Errorf("cannot add launcher allowed root: %w", err)
+			}
+		}
+	}
+
+	var cred *launcherCredential
+	var token string
+	if issueCredential {
+		cred, token, err = issueLauncherCredentialInTx(tx, id)
+		if err != nil {
+			return nil, nil, "", err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, "", fmt.Errorf("cannot commit launcher creation: %w", err)
+	}
+
+	l, err := findLauncherByID(db, id)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return l, cred, token, nil
+}
+
+// updateLauncher applies scalar field changes (name and/or enabled) to a
+// Launcher. Name changes must remain unique within the owning Principal.
+func updateLauncher(db *sql.DB, launcherID string, name *string, enabled *bool) (*LauncherWithPrincipal, error) {
+	cur, err := findLauncherByID(db, launcherID)
+	if err != nil {
+		return nil, err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if name != nil {
+		nm, err := normalizeLauncherName(*name)
+		if err != nil {
+			return nil, err
+		}
+		existing, err := findLauncherByPrincipalAndName(db, cur.PrincipalID, nm)
+		if err != nil && !errors.Is(err, ErrLauncherNotFound) {
+			return nil, err
+		}
+		if existing != nil && existing.ID != launcherID {
+			return nil, fmt.Errorf("launcher %q already exists for principal %q: %w", nm, cur.PrincipalName, ErrLauncherExists)
+		}
+		if _, err := tx.Exec(`UPDATE launchers SET name = ? WHERE id = ?`, nm, launcherID); err != nil {
+			return nil, fmt.Errorf("cannot update launcher name: %w", err)
+		}
+	}
+
+	if enabled != nil {
+		en := 0
+		if *enabled {
+			en = 1
+		}
+		if _, err := tx.Exec(`UPDATE launchers SET enabled = ? WHERE id = ?`, en, launcherID); err != nil {
+			return nil, fmt.Errorf("cannot update launcher enabled: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("cannot commit launcher update: %w", err)
+	}
+	return findLauncherByID(db, launcherID)
+}
+
+// replaceLauncherScope atomically replaces a Launcher's scope and complete
+// stored root set. For restricted scope all roots are canonicalized and
+// validated against the current effective Principal ceiling before any
+// mutation; a failed replacement leaves the old scope/roots unchanged.
+func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string) (*LauncherWithPrincipal, error) {
+	cur, err := findLauncherByID(db, launcherID)
+	if err != nil {
+		return nil, err
+	}
+	if scope != LauncherScopeInherit && scope != LauncherScopeRestricted {
+		return nil, fmt.Errorf("unknown scope %q: %w", scope, ErrInvalidScope)
+	}
+
+	var canonicalRoots []string
+	if scope == LauncherScopeRestricted {
+		effective, err := effectivePrincipalRoots(db, cur.PrincipalID, globalAllowedRoots)
+		if err != nil {
+			return nil, err
+		}
+		canonicalRoots, err = validateLauncherAllowedRoots(allowedRoots, effective)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		scope = LauncherScopeInherit
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE launchers SET scope_mode = ? WHERE id = ?`, string(scope), launcherID); err != nil {
+		return nil, fmt.Errorf("cannot update launcher scope: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM launcher_allowed_roots WHERE launcher_id = ?`, launcherID); err != nil {
+		return nil, fmt.Errorf("cannot clear launcher allowed roots: %w", err)
+	}
+	for _, root := range canonicalRoots {
+		if _, err := tx.Exec(
+			`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
+			launcherID, root,
+		); err != nil {
+			return nil, fmt.Errorf("cannot add launcher allowed root: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("cannot commit launcher scope replacement: %w", err)
+	}
+	return findLauncherByID(db, launcherID)
+}
+
+// deleteLauncher removes a Launcher. Its roots and optional credential are
+// removed via FK cascade. In Stage 1.2 there are no Launcher-owned Sessions, so
+// no Session cleanup runs here.
+func deleteLauncher(db *sql.DB, launcherID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM launchers WHERE id = ?`, launcherID).Scan(&exists); err != nil {
+		return fmt.Errorf("cannot check launcher: %w", err)
+	}
+	if exists == 0 {
+		return ErrLauncherNotFound
+	}
+
+	if _, err := tx.Exec(`DELETE FROM launchers WHERE id = ?`, launcherID); err != nil {
+		return fmt.Errorf("cannot delete launcher: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cannot commit launcher deletion: %w", err)
+	}
+	return nil
 }
