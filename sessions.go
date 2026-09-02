@@ -11,15 +11,19 @@ import (
 )
 
 type sessionRequest struct {
-	Workspace string `json:"workspace"`
+	Workspace  string `json:"workspace"`
+	LauncherID string `json:"launcher_id"`
+	Principal  string `json:"principal"`
 }
 
 type sessionJSON struct {
-	ID            string  `json:"id"`
-	Workspace     string  `json:"workspace"`
-	CreatedAt     string  `json:"created_at"`
-	ExpiresAt     string  `json:"expires_at"`
-	PrincipalName *string `json:"principal,omitempty"`
+	ID         string  `json:"id"`
+	Workspace  string  `json:"workspace"`
+	CreatedAt  string  `json:"created_at"`
+	ExpiresAt  string  `json:"expires_at"`
+	LauncherID string  `json:"launcher_id"`
+	Launcher   *string `json:"launcher,omitempty"`
+	Principal  *string `json:"principal,omitempty"`
 }
 
 type createSessionResponse struct {
@@ -34,16 +38,22 @@ type listSessionsResponse struct {
 }
 
 func sessionToJSON(s Session) sessionJSON {
+	launcherName := (*string)(nil)
+	if s.LauncherName != "" {
+		launcherName = &s.LauncherName
+	}
 	principalName := (*string)(nil)
 	if s.PrincipalName != "" {
 		principalName = &s.PrincipalName
 	}
 	return sessionJSON{
-		ID:            s.ID,
-		Workspace:     s.Workspace,
-		CreatedAt:     s.CreatedAt.Format(time.RFC3339),
-		ExpiresAt:     s.ExpiresAt.Format(time.RFC3339),
-		PrincipalName: principalName,
+		ID:         s.ID,
+		Workspace:  s.Workspace,
+		CreatedAt:  s.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:  s.ExpiresAt.Format(time.RFC3339),
+		LauncherID: s.LauncherID,
+		Launcher:   launcherName,
+		Principal:  principalName,
 	}
 }
 
@@ -52,10 +62,11 @@ func sessionToJSON(s Session) sessionJSON {
 type sessionControlAuthority struct {
 	isAdmin             bool
 	principalCredential *PrincipalCredentialAuth
+	launcherCredential  *LauncherCredentialAuth
 }
 
-// authenticateSessionControlRequest tries admin token first, then Principal
-// credential. It returns the authority context on success.
+// authenticateSessionControlRequest tries admin token first, then Principal or
+// Launcher credential. It returns the authority context on success.
 func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.Request) (*sessionControlAuthority, error) {
 	ctx := r.Context()
 
@@ -87,17 +98,13 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 		return &sessionControlAuthority{isAdmin: true}, nil
 	}
 
-	// Try credential authentication. A valid credential may be Principal-owned
-	// or Launcher-owned. During Stage 1.2 a Launcher credential is NOT yet
-	// authorized for Session control, so it is treated as an unauthorized,
-	// non-disclosing request.
+	// Try credential authentication. A valid credential is Principal-owned or
+	// Launcher-owned; both are authorized for Session control within their
+	// ownership scope.
 	authResult, err := authenticateCredential(a.DB, token)
 	if err == nil {
 		if authResult.Launcher != nil {
-			// A valid Launcher credential cannot yet control Sessions.
-			writeAuthFailure(ctx, r, "credential.unauthorized")
-			writeUnauthorizedSessionControl(ctx, w)
-			return nil, nil
+			return &sessionControlAuthority{launcherCredential: authResult.Launcher}, nil
 		}
 		return &sessionControlAuthority{principalCredential: authResult.Principal}, nil
 	}
@@ -144,6 +151,33 @@ func workspaceErrorMessage(err error) string {
 	return "invalid workspace"
 }
 
+// classifier for a create target relates a create error to its HTTP contract.
+type createTargetError struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (e *createTargetError) Error() string { return e.msg }
+
+// classifyCreateTargetError maps create-state errors to their HTTP contract.
+func classifyCreateTargetError(err error) *createTargetError {
+	switch {
+	case errors.Is(err, ErrConflictingSelectors):
+		return &createTargetError{status: http.StatusBadRequest, code: "conflicting_selectors", msg: "launcher_id and principal selectors cannot both be provided"}
+	case errors.Is(err, ErrInvalidSelector):
+		return &createTargetError{status: http.StatusBadRequest, code: "invalid_selector", msg: "invalid session selector"}
+	case errors.Is(err, ErrMissingLauncherSelector):
+		return &createTargetError{status: http.StatusBadRequest, code: "missing_launcher_selector", msg: "a launcher selector is required"}
+	case errors.Is(err, ErrLauncherNotFound):
+		return &createTargetError{status: http.StatusNotFound, code: "launcher_not_found", msg: "launcher not found"}
+	case errors.Is(err, ErrLauncherUnavailable):
+		return &createTargetError{status: http.StatusUnprocessableEntity, code: "launcher_unavailable", msg: "launcher is not available"}
+	default:
+		return nil
+	}
+}
+
 func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
@@ -167,27 +201,51 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var result *CreatedSession
-
-	if authCtx.isAdmin {
-		result, err = a.createSession(req.Workspace)
-	} else {
-		auth := authCtx.principalCredential
-		globalAllowedRoots := a.getConfig().AllowedRoots
-		principalAllowedRoots := auth.PrincipalAllowedRoots
-		effectiveAllowedRoots := intersectAllowedRootScopes(
-			globalAllowedRoots,
-			principalAllowedRoots,
-		)
-		result, err = a.createSessionWithPolicy(&sessionCreatePolicy{
-			Workspace:             req.Workspace,
-			EffectiveAllowedRoots: effectiveAllowedRoots,
-			PrincipalID:           &auth.PrincipalID,
-		})
-	}
-
 	duration := time.Since(started).Round(time.Millisecond).String()
 
+	policy, perr := a.resolveCreatePolicy(authCtx, createSelector{launcherID: req.LauncherID, principal: req.Principal}, req.Workspace)
+	if perr != nil {
+		te := classifyCreateTargetError(perr)
+		if te != nil {
+			auditRec := auditRecord{
+				Event:     "session.create",
+				Workspace: req.Workspace,
+				Result:    te.code,
+				Duration:  duration,
+			}
+			a.populateSessionAudit(&auditRec, authCtx)
+			writeRequestContextAudit(ctx, auditRec)
+			if errors.Is(perr, ErrLauncherUnavailable) {
+				opLog(ctx).Warn("session creation rejected",
+					slog.String("operation", "session_create"),
+					slog.String("error", perr.Error()),
+				)
+			}
+			writeError(ctx, w, te.status, te.code, te.msg)
+			return
+		}
+		// Unclassified resolution error is a database/system error.
+		resultCode := "database_error"
+		if errors.Is(perr, ErrSystem) {
+			resultCode = "system_error"
+		}
+		auditRec := auditRecord{
+			Event:     "session.create",
+			Workspace: req.Workspace,
+			Result:    resultCode,
+			Duration:  duration,
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+		opLog(ctx).Error("session creation error",
+			slog.String("operation", "session_create"),
+			slog.String("error", perr.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+
+	result, err := a.createSessionWithPolicy(policy)
 	if err != nil {
 		resultCode := classifyCreateSessionError(err)
 		auditRec := auditRecord{
@@ -196,10 +254,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			Result:    resultCode,
 			Duration:  duration,
 		}
-		if !authCtx.isAdmin && authCtx.principalCredential != nil {
-			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
-			auditRec.CredentialID = authCtx.principalCredential.CredentialID
-		}
+		a.populateSessionAudit(&auditRec, authCtx)
 		writeRequestContextAudit(ctx, auditRec)
 
 		if errors.Is(err, ErrInvalidWorkspace) {
@@ -224,18 +279,16 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	auditRec := auditRecord{
-		Event:     "session.create",
-		SessionID: result.Session.ID,
-		Workspace: result.Session.Workspace,
-		Result:    "success",
-		Duration:  duration,
+		Event:         "session.create",
+		SessionID:     result.Session.ID,
+		Workspace:     result.Session.Workspace,
+		LauncherID:    result.Session.LauncherID,
+		LauncherName:  result.Session.LauncherName,
+		PrincipalName: result.Session.PrincipalName,
+		Result:        "success",
+		Duration:      duration,
 	}
-	if !authCtx.isAdmin && authCtx.principalCredential != nil {
-		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
-		auditRec.CredentialID = authCtx.principalCredential.CredentialID
-		// Populate principal name in the session for the response.
-		result.Session.PrincipalName = authCtx.principalCredential.PrincipalName
-	}
+	a.populateSessionAudit(&auditRec, authCtx)
 	writeRequestContextAudit(ctx, auditRec)
 
 	writeJSONRaw(ctx, w, http.StatusCreated, createSessionResponse{
@@ -243,6 +296,23 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		Session: sessionToJSON(result.Session),
 		Token:   result.Token,
 	})
+}
+
+// populateSessionAudit adds credential provenance fields to a session-control
+// audit record from a non-admin authority.
+func (a *App) populateSessionAudit(rec *auditRecord, auth *sessionControlAuthority) {
+	switch {
+	case auth == nil || auth.isAdmin:
+		return
+	case auth.launcherCredential != nil:
+		rec.PrincipalName = auth.launcherCredential.PrincipalName
+		rec.LauncherID = auth.launcherCredential.LauncherID
+		rec.LauncherName = auth.launcherCredential.LauncherName
+		rec.CredentialID = auth.launcherCredential.CredentialID
+	case auth.principalCredential != nil:
+		rec.PrincipalName = auth.principalCredential.PrincipalName
+		rec.CredentialID = auth.principalCredential.CredentialID
+	}
 }
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -255,13 +325,13 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	var sessions []Session
+	scope := a.resolveSessionControlScope(authCtx)
 
-	if authCtx.isAdmin {
+	var sessions []Session
+	if scope.admin {
 		sessions, err = a.listSessions()
 	} else {
-		auth := authCtx.principalCredential
-		sessions, err = a.listSessionsForPrincipal(auth.PrincipalID)
+		sessions, err = a.listSessionsInScope(scope.launcherIDs)
 	}
 
 	duration := time.Since(started).Round(time.Millisecond).String()
@@ -272,10 +342,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			Result:   "database_error",
 			Duration: duration,
 		}
-		if !authCtx.isAdmin && authCtx.principalCredential != nil {
-			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
-			auditRec.CredentialID = authCtx.principalCredential.CredentialID
-		}
+		a.populateSessionAudit(&auditRec, authCtx)
 		writeRequestContextAudit(ctx, auditRec)
 		opLog(ctx).Error("list sessions error",
 			slog.String("operation", "session_list"),
@@ -299,10 +366,7 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		Result:   "success",
 		Duration: duration,
 	}
-	if !authCtx.isAdmin && authCtx.principalCredential != nil {
-		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
-		auditRec.CredentialID = authCtx.principalCredential.CredentialID
-	}
+	a.populateSessionAudit(&auditRec, authCtx)
 	writeRequestContextAudit(ctx, auditRec)
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
@@ -330,14 +394,14 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var session *Session
+	scope := a.resolveSessionControlScope(authCtx)
 
-	if authCtx.isAdmin {
-		session, err = a.deleteSession(id)
-	} else {
-		auth := authCtx.principalCredential
-		session, err = a.deleteSessionForPrincipal(id, auth.PrincipalID)
+	var session *Session
+	var scopeSet map[string]bool
+	if !scope.admin {
+		scopeSet = scope.launcherIDs
 	}
+	session, err = a.deleteSessionScoped(id, scopeSet)
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 
@@ -366,13 +430,12 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		if workspace != "" {
 			auditRec.Workspace = workspace
 		}
-		if !authCtx.isAdmin && authCtx.principalCredential != nil {
-			auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
-			auditRec.CredentialID = authCtx.principalCredential.CredentialID
-		}
+		a.populateSessionAudit(&auditRec, authCtx)
 		writeRequestContextAudit(ctx, auditRec)
 
 		if errors.Is(err, ErrSessionNotFound) {
+			// Non-disclosing: a Session outside the authority's scope (or a
+			// nonexistent Session) is never revealed with a 403.
 			writeError(ctx, w, http.StatusNotFound, "session_not_found", "session not found")
 		} else {
 			opLog(ctx).Error("delete session error",
@@ -393,10 +456,7 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if session != nil {
 		auditRec.Workspace = session.Workspace
 	}
-	if !authCtx.isAdmin && authCtx.principalCredential != nil {
-		auditRec.PrincipalName = authCtx.principalCredential.PrincipalName
-		auditRec.CredentialID = authCtx.principalCredential.CredentialID
-	}
+	a.populateSessionAudit(&auditRec, authCtx)
 	writeRequestContextAudit(ctx, auditRec)
 
 	// Clean up session runtime directory (Docker config, etc.) best-effort.
