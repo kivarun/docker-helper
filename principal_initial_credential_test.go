@@ -170,3 +170,37 @@ func TestPrincipalCreateInitialCredentialAtomicRollback(t *testing.T) {
 		t.Errorf("expected no credential after rollback, got %d", credCount)
 	}
 }
+
+// TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLookup
+// proves createPrincipalWithOptionalCredential returns a projection built from
+// committed values, so a successful commit cannot be followed by a fallible DB
+// lookup that would lose the one-time bearer secret.
+func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLookup(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	home := filepath.Join(globalRoots[0], "home", "t")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"t": home})
+
+	p, cred, token, err := createPrincipalWithOptionalCredential(db, "t", globalRoots, true)
+	if err != nil {
+		t.Fatalf("createPrincipalWithOptionalCredential: %v", err)
+	}
+	// Projection returned from committed values.
+	if p.Username != "t" || !p.Enabled || p.Home != home {
+		t.Errorf("unexpected principal projection: %+v", p)
+	}
+	if len(p.AllowedRoots) != 1 || p.AllowedRoots[0] != home {
+		t.Errorf("expected default allowed root in projection, got %v", p.AllowedRoots)
+	}
+	if cred == nil || cred.Name != "default" || !strings.HasPrefix(token, credentialTokenPrefix) {
+		t.Fatalf("expected issued credential/token, got cred=%+v token=%q", cred, token)
+	}
+	// The issued credential still authenticates, proving commit persisted it.
+	res, err := authenticateCredential(db, token)
+	if err != nil || res.Principal == nil || res.Principal.PrincipalName != "t" {
+		t.Fatalf("issued principal token should authenticate, got err=%v res=%+v", err, res)
+	}
+}

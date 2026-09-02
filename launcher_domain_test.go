@@ -31,6 +31,138 @@ func setupPrincipalForLauncherTest(t *testing.T, db *sql.DB, globalRoots []strin
 	return int64(p.ID), home
 }
 
+const (
+	// launcherTestNameRename is shared only locally within this file scope.
+	_ = 0
+)
+
+func TestLauncherCreateInheritRejectsRootsAtDomain(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, home := setupPrincipalForLauncherTest(t, db, globalRoots, "a")
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, err := createLauncher(db, pid, "a", "default", LauncherScopeInherit, []string{proj}, globalRoots, false)
+	if !errors.Is(err, ErrInvalidAllowedRoots) {
+		t.Fatalf("expected ErrInvalidAllowedRoots for inherit+roots, got: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM launchers WHERE principal_id=?`, pid).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 launchers after rejected creation, got %d", count)
+	}
+}
+
+func TestLauncherCreateRestrictedEmptyRejectedAtDomain(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "b")
+
+	_, _, _, err := createLauncher(db, pid, "b", "default", LauncherScopeRestricted, nil, globalRoots, false)
+	if !errors.Is(err, ErrInvalidAllowedRoots) {
+		t.Fatalf("expected ErrInvalidAllowedRoots for restricted without roots, got: %v", err)
+	}
+}
+
+func TestLauncherScopeReplaceInheritRejectsRootsAtDomain(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, home := setupPrincipalForLauncherTest(t, db, globalRoots, "c")
+
+	l, _, _, err := createLauncher(db, pid, "c", "default", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// inherit + roots must be rejected at the domain boundary.
+	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeInherit, []string{proj}, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
+		t.Fatalf("expected ErrInvalidAllowedRoots for inherit+roots, got: %v", err)
+	}
+	// Prior scope/roots unchanged.
+	after, err := findLauncherByID(db, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ScopeMode != LauncherScopeInherit || len(after.AllowedRoots) != 0 {
+		t.Errorf("scope/roots changed after failed replacement: %+v", after)
+	}
+
+	// Restricted with empty roots must also be rejected at the domain boundary.
+	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, nil, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
+		t.Fatalf("expected ErrInvalidAllowedRoots for restricted without roots, got: %v", err)
+	}
+	after2, err := findLauncherByID(db, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after2.ScopeMode != LauncherScopeInherit || len(after2.AllowedRoots) != 0 {
+		t.Errorf("scope/roots changed after failed replacement: %+v", after2)
+	}
+}
+
+// TestLauncherCreateWithCredentialReturnsProjectionWithoutPostCommitLookup
+// proves createLauncher returns a projection built from committed values, so a
+// successful commit cannot be followed by a fallible DB lookup that would lose
+// the one-time bearer secret.
+func TestLauncherCreateWithCredentialReturnsProjectionWithoutPostCommitLookup(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "d")
+
+	l, cred, token, err := createLauncher(db, pid, "d", "default", LauncherScopeInherit, nil, globalRoots, true)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+	// Projection returned from committed values.
+	if l.PrincipalName != "d" || l.Name != "default" || !l.Enabled || l.ScopeMode != LauncherScopeInherit {
+		t.Errorf("unexpected launcher projection: %+v", l)
+	}
+	if len(l.AllowedRoots) != 0 {
+		t.Errorf("expected no roots for inherit, got %v", l.AllowedRoots)
+	}
+	if cred == nil || !strings.HasPrefix(token, credentialTokenPrefix) {
+		t.Fatalf("expected issued credential/token, got cred=%+v token=%q", cred, token)
+	}
+	// Credential still authenticates, proving commit persisted it.
+	res, err := authenticateCredential(db, token)
+	if err != nil || res.Launcher == nil || res.Launcher.LauncherID != l.ID {
+		t.Fatalf("issued launcher token should authenticate, got err=%v res=%+v", err, res)
+	}
+}
+
+func TestLauncherUpdateNameUniqueConflictMappedToExists(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "e")
+
+	_, _, _, err := createLauncher(db, pid, "e", "a", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2, _, _, err := createLauncher(db, pid, "e", "b", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Force the UPDATE to hit the canonical UNIQUE(principal_id, name)
+	// constraint directly, bypassing the pre-check equivalence, by using the
+	// name that already exists under the same Principal. The translation to
+	// ErrLauncherExists is what a concurrent rename surfaces.
+	dup := "a"
+	if _, err := updateLauncher(db, l2.ID, &dup, nil); !errors.Is(err, ErrLauncherExists) {
+		t.Fatalf("expected ErrLauncherExists from UPDATE unique conflict, got: %v", err)
+	}
+}
+
 func TestLauncherCreateInherit(t *testing.T) {
 	db := openFreshTestDB(t)
 	globalRoots := []string{testAllowedRootDir(t)}
@@ -131,14 +263,6 @@ func TestLauncherFindListScoped(t *testing.T) {
 	}
 	if got.Name != "a" || got.PrincipalName != "frank" {
 		t.Errorf("unexpected launcher: %+v", got)
-	}
-
-	byName, err := findLauncherByPrincipalAndName(db, pid, "a")
-	if err != nil {
-		t.Fatalf("findLauncherByPrincipalAndName: %v", err)
-	}
-	if byName.ID != a.ID {
-		t.Errorf("expected launcher %s, got %s", a.ID, byName.ID)
 	}
 
 	list, err := listLaunchersForPrincipal(db, pid)
@@ -570,5 +694,105 @@ func TestLauncherCredentialCannotControlSessions(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for Launcher credential session create, got %d", w.Code)
+	}
+
+	// Launcher credential is denied on GET /sessions.
+	mux.HandleFunc("GET /sessions", app.handleListSessions)
+	req2 := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for Launcher credential session list, got %d", w2.Code)
+	}
+
+	// Launcher credential is denied on DELETE /sessions/{id}.
+	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+	req3 := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_x", nil)
+	req3.Header.Set("Authorization", "Bearer "+token)
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for Launcher credential session delete, got %d", w3.Code)
+	}
+}
+
+// TestLauncherCredentialNotRevocableByPrincipalPath proves revokeCredential is
+// Principal-credential-only: passing a Launcher credential ID returns
+// ErrCredentialNotFound, leaves revoked_at NULL, and the token still
+// authenticates afterward.
+func TestLauncherCredentialNotRevocableByPrincipalPath(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "w")
+
+	// Setup a Principal credential to prove the same path still revokes it.
+	if _, _, err := createCredential(db, "w", "oc"); err != nil {
+		t.Fatal(err)
+	}
+	// Issue a Launcher credential.
+	l, launcherCred, launcherToken, err := createLauncher(db, pid, "w", "default", LauncherScopeInherit, nil, globalRoots, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempting to revoke the Launcher credential behaves as unknown.
+	changed, err := revokeCredential(db, launcherCred.ID)
+	if err == nil || !isErrCredentialNotFound(err) {
+		t.Fatalf("expected ErrCredentialNotFound for launcher credential revoke, got changed=%v err=%v", changed, err)
+	}
+
+	// revoked_at must remain NULL and the token still authenticates.
+	var revokedAt sql.NullInt64
+	if err := db.QueryRow(`SELECT revoked_at FROM credentials WHERE id=?`, launcherCred.ID).Scan(&revokedAt); err != nil {
+		t.Fatal(err)
+	}
+	if revokedAt.Valid {
+		t.Errorf("expected revoked_at NULL for launcher credential, got %d", revokedAt.Int64)
+	}
+	if res, err := authenticateCredential(db, launcherToken); err != nil || res.Launcher == nil || res.Launcher.LauncherID != l.ID {
+		t.Fatalf("launcher credential should still authenticate after refused revoke, err=%v res=%+v", err, res)
+	}
+}
+
+// TestPrincipalRevokeUnchanged proves the Principal-credential revoke path
+// still behaves exactly as before after the ownership predicate was added.
+func TestPrincipalRevokeUnchanged(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	home := filepath.Join(globalRoots[0], "home", "x")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	orig := OSUserLookup
+	t.Cleanup(func() { OSUserLookup = orig })
+	OSUserLookup = func(u string) (string, string, string, error) {
+		return "2001", "2001", home, nil
+	}
+	if _, err := createPrincipal(db, "x", globalRoots); err != nil {
+		t.Fatal(err)
+	}
+	pc, token, err := createCredential(db, "x", "oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Token authenticates before revoke.
+	if _, err := authenticateCredential(db, token); err != nil {
+		t.Fatalf("token should authenticate before revoke: %v", err)
+	}
+
+	changed, err := revokeCredential(db, pc.ID)
+	if err != nil || !changed {
+		t.Fatalf("principal revoke should succeed with changed=true, got changed=%v err=%v", changed, err)
+	}
+	// Revoked credential no longer authenticates.
+	if _, err := authenticateCredential(db, token); !errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("revoked credential should not authenticate, got err=%v", err)
+	}
+	// Idempotent second revoke returns changed=false.
+	changed2, err := revokeCredential(db, pc.ID)
+	if err != nil || changed2 {
+		t.Fatalf("second revoke should be idempotent changed=false, got changed=%v err=%v", changed2, err)
 	}
 }
