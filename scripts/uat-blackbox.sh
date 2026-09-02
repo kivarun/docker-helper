@@ -470,7 +470,7 @@ ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 
 # Negative: an admin create with NO selector must fail closed with
 # 400 missing_launcher_selector — never create a selector-less session.
-NO_SEL_OUT="$(dh session create --system --workspace "$WS" 2>&1)"; NO_SEL_RC=$?
+NO_SEL_OUT="$(docker-helper session create --system --workspace "$WS" 2>&1)"; NO_SEL_RC=$?
 [ "$NO_SEL_RC" -ne 0 ] \
   || fail_uat "admin selector-less session create unexpectedly succeeded"
 printf '%s\n' "$NO_SEL_OUT" | grep -q 'missing_launcher_selector' \
