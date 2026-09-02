@@ -133,6 +133,16 @@ before changing either. If the conflict would require a public-contract change
 and the task or canonical documentation does not resolve it, report the
 conflict instead of guessing.
 
+When work follows an accepted architecture or release plan, implementation may
+choose internal mechanics but MUST NOT silently change accepted domain
+vocabulary, ownership or security boundaries, public contracts, state
+transitions, recovery behavior, defaults, or completion criteria. If
+implementation shows that an accepted contract is infeasible or inconsistent,
+stop the affected step and report an explicit architectural warning or change
+proposal. Update and accept the canonical architecture before resuming that
+step. Do not advance to the next planned step until the operative architect has
+reviewed the current result and either accepted it or assigned a fix.
+
 When introducing or reusing a domain error, inspect every public boundary that
 may receive it. Expected policy/input/state errors must not silently fall
 through to generic internal-error handling.
