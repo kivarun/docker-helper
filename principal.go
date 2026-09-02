@@ -317,8 +317,13 @@ func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (p
 
 	var sessionIDs []string
 	if !enabled {
-		// Collect session IDs before deletion for runtime cleanup.
-		rows, err := tx.Query(`SELECT id FROM sessions WHERE principal_id = ?`, principalID)
+		// Collect session IDs across every Launcher attached to this Principal
+		// before deletion, for runtime cleanup. Sessions are Launcher-owned, so
+		// the ownership join goes through launchers.
+		rows, err := tx.Query(
+			`SELECT s.id FROM sessions s JOIN launchers l ON l.id = s.launcher_id WHERE l.principal_id = ?`,
+			principalID,
+		)
 		if err != nil {
 			tx.Rollback()
 			return principalEnabledChangeResult{}, fmt.Errorf("cannot query principal sessions: %w", err)
@@ -340,7 +345,7 @@ func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (p
 		rows.Close()
 
 		_, err = tx.Exec(
-			`DELETE FROM sessions WHERE principal_id = ?`,
+			`DELETE FROM sessions WHERE launcher_id IN (SELECT id FROM launchers WHERE principal_id = ?)`,
 			principalID,
 		)
 		if err != nil {
@@ -502,8 +507,13 @@ func deletePrincipal(db *sql.DB, username string) ([]string, error) {
 		return nil, err
 	}
 
-	// Collect session IDs before deletion for runtime cleanup.
-	rows, err := tx.Query(`SELECT id FROM sessions WHERE principal_id = ?`, principalID)
+	// Collect session IDs across every Launcher of this Principal before
+	// deletion for runtime cleanup. Sessions are Launcher-owned, so the
+	// ownership join goes through launchers.
+	rows, err := tx.Query(
+		`SELECT s.id FROM sessions s JOIN launchers l ON l.id = s.launcher_id WHERE l.principal_id = ?`,
+		principalID,
+	)
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("cannot query principal sessions: %w", err)
@@ -524,9 +534,14 @@ func deletePrincipal(db *sql.DB, username string) ([]string, error) {
 	}
 	rows.Close()
 
-	// Delete all sessions for this principal.
-	// Not relying on FK cascade — sessions.principal_id has no ON DELETE CASCADE.
-	_, err = tx.Exec(`DELETE FROM sessions WHERE principal_id = ?`, principalID)
+	// Delete all sessions for this Principal's Launchers. Launchers (and their
+	// credentials/roots) follow via the principal FK cascade. There is no
+	// ON DELETE CASCADE from Launcher -> Session, so sessions are removed
+	// explicitly first.
+	_, err = tx.Exec(
+		`DELETE FROM sessions WHERE launcher_id IN (SELECT id FROM launchers WHERE principal_id = ?)`,
+		principalID,
+	)
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("cannot delete principal sessions: %w", err)

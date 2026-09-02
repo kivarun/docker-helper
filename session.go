@@ -38,12 +38,17 @@ type sqlScanner interface {
 	Scan(dest ...any) error
 }
 
+// Session is the final owner resolution of a Launcher-backed Session. The
+// Launcher is the owner; the Principal and its name are derived projections via
+// the owning Launcher. There is no ownerless Session and no separate Session
+// owner authority beyond the Launcher.
 type Session struct {
 	ID            string
 	Workspace     string
 	CreatedAt     time.Time
 	ExpiresAt     time.Time
-	PrincipalID   *int64
+	LauncherID    string
+	LauncherName  string
 	PrincipalName string
 }
 
@@ -89,44 +94,52 @@ func intersectAllowedRootScopes(globalAllowedRoots, principalAllowedRoots []stri
 	return effectiveAllowedRoots
 }
 
-// scanSessionWithPrincipal scans session columns joined with principal username.
-// Columns: id, workspace, created_at, expires_at, principal_id, principal_username.
-func scanSessionWithPrincipal(s sqlScanner) (Session, error) {
+// scanSessionWithOwnership scans the final Launcher-owned session projection
+// joined with its owning Launcher and that Launcher's Principal. Columns:
+// id, workspace, created_at, expires_at, launcher_id, launcher_name,
+// principal_username. This is the single Session projection helper.
+func scanSessionWithOwnership(s sqlScanner) (Session, error) {
 	var sess Session
 	var createdAt int64
 	var expiresAt int64
-	var principalID sql.NullInt64
-	var principalName sql.NullString
 
-	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt, &principalID, &principalName); err != nil {
+	if err := s.Scan(&sess.ID, &sess.Workspace, &createdAt, &expiresAt, &sess.LauncherID, &sess.LauncherName, &sess.PrincipalName); err != nil {
 		return sess, err
 	}
 
 	sess.CreatedAt = time.Unix(createdAt, 0)
 	sess.ExpiresAt = time.Unix(expiresAt, 0)
-	if principalID.Valid {
-		sess.PrincipalID = &principalID.Int64
-	}
-	if principalName.Valid {
-		sess.PrincipalName = principalName.String
-	}
 
 	return sess, nil
 }
 
-// sessionCreatePolicy contains the context needed to create a session.
-// EffectiveAllowedRoots is the already-computed effective session-creation
-// allowed-root scope (intersection of global and principal scopes, or the
-// canonicalized global scope for admin creation).
+// sessionOwnershipProjection is the SQL projection columns shared by every
+// Session ownership query, joined through launchers to principals. It is the
+// single authoritative JOIN for Session ownership.
+const sessionOwnershipProjection = `
+	s.id, s.workspace, s.created_at, s.expires_at, s.launcher_id, l.name, p.username
+	FROM sessions s
+	JOIN launchers l ON l.id = s.launcher_id
+	JOIN principals p ON p.id = l.principal_id`
+
+// sessionCreatePolicy contains the resolved context needed to create a session.
+// LauncherID is the resolved owning Launcher. EffectiveAllowedRoots is the
+// already-computed effective session-creation allowed-root scope (the three-level
+// evaluation result).
 type sessionCreatePolicy struct {
 	Workspace             string
 	EffectiveAllowedRoots []string
-	PrincipalID           *int64
+	LauncherID            string
+	LauncherName          string
+	PrincipalName         string
 }
 
 func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, error) {
 	if p.Workspace == "" {
 		return nil, fmt.Errorf("workspace is required: %w", ErrInvalidWorkspace)
+	}
+	if p.LauncherID == "" {
+		return nil, fmt.Errorf("launcher is required: %w", ErrInvalidWorkspace)
 	}
 
 	absWorkspace, err := filepath.Abs(p.Workspace)
@@ -187,55 +200,42 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 	// Acquire coordinator serialization and prepare MAC.
 	// CreateSessionBinding holds the lock through DB insert and rollback.
 	insertSession := func() error {
-		if p.PrincipalID != nil {
-			// Conditional insert: only succeeds if the principal exists AND is enabled.
-			// This prevents a stale-auth race where the principal was disabled between
-			// authentication and session creation.
-			_, err := a.DB.Exec(
-				`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
-				 SELECT ?, ?, ?, ?, ?, ?
-				 FROM principals WHERE id = ? AND enabled = 1`,
-				sessionID,
-				tokenHashHex,
-				absWorkspace,
-				now.Unix(),
-				expiresAt.Unix(),
-				*p.PrincipalID,
-				*p.PrincipalID,
-			)
-			if err != nil {
-				return err
-			}
-			// Verify exactly one row was inserted. If zero, the principal
-			// was disabled or deleted between authentication and this insert.
-			// (RowsAffected is not reliable with INSERT...SELECT in SQLite,
-			// so we verify by checking the session exists.)
-			var count int
-			err = a.DB.QueryRow(
-				`SELECT COUNT(*) FROM sessions WHERE id = ?`,
-				sessionID,
-			).Scan(&count)
-			if err != nil {
-				return err
-			}
-			if count == 0 {
-				return fmt.Errorf("principal is no longer enabled: %w", ErrInvalidWorkspace)
-			}
-			return nil
-		}
-
-		// Admin session: no principal check needed.
+		// Conditional insert: only succeeds if the owning Launcher and its
+		// Principal both exist and are enabled. This prevents a stale-auth race
+		// where the Launcher/Principal was disabled or deleted between
+		// resolution and session creation.
 		_, err := a.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+			 SELECT ?, ?, ?, ?, ?, ?
+			 FROM launchers l JOIN principals p ON p.id = l.principal_id
+			 WHERE l.id = ? AND l.enabled = 1 AND p.enabled = 1`,
 			sessionID,
 			tokenHashHex,
 			absWorkspace,
 			now.Unix(),
 			expiresAt.Unix(),
-			nil,
+			p.LauncherID,
+			p.LauncherID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		// Verify exactly one row was inserted. If zero, the Launcher or its
+		// Principal was disabled or deleted between authentication and this
+		// insert. (RowsAffected is not reliable with INSERT...SELECT in SQLite,
+		// so we verify by checking the session exists.)
+		var count int
+		err = a.DB.QueryRow(
+			`SELECT COUNT(*) FROM sessions WHERE id = ?`,
+			sessionID,
+		).Scan(&count)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return fmt.Errorf("launcher is no longer enabled: %w", ErrInvalidWorkspace)
+		}
+		return nil
 	}
 
 	if a.MACCoordinator != nil {
@@ -257,41 +257,48 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 
 	return &CreatedSession{
 		Session: Session{
-			ID:          sessionID,
-			Workspace:   absWorkspace,
-			CreatedAt:   now,
-			ExpiresAt:   expiresAt,
-			PrincipalID: p.PrincipalID,
+			ID:            sessionID,
+			Workspace:     absWorkspace,
+			CreatedAt:     now,
+			ExpiresAt:     expiresAt,
+			LauncherID:    p.LauncherID,
+			LauncherName:  p.LauncherName,
+			PrincipalName: p.PrincipalName,
 		},
 		Token: token,
 	}, nil
 }
 
-// createSession is the admin-only session creation using global allowed roots.
+// createSession is the thin user-mode default wrapper over
+// createSessionWithPolicy. It resolves the real daemon-owner 'default' Launcher
+// (provisioned at startup by ensureUserModeOwnership) and creates a Session
+// under the global allowed roots (the user-mode collapsed policy). It is the
+// request-time-equivalent used by tests and any non-selector user-mode caller.
+// System mode has no implicit default and must use explicit selectors.
 func (a *App) createSession(workspace string) (*CreatedSession, error) {
-	cfg := a.getConfig()
-	globalAllowedRoots := make([]string, 0, len(cfg.AllowedRoots))
-	for _, r := range cfg.AllowedRoots {
-		resolved, err := filepath.EvalSymlinks(r)
-		if err != nil {
-			return nil, fmt.Errorf("cannot resolve allowed root: %w: %w", err, ErrSystem)
-		}
-		globalAllowedRoots = append(globalAllowedRoots, resolved)
+	if a.getConfig().Mode != ModeUser || a.userModeDefault == nil {
+		return nil, fmt.Errorf("no default launcher available for session creation: %w", ErrInvalidWorkspace)
 	}
+	globalRoots, err := a.appResolvedGlobalRoots()
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve allowed roots: %w: %w", err, ErrSystem)
+	}
+	launcherID := a.userModeDefault.launcherID
 	return a.createSessionWithPolicy(&sessionCreatePolicy{
 		Workspace:             workspace,
-		EffectiveAllowedRoots: globalAllowedRoots,
-		PrincipalID:           nil,
+		EffectiveAllowedRoots: globalRoots,
+		LauncherID:            launcherID,
+		LauncherName:          "default",
+		PrincipalName:         a.userModeDefault.username,
 	})
 }
 
+// listSessions returns all active sessions in admin scope.
 func (a *App) listSessions() ([]Session, error) {
 	now := time.Now().Unix()
 
 	rows, err := a.DB.Query(
-		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
-		 FROM sessions s
-		 LEFT JOIN principals p ON p.id = s.principal_id
+		`SELECT `+sessionOwnershipProjection+`
 		 WHERE s.expires_at > ?
 		 ORDER BY s.created_at ASC`,
 		now,
@@ -303,7 +310,7 @@ func (a *App) listSessions() ([]Session, error) {
 
 	var sessions []Session
 	for rows.Next() {
-		s, err := scanSessionWithPrincipal(rows)
+		s, err := scanSessionWithOwnership(rows)
 		if err != nil {
 			return nil, fmt.Errorf("cannot scan session: %w", err)
 		}
@@ -317,17 +324,22 @@ func (a *App) listSessions() ([]Session, error) {
 	return sessions, nil
 }
 
-// listSessionsForPrincipal returns only sessions owned by the given principal.
-func (a *App) listSessionsForPrincipal(principalID int64) ([]Session, error) {
+// listSessionsInScope returns active sessions owned by any Launcher in the
+// given authorized Launcher set. A nil/empty set (admin scope) lists all
+// sessions owned by any Launcher.
+func (a *App) listSessionsInScope(launcherIDs map[string]bool) ([]Session, error) {
 	now := time.Now().Unix()
 
+	pred, args, err := launcherScopePredicate(launcherIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := a.DB.Query(
-		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
-		 FROM sessions s
-		 LEFT JOIN principals p ON p.id = s.principal_id
-		 WHERE s.expires_at > ? AND s.principal_id = ?
+		`SELECT `+sessionOwnershipProjection+`
+		 WHERE s.expires_at > ?`+pred+`
 		 ORDER BY s.created_at ASC`,
-		now, principalID,
+		append([]any{now}, args...)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot list sessions: %w", err)
@@ -336,7 +348,7 @@ func (a *App) listSessionsForPrincipal(principalID int64) ([]Session, error) {
 
 	var sessions []Session
 	for rows.Next() {
-		s, err := scanSessionWithPrincipal(rows)
+		s, err := scanSessionWithOwnership(rows)
 		if err != nil {
 			return nil, fmt.Errorf("cannot scan session: %w", err)
 		}
@@ -350,16 +362,23 @@ func (a *App) listSessionsForPrincipal(principalID int64) ([]Session, error) {
 	return sessions, nil
 }
 
-func (a *App) deleteSession(id string) (*Session, error) {
+// deleteSessionScoped deletes a session by id within a scope, returning its
+// metadata for audit. A session outside the scope is not found (non-disclosing).
+// A nil scope (admin) deletes any session.
+func (a *App) deleteSessionScoped(id string, launcherIDs map[string]bool) (*Session, error) {
+	pred, args, err := launcherScopePredicate(launcherIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	selectArgs := append([]any{id}, args...)
 	row := a.DB.QueryRow(
-		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
-		 FROM sessions s
-		 LEFT JOIN principals p ON p.id = s.principal_id
-		 WHERE s.id = ?`,
-		id,
+		`SELECT `+sessionOwnershipProjection+`
+		 WHERE s.id = ?`+pred,
+		selectArgs...,
 	)
 
-	s, err := scanSessionWithPrincipal(row)
+	s, err := scanSessionWithOwnership(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
@@ -367,10 +386,8 @@ func (a *App) deleteSession(id string) (*Session, error) {
 		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
 	}
 
-	// Read-before-delete: the session must be returned to the caller so that
-	// the handler can populate the audit record with the workspace even when
-	// the DELETE itself fails.
-	result, err := a.DB.Exec(`DELETE FROM sessions WHERE id = ?`, id)
+	deleteArgs := append([]any{id}, args...)
+	result, err := a.DB.Exec(`DELETE FROM sessions WHERE id = ?`+pred, deleteArgs...)
 	if err != nil {
 		return &s, fmt.Errorf("cannot delete session: %w: %w", err, ErrDatabase)
 	}
@@ -392,56 +409,67 @@ func (a *App) deleteSession(id string) (*Session, error) {
 	return &s, nil
 }
 
-// deleteSessionForPrincipal atomically deletes a session only if it belongs to the given principal.
-// Returns ErrSessionNotFound if the session doesn't exist or doesn't belong to the principal.
-// Returns the deleted session metadata for audit purposes.
-func (a *App) deleteSessionForPrincipal(id string, principalID int64) (*Session, error) {
-	tx, err := a.DB.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("cannot begin transaction: %w", err)
+// launcherScopePredicate returns the SQL predicate and args that restrict a
+// Session query to the given Launcher set. A nil scope (admin) matches all
+// Launcher-owned Sessions.
+func launcherScopePredicate(launcherIDs map[string]bool) (string, []any, error) {
+	if launcherIDs == nil {
+		return "", nil, nil
 	}
-	defer tx.Rollback()
+	ids := make([]string, 0, len(launcherIDs))
+	args := make([]any, 0, len(launcherIDs))
+	for id := range launcherIDs {
+		ids = append(ids, id)
+		args = append(args, id)
+	}
+	if len(ids) == 0 {
+		return " AND 0", nil, nil
+	}
+	// Unqualified (not s.launcher_id): this predicate is shared by the SELECT
+	// ownership queries and by the standalone DELETE, where no alias exists.
+	return " AND launcher_id IN (" + placeholderList(len(ids)) + ")", args, nil
+}
 
-	// Read session metadata first within the transaction.
-	row := tx.QueryRow(
-		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
-		 FROM sessions s
-		 LEFT JOIN principals p ON p.id = s.principal_id
-		 WHERE s.id = ? AND s.principal_id = ?`,
-		id, principalID,
-	)
-	s, err := scanSessionWithPrincipal(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
+// placeholderList returns a SQLite placeholder list "?,?,?" of length n,
+// or "NULL" (impossible match) when n is 0.
+func placeholderList(n int) string {
+	if n <= 0 {
+		return "NULL"
+	}
+	out := ""
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			out += ","
 		}
-		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
+		out += "?"
+	}
+	return out
+}
+
+// resolveSessionExecutionIdentity returns the UID:GID for Docker --user for a
+// Session, resolved through the owning Launcher to its Principal. There is no
+// PrincipalID == nil (daemon) special case: every Session has a Launcher
+// owner.
+func resolveSessionExecutionIdentity(db *sql.DB, session *Session) (uid, gid int, err error) {
+	var pUID, pGID int
+	row := db.QueryRow(
+		`SELECT p.uid, p.gid
+		 FROM launchers l JOIN principals p ON p.id = l.principal_id
+		 WHERE l.id = ?`,
+		session.LauncherID,
+	)
+	if err := row.Scan(&pUID, &pGID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, fmt.Errorf("launcher %q principal not found: %w", session.LauncherID, ErrDatabase)
+		}
+		return 0, 0, fmt.Errorf("cannot lookup launcher principal identity: %w", err)
 	}
 
-	// Delete within the same transaction.
-	result, err := tx.Exec(`DELETE FROM sessions WHERE id = ? AND principal_id = ?`, id, principalID)
-	if err != nil {
-		return nil, fmt.Errorf("cannot delete session: %w: %w", err, ErrDatabase)
-	}
+	return pUID, pGID, nil
+}
 
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return nil, fmt.Errorf("cannot check deletion result: %w: %w", err, ErrDatabase)
-	}
-	if affected == 0 {
-		return nil, fmt.Errorf("session not found: %w", ErrSessionNotFound)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("cannot commit deletion: %w", err)
-	}
-
-	// Release MAC boundary for the deleted session.
-	if a.MACCoordinator != nil {
-		a.MACCoordinator.ReleaseSessionBinding(id)
-	}
-
-	return &s, nil
+func (a *App) deleteSession(id string) (*Session, error) {
+	return a.deleteSessionScoped(id, nil)
 }
 
 func (a *App) findSessionByToken(token string) (*Session, error) {
@@ -451,17 +479,15 @@ func (a *App) findSessionByToken(token string) (*Session, error) {
 	now := time.Now().Unix()
 
 	row := a.DB.QueryRow(
-		`SELECT s.id, s.workspace, s.created_at, s.expires_at, s.principal_id, p.username
-		 FROM sessions s
-		 LEFT JOIN principals p ON p.id = s.principal_id
+		`SELECT `+sessionOwnershipProjection+`
 		 WHERE s.token_hash = ? AND s.expires_at > ?
-		 AND (s.principal_id IS NULL OR p.enabled = 1)
+		 AND l.enabled = 1 AND p.enabled = 1
 		 LIMIT 1`,
 		tokenHashHex,
 		now,
 	)
 
-	s, err := scanSessionWithPrincipal(row)
+	s, err := scanSessionWithOwnership(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrSessionNotFound
@@ -568,27 +594,4 @@ func cleanupStaleSessionRuntimeDirs(db *sql.DB, runtimeDir string) error {
 		return fmt.Errorf("stale session cleanup failed (%d error(s)): %v", len(staleErrors), staleErrors)
 	}
 	return nil
-}
-
-// resolveSessionExecutionIdentity returns the UID:GID for Docker --user.
-// Legacy/admin sessions (principal_id == NULL) use the daemon process UID/GID.
-// Principal-owned sessions use the stored principal UID/GID from the database.
-func resolveSessionExecutionIdentity(db *sql.DB, session *Session) (uid, gid int, err error) {
-	if session.PrincipalID == nil {
-		return os.Getuid(), os.Getgid(), nil
-	}
-
-	var pUID, pGID int
-	row := db.QueryRow(
-		`SELECT uid, gid FROM principals WHERE id = ?`,
-		*session.PrincipalID,
-	)
-	if err := row.Scan(&pUID, &pGID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, 0, fmt.Errorf("principal %d not found: %w", *session.PrincipalID, ErrDatabase)
-		}
-		return 0, 0, fmt.Errorf("cannot lookup principal identity: %w", err)
-	}
-
-	return pUID, pGID, nil
 }
