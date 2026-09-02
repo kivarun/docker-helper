@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -59,14 +58,41 @@ func initializeDatabase(db *sql.DB) error {
 			UNIQUE(principal_id, root_path)
 		);
 
-		CREATE TABLE IF NOT EXISTS credentials (
+		CREATE TABLE IF NOT EXISTS launchers (
 			id TEXT PRIMARY KEY,
 			principal_id INTEGER NOT NULL,
 			name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			scope_mode TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name),
+			CHECK (scope_mode IN ('inherit', 'restricted'))
+		);
+
+		CREATE TABLE IF NOT EXISTS launcher_allowed_roots (
+			launcher_id TEXT NOT NULL,
+			root_path TEXT NOT NULL,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id, root_path)
+		);
+
+		CREATE TABLE IF NOT EXISTS credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
 			token_hash TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL,
 			revoked_at INTEGER,
-			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
 		);
 	`)
 	if err != nil {
@@ -87,68 +113,22 @@ func initializeDatabase(db *sql.DB) error {
 		}
 	}
 
-	// Credential lifecycle migration: a credential name must be reusable after
-	// its previous credential is revoked. The old schema enforced a hard
-	// UNIQUE(principal_id, name), permanently reserving a name after revoke.
-	// Replace it with a partial unique index over active (revoked_at IS NULL)
-	// credentials, preserving revoked records as history.
-	//
-	// Detect the old table-level UNIQUE constraint by inspecting the stored
-	// table DDL (the canonical schema this code created). If present, rebuild
-	// the table without the constraint so the name can be reused after revoke.
-	var credTableSQL string
-	err = db.QueryRow(
-		`SELECT sql FROM sqlite_master WHERE type='table' AND name='credentials'`,
-	).Scan(&credTableSQL)
-	if err != nil {
-		return fmt.Errorf("cannot inspect credentials schema: %w", err)
-	}
-	normalized := strings.ToLower(strings.Join(strings.Fields(credTableSQL), ""))
-	if strings.Contains(normalized, "unique(principal_id,name)") {
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("cannot begin credentials migration: %w", err)
-		}
-		_, err = tx.Exec(`
-			CREATE TABLE credentials_new (
-				id TEXT PRIMARY KEY,
-				principal_id INTEGER NOT NULL,
-				name TEXT NOT NULL,
-				token_hash TEXT NOT NULL UNIQUE,
-				created_at INTEGER NOT NULL,
-				revoked_at INTEGER,
-				FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
-			);
-		`)
-		if err != nil {
-			tx.Rollback() //nolint:errcheck
-			return fmt.Errorf("cannot create new credentials table: %w", err)
-		}
-		_, err = tx.Exec(`INSERT INTO credentials_new SELECT id, principal_id, name, token_hash, created_at, revoked_at FROM credentials`)
-		if err != nil {
-			tx.Rollback() //nolint:errcheck
-			return fmt.Errorf("cannot migrate credentials data: %w", err)
-		}
-		_, err = tx.Exec(`DROP TABLE credentials`)
-		if err != nil {
-			tx.Rollback() //nolint:errcheck
-			return fmt.Errorf("cannot drop old credentials table: %w", err)
-		}
-		_, err = tx.Exec(`ALTER TABLE credentials_new RENAME TO credentials`)
-		if err != nil {
-			tx.Rollback() //nolint:errcheck
-			return fmt.Errorf("cannot rename credentials table: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("cannot commit credentials migration: %w", err)
-		}
+	// Migrate any pre-2.1 credentials table to the final single-table,
+	// single-concrete-owner schema. Existing Principal credential rows are
+	// preserved byte-for-byte with launcher_id left NULL. On a fresh database
+	// the table already has the final schema and this is a no-op.
+	if err := migrateCredentialsToConcreteOwnerSchema(db); err != nil {
+		return err
 	}
 
-	// Enforce active-name uniqueness with a partial unique index. On a fresh
+	// Enforce active Principal-credential name uniqueness with a partial unique
+	// index over active (revoked_at IS NULL) credentials, preserving revoked
+	// records as history so a name can be reused after revoke. On a fresh
 	// database this is created after the initial CREATE TABLE; after the
 	// migration above it is created on the rebuilt table. The old hard
-	// UNIQUE guaranteed no duplicate active (principal_id, name) rows, so this
-	// index creation cannot fail on migrated data.
+	// UNIQUE(principal_id, name) guaranteed no duplicate active rows, so this
+	// index creation cannot fail on migrated data unless the source was already
+	// corrupt with two active same-name rows.
 	_, err = db.Exec(`
 		CREATE UNIQUE INDEX IF NOT EXISTS credentials_active_name_unique
 		ON credentials(principal_id, name) WHERE revoked_at IS NULL;
@@ -217,6 +197,90 @@ func initializeDatabase(db *sql.DB) error {
 		}
 	}
 
+	return nil
+}
+
+// migrateCredentialsToConcreteOwnerSchema migrates a pre-2.1 credentials table
+// to the final single-table, single-concrete-owner schema in one atomic
+// transaction. Every existing Principal credential row is preserved exactly:
+// id, principal_id, name, token_hash, created_at, revoked_at remain unchanged
+// and launcher_id is set to NULL. No Launcher credential is fabricated and no
+// existing credential is issued or revoked during migration.
+//
+// Detection is by schema introspection: if the credentials table already has
+// the launcher_id column it is already at the final schema and this is a no-op.
+// This covers both the current v2.0 schema (principal_id NOT NULL, partial
+// active-name index) and the older schema with a table-level
+// UNIQUE(principal_id, name): both lack launcher_id and are rebuilt. The
+// table-level hard UNIQUE is dropped by the rebuild; active-name uniqueness is
+// re-enforced by the partial index created by the caller after this returns.
+//
+// A crash before commit leaves the old table usable; a crash after commit
+// leaves the final table usable and the next call detects the final schema.
+func migrateCredentialsToConcreteOwnerSchema(db *sql.DB) error {
+	var launcherCol int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('credentials') WHERE name='launcher_id';`,
+	).Scan(&launcherCol)
+	if err != nil {
+		return fmt.Errorf("cannot inspect credentials schema: %w", err)
+	}
+	if launcherCol > 0 {
+		// Already at the final concrete-owner schema.
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("cannot begin credentials migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`
+		CREATE TABLE credentials_new (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("cannot create new credentials table: %w", err)
+	}
+
+	_, err = tx.Exec(`
+		INSERT INTO credentials_new (id, principal_id, launcher_id, name, token_hash, created_at, revoked_at)
+		SELECT id, principal_id, NULL, name, token_hash, created_at, revoked_at
+		FROM credentials
+	`)
+	if err != nil {
+		return fmt.Errorf("cannot migrate credentials data: %w", err)
+	}
+
+	_, err = tx.Exec(`DROP TABLE credentials`)
+	if err != nil {
+		return fmt.Errorf("cannot drop old credentials table: %w", err)
+	}
+
+	_, err = tx.Exec(`ALTER TABLE credentials_new RENAME TO credentials`)
+	if err != nil {
+		return fmt.Errorf("cannot rename credentials table: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("cannot commit credentials migration: %w", err)
+	}
 	return nil
 }
 
