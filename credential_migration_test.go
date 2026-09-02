@@ -396,13 +396,22 @@ func TestCredentialsSchemaClassifierSupported(t *testing.T) {
 		t.Fatalf("openDatabase() error: %v", err)
 	}
 	if _, err := db.Exec(`
+		CREATE TABLE principals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT NOT NULL UNIQUE,
+			uid INTEGER NOT NULL,
+			gid INTEGER NOT NULL,
+			home TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1
+		);
 		CREATE TABLE credentials (
 			id TEXT PRIMARY KEY,
 			principal_id INTEGER NOT NULL,
 			name TEXT NOT NULL,
 			token_hash TEXT NOT NULL UNIQUE,
 			created_at INTEGER NOT NULL,
-			revoked_at INTEGER
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
 		);
 	`); err != nil {
 		t.Fatalf("create v2.0 schema: %v", err)
@@ -556,6 +565,141 @@ func TestCredentialsSchemaExtraColumnFailsClosed(t *testing.T) {
 			created_at INTEGER NOT NULL,
 			revoked_at INTEGER,
 			extra_column TEXT
+		);
+	`)
+}
+
+// TestCredentialsSchemaFKNoActionFailsClosed: the final schema with an owner
+// foreign key that uses the default NO ACTION (instead of ON DELETE CASCADE)
+// must fail closed. ON DELETE CASCADE is canonical.
+func TestCredentialsSchemaFKNoActionFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id),
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
+		);
+	`)
+}
+
+// TestCredentialsPre21MissingTokenHashUniqueFailsClosed: a pre-2.1 Principal-only
+// lookalike without UNIQUE(token_hash) must fail closed.
+func TestCredentialsPre21MissingTokenHashUniqueFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
+		);
+	`)
+}
+
+// TestCredentialsPre21MissingPrincipalFKFailsClosed: a pre-2.1 Principal-only
+// lookalike without the principal_id -> principals(id) foreign key must fail
+// closed.
+func TestCredentialsPre21MissingPrincipalFKFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER
+		);
+	`)
+}
+
+// TestCredentialsSchemaOwnerCheckOrOneFailsClosed: the owner CHECK with an
+// added `OR 1=1` (which changes validity) must fail closed, even though both
+// canonical branch substrings are present in the DDL.
+func TestCredentialsSchemaOwnerCheckOrOneFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+				OR 1=1
+			)
+		);
+	`)
+}
+
+// TestCredentialsSchemaExtraCheckFailsClosed: the final schema with an
+// additional contradictory CHECK that changes credential cardinality/validity
+// must fail closed.
+func TestCredentialsSchemaExtraCheckFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			),
+			CHECK (name IS NOT NULL OR launcher_id IS NOT NULL)
+		);
+	`)
+}
+
+// TestCredentialsSchemaExtraUniquePrincipalFailsClosed: the final schema with an
+// additional UNIQUE(principal_id) that changes the credential cardinality
+// contract must fail closed.
+func TestCredentialsSchemaExtraUniquePrincipalFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			UNIQUE (principal_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
 		);
 	`)
 }
