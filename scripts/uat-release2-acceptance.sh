@@ -232,15 +232,26 @@ set_up_principal() {
   # launcher_not_found. There is no Launcher CLI command, so the admin creates
   # the default Launcher over the raw control-plane API using the system admin
   # token (never printed; sent only as an Authorization header).
+  #
+  # The Launcher control-plane API exists only in the release in which Sessions
+  # became Launcher-owned. Scenario F seeds Principal/credential/session state
+  # under the v2.0.0 upgrade baseline, which predates the Launcher API (route
+  # absent -> HTTP 404, a plain text 404 page, no JSON body). Under that
+  # baseline a principal Session must still be creatable WITHOUT a Launcher, so
+  # a 404 (route not implemented) is tolerated and the Session create below
+  # exercises that version's own ownership semantics. Any other status demands
+  # a live default Launcher.
   ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
   [ -n "$ADMIN_TOKEN" ] || { echo "error: could not read the admin token from /etc/docker-helper/admin.token" >&2; return 1; }
-  LAUNCHER_JSON="$(curl --silent --fail --max-time 5 \
+  LAUNCHER_HTTP="$(curl --silent --output /tmp/r2ac-launcher.json --write-out '%{http_code}' --max-time 5 \
     --unix-socket "$SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H 'Content-Type: application/json' \
-    -d '{"scope":"inherit"}' "http://localhost/principals/$user/launchers" 2>/dev/null)" \
-    || { echo "error: default launcher create for principal '$user' failed" >&2; return 1; }
-  printf '%s\n' "$LAUNCHER_JSON" | grep -q '"ok":true' \
-    || { echo "error: default launcher create did not report ok: $LAUNCHER_JSON" >&2; return 1; }
+    -d '{"scope":"inherit"}' "http://localhost/principals/$user/launchers" 2>/dev/null || true)"
+  if [ "$LAUNCHER_HTTP" != "404" ]; then
+    LAUNCHER_JSON="$(cat /tmp/r2ac-launcher.json 2>/dev/null || true)"
+    printf '%s\n' "$LAUNCHER_JSON" | grep -q '"ok":true' \
+      || { echo "error: default launcher create for principal '$user' failed (http=$LAUNCHER_HTTP): $LAUNCHER_JSON" >&2; return 1; }
+  fi
   json="$(dh session create --system --token-file "$credfile" --workspace "$home/ws" --json 2>/dev/null)" || return 1
   GLOBAL_SESSION_ID="$(printf '%s' "$json" | json_field id)"
   GLOBAL_SESSION_TOKEN="$(printf '%s' "$json" | json_field token)"
