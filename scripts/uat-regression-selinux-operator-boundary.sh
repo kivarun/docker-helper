@@ -58,6 +58,10 @@ reg_info "operator fcontext rules matching $BND before session: $RULE_COUNT_BEFO
 # operator boundary under the final ownership model.
 SEL_P="selbnd"; SEL_CRED="/tmp/selbnd.tok"
 reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+# The session workspace is under /opt (the non-home allowed root this group
+# deliberately exercises), so /opt must be in the principal's own allowed roots
+# for the inherit-scope Session authorization to permit it.
+dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # --- Session uses the existing compatible coverage --------------------------------------

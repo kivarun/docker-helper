@@ -78,6 +78,11 @@ fi
 # selector-less admin Session (missing_launcher_selector).
 SEL_P="selguard"; SEL_CRED="/tmp/selguard.tok"
 reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+# The session workspace is under /opt (the non-home allowed root this group
+# deliberately exercises), so /opt must be in the principal's own allowed roots
+# for the inherit-scope Session authorization to permit it. Without it the
+# create is rejected as invalid_workspace instead of reaching the guard.
+dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 SESS_JSON="$(dh session create --system --token-file "$SEL_CRED" --workspace "$WS" --json 2>&1)"
 SESS_EC=$?

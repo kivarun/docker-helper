@@ -67,6 +67,10 @@ reg_info "workspace: $WS"
 # (never a selector-less admin Session, which the model now rejects).
 SEL_P="selws"; SEL_CRED="/tmp/selws.tok"
 reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+# The session workspace is under /opt (the non-home allowed root this group
+# deliberately exercises), so /opt must be in the principal's own allowed roots
+# for the inherit-scope Session authorization to permit it.
+dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
 # --- session creation ---------------------------------------------------------------
