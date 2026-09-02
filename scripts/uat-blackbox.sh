@@ -498,11 +498,11 @@ ADMIN_CREATED_JSON="$(curl --silent --fail --max-time 5 \
   -H 'Content-Type: application/json' \
   -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" http://localhost/sessions)" \
   || fail_uat "admin-created (principal-selector) session POST failed"
-ADMIN_CREATED_ID="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
-ADMIN_CREATED_TOKEN="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
-ADMIN_CREATED_LID="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"launcher_id": "\K[^"]+' | head -1)"
-ADMIN_CREATED_LAUNCHER="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"launcher": "\K[^"]+' | head -1)"
-ADMIN_CREATED_PRINC="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"principal": "\K[^"]+' | head -1)"
+ADMIN_CREATED_ID="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"id":"\K[^"]+' | head -1)"
+ADMIN_CREATED_TOKEN="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"token":"\K[^"]+' | head -1)"
+ADMIN_CREATED_LID="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"launcher_id":"\K[^"]+' | head -1)"
+ADMIN_CREATED_LAUNCHER="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"launcher":"\K[^"]+' | head -1)"
+ADMIN_CREATED_PRINC="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"principal":"\K[^"]+' | head -1)"
 [ -n "$ADMIN_CREATED_ID" ] && [ -n "$ADMIN_CREATED_TOKEN" ] \
   || fail_uat "admin-created session returned no id/token"
 [ -n "$ADMIN_CREATED_LID" ] \
