@@ -39,18 +39,20 @@ Log access follows the same authorization and ownership boundaries as other cont
 
 Container logs remain runtime-owned data. docker-helper performs bounded retrieval from Docker Engine and does not introduce its own persistent container-log storage, retention, or rotation subsystem.
 
+Release 3 provides only a bounded snapshot with combined output. Log following is outside the release scope.
+
 ### Exec
 
 Release 3 supports execution of commands inside managed containers.
 
 Two execution modes are provided:
 
-- **non-interactive exec** — a synchronous Command with the same request/response model and bounded output behavior as the existing one-shot `run`;
+- **non-interactive exec** — a synchronous Command with the same combined, bounded output and exit-code model as the existing one-shot `run`;
 - **interactive exec** — streamed over WebSocket.
 
 Neither mode creates a durable Operation. Interactive streaming is a transport mechanism for an authorized exec Command and does not create an independent authorization model.
 
-If workload output logging is enabled by operator configuration, `build`, `run`, and `exec` output may be emitted through the existing structured JSON logger and therefore captured by journald. This is operator diagnostics, not a client output-delivery or replay mechanism. Workload output is not logged by default.
+Release 3 does not emit workload output to the daemon logger or journald. Audit and operational records contain command metadata and normalized outcomes, never captured command output.
 
 ### Durable operations
 
@@ -73,27 +75,29 @@ Release 3 does not add persistent Operation logs. Operation stores status, times
 
 ### Session networking
 
-Containers belonging to the same session may communicate through an isolated session network.
+Each Session owns a user-defined bridge network. Managed Containers and one-shot `run` containers belonging to the Session attach to that network and may communicate through Session-scoped names.
 
 Container-local ports may be used freely inside that network without host publication.
 
-Network isolation remains aligned with session ownership.
+The network retains ordinary Docker outbound connectivity. Release 3 adds no special host alias, host-access grant, or firewall layer. Its isolation guarantee separates Session networks; it does not claim to be a complete outbound or host-network sandbox.
+
+Build execution does not attach to the Session network.
 
 ### Port publishing
 
-A managed container may explicitly publish selected ports outside its session network.
+A managed container may explicitly publish selected TCP ports from its Session network to IPv4 loopback on the host.
 
-Publishing is intended for cases where a service must be reachable from outside the session, for example a development web server.
+Publishing authority and port ceilings derive from the owning Launcher. The Session may request an allowed host port or omit it for automatic allocation. The effective loopback address and host port are persisted and returned to the caller.
 
-Port publishing is deliberately narrower than general Docker networking configuration.
+Release 3 does not publish UDP ports or bind to external host interfaces. Port publishing is deliberately narrower than general Docker networking configuration.
 
 ### Resource limits
 
-Release 3 adds a bounded set of resource limits for managed containers.
+Release 3 adds a bounded set of resource limits for managed containers and one-shot `run`.
 
 The purpose is to constrain agent-controlled workloads, not to expose the complete Docker resource-management surface.
 
-The exact supported limits are defined separately by the Release 3 resource-limits design.
+Build resource control is outside this model. The exact supported limits, hierarchical quotas, reservations, and safe defaults are defined separately by the Release 3 resource-limits design. Ordinary quick-start workflows must remain valid without requiring explicit resource-policy flags.
 
 ## Architectural invariants
 
@@ -107,7 +111,10 @@ In particular:
 - workspace and mount restrictions remain enforced;
 - session boundaries also define managed-container ownership;
 - new lifecycle and streaming operations must not bypass existing authorization checks;
+- common workflows remain usable through safe defaults without requiring callers to reproduce operator policy;
 - Docker Engine implementation details must not become part of the public docker-helper contract unless explicitly required.
+
+Release 3 uses the Docker Engine API behind a docker-helper-owned backend boundary. Docker request and stream representations are implementation details and do not become the public API.
 
 Managed containers are an extension of the existing session model, not a parallel management plane.
 
@@ -159,8 +166,11 @@ Release 3 does not provide:
 - multi-host orchestration;
 - general-purpose Docker API compatibility;
 - unrestricted Docker networking;
+- external-interface or UDP port publishing;
+- container-log following;
 - support for every Docker runtime option;
 - persistent Operation output or log replay;
+- workload-output logging to the daemon logger or journald;
 - a stateful CLI workflow engine.
 
 A stopped or failed managed container remains stopped or failed until an authorized actor explicitly performs another lifecycle operation. Teardown caused by expiration or explicit closure of the owning Session is the sole ownership-lifecycle exception; it is resource cleanup, not desired-state reconciliation.

@@ -36,7 +36,7 @@ Release 3 durable work includes:
 - `container.remove`;
 - `session.cleanup`.
 
-Queries, `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. `build`, `run`, and non-interactive exec return bounded output synchronously. Interactive exec uses WebSocket transport. None gains durable recovery, persisted output, or replay semantics.
+Queries, `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. `build`, `run`, and non-interactive exec return one combined bounded `output` synchronously. Interactive exec uses WebSocket transport. None gains durable recovery, persisted output, or replay semantics.
 
 ## Core invariants
 
@@ -262,10 +262,11 @@ The canonical current-to-target symbol, API, configuration, and test migration i
 
 The D0 execution plan fixes the implementation ownership and sequence. The following contract details remain to be fixed in their owning designs before the affected executor tasks begin:
 
-- direct build/run output fields, terminal HTTP semantics, and output-limit configuration compatibility;
 - final Release 2.1 Session foreign key and ownership symbols used by the Operation migration;
 - type-specific normalized Command input and recovery payloads used for idempotency and restart handling;
 - authorization rules for exposing `initiator_id` and `origin_request_id`;
 - stable HTTP and CLI field names and error details for durable lookup and listing.
 
 Resource-specific Command preconditions, backend calls, and recovery observations are defined in their own detailed designs.
+
+The synchronous Command result shape, terminal HTTP semantics, and output-limit compatibility are fixed by `release-3-d0-execution-plan.md`. Backend-specific D0 tasks must be reconciled with the accepted Docker Engine API boundary before implementation begins.

@@ -2,16 +2,18 @@
 
 ## Status and baseline
 
-This document is the executor-facing implementation plan for D0, the cross-cutting Operation foundation defined by `release-3-operation-model.md`.
+This document fixes the D0 semantic contract and records an implementation plan against the inspected baseline for the cross-cutting Operation foundation defined by `release-3-operation-model.md`.
 
 The inspected baseline is `main` at `c840d4e197e86e1b7a190d4dcea7dd795975d8a5`. Release 2.1 Launcher delegation is still design-only at this commit. Symbol and schema references below describe that exact baseline and must be reconciled once the Release 2.1 implementation lands.
+
+The baseline implementation invokes the Docker CLI. Release 3 has since selected the Docker Engine API behind a docker-helper-owned adapter as its target backend. The CLI-specific inventory remains evidence about code that must be retired. Before D0.1 is assigned, the operational architect must select the Engine client implementation and freeze the adapter methods needed by build, pull, one-shot run, lifecycle, logs, and exec. No executor should introduce a new long-lived `exec.Cmd` abstraction solely to reproduce the baseline mechanics.
 
 D0 changes two mechanisms that currently share one in-memory object but have different target semantics:
 
 1. `build` and one-shot `run` become synchronous Commands bound to their HTTP Requests;
 2. durable Operation is introduced for managed-container lifecycle and Session cleanup only.
 
-The current in-memory Operation is not migrated or generalized. Its process-lifetime mechanics are separated from its public status/log/cancel contract, then the public contract and record are removed.
+The current in-memory Operation is not migrated or generalized. Its public status/log/cancel contract and record are removed. Existing cancellation, shutdown, and cleanup behavior is retained as an observable requirement, not as a requirement to preserve the Docker CLI process mechanism.
 
 ## Fixed contract
 
@@ -22,12 +24,18 @@ The following decisions are already binding:
 - only managed-container lifecycle mutations and `session.cleanup` create durable Operations;
 - synchronous Commands do not survive request loss or daemon restart;
 - the normal CLI remains blocking and returns the workload exit result;
-- output returned by a synchronous Command is bounded and is not replayable;
+- `pull`, `build`, one-shot `run`, and non-interactive exec return one combined bounded `output` that is not replayable;
+- a started `run` or exec returns HTTP `200` with its actual `exit_code`, including a non-zero exit;
+- a build that reaches the backend but fails returns HTTP `422` with bounded diagnostic output;
+- invalid, denied, absent, and conflicting inputs use HTTP `400`, `403`, `404`, and `409`; backend unavailability and unexpected backend interaction use `503` and `502` respectively;
+- `command_output_max_bytes` replaces `operation_log_max_bytes`, retains the 4 MiB default, newest-output tail, `truncated` flag, and reload behavior, and applies to all four synchronous Commands;
+- Release 3 accepts `operation_log_max_bytes` as a deprecated alias with a startup warning, rejects configurations containing both names, and exposes only the new name through config CLI operations;
+- workload output is never emitted to the daemon logger, journald, or audit stream;
 - durable Operations persist no workload output or progress log;
 - public build/run Operation status, log, and cancel workflows are removed;
-- a daemon shutdown must still terminate live build/run processes within the existing shared shutdown deadline;
-- one-shot `run` cleanup must still remove a container that outlives its Docker CLI process;
-- staged build contexts, pinned mounts, cidfiles, and MAC leases retain their current cleanup ordering and failure semantics;
+- a daemon shutdown must still cancel live build/run execution within the existing shared shutdown deadline;
+- one-shot `run` cleanup must still remove its backend container after request cancellation, client disconnect, or daemon shutdown;
+- staged build contexts, pinned mounts, and MAC leases retain their current cleanup ordering and failure semantics; cidfiles are a baseline Docker CLI mechanism and need not survive the Engine API migration;
 - daemon shutdown does not convert a durable running Operation into a terminal cancellation; restart recovery decides its result;
 - no independent Operation retention configuration or delete API exists;
 - no hidden queue defers a conflicting lifecycle Command for later execution.
@@ -41,22 +49,22 @@ The current `operation` object owns five unrelated responsibilities:
 | Public build/run status | `operation` fields and `GET /operations/{id}` | Remove for build/run; replace later with the durable representation. |
 | Client output replay | `operation.LogBuffer`, offset polling, `/logs` | Remove. Retain only a bounded direct-response buffer. |
 | Public cancellation | `/operations/{id}/cancel`, `operationSupervisor.cancel` | Remove. Request/signal loss cancels synchronous work; Session cleanup owns internal durable cancellation. |
-| Live process termination | `operation.cmd`, `terminateForShutdown`, force cleanup | Preserve under a transient process supervisor that is not a durable Operation store. |
+| Live execution termination | `operation.cmd`, `terminateForShutdown`, force cleanup | Re-express as request-context cancellation and bounded backend-resource cleanup outside the durable Operation store. |
 | Durable execution | None | Add SQLite-backed records, one dispatcher, typed handlers, and restart recovery. |
 
 ### Production files
 
 | File | Current responsibility | Required change |
 | --- | --- | --- |
-| `operation.go` | In-memory record, registry, log buffer, public cancellation, process start, shutdown termination. | Split transient process supervision and bounded output from the deleted public record; add durable Operation types in separate files. |
+| `operation.go` | In-memory record, registry, log buffer, public cancellation, process start, shutdown termination. | Remove the public record and child-process ownership after callers migrate; retain the bounded output primitive only if the Engine API path still needs it; add durable Operation types in separate files. |
 | `build.go` | Validates and stages, registers Operation, starts Docker, returns `201`, completes in a goroutine. | Execute within the request lifetime, return one bounded terminal response, preserve staging/MAC cleanup. |
-| `run.go` | Validates, pins mounts, registers Operation, manages cidfile, returns `201`, completes in a goroutine. | Execute within the request lifetime, return one bounded terminal response, preserve daemon-side container cleanup, pins, cidfile, and MAC cleanup. |
+| `run.go` | Validates, pins mounts, registers Operation, manages cidfile, returns `201`, completes in a goroutine. | Execute through the Engine API within the request lifetime, return one bounded terminal response, and preserve daemon-side container, pin, and MAC cleanup without retaining cidfile as target architecture. |
 | `api_contract.go` | Build/run created, status, logs, and cancel response shapes. | Replace build/run response with direct result shapes. Later add the durable Operation representation and list envelope. |
 | `response.go` | `writeOperationCreated` and generic response envelope. | Remove build/run creation response; keep one owner for direct Command responses. |
 | `client.go` | Starts Operations, polls status/logs, cancels. | Replace build/run methods with one-request direct methods; later add durable lookup/list/wait methods. |
 | `agent_cli.go` | Poll loop, log offsets, signal-triggered public cancel. | Render direct build/run results; use request-context cancellation on signals. Durable lifecycle waiting is added separately and performs no public cancel. |
-| `main.go` | Registers legacy Operation routes and terminates `OperationSupervisor` during shutdown. | Remove legacy routes; wire transient process shutdown separately from the durable dispatcher. Add durable lookup/list routes only with the new model. |
-| `app.go` | Stores `OperationSupervisor`; test seams use `operationID` as a runtime key. | Hold separate transient process and durable Operation owners. Rename runtime-key parameters so they do not imply public Operation identity. |
+| `main.go` | Registers legacy Operation routes and terminates `OperationSupervisor` during shutdown. | Remove legacy routes; wire synchronous execution cancellation and backend cleanup separately from the durable dispatcher. Add durable lookup/list routes only with the new model. |
+| `app.go` | Stores `OperationSupervisor`; test seams use `operationID` as a runtime key. | Hold separate synchronous-execution and durable Operation owners. Rename runtime-key parameters so they do not imply public Operation identity. |
 | `config.go`, `config_cli.go`, `reload.go`, `cli.go` | Operation TTL/count and log-buffer configuration. | Remove TTL/count settings. Move the byte limit to direct Command output under the agreed compatibility rule. |
 | `database.go` | Session/Principal/MAC schema; immediate expired-Session deletion. | Add durable Operation/idempotency schema only after Release 2.1; Session cleanup replaces immediate deletion in the later integration step. |
 | `audit.go`, `logging.go` | Request-correlated audit and operational records. | Stop emitting Operation IDs for synchronous build/run. Durable events use the new Operation type/initiator/target vocabulary. |
@@ -78,32 +86,32 @@ Historical roadmap sections may describe the old Release 1/2 implementation, but
 
 ### 1. Synchronous Command service
 
-The build and run handlers remain the owners of their domain validation, Docker argv, typed failure classification, audit metadata, and resource cleanup.
+The build and run services remain the owners of their domain validation, typed failure classification, audit metadata, and resource cleanup.
 
-They invoke one shared bounded process primitive that:
+They invoke one docker-helper-owned Docker Engine API adapter that:
 
-- starts exactly one `exec.Cmd` under the transient supervisor's start/shutdown boundary;
-- attaches bounded output writers;
-- waits exactly once;
-- observes request cancellation;
-- returns start error, wait error, exit code, duration, retained output, and truncation;
+- executes under the caller's context and the daemon shutdown boundary;
+- decodes backend streams without exposing Docker framing publicly;
+- collects combined output under the shared bounded-output contract;
+- waits for or observes one terminal backend result;
+- returns typed backend failure, workload exit code where applicable, duration, retained output, and truncation;
 - does not allocate, expose, or persist an Operation ID.
 
-The primitive does not own build staging, mount pinning, cidfiles, Docker error classification, audit events, or HTTP status selection.
+The adapter does not own build staging, mount pinning, policy validation, audit events, or HTTP status selection.
 
-### 2. Transient process supervisor
+### 2. Transient execution coordination
 
-The process supervisor is live daemon state. It owns only:
+Synchronous execution is live daemon state. Its coordinator owns only:
 
 - an admission gate closed when daemon shutdown begins;
-- the active child-process set;
-- the start-versus-shutdown race boundary currently protected by `op.mu`;
-- graceful signal and force-kill coordination under the existing absolute shutdown deadline;
-- an optional command-specific force-cleanup callback.
+- active execution contexts;
+- the admission-versus-shutdown race boundary;
+- cancellation and bounded cleanup under the existing absolute shutdown deadline;
+- command-specific backend-resource cleanup where cancellation alone cannot prove the postcondition.
 
-The one-shot run callback reads the helper-owned cidfile and performs bounded daemon-side container cleanup before force-killing the Docker CLI. Build has no container cleanup callback. Domain handlers continue to clean staging, pins, cidfiles, and MAC leases after the process reaches its terminal local state.
+One-shot run tracks the Engine-returned BackendContainerID internally and removes that container on request cancellation, disconnect, or daemon shutdown. Build cancellation closes the Engine request and stream through its context. Domain services continue to clean staging, pins, and MAC leases after execution reaches its terminal local state.
 
-This supervisor has no public lookup, result state, log buffer, retention, Session authorization, or retry semantics. A private per-request runtime key may identify staging/pin/cidfile paths, but it is not an Operation ID and is not returned or audited as one.
+This coordinator has no public lookup, result state, log buffer, retention, Session authorization, or retry semantics. A private per-request runtime key may identify staging or pin paths, but it is not an Operation ID and is not returned or audited as one.
 
 ### 3. Durable Operation store and dispatcher
 
@@ -225,10 +233,10 @@ The generic dispatcher never converts an arbitrary context error into public can
 
 When shutdown begins:
 
-1. close synchronous-process and durable-Operation admission gates;
+1. close synchronous-execution and durable-Operation admission gates;
 2. stop claiming new `pending` Operations;
 3. cancel active handler contexts with a daemon-shutdown cause;
-4. terminate transient child processes within the existing shared absolute deadline;
+4. cancel synchronous Engine API activity and finish required backend cleanup within the existing shared absolute deadline;
 5. allow a durable handler that reaches a valid terminal commit to keep that result;
 6. leave any other durable row `running` for restart recovery;
 7. never write `canceled` solely because the daemon stopped.
@@ -239,23 +247,25 @@ Pending Operations remain pending. The next daemon instance resumes dispatch aft
 
 Each task is intended to be a focused commit or a small reviewable commit series. Later tasks must not leave the old and new owners active together.
 
-### D0.1 — Extract transient process supervision
+### D0.1 — Introduce the Docker Engine API execution boundary
 
-- introduce the shutdown/admission/process owner without changing HTTP behavior;
-- move the proven start race, SIGTERM, force deadline, single-owner force cleanup, and cidfile callback mechanics out of the public `operation` record;
-- keep `boundedBuffer` independent of both supervisors;
-- migrate shutdown/race/force-cleanup tests to the new production owner;
-- prove old process fields and termination paths are no longer reachable from `operation`.
+- select and pin the Engine API client implementation behind one docker-helper-owned adapter;
+- migrate build/run backend calls while preserving the current public behavior at this intermediate point;
+- introduce the synchronous-execution admission, shutdown, cancellation, and backend-cleanup owner independently of durable Operation;
+- keep `boundedBuffer` independent of the execution coordinator and durable dispatcher;
+- replace cidfile correlation with BackendContainerID returned directly by Engine;
+- migrate shutdown/race/cleanup tests to the new production owner;
+- prove new code does not introduce another raw Engine client or a replacement `exec.Cmd` lifecycle.
 
 Completion evidence:
 
 - behavior of build/run status/log/cancel remains unchanged at this intermediate point;
-- existing shutdown deadline, simultaneous-operation, start-race, cidfile cleanup, staging, pins, and MAC lease tests still pass through the new owner;
-- `operationSupervisor` no longer owns process termination.
+- existing shutdown deadline, simultaneous-operation, start-race, container cleanup, staging, pins, and MAC lease invariants still pass through the new owner;
+- `operationSupervisor` no longer owns execution termination or backend cleanup.
 
 ### D0.2 — Make build synchronous
 
-- execute Docker build under the request context and transient supervisor;
+- execute Docker build under the request context through the Engine API adapter and transient execution coordinator;
 - return one bounded terminal response;
 - remove `newBuildOperation`, build polling, build public cancellation, and `waitBuildCompletion`;
 - preserve validation, isolated staging, build-arg ordering, Docker config ownership, audit fields, cleanup order, and MAC lease retention on cleanup failure;
@@ -264,22 +274,22 @@ Completion evidence:
 Completion evidence:
 
 - the CLI still blocks, prints build output, reports truncation, handles signals, and exits non-zero on build failure;
-- request disconnect and daemon shutdown terminate the local build process and clean staging;
+- request disconnect and daemon shutdown cancel the Engine build and clean staging;
 - no build path calls the legacy Operation registry or public Operation routes.
 
 ### D0.3 — Make one-shot run synchronous
 
-- execute Docker run under the request context and transient supervisor;
+- execute Docker run under the request context through the Engine API adapter and transient execution coordinator;
 - return bounded output, duration, result code, and exit code directly;
 - remove `newRunOperation`, run polling, run public cancellation, and `waitRunCompletion`;
-- preserve UID/GID selection, MAC backend enforcement, mount validation and pinning, CA injection, Docker config, cidfile cleanup, daemon-side forced container removal, audit metadata, and exit-code mapping;
+- preserve UID/GID selection, MAC backend enforcement, mount validation and pinning, CA injection, Docker configuration, daemon-side container removal, audit metadata, and exit-code mapping;
 - remove run Operation IDs from API responses and audit records.
 
 Completion evidence:
 
 - the CLI still blocks and returns the container exit code for `container_exit_nonzero`;
-- SIGINT/SIGTERM and request disconnect cannot leave the one-shot container running;
-- pin/cidfile/MAC cleanup ordering is unchanged;
+- CLI signal cancellation and request disconnect cannot leave the one-shot container running;
+- pin/container/MAC cleanup ordering preserves the existing observable guarantees;
 - no run path calls the legacy Operation registry or public Operation routes.
 
 ### D0.4 — Delete the legacy public Operation mechanism
@@ -289,7 +299,7 @@ Completion evidence:
 - remove `operation_retention_ttl` and `operation_max_completed` from runtime config, reload, CLI help, completion, docs, and tests;
 - apply the agreed compatibility treatment to the output byte-limit field;
 - update architecture, README, man pages, agent skill, and examples in the same change;
-- retain only the process supervisor and direct-response bounded buffer from the old implementation.
+- retain only reusable bounded-output and cleanup behavior from the old implementation; do not retain its child-process supervisor as target architecture.
 
 Completion evidence:
 
@@ -351,7 +361,7 @@ Do not ship a fake production Operation type merely to exercise D0. Until D2 or 
 | `cmd_start_race_test.go` | Start and shutdown have one atomic boundary. |
 | `shutdown_test.go`, `shutdown_lifecycle_test.go` | Graceful and force termination share one absolute deadline and run concurrently. |
 | `shutdown_gate_test.go` | Work admitted before gate close is supervised; work after close is rejected. |
-| `container_lifecycle_unit_test.go`, `container_lifecycle_integration_test.go` | One-shot run force cleanup removes backend containers and handles cidfile races. |
+| `container_lifecycle_unit_test.go`, `container_lifecycle_integration_test.go` | One-shot run cancellation cleanup removes the Engine-returned backend container under admission and shutdown races. |
 | `build_staging_test.go` | Staging cleanup precedes MAC lease release; failure retains confinement state. |
 | `mount_pin_linux_test.go`, relevant `mac_lifecycle_test.go` cases | Pin cleanup and MAC lease ownership remain ordered and fail closed. |
 | `bounded_buffer_test.go`, `build_tail_test.go` | Direct output remains bounded, retains the newest bytes, and reports truncation. |
@@ -362,10 +372,10 @@ Do not ship a fake production Operation type merely to exercise D0. Until D2 or 
 ### Remove or rewrite
 
 - `build_async_test.go` becomes synchronous build request/result and disconnect coverage;
-- public cancellation cases in `cancel_test.go` are deleted, while process termination and cleanup races move to transient-supervisor tests;
+- public cancellation cases in `cancel_test.go` are deleted, while execution cancellation and backend cleanup races move to transient-coordinator tests;
 - `operation_cleanup_test.go` is deleted with TTL/count pruning;
 - status/log offset tests in `build_test.go`, `run_exit_code_test.go`, `agent_cli_test.go`, and `error_contract_test.go` are replaced by direct result assertions;
-- `operationSupervisor`-specific tests are retained only when they protect process supervision and are rewritten against that owner;
+- `operationSupervisor`-specific tests are retained only when they protect observable cancellation or cleanup guarantees and are rewritten against their final owner;
 - configuration, reload, help, completion, README, man-page, packaging, and agent-skill tests are updated with the selected output-limit compatibility rule.
 
 ### New durable invariants
@@ -384,17 +394,11 @@ D0 persistence and dispatcher tests must prove:
 - recovery of the previous supported payload version across daemon upgrade;
 - pending work survives a lost wake-up and process restart;
 - shutdown leaves interrupted work recoverable;
-- no secret, workload output, or raw backend ID enters durable rows, public errors, or audit records.
+- no secret or raw backend ID enters durable rows, public errors, or audit records; workload output appears only in the bounded direct Command result and never in durable rows or audit.
 
-## Remaining contract gates
+## Remaining implementation gate
 
-The implementation sequence is fixed, but three public details must be settled before D0.2-D0.4 are assigned for coding:
-
-1. **Direct output shape.** The smallest compatibility change is one combined bounded `output` field, matching current build/run polling and synchronous pull behavior. Splitting stdout/stderr would be a separate public CLI/API change and must not happen accidentally.
-2. **Terminal HTTP semantics.** The response must distinguish failure to start Docker, Docker/backend failure, build failure, and a successfully started container that exits non-zero. Exact HTTP statuses and whether `container_exit_nonzero` is a `200` terminal result must be frozen in the API design.
-3. **Output-limit configuration migration.** `operation_log_max_bytes` is semantically obsolete but exists in deployed configs and also bounds pull output. The replacement name, upgrade behavior, reload semantics, and whether pull/build/run/exec share one limit require one explicit compatibility decision.
-
-The workload-output-to-journald option is not part of D0 process delivery. Its name, redaction, and scope remain a D5/D9 design gate and must not be conflated with the direct response byte limit.
+The public D0 contract and target ownership split are fixed. Before D0.1 is assigned, the operational architect must select the Engine client dependency and write the narrow adapter method contracts, including cancellation, shutdown, build-stream decoding, and one-shot-container cleanup. This implementation detail is not permission to reopen the synchronous Command or durable Operation contracts.
 
 ## D0 completion gate
 
@@ -403,7 +407,7 @@ D0 is complete only when all of the following are true:
 - build and one-shot run have no public or internal durable Operation identity;
 - their CLI remains blocking and their output, exit, cancellation, cleanup, and shutdown behavior is covered through the synchronous production path;
 - the old in-memory record, registry, polling, replay, public cancellation, and retention configuration are gone;
-- transient process supervision is the only owner of live child-process shutdown;
+- transient execution coordination is the only owner of synchronous cancellation and backend-resource cleanup;
 - durable Operation persistence, dispatcher, handler registration, recovery, idempotency, retention-by-Session, and read API have one owner each;
 - no fake build/run compatibility layer reproduces the deleted async workflow;
 - the final implementation map references the actual Release 2.1 symbols and schema;

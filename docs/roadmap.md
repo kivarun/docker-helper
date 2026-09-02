@@ -471,13 +471,17 @@ consolidation/parallelization.
 
 Release 3 is reserved for the larger runtime architecture:
 
-- managed containers with explicit create, start, stop, restart, inspect, and
-  logs operations;
+- managed containers with explicit create, start, stop, restart, inspect,
+  remove, and bounded log-snapshot operations;
 - synchronous non-interactive exec with bounded direct output;
 - interactive exec over WebSocket;
 - per-Session networking;
-- narrow Launcher-governed port publishing for deliberate external exposure;
+- narrow Launcher-governed TCP port publishing on host IPv4 loopback;
 - explicit CPU, memory, and related resource limits.
+
+Release 3 uses the Docker Engine API behind a docker-helper-owned backend
+boundary. Workload output remains a bounded direct client result and is not
+copied into daemon logs, audit, or journald.
 
 A managed container is not desired state. Release 3 does not add automatic
 recovery, reconciliation, or restart-policy semantics.
@@ -491,12 +495,14 @@ Release 3 foundation documents:
 - [`release-3-scope.md`](release-3-scope.md) — binding scope and exclusions;
 - [`release-3-decomposition.md`](release-3-decomposition.md) — work packages and dependencies;
 - [`release-3-operation-model.md`](release-3-operation-model.md) — durable execution contract;
+- [`release-3-d0-execution-plan.md`](release-3-d0-execution-plan.md) — Operation foundation and synchronous-command migration plan;
 - [`release-3-managed-container-domain.md`](release-3-managed-container-domain.md) — identity, ownership, and lifetime;
 - [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.
 
-## 4.0 / use-case driven
+## Possible 4.0 / use-case driven
 
-Remote capabilities remain a later, separate architecture problem:
+If concrete use cases justify remote capabilities, they remain a later,
+separate architecture problem:
 
 - explicit TLS identity and non-loopback transport policy;
 - uploaded or streamed build contexts;

@@ -274,26 +274,33 @@ Orphan decisions are exposed through an administrator-only CLI surface:
 ```text
 docker-helper container orphan list
 docker-helper container orphan show <backend-id>
-docker-helper container orphan adopt <backend-id>
 docker-helper container orphan remove <backend-id>
 ```
 
 `show` presents the backend state and the policy-relevant image, mounts, network, limits, and publishing configuration. Environment values are not displayed.
-
-`adopt`:
-
-- accepts only a correctly labelled docker-helper backend object;
-- restores only the original ManagedContainerID and original owning Session;
-- cannot transfer the object into another Session;
-- requires the original Session to exist and be active;
-- revalidates workspace, mounts, network, resource constraints, and publishing against current authorization policy;
-- fails if the complete security-relevant effective configuration cannot be reconstructed and validated.
 
 `remove` is limited to a verified docker-helper-labelled orphan so that the command cannot become a general Docker container deletion interface.
 
 Session, Launcher, and Principal credentials cannot operate on orphaned objects. Their ownership is absent from persistent state, so only administrator authority may resolve them.
 
 No orphan is adopted or removed automatically.
+
+Orphan adoption is outside Release 3. A later design may add it if operational evidence justifies the additional reconstruction and authorization contract.
+
+## Accepted lifecycle semantics
+
+Lifecycle Commands express an explicit caller intent rather than requiring the caller to reproduce Docker's prerequisite steps.
+
+- `start` for an already running container is a successful no-op and creates no Operation;
+- `stop` for an already stopped container is a successful no-op and creates no Operation;
+- `restart` restarts a running container and starts a stopped container;
+- `remove` stops a running container internally before removing it;
+- Release 3 exposes no public force flag and no caller-selected stop timeout;
+- stop behavior uses one finite backend default for `stop`, `restart`, `remove`, and Session teardown;
+- accepted `stop`, `restart`, `remove`, and Session teardown close exec admission and terminate active exec instances; active exec is not a lifecycle conflict;
+- a competing lifecycle mutation returns `409 Conflict` with the active Operation ID and is never queued; the stable error code must not be `container_busy`.
+
+The detailed lifecycle design must map these rules across every observed runtime state and define their recovery evidence without changing the accepted caller-facing behavior.
 
 ## Persistent data boundary
 
@@ -314,7 +321,7 @@ Exact schema columns, indexes, closed-Session tombstone duration, and migration 
 
 The following decisions are intentionally outside this document:
 
-- detailed per-command lifecycle preconditions, repeated-command behavior, and remove force policy;
+- detailed runtime-state mapping and recovery evidence for the accepted lifecycle behavior;
 - container name and Session-scoped network alias rules;
 - the immutable create specification and whether any fields may be updated;
 - Session-network provisioning and cleanup mechanics;

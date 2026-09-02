@@ -111,7 +111,7 @@ Lifecycle mutations return `202 Accepted`. The CLI waits for terminal status by 
 
 Inspect status is a Query and creates no Operation.
 
-The design must explicitly define remove semantics, including stopped versus running containers, repeated removal, missing backend objects, and whether any force behavior is exposed.
+The detailed design must preserve the accepted Docker-like lifecycle semantics: repeated start/stop postconditions are successful no-ops; restart of a stopped container starts it; removal of a running container stops it internally; no public force or caller-selected stop-timeout control is exposed. Active exec is terminated by teardown and is not reported as `container_busy`. Competing lifecycle mutations still return a non-queued conflict with the active Operation ID.
 
 Completion criterion: every lifecycle mutation has one ownership check, one state-transition contract, one backend execution path, and one externally observable result.
 
@@ -133,6 +133,8 @@ External port publishing is not part of this package.
 
 The design must separately decide outbound connectivity and host access. Session isolation does not by itself imply either unrestricted egress or a fully internal Docker network.
 
+Release 3 retains ordinary Docker outbound connectivity and adds no host alias, host-access grant, or firewall layer. Managed Containers and one-shot `run` attach to the Session network; build does not.
+
 Completion criterion: two containers in one Session can communicate by an approved name, while a container from another Session cannot join or address that network through docker-helper.
 
 ### D4. Container logs
@@ -143,14 +145,14 @@ Responsibilities:
 
 - target resolution and ownership verification;
 - bounded retrieval options;
-- stable stdout and stderr behavior where the backend can preserve the distinction;
+- combined output consistent with the synchronous Command contract;
 - limits that prevent unbounded memory use or response growth;
 - consistent behavior for running, stopped, removed, and missing containers;
 - audit behavior appropriate to log access.
 
 Container logs are read from Docker Engine under bounded request and response limits. docker-helper does not persist, rotate, or retain a second copy.
 
-Whether log following is part of Release 3 must be decided explicitly. It must not be added implicitly as a side effect of interactive exec streaming.
+Release 3 provides bounded snapshots only. Log following is outside its scope and must not be added implicitly as a side effect of interactive exec streaming.
 
 Completion criterion: authorized callers can retrieve bounded container logs without receiving direct Docker Engine access or backend-specific identifiers as authority.
 
@@ -167,13 +169,13 @@ Responsibilities:
 - audit attribution;
 - shared execution semantics for non-interactive and interactive modes.
 
-Non-interactive exec reuses the existing synchronous `run` request/response model. It returns bounded stdout, stderr, and exit status directly and creates no Operation.
+Non-interactive exec reuses the existing synchronous `run` request/response model. It returns combined bounded output and exit status directly and creates no Operation.
 
 Interactive exec reuses the same authorization and execution core. It must not be implemented as a separate privileged path.
 
 Active exec instances are transient daemon state. Lifecycle stop, restart, remove, and Session cleanup close exec admission and terminate active processes through container lifecycle action. Exec never blocks teardown and has no restart recovery or output replay contract.
 
-Workload output enters the existing structured JSON logger only when the operator enables the corresponding output-logging option. journald is an operator diagnostic sink, not the client result channel.
+Workload output never enters the daemon logger, journald, or audit stream in Release 3.
 
 Completion criterion: a non-interactive command can run inside an authorized Managed Container with the same bounded synchronous result model as `run`, and both exec modes share one authorization and execution core.
 
@@ -198,14 +200,14 @@ Completion criterion: interactive exec can be used without exposing a second aut
 
 ### D7. Resource constraints
 
-This package defines a deliberately bounded resource policy for Managed Containers.
+This package defines a deliberately bounded resource policy for Managed Containers and one-shot `run`.
 
 Responsibilities:
 
 - the supported CPU, memory, process, and related limit vocabulary;
 - normalized units and validation;
-- safe defaults where defaults are required;
-- authorization ceilings inherited by the Session;
+- safe defaults that keep ordinary quick-start workflows free of mandatory resource flags;
+- hierarchical Principal, Launcher, and Session quotas and active reservations;
 - enforcement during container creation;
 - status representation sufficient to inspect the effective limits;
 - stable errors for unsupported or excessive requests.
@@ -218,16 +220,18 @@ The design must distinguish:
 - the Session's authorized ceiling;
 - the effective backend value.
 
-Completion criterion: a Session can create a container only within its authorized resource envelope, and the effective limits remain inspectable without exposing the full Docker resource surface.
+Build resource control is outside this package. Exact quota accounting, supported limit dimensions, reservations, and numeric defaults remain part of the D7 design and are not frozen by this decomposition.
+
+Completion criterion: a Session can start a Managed Container or execute `run` only within its authorized resource envelope, and the effective limits remain inspectable without exposing the full Docker resource surface.
 
 ### D8. External port publishing
 
-This package provides narrow, explicit exposure of selected container ports outside the Session network.
+This package provides narrow, explicit exposure of selected container TCP ports from the Session network to host IPv4 loopback.
 
 Responsibilities:
 
 - representation of the container port and protocol;
-- policy for host bind addresses;
+- the fixed `127.0.0.1` host bind address;
 - allocation or validation of host ports;
 - collision handling;
 - authorization inherited from the Release 2.1 Launcher and Session model;
@@ -237,7 +241,9 @@ Responsibilities:
 
 Publishing authority originates outside the untrusted Session through the Release 2.1 delegation model. Release 3 must not create a second delegation mechanism merely for ports.
 
-This package does not expose arbitrary Docker networks, network modes, aliases, routing configuration, or unrestricted host binding.
+The Session may request an allowed host port or omit it for automatic allocation. The effective mapping is returned by create and shown with Session grants; no separate range-discovery endpoint is required.
+
+This package does not expose UDP, external host binding, arbitrary Docker networks, network modes, aliases, or routing configuration.
 
 Completion criterion: an authorized service can be exposed through a narrowly defined mapping, while an untrusted agent cannot freely claim host addresses or ports outside its grant.
 

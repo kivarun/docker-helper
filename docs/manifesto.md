@@ -59,6 +59,22 @@ already solved elsewhere.
 
 Its distinctive value is semantic policy at the capability level.
 
+## Simple by default
+
+A user who wants to experiment with agents and containers should not have to
+learn the full vocabulary of container runtimes, resource policy, networking,
+and infrastructure security before completing a useful workflow.
+
+Common workflows should work with safe, documented defaults and a small stable
+product vocabulary. Advanced policy and backend controls should appear only
+when a user or operator needs to make an explicit choice. Complexity that
+docker-helper must own should not be pushed onto every caller as mandatory
+configuration.
+
+This is progressive disclosure, not the removal of control. Operators may tune
+the policy boundary, but ordinary users should not have to reproduce that
+policy by hand to get started.
+
 ## Development philosophy
 
 Develop from demonstrated use cases rather than inventing a platform in
@@ -74,5 +90,7 @@ of adoption is not a prerequisite for solving a real problem.
 - standardize contracts and conventions, not mandatory shared runtime code;
 - preserve remote and multi-session futures without predesigning them;
 - prefer the smallest implementation that solves a demonstrated problem;
+- keep common workflows simple through safe defaults and progressive
+  disclosure;
 - keep the agent contract above Docker-specific protocol details where
   practical.
