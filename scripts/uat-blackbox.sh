@@ -458,6 +458,22 @@ CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
 printf '%s\n' "$CRED_TOKEN" > "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 
+# The principal's ownership is realized through an enabled inherit-scope
+# 'default' Launcher (the final model derives the Principal through its
+# Launcher). The admin creates it via the launcher API; sessions for this
+# Principal then resolve to this default Launcher. There is no CLI command for
+# launchers, so this goes over the raw control-plane API with the admin token.
+ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+[ -n "$ADMIN_TOKEN" ] || fail_uat "could not read the admin token from /etc/docker-helper/admin.token"
+LAUNCHER_JSON="$(curl --silent --fail --max-time 5 \
+  --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"inherit"}' "http://localhost/principals/$PRINCIPAL/launchers")" \
+  || fail_uat "default launcher create for principal '$PRINCIPAL' failed"
+printf '%s\n' "$LAUNCHER_JSON" | grep -q '"ok":true' \
+  || fail_uat "default launcher create did not report ok: $LAUNCHER_JSON"
+info "default launcher for $PRINCIPAL established (principal-derived ownership)"
+
 # --- Focused control-plane proof: Admin is creation authority, not owner. ---
 # The final model retires selector-less / global-root admin Sessions: a Session
 # owner is always a Launcher, and the Principal is derived through that
@@ -465,8 +481,6 @@ chmod 600 "$CRED_FILE"
 # request carrying a `principal` selector; the Session is owned by that
 # Principal's Launcher. The admin token is read from /etc/docker-helper/admin.token
 # (written by system init) and sent only as an Authorization header.
-ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
-[ -n "$ADMIN_TOKEN" ] || fail_uat "could not read the admin token from /etc/docker-helper/admin.token"
 
 # Negative: an admin create with NO selector must fail closed with
 # 400 missing_launcher_selector — never create a selector-less session.
