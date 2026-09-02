@@ -186,6 +186,20 @@ fi
 record_stage "black-box UAT" "$BB_RESULT"
 
 # ---------------------------------------------------------------------------
+# 7b. docker-helper selinux check diagnostic (read-only operator diagnostic)
+# ---------------------------------------------------------------------------
+log "== 7b. docker-helper selinux check diagnostic =="
+SELCHECK_RESULT=FAIL
+if run_guest_capture "docker-helper selinux check inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash scripts/uat-selinux-check-regression.sh"; then
+  SELCHECK_RESULT=PASS
+  log "docker-helper selinux check passed inside the guest"
+else
+  log "docker-helper selinux check FAILED inside the guest (recorded)"
+fi
+record_stage "SELinux check diagnostic" "$SELCHECK_RESULT"
+
+# ---------------------------------------------------------------------------
 # 8. SELinux mount-pin / RPM postinstall regression
 # ---------------------------------------------------------------------------
 log "== 8. SELinux mount-pin / RPM postinstall regression =="
@@ -277,7 +291,7 @@ echo "============================="
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"
