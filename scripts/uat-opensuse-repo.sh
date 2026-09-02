@@ -12,21 +12,25 @@
 # nothing).
 #
 # Provided functions:
-#   opensuse_zypp_tune_timeouts  Enforce libzypp download policy in zypp.conf so
-#                                a dead/stalled mirror costs seconds instead of
-#                                the 60s connect default, and a mirror that
+#   opensuse_zypp_tune_timeouts  Enforce libzypp download policy through a
+#                                docker-helper-owned zypp drop-in
+#                                (/etc/zypp/zypp.conf.d/99-docker-helper-uat.conf)
+#                                so a dead/stalled mirror costs seconds instead
+#                                of the 60s connect default, and a mirror that
 #                                connects successfully but then transfers
-#                                unusably slowly is abandoned. Sets
+#                                unusably slowly is abandoned. Writes
 #                                download.connect_timeout (5, connection phase
-#                                only) and download.min_download_speed
-#                                (262144 bytes/s — libzypp's native control for
-#                                abandoning an already-connected slow server).
-#                                zypper's CLI --connect-timeout flag is not
-#                                accepted on this Tumbleweed image; zypp.conf is
-#                                the supported knob (zypper.conf(5)).
-#                                download.transfer_timeout is left at the
-#                                libzypp default. zypp.conf semantics: the last
-#                                value for a key wins.
+#                                only), download.min_download_speed (262144
+#                                bytes/s — libzypp's native control for
+#                                abandoning an already-connected slow server),
+#                                and download.transfer_timeout (600, so a large
+#                                RPM on a slow mirror is not abandoned too
+#                                early). zypper's CLI --connect-timeout flag is
+#                                not accepted on this Tumbleweed image; the
+#                                zypp.conf.d drop-in is the supported override
+#                                mechanism (zypper.conf(5)), and later drop-ins
+#                                override earlier settings. The vendored
+#                                /etc/zypp/zypp.conf is never modified.
 #   opensuse_zypper <args...>    Run `zypper --non-interactive <args...>` with
 #                                up to OPENSUSE_ZYPPER_ATTEMPTS (3) command-level
 #                                attempts, OPENSUSE_ZYPPER_DELAY (2) seconds
@@ -44,6 +48,10 @@
 OPENSUSE_ZYPP_CONNECT_TIMEOUT=5
 OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED=262144
 OPENSUSE_ZYPP_TRANSFER_TIMEOUT=600
+# Directory for the docker-helper-owned zypp drop-in. Production always uses
+# /etc/zypp/zypp.conf.d; tests override it with a temporary directory. The
+# drop-in itself is 99-docker-helper-uat.conf inside this directory.
+OPENSUSE_ZYPP_CONF_D=${OPENSUSE_ZYPP_CONF_D:-/etc/zypp/zypp.conf.d}
 OPENSUSE_ZYPPER_ATTEMPTS=3
 OPENSUSE_ZYPPER_DELAY=2
 # Fallback mirrors (region-neutral / US-hosted) used only when the default
@@ -58,29 +66,42 @@ OPENSUSE_ZYPP_FALLBACK_MIRRORS=(
   "https://mirror.sjtu.edu.cn/opensuse/tumbleweed/repo/oss"
 )
 
-# zypp_set_download_key KEY VALUE: enforce one zypp.conf download key
-# (uncomment/rewrite if present, append otherwise; the last value wins). The
-# Tumbleweed Minimal-VM Cloud image may ship without /etc/zypp/zypp.conf, so a
-# missing file is not an error: the append branch creates it.
-zypp_set_download_key() {
-  local conf=/etc/zypp/zypp.conf key="$1" value="$2"
-  if [ -f "$conf" ] && grep -Eq "^[[:space:]]*#*[[:space:]]*$key([[:space:]]*=)" "$conf"; then
-    sed -i -E "s|^[[:space:]]*#*[[:space:]]*$key([[:space:]=]+).*|$key = $value|" "$conf"
-  else
-    printf '\n%s = %s\n' "$key" "$value" >> "$conf"
-  fi
-}
-
-# opensuse_zypp_tune_timeouts: enforce the libzypp download policy.
-# download.connect_timeout limits only the connection phase; a large RPM can
-# still hit the transfer timeout (libzypp default 180s / curl default 60s) on
-# a slow mirror, so transfer_timeout is raised as well.
+# opensuse_zypp_tune_timeouts: enforce the libzypp download policy through a
+# docker-helper-owned zypp drop-in. download.connect_timeout limits only the
+# connection phase; a large RPM can still hit the transfer timeout (libzypp
+# default 180s / curl default 60s) on a slow mirror, so transfer_timeout is
+# raised as well.
+#
+# The file is written atomically (temp file in the same directory -> chmod 0644
+# -> mv) so repeated calls are idempotent and replace the complete file rather
+# than appending duplicate settings. The vendored /etc/zypp/zypp.conf is never
+# modified.
 opensuse_zypp_tune_timeouts() {
-  zypp_set_download_key download.connect_timeout "$OPENSUSE_ZYPP_CONNECT_TIMEOUT"
-  zypp_set_download_key download.min_download_speed "$OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED"
-  zypp_set_download_key download.transfer_timeout "$OPENSUSE_ZYPP_TRANSFER_TIMEOUT"
-  echo "zypp download policy: connect_timeout=$OPENSUSE_ZYPP_CONNECT_TIMEOUT min_download_speed=$OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED transfer_timeout=$OPENSUSE_ZYPP_TRANSFER_TIMEOUT"
-  grep -E '^download\.(connect_timeout|min_download_speed|transfer_timeout)' /etc/zypp/zypp.conf 2>/dev/null || true
+  local dir="$OPENSUSE_ZYPP_CONF_D"
+  local conf="$dir/99-docker-helper-uat.conf"
+  if ! mkdir -p "$dir"; then
+    echo "error: cannot create zypp drop-in directory $dir" >&2
+    return 1
+  fi
+  local tmp
+  if ! tmp="$(mktemp "$dir/.99-docker-helper-uat.conf.XXXXXX")"; then
+    echo "error: cannot create temporary zypp drop-in" >&2
+    return 1
+  fi
+  if ! printf '[main]\ndownload.connect_timeout = %s\ndownload.min_download_speed = %s\ndownload.transfer_timeout = %s\n' \
+    "$OPENSUSE_ZYPP_CONNECT_TIMEOUT" "$OPENSUSE_ZYPP_MIN_DOWNLOAD_SPEED" "$OPENSUSE_ZYPP_TRANSFER_TIMEOUT" > "$tmp"; then
+    rm -f "$tmp"
+    echo "error: cannot write temporary zypp drop-in" >&2
+    return 1
+  fi
+  chmod 0644 "$tmp"
+  if ! mv -f "$tmp" "$conf"; then
+    rm -f "$tmp"
+    echo "error: cannot install zypp drop-in $conf" >&2
+    return 1
+  fi
+  echo "zypp download policy: $conf"
+  cat "$conf"
 }
 
 # opensuse_zypper: retry wrapper preserving the final real zypper exit code.

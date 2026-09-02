@@ -209,6 +209,80 @@ else
   bad "no reachable mirror must leave every repo untouched (state: $(cat "$STATE" | tr '\n' ';'))"
 fi
 
+# --- Timeout drop-in tests ----------------------------------------------------
+# Exercise the REAL opensuse_zypp_tune_timeouts against a temporary config dir
+# (no root, no /etc writes) by overriding OPENSUSE_ZYPP_CONF_D.
+ZYPP_CONF_D="$WORK/zypp-conf-d"
+mkdir -p "$ZYPP_CONF_D"
+
+# Pre-existing unrelated drop-in that must not be modified.
+PREEXISTING="$ZYPP_CONF_D/10-vendor.conf"
+printf '[main]\npriority = 99\n' > "$PREEXISTING"
+PREEXISTING_BEFORE="$(cat "$PREEXISTING")"
+
+# Source the production file in the main context with the temp destination.
+export OPENSUSE_ZYPP_CONF_D="$ZYPP_CONF_D"
+# shellcheck source=scripts/uat-opensuse-repo.sh
+source "$REPO_POLICY"
+
+DROPIN="$ZYPP_CONF_D/99-docker-helper-uat.conf"
+
+if opensuse_zypp_tune_timeouts > "$WORK/tune1.out" 2>&1; then
+  ok "opensuse_zypp_tune_timeouts returns 0"
+else
+  bad "opensuse_zypp_tune_timeouts should return 0"
+  cat "$WORK/tune1.out" >&2
+fi
+
+# T6: exactly one docker-helper UAT drop-in is created.
+dropin_count="$(find "$ZYPP_CONF_D" -maxdepth 1 -name '99-docker-helper-uat.conf' | wc -l)"
+[ "$dropin_count" = 1 ] && ok "exactly one docker-helper UAT drop-in created" \
+  || bad "expected exactly one docker-helper UAT drop-in (found $dropin_count)"
+
+# T7: first meaningful section is [main].
+first_section="$(grep -m1 '^\[' "$DROPIN")"
+[ "$first_section" = "[main]" ] && ok "first meaningful section is [main]" \
+  || bad "expected first section [main], got '$first_section'"
+
+# T8: file contains exactly one effective assignment for each download key.
+for kv in "download.connect_timeout = 5" "download.min_download_speed = 262144" "download.transfer_timeout = 600"; do
+  n="$(grep -cF "$kv" "$DROPIN")"
+  [ "$n" = 1 ] && ok "exactly one assignment: $kv" \
+    || bad "expected exactly one assignment '$kv' (found $n)"
+done
+
+# T9: calling twice does not duplicate keys or sections.
+opensuse_zypp_tune_timeouts > "$WORK/tune2.out" 2>&1
+for kv in "download.connect_timeout = 5" "download.min_download_speed = 262144" "download.transfer_timeout = 600"; do
+  n="$(grep -cF "$kv" "$DROPIN")"
+  [ "$n" = 1 ] && ok "no duplicate after second call: $kv" \
+    || bad "expected no duplicate '$kv' after second call (found $n)"
+done
+main_count="$(grep -cF '[main]' "$DROPIN")"
+[ "$main_count" = 1 ] && ok "single [main] section after second call" \
+  || bad "expected single [main] after second call (found $main_count)"
+
+# T10: unrelated pre-existing drop-in in the directory is not modified.
+if [ "$(cat "$PREEXISTING")" = "$PREEXISTING_BEFORE" ]; then
+  ok "pre-existing unrelated drop-in not modified"
+else
+  bad "pre-existing unrelated drop-in was modified"
+fi
+
+# T11: production helper no longer writes /etc/zypp/zypp.conf.
+if grep -nE '(sed[[:space:]].*|>>[[:space:]]*).*/etc/zypp/zypp\.conf' "$REPO_POLICY" >/dev/null; then
+  bad "production helper must not mutate /etc/zypp/zypp.conf"
+else
+  ok "production helper no longer mutates /etc/zypp/zypp.conf"
+fi
+
+# T12: the old zypp_set_download_key append/sed helper is gone.
+if grep -q 'zypp_set_download_key' "$REPO_POLICY"; then
+  bad "zypp_set_download_key append/sed helper must be removed"
+else
+  ok "zypp_set_download_key append/sed helper removed"
+fi
+
 # --- Summary -------------------------------------------------------------------
 echo
 echo "=================== test-uat-opensuse-repo summary ==================="
