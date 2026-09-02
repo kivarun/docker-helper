@@ -483,10 +483,12 @@ Release 3 uses the Docker Engine API behind a docker-helper-owned backend
 boundary. Workload output remains a bounded direct client result and is not
 copied into daemon logs, audit, or journald.
 
-Managed-container creation is synchronous and returns a stopped container.
-Start, stop, restart, remove, and Session cleanup use the durable Operation
-model. Build, one-shot run, and non-interactive exec remain synchronous;
-interactive exec uses WebSocket.
+Managed-container creation is synchronous and returns a stopped container with
+its effective Session-local name and DNS alias. State-changing start, stop,
+restart, remove, and Session cleanup use the durable Operation model; an
+already-satisfied start or stop is a synchronous no-op. Build, one-shot run,
+and non-interactive exec remain synchronous; interactive exec uses WebSocket
+and ends when expiration cleanup removes its owning container.
 
 A managed container is not desired state. Release 3 does not add automatic
 recovery, reconciliation, or restart-policy semantics.

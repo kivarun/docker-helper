@@ -75,9 +75,9 @@ Teardown:
 6. transitions the Session to `closed` after backend cleanup succeeds;
 7. physically removes the closed Session and all dependent records after a fixed internal 10-minute observation grace period.
 
-This is deterministic resource teardown at the end of an ownership lease. It is not desired-state reconciliation or automatic workload recovery.
+This is deterministic resource teardown at the end of an ownership lease. It is not desired-state reconciliation or automatic workload recovery. An open interactive stream never extends Session TTL. Expiration closes the stream and removes the owning container through this same teardown path; active exec receives no separate lease or grace period.
 
-If teardown cannot finish, the Session and the remaining resource records are retained in cleanup failure state. They accept no normal workload operations. Transient backend failures are retried automatically with bounded persisted backoff, and the owning Principal, owning Launcher, or administrator may request an immediate retry. Ownership mismatch or ambiguous authority is never resolved through automatic deletion and requires administrator action.
+If teardown cannot finish transiently, the Session remains `closing` and accepts no normal workload operations. One `session.cleanup` Operation records one immutable attempt: a failed attempt becomes terminal, while the Session stores its attempt count and `cleanup_retry_at`; the due retry creates a new Operation. The owning Principal, owning Launcher, or administrator may request an immediate new attempt when none is active. Ownership mismatch or ambiguous authority moves the Session to `cleanup_failed`, is never resolved through automatic deletion, and requires administrator action.
 
 The Session bearer is invalid from the moment teardown claims the Session. A `closed` tombstone exists only so an authorized Principal, owning Launcher, or administrator can observe the terminal `session.cleanup` result. The observation grace is not an extension of Session TTL or configurable retention. Closed Sessions cannot be renewed. Physical Session deletion cascades to Managed Containers, Operations, and idempotency records. Audit events remain subject to the independent journald or external audit-retention policy.
 
@@ -85,14 +85,14 @@ The Session bearer is invalid from the moment teardown claims the Session. A `cl
 
 The cross-cutting Operation model is defined canonically in `release-3-operation-model.md`. This document defines only the Managed Container side of that relationship.
 
-The following Managed Container lifecycle Commands create durable Operations:
+The following Managed Container lifecycle Commands may create durable Operations when their requested mutation is not already satisfied:
 
 - `container.start`;
 - `container.stop`;
 - `container.restart`;
 - `container.remove`.
 
-`container.create` is a synchronous Command and creates no Operation. ManagedContainerID is allocated before backend creation so that the persistent ownership row and Docker ownership metadata can refer to the same target during crash recovery.
+`container.create` is a synchronous Command and creates no Operation. ManagedContainerID is allocated before backend container creation so that the persistent ownership row and Docker ownership metadata can refer to the same target during crash recovery. A start of an already running container and a stop of an already stopped one return HTTP `200 OK` as successful no-ops and create no Operation; lifecycle work that changes state returns `202 Accepted`.
 
 Each Managed Container has at most one active lifecycle mutation. The durable `active_mutation_operation_id` relationship is established with Operation admission, survives daemon restart, and is cleared with terminal Operation status. A competing lifecycle Command is rejected; docker-helper does not maintain a hidden queue of user mutations.
 
@@ -117,17 +117,20 @@ It is:
 
 The external format is `dhmc_` followed by 32 lowercase hexadecimal characters representing 16 random bytes. A database uniqueness conflict causes bounded regeneration rather than exposing the collision.
 
-### Logical name
+### Name
 
-Every Managed Container has one immutable logical name unique within its owning Session. A caller may provide a DNS-label-compatible name. If omitted, docker-helper derives a readable base from the image repository basename and appends a short ManagedContainerID suffix, for example `postgres-a13f09c4`.
+Every Managed Container has one immutable `name` unique within its owning Session. A caller may provide a DNS-label-compatible name during create. The supplied value is validated but never normalized, truncated, or rewritten.
 
-The logical name is:
+If the caller omits `name`, docker-helper removes registry path, tag, and digest from the image reference and uses the repository basename only when it is already a valid, unused DNS label. If that default is invalid, longer than 63 characters, or already occupied in the Session, create requires the caller to provide an explicit name rather than inventing or suffixing one.
 
-- the name shown by docker-helper list and show Commands;
-- the single Session-network alias used for same-Session discovery;
-- retained in persistent helper state and backend ownership labels.
+The name is:
 
-The Docker container name is diagnostic backend data of the form `dhmc-<logical-name>-<short-id>`. It prevents deployment-wide Docker name collisions and remains recognizable in host diagnostics, but callers do not use it as authority or stable identity. Release 3 adds no rename Command or extra caller-defined network aliases.
+- always returned by create, including when derived by the server;
+- shown by docker-helper list and show Commands;
+- exactly the single Session-network DNS alias used for same-Session discovery;
+- retained in the management projection and backend ownership labels.
+
+The Docker container name is diagnostic backend data of the form `dhmc-<name>-<full-session-id>`. More generally, every named Docker resource owned directly by a Session includes the full Session ID and a stable resource-type prefix; for example, the Session network uses `dhsn-<full-session-id>`. Session-local names remain human-facing, while the Session suffix prevents deployment-wide backend-name collisions. ManagedContainerID and OperationID never participate in backend naming. Release 3 adds no rename Command or extra caller-defined network aliases.
 
 ### BackendContainerID
 
@@ -223,7 +226,7 @@ Conditions do not trigger autonomous workload repair.
 
 ### Public show projection
 
-docker-helper never returns raw Docker inspect data. `container show` exposes the ManagedContainerID, logical name, owning Session, management and runtime state, condition, image reference, command argv, workdir, environment key names without values, mounts, resource limits, shared-memory limit, port publications, and timestamps.
+docker-helper never returns raw Docker inspect data. `container show` exposes the ManagedContainerID, name, owning Session, management and runtime state, condition, image reference, command argv, workdir, environment key names without values, mounts, resource limits, shared-memory limit, port publications, and timestamps.
 
 BackendContainerID, raw backend labels, environment values, and Docker network or endpoint identifiers are omitted. Command argv is returned only by the explicit show Query; it is excluded from list results, daemon logs, and audit. Callers are instructed not to place secrets in argv because docker-helper cannot identify them reliably.
 
@@ -233,16 +236,16 @@ SQLite and Docker Engine cannot participate in one atomic transaction. Managed C
 
 The create sequence is:
 
-1. authorize and validate the complete request;
-2. resolve Session, workspace, mount, policy, lazy networking, limit, and publishing inputs;
-3. generate ManagedContainerID and ownership metadata;
-4. insert a persistent `creating` record;
-5. create the backend container with matching ownership metadata;
+1. authorize and validate the complete request, including the explicit or derived name;
+2. resolve Session, workspace, mount, policy, network, limit, and publishing inputs without allocating a Managed Container;
+3. resolve the image and, when it is absent locally, complete the synchronous pull under the Request context;
+4. re-resolve the Session and, in one transaction, require it to remain `active`, allocate ManagedContainerID and any port leases, and insert the persistent `creating` management projection;
+5. under the short server-owned context, provision or verify the lazy Session network and create the backend container with the diagnostic name and matching ownership metadata;
 6. receive and verify BackendContainerID and effective backend configuration;
-7. persist the correlation and transition `creating` to `managed`;
+7. in one transaction, require the Session and provisional row to remain eligible, persist the correlation, and transition `creating` to `managed`;
 8. report successful creation only after the final database commit.
 
-If validation or provisional database creation fails, no backend call is made.
+If validation, image resolution or pull, or provisional database creation fails, no backend container is created. Pull deliberately precedes the provisional commit because it may be long-running and remains bound to the client Request.
 
 If backend creation fails and docker-helper can prove that no object was created, the provisional record is deleted. The failure remains attributable through request-correlated audit; synchronous create does not manufacture an Operation solely to retain the failure.
 
@@ -255,17 +258,17 @@ If a backend object may have been created, docker-helper performs a bounded corr
 
 Creation never reports success before both persistent ownership and backend correlation are complete. It returns `201 Created` with a stopped Managed Container and never starts workload execution.
 
-Before inserting `creating`, request cancellation ends the Command without a persistent resource. After that commit point, the handler uses a short server-owned context to complete registration or compensation even if the HTTP client disconnects. Daemon restart uses the same `creating` record and ownership labels to finish bookkeeping safely. The CLI never retries an ambiguous create automatically; the caller resolves a lost response through `container list` or an explicitly requested unique logical name.
+Before inserting `creating`, request cancellation ends the Command without a persistent resource. After that commit point, the handler uses a short server-owned context to complete registration or compensation even if the HTTP client disconnects. If the Session enters `closing` before final registration, the handler removes any created backend container and releases the provisional state rather than registering new work into the closing Session. Daemon restart uses the same `creating` record and ownership labels to finish bookkeeping safely. The CLI never retries an ambiguous create automatically; the caller resolves a lost response through `container list` or an explicitly requested unique name.
 
-`container.create` does not accept the durable-Operation `Idempotency-Key` contract. Extending it would require a separate resource-result association and a safe fingerprint of secret-bearing environment values. Release 3 uses unique logical-name conflict detection instead of adding that subsystem.
+`container.create` does not accept the durable-Operation `Idempotency-Key` contract. Extending it would require a separate resource-result association and a safe fingerprint of secret-bearing environment values. Release 3 uses Session-local name conflict detection instead of adding that subsystem.
 
-If the requested image is absent locally, docker-helper performs a synchronous pull before backend creation. An existing local image is used unchanged; callers that want to refresh a mutable tag invoke the existing explicit `pull` Command. The record retains the requested image reference and the immutable image ID actually used. Release 3 exposes no create-specific pull-policy flags.
+If the requested image is absent locally, docker-helper performs the synchronous pull before the `creating` commit. An existing local image is used unchanged; callers that want to refresh a mutable tag invoke the existing explicit `pull` Command. The management projection retains the requested image reference and the immutable image ID actually used. Release 3 exposes no create-specific pull-policy flags.
 
-The create request keeps the existing 16 KiB HTTP body limit and the established `run` validation for command, workdir, environment names, and workspace-contained bind mounts. It adds the logical name, resource limits, and at most 16 loopback TCP publications. No caller-requested named volumes, arbitrary host paths, `volumes-from`, tmpfs surface, or general volume API is added. The writable layer and image-declared anonymous volumes survive stop/start/restart and are removed with the Managed Container.
+The create request keeps the existing 16 KiB HTTP body limit and the established `run` validation for command, workdir, environment names, and workspace-contained bind mounts. It adds the optional name, resource limits, and at most 16 loopback TCP publications. No caller-requested named volumes, arbitrary host paths, `volumes-from`, tmpfs surface, or general volume API is added. The writable layer and image-declared anonymous volumes survive stop/start/restart and are removed with the Managed Container.
 
 ## Restart recovery
 
-Daemon startup performs bounded recovery of incomplete docker-helper bookkeeping.
+Daemon startup performs bounded recovery of incomplete docker-helper bookkeeping. It resolves all `creating` records before dispatching or retrying cleanup for expired or closing Sessions. A live cleanup attempt that encounters `creating` does not discard its ownership row; it fails transiently so that the Session-owned retry schedule can create a later cleanup attempt after create recovery or compensation finishes.
 
 For each `creating` record:
 
@@ -320,7 +323,7 @@ Lifecycle Commands express an explicit caller intent rather than requiring the c
 - `create` is synchronous, returns a stopped container, and creates no Operation;
 - `start` for an already running container is a successful no-op and creates no Operation;
 - `stop` for an already stopped container is a successful no-op and creates no Operation;
-- `restart` restarts a running container and starts a stopped container;
+- `restart` is one Operation implemented as persisted internal `stop` then `start` steps; it performs the full docker-helper stop path followed by the full docker-helper start path, and a stopped container begins at the `start` step;
 - `remove` stops a running container internally before removing it;
 - Release 3 exposes no public force flag and no caller-selected stop timeout;
 - stop behavior uses the reloadable administrator setting `container_stop_timeout`, default `10s`, for `stop`, `restart`, `remove`, and Session teardown;
@@ -342,9 +345,11 @@ Persistent Managed Container data contains only information required for:
 - status and recovery;
 - audit attribution.
 
-Release 3 does not persist environment secret values merely to reproduce a complete Docker configuration. It does not support autonomous recreation, so a desired-state copy of every backend field is unnecessary.
+The persistent record is a management projection, not a normalized copy of the Docker create request. It retains identity and ownership, ManagedContainerID and internal BackendContainerID correlation, name, image reference and immutable image ID, command argv and workdir, environment key names without values, mount descriptors, resource limits, port publications, management state, runtime-correlation data, and required timestamps.
 
-Exact schema columns, indexes, and migration ordering belong to the implementation design. Field names must preserve the distinction between ManagedContainerID, BackendContainerID, logical name, management state, runtime observation, and Operation identity.
+It does not retain environment values, registry credentials, a secret-bearing Docker create payload, or enough configuration to recreate the container autonomously. Docker Engine remains authoritative for the complete runtime configuration.
+
+Exact schema columns, indexes, and migration ordering belong to the implementation design. Field names must preserve the distinction between ManagedContainerID, BackendContainerID, name, management state, runtime observation, and Operation identity.
 
 ## Deferred to subsequent designs
 

@@ -37,6 +37,8 @@ Release 3 durable work includes:
 
 Queries, synchronous `container.create`, `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. `container.create` returns the stopped resource directly. `build`, `run`, and non-interactive exec return one combined bounded `output` synchronously. Interactive exec uses WebSocket transport. None gains durable recovery, persisted output, or replay semantics.
 
+Synchronous process Commands use the existing flat response envelope rather than a nested result object. A started one-shot `run` or non-interactive exec returns HTTP `200` with `ok`, combined `output`, `truncated`, `duration`, and the actual `exit_code`; a non-zero workload exit sets `ok: false` and `code: container_exit_nonzero` without changing the HTTP status. A build failure reported by the backend returns HTTP `422` with `ok: false`, `code: build_failed`, sanitized `message`, combined `output`, `truncated`, and `duration`. Pull follows the same flat bounded-output convention. Transport, authorization, validation, and backend-availability errors retain their normal non-success HTTP statuses.
+
 ## Core invariants
 
 Every Operation:
@@ -108,9 +110,11 @@ Timeout is a normalized error code on `failed`, not a separate status. `cancel_r
 
 ## Admission and public API
 
-Validation, authorization, resource-state checks, and conflict checks finish before an Operation enters `pending`. Admission failure is returned as an HTTP error and creates no Operation.
+Authentication, authorization, request normalization, and target resolution happen before idempotency lookup. For a supplied `Idempotency-Key`, an existing Session-scoped association is resolved before evaluating current runtime state: an identical replay returns the original Operation even if the target now already satisfies the requested postcondition.
 
-Successful admission returns `202 Accepted`, the Operation identity, and its `Location`.
+For a fresh request, validation, resource-state checks, and conflict checks finish before an Operation enters `pending`. A start of an already running Managed Container and a stop of an already stopped one return the current container representation with HTTP `200 OK`, create no Operation, and create no idempotency record. Other admission failures are returned as HTTP errors and create no Operation.
+
+A lifecycle Command that requires mutation returns `202 Accepted`, the Operation identity, and its `Location`.
 
 The API exposes:
 
@@ -126,7 +130,7 @@ The CLI waits for terminal status by default and may return after admission with
 
 The HTTP API may accept an optional `Idempotency-Key` for a Command that creates an Operation.
 
-The key is scoped to the owning Session. Its deduplication record contains a normalized request fingerprint and the resulting Operation ID and is created transactionally with the Operation.
+The key is scoped to the owning Session. Its deduplication record contains a normalized request fingerprint and the resulting Operation ID and is created transactionally with the Operation. For the Release 3 lifecycle surface, the fingerprint is a versioned tuple of Operation type and public target identity; any later non-secret Command option must be added to the normalized tuple explicitly. Internal `session.cleanup` attempts do not use client idempotency keys.
 
 Reuse behavior is:
 
@@ -174,7 +178,7 @@ The Release 3 recovery contracts are:
 | --- | --- |
 | `container.start` | Confirm the running postcondition and continue start only when required. |
 | `container.stop` | Confirm the stopped postcondition and continue stop only when required. |
-| `container.restart` | Compare the stored pre-operation runtime incarnation with current observation; never issue a second restart blindly. |
+| `container.restart` | Persist an internal `stop` then `start` step and recover by repeating the current idempotent step; never infer completion from timestamps or replay a monolithic backend restart. |
 | `container.remove` | Treat absence of the verified backend object as the achieved postcondition. |
 | `session.cleanup` | Re-enumerate Session-owned resources and continue deterministic teardown. |
 
@@ -217,7 +221,7 @@ Terminal Operations remain attached to their owning Session. Release 3 defines n
 
 A successfully closed Session remains for a fixed internal 10-minute observation grace period so authorized management callers can inspect the terminal `session.cleanup` result. `closing` and `cleanup_failed` Sessions are never removed by this timer. Physical Session deletion removes its Operations and idempotency records through foreign-key cascade.
 
-Transient Session cleanup failures such as backend unavailability and bounded timeout are retried automatically with persisted bounded backoff. Ownership mismatch and other ambiguous authority failures remain in `cleanup_failed` and require administrator action. This ownership teardown loop is not workload reconciliation.
+One `session.cleanup` Operation represents exactly one immutable cleanup attempt. A transient failure such as backend unavailability or bounded timeout terminates that Operation as `failed`; the Session remains `closing` and stores the attempt count and `cleanup_retry_at`. When retry is due, the server creates a new `session.cleanup` Operation. An authorized Principal, owning Launcher, or administrator may request an immediate new attempt when none is active. Ownership mismatch and other ambiguous authority failures move the Session to `cleanup_failed` and require administrator action. This Session-owned retry schedule does not add an Operation retry state or a generic retry framework and is not workload reconciliation.
 
 Operation records are working control-plane state. Permanent security history belongs to the structured audit stream.
 

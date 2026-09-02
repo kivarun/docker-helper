@@ -6,7 +6,9 @@ This document fixes the D0 semantic contract and records an implementation plan 
 
 The inspected baseline is `main` at `c840d4e197e86e1b7a190d4dcea7dd795975d8a5`. Release 2.1 Launcher delegation is still design-only at this commit. Symbol and schema references below describe that exact baseline and must be reconciled once the Release 2.1 implementation lands.
 
-The baseline implementation invokes the Docker CLI. Release 3 uses the official `github.com/moby/moby/client` Docker Engine API client, pinned to a reviewed version, behind a docker-helper-owned adapter. The client negotiates the daemon API version, while docker-helper documents and tests a minimum supported Engine API. The CLI-specific inventory remains evidence about code that must be retired. Before D0.1 is assigned, the operational architect must freeze the narrow adapter methods needed by build, pull, one-shot run, lifecycle, logs, and exec. No executor should introduce a new long-lived `exec.Cmd` abstraction solely to reproduce the baseline mechanics or expose Moby request types outside the adapter.
+The baseline implementation invokes the Docker CLI. Release 3 uses the official `github.com/moby/moby/client` Docker Engine API client, pinned to a reviewed version, behind a docker-helper-owned adapter. The client negotiates the daemon API version, while docker-helper documents and tests a minimum supported Engine API. The CLI-specific inventory remains evidence about code that must be retired. Before production migration begins, the operational architect must freeze the narrow adapter methods needed by build, pull, one-shot run, lifecycle, logs, and exec. No executor should introduce a new long-lived `exec.Cmd` abstraction solely to reproduce the baseline mechanics or expose Moby request types outside the adapter.
+
+The current Docker CLI reads a Session-scoped Docker configuration directory. Engine API calls do not inherit that client configuration automatically. The adapter must read the existing Session credential source just in time, pass only the matching registry authorization to image pull, and pass the Session-scoped registry authorization map required by image build. Container create and one-shot run receive no registry credentials after the image is local. Credentials never enter durable Operation data, container management projections, audit, daemon logs, or public errors.
 
 D0 changes two mechanisms that currently share one in-memory object but have different target semantics:
 
@@ -22,7 +24,7 @@ The following decisions are already binding:
 - `build`, one-shot `run`, and non-interactive exec are synchronous Commands;
 - `container.create` is also synchronous, returns `201 Created` with a stopped Managed Container, and creates no Operation;
 - interactive exec uses WebSocket and is not an Operation;
-- only `container.start`, `container.stop`, `container.restart`, `container.remove`, and `session.cleanup` create durable Operations;
+- durable Operation types are limited to `container.start`, `container.stop`, `container.restart`, `container.remove`, and `session.cleanup`; a state-matching start or stop returns `200 OK` as a no-op and creates neither an Operation nor an idempotency record;
 - synchronous process execution does not survive request loss or daemon restart; after create's provisional database commit, only bounded registration or compensation continues under server ownership and restart recovery;
 - the normal CLI remains blocking and returns the workload exit result;
 - `pull`, `build`, one-shot `run`, and non-interactive exec return one combined bounded `output` that is not replayable;
@@ -41,6 +43,8 @@ The following decisions are already binding:
 - no independent Operation retention configuration or delete API exists;
 - no hidden queue defers a conflicting lifecycle Command for later execution.
 
+Direct process results keep the existing flat response envelope. A started one-shot `run` or non-interactive exec returns HTTP `200` with `ok`, combined `output`, `truncated`, `duration`, and actual `exit_code`; a non-zero workload exit uses `ok: false` and `code: container_exit_nonzero` without changing the HTTP status. A backend-reported build failure returns HTTP `422` with `ok: false`, `code: build_failed`, sanitized `message`, combined `output`, `truncated`, and `duration`. Results are not nested under another object and never split stdout from stderr.
+
 ## Current implementation inventory
 
 The current `operation` object owns five unrelated responsibilities:
@@ -58,7 +62,8 @@ The current `operation` object owns five unrelated responsibilities:
 | File | Current responsibility | Required change |
 | --- | --- | --- |
 | `operation.go` | In-memory record, registry, log buffer, public cancellation, process start, shutdown termination. | Remove the public record and child-process ownership after callers migrate; retain the bounded output primitive only if the Engine API path still needs it; add durable Operation types in separate files. |
-| `build.go` | Validates and stages, registers Operation, starts Docker, returns `201`, completes in a goroutine. | Execute within the request lifetime, return one bounded terminal response, preserve staging/MAC cleanup. |
+| `pull.go` and registry configuration helpers | Invoke Docker CLI with the Session configuration directory and return bounded pull output. | Execute pull through the Engine API and explicitly bridge only the matching Session registry authorization. |
+| `build.go` | Validates and stages, registers Operation, starts Docker, returns `201`, completes in a goroutine. | Execute within the request lifetime, return one bounded terminal response, preserve staging/MAC cleanup, and pass Session-scoped registry authorization for private `FROM` resolution. |
 | `run.go` | Validates, pins mounts, registers Operation, manages cidfile, returns `201`, completes in a goroutine. | Execute through the Engine API within the request lifetime, return one bounded terminal response, and preserve daemon-side container, pin, and MAC cleanup without retaining cidfile as target architecture. |
 | `api_contract.go` | Build/run created, status, logs, and cancel response shapes. | Replace build/run response with direct result shapes. Later add the durable Operation representation and list envelope. |
 | `response.go` | `writeOperationCreated` and generic response envelope. | Remove build/run creation response; keep one owner for direct Command responses. |
@@ -93,6 +98,7 @@ They invoke one docker-helper-owned Docker Engine API adapter that:
 
 - executes under the caller's context and the daemon shutdown boundary;
 - decodes backend streams without exposing Docker framing publicly;
+- reads Session registry credentials only for image operations, sends matching authorization to pull and the required Session-scoped authorization map to build, and never forwards those credentials to container create or run;
 - collects combined output under the shared bounded-output contract;
 - waits for or observes one terminal backend result;
 - returns typed backend failure, workload exit code where applicable, duration, retained output, and truncation;
@@ -185,16 +191,19 @@ Application and schema checks must reject impossible combinations:
 
 ### Admission
 
-1. Authenticate and authorize before backend access.
-2. Normalize and validate the type-specific Command.
-3. Begin one SQLite transaction.
-4. Recheck resource state and lifecycle conflict conditions inside the transaction.
-5. Resolve an optional idempotency key.
-6. Insert the `pending` Operation and idempotency association.
-7. Apply the resource-specific active mutation reference in the same transaction.
-8. Commit, return `202 Accepted` with `Location`, and signal the dispatcher.
+1. Authenticate, authorize, resolve the public target, and validate before backend access.
+2. Normalize the type-specific Command and compute its versioned non-secret fingerprint.
+3. Resolve an existing optional Session-scoped idempotency key before current-state observation. Identical reuse returns the original Operation; different reuse returns `idempotency_key_reused`.
+4. For a fresh request, obtain the type-specific runtime observation needed for admission.
+5. Begin the admission transaction and re-resolve the idempotency key to close concurrent-reuse races.
+6. Recheck persistent management state and lifecycle conflicts. A competing active mutation returns `409 Conflict` even if the last runtime observation happened to match the requested postcondition.
+7. If the requested start or stop postcondition already holds, commit no new record and return `200 OK` with the current container representation.
+8. Otherwise insert the `pending` Operation and idempotency association and apply the resource-specific active mutation reference in the same transaction.
+9. Commit, return `202 Accepted` with `Location`, and signal the dispatcher.
 
-If admission loses a conflict, it returns HTTP `409 Conflict` with the conflicting Operation ID. The stable error-code name belongs to the API design. No rejected Command is queued and no Operation row is created.
+The architecture fixes this observable ordering but does not require holding a SQLite transaction across Docker Engine access. The operational architect chooses the exact transaction mechanics while preserving idempotency, conflict, and no-op races.
+
+If admission loses a conflict, it returns HTTP `409 Conflict` with the conflicting Operation ID. The stable error-code name belongs to the API design. No rejected or state-matching no-op Command is queued, and neither creates an Operation row.
 
 ### New execution
 
@@ -248,34 +257,36 @@ Pending Operations remain pending. The next daemon instance resumes dispatch aft
 
 Each task is intended to be a focused commit or a small reviewable commit series. Later tasks must not leave the old and new owners active together.
 
-### D0.1 — Introduce the Docker Engine API execution boundary
+### D0.1 — Freeze the Docker Engine API boundary
 
-- pin the official `github.com/moby/moby/client` dependency behind one docker-helper-owned adapter;
-- enable API-version negotiation and define the minimum tested Engine API version from the supported daemon matrix;
-- spike `ImageBuild` stream/error compatibility with the project's BuildKit-enabled and legacy test environments before freezing the build adapter;
-- migrate build/run backend calls while preserving the current public behavior at this intermediate point;
-- introduce the synchronous-execution admission, shutdown, cancellation, and backend-cleanup owner independently of durable Operation;
-- keep `boundedBuffer` independent of the execution coordinator and durable dispatcher;
-- replace cidfile correlation with BackendContainerID returned directly by Engine;
-- migrate shutdown/race/cleanup tests to the new production owner;
-- prove new code does not introduce another raw Engine client or a replacement `exec.Cmd` lifecycle.
+This is an architectural and compatibility gate, not an intermediate production migration.
+
+- define the narrow adapter methods required by image pull, image build, one-shot run, lifecycle, logs, and exec without exposing Moby types to domain services;
+- define API-version negotiation and the minimum tested Engine API version from the supported daemon matrix;
+- verify `ImageBuild` stream and error handling against the project's BuildKit-enabled and legacy test environments;
+- verify translation from the existing Session registry credential source to pull authorization and build authorization maps, including private-registry success and secret non-disclosure;
+- define cancellation, shutdown, stream decoding, BackendContainerID handling, and one-shot-container cleanup contracts;
+- do not migrate build or run to an Engine-backed copy of the legacy status/log/cancel workflow.
 
 Completion evidence:
 
-- behavior of build/run status/log/cancel remains unchanged at this intermediate point;
-- existing shutdown deadline, simultaneous-operation, start-race, container cleanup, staging, pins, and MAC lease invariants still pass through the new owner;
-- `operationSupervisor` no longer owns execution termination or backend cleanup.
+- the adapter contract and compatibility evidence are recorded for review;
+- private pull and private `FROM` behavior are covered explicitly;
+- no production path, public response, or temporary owner reproduces the asynchronous build/run mechanism over Engine API.
 
-### D0.2 — Make build synchronous
+### D0.2 — Migrate pull and make build synchronous
 
-- execute Docker build under the request context through the Engine API adapter and transient execution coordinator;
-- return one bounded terminal response;
+- pin and introduce the reviewed official Moby dependency with the first production adapter methods;
+- execute image pull through the adapter with only matching Session registry authorization;
+- execute Docker build under the request context through the Engine API adapter and transient execution coordinator, with the Session-scoped authorization map required for private `FROM` images;
+- return flat bounded terminal responses;
 - remove `newBuildOperation`, build polling, build public cancellation, and `waitBuildCompletion`;
-- preserve validation, isolated staging, build-arg ordering, Docker config ownership, audit fields, cleanup order, and MAC lease retention on cleanup failure;
+- preserve validation, isolated staging, build-arg ordering, Session credential ownership, audit fields, cleanup order, and MAC lease retention on cleanup failure;
 - remove build Operation IDs from API responses and audit records.
 
 Completion evidence:
 
+- public and private pull and build paths use the reviewed adapter without exposing credentials;
 - the CLI still blocks, prints build output, reports truncation, handles signals, and exits non-zero on build failure;
 - request disconnect and daemon shutdown cancel the Engine build and clean staging;
 - no build path calls the legacy Operation registry or public Operation routes.
@@ -285,7 +296,7 @@ Completion evidence:
 - execute Docker run under the request context through the Engine API adapter and transient execution coordinator;
 - return bounded output, duration, result code, and exit code directly;
 - remove `newRunOperation`, run polling, run public cancellation, and `waitRunCompletion`;
-- preserve UID/GID selection, MAC backend enforcement, mount validation and pinning, CA injection, Docker configuration, daemon-side container removal, audit metadata, and exit-code mapping;
+- preserve UID/GID selection, MAC backend enforcement, mount validation and pinning, CA injection, image-reference behavior, daemon-side container removal, audit metadata, and exit-code mapping;
 - remove run Operation IDs from API responses and audit records.
 
 Completion evidence:
@@ -401,7 +412,7 @@ D0 persistence and dispatcher tests must prove:
 
 ## Remaining implementation gate
 
-The public D0 contract, target ownership split, and official Moby client dependency are fixed. Before D0.1 is assigned, the operational architect must write the narrow adapter method contracts, including cancellation, shutdown, build-stream decoding, and one-shot-container cleanup, and record the minimum tested Engine API version. The ImageBuild/BuildKit compatibility spike may refine adapter mechanics but is not permission to reopen the synchronous Command or durable Operation contracts.
+The public D0 contract, target ownership split, and official Moby client dependency are fixed. D0.1 is the operational architect's gate for the narrow adapter contracts, including cancellation, shutdown, build-stream decoding, one-shot-container cleanup, private-registry authorization translation, and the minimum tested Engine API version. The compatibility spike may refine adapter mechanics but is not permission to reopen the synchronous Command, credential boundary, or durable Operation contracts.
 
 ## D0 completion gate
 

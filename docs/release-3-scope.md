@@ -27,6 +27,8 @@ Managed containers support an explicit lifecycle:
 
 A managed container remains owned by the session under which it was created.
 
+Each Managed Container has one immutable Session-local `name`. A caller may provide it during create; otherwise docker-helper uses the image repository basename only when that value is already a valid, unused DNS label. Invalid or conflicting defaults require an explicit name rather than silent truncation, normalization, or suffix generation. The effective name is always returned by create and is also the container's DNS alias inside the Session network.
+
 `container create` follows Docker's create semantics: it returns a stopped container and does not start workload execution. The caller uses the separate `start` Command when execution is required. The create specification is immutable in Release 3.
 
 Managed Container storage remains bounded by the existing workspace model. Caller-requested named volumes, arbitrary host paths, `volumes-from`, and a general volume API are outside the release. The writable container layer and image-declared anonymous volumes survive stop/start/restart but are removed with the Managed Container or its owning Session.
@@ -54,7 +56,7 @@ Two execution modes are provided:
 - **non-interactive exec** — a synchronous Command with the same combined, bounded output and exit-code model as the existing one-shot `run`;
 - **interactive exec** — streamed over WebSocket.
 
-Neither mode creates a durable Operation. Interactive streaming is a transport mechanism for an authorized exec Command and does not create an independent authorization model.
+Neither mode creates a durable Operation. Interactive streaming is a transport mechanism for an authorized exec Command and does not create an independent authorization model. An open interactive stream never renews its Session; expiration closes the stream and Session cleanup removes the owning container.
 
 Release 3 does not emit workload output to the daemon logger or journald. Audit and operational records contain command metadata and normalized outcomes, never captured command output.
 
@@ -71,7 +73,7 @@ Release 3 uses durable Operations for:
 
 Queries, `container create`, `build`, `run`, and both exec modes do not become Operations merely for uniformity. `container create` returns `201 Created`; `build` and `run` are synchronous Commands with bounded direct results.
 
-Durable lifecycle Command admission completes validation, authorization, and conflict checks before creating an Operation. The API returns `202 Accepted`; the CLI waits for terminal status by default and may return immediately with `--detach`.
+Durable lifecycle Command admission completes validation, authorization, and conflict checks before creating an Operation. A state-matching start or stop is a synchronous `200 OK` no-op and creates no Operation. A lifecycle Command that requires mutation returns `202 Accepted`; the CLI hides this transport distinction, waits for terminal status by default, and may return immediately with `--detach` for accepted work.
 
 The HTTP API may accept an optional `Idempotency-Key` for Commands that create durable Operations. This protocol capability does not require CLI support. The CLI does not generate, retain, or replay idempotency keys and never automatically retries an ambiguous mutation.
 
@@ -103,7 +105,7 @@ Release 3 adds a bounded set of resource limits for managed containers and one-s
 
 The purpose is to constrain agent-controlled workloads, not to expose the complete Docker resource-management surface.
 
-Build resource control is outside this model. The exact supported limits, hierarchical quotas, reservations, and safe defaults are defined separately by the Release 3 resource-limits design. Ordinary quick-start workflows must remain valid without requiring explicit resource-policy flags.
+Build resource control is outside this model. The exact supported limits, hierarchical aggregate ceilings, per-workload limits, and safe defaults are defined separately by the Release 3 resource-limits design. Root defaults are derived at initialization from Docker Engine-reported capacity. The hierarchy is enforced through workload cgroups; docker-helper does not reserve capacity for future containers or calculate a remaining allocation before admission. Ordinary quick-start workflows must remain valid without requiring explicit resource-policy flags.
 
 ## Architectural invariants
 
@@ -120,7 +122,7 @@ In particular:
 - common workflows remain usable through safe defaults without requiring callers to reproduce operator policy;
 - Docker Engine implementation details must not become part of the public docker-helper contract unless explicitly required.
 
-Release 3 uses the official `github.com/moby/moby/client` Go module behind a narrow docker-helper-owned backend boundary. API-version negotiation is enabled, a tested minimum Engine API version is enforced, and daemon socket selection comes from docker-helper deployment configuration rather than arbitrary process environment. Moby request and stream representations are implementation details and do not become the public API.
+Release 3 uses the official `github.com/moby/moby/client` Go module behind a narrow docker-helper-owned backend boundary. API-version negotiation is enabled, a tested minimum Engine API version is enforced, and daemon socket selection comes from docker-helper deployment configuration rather than arbitrary process environment. The adapter preserves the existing Session-scoped private-registry behavior by supplying the required credentials explicitly to pull and build calls; Engine API migration must not expose credentials to container creation, durable state, logs, audit, or errors. Moby request and stream representations are implementation details and do not become the public API.
 
 Managed containers are an extension of the existing session model, not a parallel management plane.
 

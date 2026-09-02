@@ -4,7 +4,9 @@
 
 This document decomposes Release 3 into architectural work packages and defines the dependencies between them.
 
-It does not define the final HTTP API, CLI syntax, database schema, or Docker Engine calls. Those contracts are produced by the design documents identified below.
+It does not define the final HTTP API, CLI syntax, database schema, or Docker Engine calls. Public and architectural contracts are produced by the design documents identified below. Exact Go structures, SQL DDL, worker mechanics, Moby call sequences, and test-file layout remain implementation decisions for the operational architect.
+
+Release 3 proceeds package by package: accepted architecture, implementation plan against current code, executor work, architectural review, then acceptance or correction before the next package. The mandatory escalation and review gate is defined in `AGENTS.md`; implementation findings never change accepted architecture silently.
 
 ## Architectural center
 
@@ -44,6 +46,8 @@ This package introduces the single durable Operation model used by Release 3 and
 Responsibilities:
 
 - retire the current build/run Operation types, status/log/cancel workflow, and related retention configuration;
+- introduce one narrow official Moby Engine API adapter and move `pull`, `build`, and `run` directly to their target synchronous paths without rebuilding the legacy asynchronous workflow on the new backend;
+- preserve existing Session-scoped private-registry behavior by explicitly bridging pull and build credentials through the adapter;
 - move `build` and `run` into bounded synchronous request handling while preserving their normal blocking CLI behavior;
 - define the shared Operation handler boundary for separate `Execute` and `Recover` behavior;
 - define durable admission, terminal outcome, idempotency association, Session ownership, and cascade retention;
@@ -63,9 +67,8 @@ Responsibilities:
 
 - stable `dhmc_` plus 32-lowercase-hex docker-helper container identity;
 - Session ownership;
-- immutable, Session-unique, DNS-label-compatible logical name and one matching network alias;
-- persistent metadata required for authorization and backend correlation;
-- normalized container specification retained by docker-helper;
+- one immutable, Session-unique, DNS-label-compatible `name` that is also the network alias, supplied explicitly or derived only from a valid unused image basename;
+- persistent management projection required for authorization, inspection, policy, and backend correlation without environment values, registry credentials, or a recreate-capable Docker request;
 - lookup and ownership verification;
 - projection of backend runtime state into a bounded public status model;
 - integrity metadata that distinguishes docker-helper-owned backend objects from foreign objects.
@@ -78,7 +81,7 @@ This package must define behavior when:
 - persistent helper state and backend state disagree;
 - the owning Session expires or is removed.
 
-The package also defines the closed-Session tombstone required to observe cleanup completion. A successfully closed Session has one fixed internal ten-minute observation grace; it is not an extension of Session TTL or an operator retention setting. Physical Session deletion cascades to its Managed Containers, Operations, and idempotency records; audit retention remains independent. `closing` and `cleanup_failed` Sessions are never removed by this grace timer. Transient cleanup failures are retried with bounded persisted backoff, while ownership ambiguity requires administrative resolution.
+The package also defines the closed-Session tombstone required to observe cleanup completion. A successfully closed Session has one fixed internal ten-minute observation grace; it is not an extension of Session TTL or an operator retention setting. Physical Session deletion cascades to its Managed Containers, Operations, and idempotency records; audit retention remains independent. `closing` and `cleanup_failed` Sessions are never removed by this grace timer. Each cleanup attempt is one immutable Operation; after a transient failure the Session remains `closing`, persists its retry time and attempt count, and creates a new Operation when retry is due. Ownership ambiguity requires administrative resolution.
 
 Restart handling restores management visibility only. It must not restart, stop, recreate, or otherwise reconcile a container toward a desired state.
 
@@ -108,13 +111,13 @@ Responsibilities:
 
 This package must not introduce a second generic job abstraction beside Operation.
 
-`container.create` returns `201 Created` synchronously with a stopped Managed Container and creates no Operation. It commits a provisional `creating` row before backend creation, completes registration or compensation under a short server-owned context after that commit point, and recovers interrupted bookkeeping from the row and immutable backend labels. It accepts no `Idempotency-Key`; an explicit unique logical name provides conflict detection, and clients never retry an ambiguous create automatically.
+`container.create` returns `201 Created` synchronously with a stopped Managed Container and creates no Operation. Image resolution and any required synchronous pull finish under the Request context before the provisional commit. The server then rechecks that the Session remains active and transactionally inserts a `creating` management projection before backend container creation; after that commit point it completes registration or compensation under a short server-owned context and recovers interrupted bookkeeping from the row and immutable backend labels. It accepts no `Idempotency-Key`; Session-local name conflict detection and explicit lost-response resolution avoid a second idempotency subsystem.
 
-Start, stop, restart, and remove return `202 Accepted`. The CLI waits for terminal status by default and may detach, but remains a stateless protocol adapter. Public Operation cancellation is outside Release 3; internal cancellation exists only where deterministic Session teardown requires it.
+A start of an already running container and a stop of an already stopped one return `200 OK` with the current container representation, create no Operation, and create no idempotency record. Lifecycle work that mutates state returns `202 Accepted`. An existing matching idempotency record is resolved before the current-state no-op check so a lost accepted response returns its original Operation. The CLI hides the transport distinction, waits for accepted work by default, and may detach, but remains a stateless protocol adapter. Public Operation cancellation is outside Release 3; internal cancellation exists only where deterministic Session teardown requires it.
 
 Inspect status is a Query and creates no Operation.
 
-The detailed design must preserve the accepted Docker-like lifecycle semantics: repeated start/stop postconditions are successful no-ops; restart of a stopped container starts it; removal of a running container stops it internally; no public force or caller-selected stop-timeout control is exposed. One reloadable administrator setting, `container_stop_timeout`, defaults to ten seconds and applies uniformly to stop, restart, remove, and Session cleanup. Active exec is terminated by teardown and is not reported as `container_busy`. Competing lifecycle mutations still return a non-queued `409` with the active Operation ID.
+The detailed design must preserve the accepted Docker-like lifecycle semantics: repeated start/stop postconditions are successful no-ops; restart is one Operation composed from the full docker-helper stop path followed by the full start path, with a persisted internal step that makes crash recovery idempotent; restart of a stopped container begins at start; removal of a running container stops it internally; no public force or caller-selected stop-timeout control is exposed. One reloadable administrator setting, `container_stop_timeout`, defaults to ten seconds and applies uniformly to stop, restart, remove, and Session cleanup. Active exec is terminated by teardown and is not reported as `container_busy`. Competing lifecycle mutations still return a non-queued `409` with the active Operation ID.
 
 For observed Docker states `paused`, `restarting`, or `dead`, start/stop/restart return `runtime_state_conflict`, while remove and cleanup attempt safe deletion. A missing backend makes start/stop/restart fail but satisfies remove. An unavailable or unknown backend returns `503` without mutation. Ownership mismatch always fails closed and requires the administrative orphan path.
 
@@ -138,7 +141,7 @@ External port publishing is not part of this package.
 
 Session isolation does not imply an internal-only Docker network or a new host-access path. The accepted egress and host-access boundary is explicit below.
 
-Release 3 provisions the network lazily on the first `container.create` or one-shot `run`; Session creation itself is database-only and Docker-independent. Concurrent first users serialize to one network. The network persists until Session cleanup and is not recreated silently if it later disappears: future create/run requests return `session_network_missing`, while cleanup treats absence as success.
+Release 3 provisions the network lazily on the first `container.create` or one-shot `run`; Session creation itself is database-only and Docker-independent. Concurrent first users serialize to one network. Its diagnostic Docker name is `dhsn-<full-session-id>`; all named Docker resources owned directly by a Session use a stable resource-type prefix and include that full Session ID, while labels remain the ownership authority. The network persists until Session cleanup and is not recreated silently if it later disappears: future create/run requests return `session_network_missing`, while cleanup treats absence as success.
 
 Release 3 retains ordinary Docker outbound connectivity and adds no host alias, host-access grant, or firewall layer. Managed Containers and one-shot `run` attach to the Session network; build does not.
 
@@ -207,7 +210,7 @@ Responsibilities:
 
 The WebSocket protocol must be docker-helper-owned and versionable. Raw Docker attach framing must not become the public contract.
 
-One JSON start frame establishes the exec and the negotiated subprotocol version. Binary frames carry stdin and combined output; text frames carry controls such as terminal resize and completion. Each connection has a 1 MiB outbound queue. On disconnect docker-helper makes a best-effort Ctrl-C, waits about one second, closes stdin with Ctrl-D semantics, and then detaches if the process remains alive. Reconnect and an `exec kill` endpoint are outside Release 3; a detached process continues to count until it exits or its container is torn down.
+One JSON start frame establishes the exec and the negotiated subprotocol version. Binary frames carry stdin and combined output; text frames carry controls such as terminal resize and completion. Each connection has a 1 MiB outbound queue. On ordinary disconnect docker-helper makes a best-effort Ctrl-C, waits about one second, closes stdin with Ctrl-D semantics, and then detaches if the process remains alive. Reconnect and an `exec kill` endpoint are outside Release 3; a detached process continues to count until it exits or its container is torn down. An open stream never renews Session TTL; Session expiration closes the stream and teardown removes the owning container without a separate exec grace period.
 
 Completion criterion: interactive exec can be used without exposing a second authorization model, an unbounded relay, or Docker-specific stream framing.
 
@@ -235,9 +238,9 @@ The design distinguishes:
 
 Every Managed Container and one-shot `run` receives explicit CPU, memory, PIDs, and shared-memory limits. An omitted workload value means the effective Session ceiling, not unbounded Docker behavior or a calculation of remaining quota. A caller may narrow inherited values but never widen them.
 
-The root workload memory pool defaults to 75% of physical RAM rounded down to 256 MiB. The CPU pool defaults to logical CPUs minus the larger of 0.5 CPU or 10%, rounded down to 0.1 CPU. The default per-workload PIDs ceiling is 512 and is clamped by inherited and system ceilings. Swap is disabled. Shared memory defaults to the smaller of 256 MiB and the workload memory limit, may be narrowed explicitly, and never exceeds memory. Disk quotas are outside Release 3.
+At initialization, the root workload memory pool defaults to 75% of Docker Engine-reported `MemTotal`, rounded down to 256 MiB. The CPU pool defaults from Engine-reported `NCPU`: logical CPUs minus the larger of 0.5 CPU or 10%, rounded down to 0.1 CPU. These defaults are materialized as explicit configuration and do not derive from the docker-helper process cgroup. The default per-workload PIDs ceiling is 512 and is clamped by inherited and system ceilings. Swap is disabled. Shared memory defaults to the smaller of 256 MiB and the workload memory limit, may be narrowed explicitly, and never exceeds memory. Disk quotas are outside Release 3.
 
-An omitted Principal, Launcher, or Session ceiling inherits its effective parent ceiling. A second Principal or Launcher that still inherits the full parent produces an operator warning rather than an automatic fractional split. Memory ceilings are decreased only when the subtree has no active workloads; CPU and PIDs decreases apply live; exec-concurrency decreases do not kill existing execs. A cgroup-hierarchy spike must prove aggregate enforcement for both system and rootless deployments before implementation is frozen.
+An omitted Principal, Launcher, or Session ceiling inherits its effective parent ceiling. A second Principal or Launcher that still inherits the full parent produces an operator warning rather than an automatic fractional split. The hierarchy is an aggregate runtime security boundary enforced by parent cgroups: multiple containers may each receive the full Session ceiling as their individual limit, while their combined actual usage remains bounded by the Session cgroup and its ancestors. docker-helper performs no resource reservation, remaining-capacity calculation, or scheduling admission. Memory ceilings are decreased only when the subtree has no active workloads; CPU and PIDs decreases apply live; exec-concurrency decreases do not kill existing execs. A cgroup-hierarchy spike must prove aggregate enforcement for both system and rootless deployments before implementation is frozen.
 
 Build resource control is outside this package.
 
@@ -348,4 +351,4 @@ The decomposition produces the following detailed design documents:
 9. `release-3-api-cli.md` — public surface and compatibility;
 10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
 
-The Operation model and Managed Container domain are the two foundation designs. `release-3-vocabulary-and-implementation-map.md` is their implementation bridge to the Release 2 codebase and the Release 2.1 Launcher design. `release-3-d0-execution-plan.md` turns the common Operation foundation into ordered executor tasks and test gates. The next blocking designs are lifecycle semantics and the networking, resource, and publishing inputs that form the immutable container creation contract.
+The Operation model and Managed Container domain are the two foundation designs. `release-3-vocabulary-and-implementation-map.md` is their implementation bridge to the Release 2 codebase and the Release 2.1 Launcher design. `release-3-d0-execution-plan.md` turns the common Operation foundation into ordered executor tasks and test gates. Each remaining owner document must be contract-ready before its package is assigned, but need not prescribe code-ready mechanics that belong to the operational architect. The next blocking designs are lifecycle semantics and the networking, resource, and publishing inputs that form the immutable container creation contract.
