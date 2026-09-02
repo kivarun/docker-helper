@@ -114,7 +114,11 @@ done
 
 # --- container-created object ----------------------------------------------------------
 RW_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$STOK" \
-  dh run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec 'echo container-object > /mnt/rw/container-file; cat /mnt/rw/container-file' 2>&1)"
+  dh run --image "$IMAGE" --mount rw:/mnt/rw -- sh -ec '
+    echo "diag uid=$(id -u) gid=$(id -g) ctx=$(cat /proc/self/attr/current 2>/dev/null)"
+    ls -ldn /mnt/rw 2>&1
+    echo container-object > /mnt/rw/container-file
+    cat /mnt/rw/container-file' 2>&1)"
 RW_EC=$?
 CONTAINER_FILE="$WS/rw/container-file"
 if [ "$RW_EC" -eq 0 ] && printf '%s' "$RW_OUT" | grep -q 'container-object'; then
