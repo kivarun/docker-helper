@@ -16,13 +16,14 @@ A Managed Container:
 - has a docker-helper identity distinct from its Docker Engine identity;
 - is authorized through persistent docker-helper ownership data, never through Docker labels alone;
 - has runtime state observed from Docker Engine rather than maintained as desired state;
-- is never recreated, restarted, stopped, or adopted merely because stored and observed state differ.
+- is never recreated, restarted, stopped, or adopted merely because stored and observed state differ;
+- has an immutable create specification and is initially stopped.
 
 ## Ownership and lifetime
 
 The Session is both the authorization boundary and the resource-lifetime boundary for its Managed Containers.
 
-A Managed Container may outlive the operation that created it, but not the Session that owns it.
+A Managed Container outlives the synchronous Request that created it, but not the Session that owns it.
 
 While a Session is active, its bearer token may perform the Managed Container operations authorized by the Session contract. The owning Principal, owning Launcher, and administrator retain their higher-level management authority as defined by the Release 2.1 delegation model.
 
@@ -72,13 +73,13 @@ Teardown:
 4. releases their external port publications;
 5. removes the Session network;
 6. transitions the Session to `closed` after backend cleanup succeeds;
-7. physically removes the closed Session and all dependent records after the bounded closed-Session tombstone period.
+7. physically removes the closed Session and all dependent records after a fixed internal 10-minute observation grace period.
 
 This is deterministic resource teardown at the end of an ownership lease. It is not desired-state reconciliation or automatic workload recovery.
 
-If teardown cannot finish, the Session and the remaining resource records are retained in cleanup failure state. They accept no normal workload operations. The owning Principal, owning Launcher, or administrator may retry cleanup; the administrator may inspect the failure in detail.
+If teardown cannot finish, the Session and the remaining resource records are retained in cleanup failure state. They accept no normal workload operations. Transient backend failures are retried automatically with bounded persisted backoff, and the owning Principal, owning Launcher, or administrator may request an immediate retry. Ownership mismatch or ambiguous authority is never resolved through automatic deletion and requires administrator action.
 
-The Session bearer is invalid from the moment teardown claims the Session. A `closed` tombstone exists only so an authorized Principal, owning Launcher, or administrator can observe the terminal `session.cleanup` result. Closed Sessions cannot be renewed. Physical Session deletion cascades to Managed Containers, Operations, and idempotency records. Audit events remain subject to the independent journald or external audit-retention policy.
+The Session bearer is invalid from the moment teardown claims the Session. A `closed` tombstone exists only so an authorized Principal, owning Launcher, or administrator can observe the terminal `session.cleanup` result. The observation grace is not an extension of Session TTL or configurable retention. Closed Sessions cannot be renewed. Physical Session deletion cascades to Managed Containers, Operations, and idempotency records. Audit events remain subject to the independent journald or external audit-retention policy.
 
 ## Operation integration
 
@@ -86,17 +87,16 @@ The cross-cutting Operation model is defined canonically in `release-3-operation
 
 The following Managed Container lifecycle Commands create durable Operations:
 
-- `container.create`;
 - `container.start`;
 - `container.stop`;
 - `container.restart`;
 - `container.remove`.
 
-A create Operation and its Managed Container have separate public identities. ManagedContainerID is allocated before backend creation so that the Operation, persistent ownership row, and Docker ownership metadata can refer to the same target without reusing Operation identity.
+`container.create` is a synchronous Command and creates no Operation. ManagedContainerID is allocated before backend creation so that the persistent ownership row and Docker ownership metadata can refer to the same target during crash recovery.
 
 Each Managed Container has at most one active lifecycle mutation. The durable `active_mutation_operation_id` relationship is established with Operation admission, survives daemon restart, and is cleared with terminal Operation status. A competing lifecycle Command is rejected; docker-helper does not maintain a hidden queue of user mutations.
 
-Inspect is a Query. `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. Exec activity is tracked only in daemon memory and may be terminated by an accepted stop, restart, remove, or Session cleanup. Exec never blocks ownership teardown.
+Inspect is a Query. `container.create`, `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. Exec activity is tracked only in daemon memory and may be terminated by an accepted stop, restart, remove, or Session cleanup. Exec never blocks ownership teardown.
 
 Session teardown coordinates pending and running Operations through the common internal cancellation contract, then observes actual backend state and continues `session.cleanup`. Container-specific execution and recovery rules are defined by the create consistency, restart recovery, and lifecycle designs.
 
@@ -115,7 +115,19 @@ It is:
 - safe to expose through the API, CLI, audit records, and operation results;
 - the identifier used for lookup and authorization.
 
-The exact textual prefix must be selected against the existing project-wide identifier registry so that it does not collide with Principal, credential, Session, token, Launcher, or Operation identifiers.
+The external format is `dhmc_` followed by 32 lowercase hexadecimal characters representing 16 random bytes. A database uniqueness conflict causes bounded regeneration rather than exposing the collision.
+
+### Logical name
+
+Every Managed Container has one immutable logical name unique within its owning Session. A caller may provide a DNS-label-compatible name. If omitted, docker-helper derives a readable base from the image repository basename and appends a short ManagedContainerID suffix, for example `postgres-a13f09c4`.
+
+The logical name is:
+
+- the name shown by docker-helper list and show Commands;
+- the single Session-network alias used for same-Session discovery;
+- retained in persistent helper state and backend ownership labels.
+
+The Docker container name is diagnostic backend data of the form `dhmc-<logical-name>-<short-id>`. It prevents deployment-wide Docker name collisions and remains recognizable in host diagnostics, but callers do not use it as authority or stable identity. Release 3 adds no rename Command or extra caller-defined network aliases.
 
 ### BackendContainerID
 
@@ -128,7 +140,7 @@ It is:
 - stored only to correlate the persistent record with the backend object;
 - not part of the stable public contract.
 
-A create Operation and the Managed Container it creates have different identifiers. Operation identity must not be reused as container identity.
+The administrator-only orphan surface is the sole public exception to the BackendContainerID rule because no persistent helper resource remains to target. Ordinary container APIs never expose or accept it.
 
 ## Sources of truth
 
@@ -209,6 +221,12 @@ Stable conditions provide the reason when management and runtime data cannot be 
 
 Conditions do not trigger autonomous workload repair.
 
+### Public show projection
+
+docker-helper never returns raw Docker inspect data. `container show` exposes the ManagedContainerID, logical name, owning Session, management and runtime state, condition, image reference, command argv, workdir, environment key names without values, mounts, resource limits, shared-memory limit, port publications, and timestamps.
+
+BackendContainerID, raw backend labels, environment values, and Docker network or endpoint identifiers are omitted. Command argv is returned only by the explicit show Query; it is excluded from list results, daemon logs, and audit. Callers are instructed not to place secrets in argv because docker-helper cannot identify them reliably.
+
 ## Create consistency model
 
 SQLite and Docker Engine cannot participate in one atomic transaction. Managed Container creation therefore uses a persistent provisional record and explicit compensation.
@@ -216,7 +234,7 @@ SQLite and Docker Engine cannot participate in one atomic transaction. Managed C
 The create sequence is:
 
 1. authorize and validate the complete request;
-2. resolve Session, workspace, mount, policy, networking, limit, and publishing inputs;
+2. resolve Session, workspace, mount, policy, lazy networking, limit, and publishing inputs;
 3. generate ManagedContainerID and ownership metadata;
 4. insert a persistent `creating` record;
 5. create the backend container with matching ownership metadata;
@@ -226,7 +244,7 @@ The create sequence is:
 
 If validation or provisional database creation fails, no backend call is made.
 
-If backend creation fails and docker-helper can prove that no object was created, the provisional record is deleted. The failure remains attributable through the Operation while the Session exists and through the independently retained audit record.
+If backend creation fails and docker-helper can prove that no object was created, the provisional record is deleted. The failure remains attributable through request-correlated audit; synchronous create does not manufacture an Operation solely to retain the failure.
 
 If a backend object may have been created, docker-helper performs a bounded correlation check using the unique ownership metadata.
 
@@ -235,7 +253,15 @@ If a backend object may have been created, docker-helper performs a bounded corr
 - If a matching object exists but creation cannot be completed, docker-helper attempts compensating removal.
 - If compensating removal fails or the result remains ambiguous, the record becomes `cleanup_failed` and a warning is emitted.
 
-Creation never reports success before both persistent ownership and backend correlation are complete.
+Creation never reports success before both persistent ownership and backend correlation are complete. It returns `201 Created` with a stopped Managed Container and never starts workload execution.
+
+Before inserting `creating`, request cancellation ends the Command without a persistent resource. After that commit point, the handler uses a short server-owned context to complete registration or compensation even if the HTTP client disconnects. Daemon restart uses the same `creating` record and ownership labels to finish bookkeeping safely. The CLI never retries an ambiguous create automatically; the caller resolves a lost response through `container list` or an explicitly requested unique logical name.
+
+`container.create` does not accept the durable-Operation `Idempotency-Key` contract. Extending it would require a separate resource-result association and a safe fingerprint of secret-bearing environment values. Release 3 uses unique logical-name conflict detection instead of adding that subsystem.
+
+If the requested image is absent locally, docker-helper performs a synchronous pull before backend creation. An existing local image is used unchanged; callers that want to refresh a mutable tag invoke the existing explicit `pull` Command. The record retains the requested image reference and the immutable image ID actually used. Release 3 exposes no create-specific pull-policy flags.
+
+The create request keeps the existing 16 KiB HTTP body limit and the established `run` validation for command, workdir, environment names, and workspace-contained bind mounts. It adds the logical name, resource limits, and at most 16 loopback TCP publications. No caller-requested named volumes, arbitrary host paths, `volumes-from`, tmpfs surface, or general volume API is added. The writable layer and image-declared anonymous volumes survive stop/start/restart and are removed with the Managed Container.
 
 ## Restart recovery
 
@@ -291,16 +317,19 @@ Orphan adoption is outside Release 3. A later design may add it if operational e
 
 Lifecycle Commands express an explicit caller intent rather than requiring the caller to reproduce Docker's prerequisite steps.
 
+- `create` is synchronous, returns a stopped container, and creates no Operation;
 - `start` for an already running container is a successful no-op and creates no Operation;
 - `stop` for an already stopped container is a successful no-op and creates no Operation;
 - `restart` restarts a running container and starts a stopped container;
 - `remove` stops a running container internally before removing it;
 - Release 3 exposes no public force flag and no caller-selected stop timeout;
-- stop behavior uses one finite backend default for `stop`, `restart`, `remove`, and Session teardown;
+- stop behavior uses the reloadable administrator setting `container_stop_timeout`, default `10s`, for `stop`, `restart`, `remove`, and Session teardown;
 - accepted `stop`, `restart`, `remove`, and Session teardown close exec admission and terminate active exec instances; active exec is not a lifecycle conflict;
 - a competing lifecycle mutation returns `409 Conflict` with the active Operation ID and is never queued; the stable error code must not be `container_busy`.
 
 The detailed lifecycle design must map these rules across every observed runtime state and define their recovery evidence without changing the accepted caller-facing behavior.
+
+Out-of-band Docker states do not expand the supported lifecycle. `paused`, `restarting`, and `dead` return `409 runtime_state_conflict` for start, stop, and restart; remove and Session cleanup may attempt bounded safe deletion. A missing backend object rejects start, stop, and restart but is the achieved backend postcondition for remove. Backend unavailability returns `503 backend_unavailable` without mutation. Ownership mismatch denies ordinary lifecycle and requires administrative resolution.
 
 ## Persistent data boundary
 
@@ -315,15 +344,13 @@ Persistent Managed Container data contains only information required for:
 
 Release 3 does not persist environment secret values merely to reproduce a complete Docker configuration. It does not support autonomous recreation, so a desired-state copy of every backend field is unnecessary.
 
-Exact schema columns, indexes, closed-Session tombstone duration, and migration ordering belong to the implementation design. Field names must preserve the distinction between ManagedContainerID, BackendContainerID, management state, runtime observation, and Operation identity.
+Exact schema columns, indexes, and migration ordering belong to the implementation design. Field names must preserve the distinction between ManagedContainerID, BackendContainerID, logical name, management state, runtime observation, and Operation identity.
 
 ## Deferred to subsequent designs
 
 The following decisions are intentionally outside this document:
 
-- detailed runtime-state mapping and recovery evidence for the accepted lifecycle behavior;
-- container name and Session-scoped network alias rules;
-- the immutable create specification and whether any fields may be updated;
+- type-specific recovery evidence for accepted lifecycle Operations;
 - Session-network provisioning and cleanup mechanics;
 - supported resource constraints;
 - port-publication grants and allocation;

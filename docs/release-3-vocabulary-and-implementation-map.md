@@ -21,7 +21,7 @@ The document distinguishes three categories:
 
 - **existing fact** — directly present at the baseline commit;
 - **accepted target** — already fixed by the Release 3 scope and domain designs;
-- **open decision** — must be settled before the corresponding implementation task is issued.
+- **implementation gate** — accepted architecture that still requires evidence from the final Release 2.1 code or a bounded backend spike before executor work begins.
 
 Target names describe one logical responsibility. Exact Go visibility follows the final package boundary. Capitalization of a domain term in documentation does not require an exported Go type in the current single-package implementation.
 
@@ -33,19 +33,21 @@ Target names describe one logical responsibility. Exact Go visibility follows th
 | Response | One transport representation returned to a client. | Response structs in `api_contract.go`. | Remains a transport concept. |
 | Command | An application action that may change state or produce an external effect. | Usually implemented directly inside an HTTP handler; no common type. | A conceptual role, not a mandatory `Command` interface or wrapper struct. |
 | Query | A read-only application observation. | Usually implemented directly inside an HTTP handler; no common type. | A conceptual role. A Query never creates an Operation merely for uniformity. |
-| Operation | A durable execution record for selected asynchronous Commands. | `operation` is an in-memory process record for asynchronous `run` and `build`. | Becomes persisted Session-owned control-plane state for managed-container lifecycle and Session cleanup. It contains no process handle or output buffer. |
-| Operation type | Discriminator for type-specific execution and recovery. | `operation.Kind string` with internal values `run` and `build`. | Use `type`, not `kind`. Durable values include `container.*` and `session.cleanup`; both current values are removed. |
+| Operation | A durable execution record for selected asynchronous Commands. | `operation` is an in-memory process record for asynchronous `run` and `build`. | Becomes persisted Session-owned control-plane state for container start, stop, restart, remove, and Session cleanup. It contains no process handle or output buffer. |
+| Operation type | Discriminator for type-specific execution and recovery. | `operation.Kind string` with internal values `run` and `build`. | Use `type`, not `kind`. Durable values are `container.start`, `container.stop`, `container.restart`, `container.remove`, and `session.cleanup`; both current values are removed. |
 | Operation status | Durable execution state. | `operationState`: `running`, `succeeded`, `failed`. | `pending`, `running`, `succeeded`, `failed`, `canceled`. |
 | Operation handler | Type-specific execution and restart recovery. | No common handler boundary; `build.go` and `run.go` own process completion directly. | One handler per Operation type with separate `Execute` and `Recover` behavior. |
 | Managed Container | Session-owned durable docker-helper resource. | No corresponding domain object. A `run` container is ephemeral and uses `--rm`. | New persistent domain object; never an alias for a Docker container ID or Operation. |
-| ManagedContainerID | Stable public identity allocated by docker-helper. | Does not exist. | New immutable public identifier. Its prefix remains an open registry decision. |
-| BackendContainerID | Docker Engine container identifier. | Transient value read through a `--cidfile` for `run` shutdown cleanup. | Persistent backend correlation, never a stable public identifier. |
+| ManagedContainerID | Stable public identity allocated by docker-helper. | Does not exist. | New immutable public identifier: `dhmc_` followed by 32 lowercase hexadecimal characters. |
+| Logical container name | Immutable Session-local user-facing name and DNS alias. | Does not exist; one-shot `run` has no retained name. | Unique within one Session and DNS-label-compatible. If omitted, derive a recognizable name from the image basename and short ManagedContainerID. |
+| Docker backend name | Diagnostic host-visible Docker object name. | Docker CLI chooses or receives transient names. | Generate `dhmc-<logical-name>-<short-id>`; it is not authority or public identity. |
+| BackendContainerID | Docker Engine container identifier. | Transient value read through a `--cidfile` for `run` shutdown cleanup. | Persistent internal correlation, never normal public authority. Only the admin orphan list/show/remove surface may expose or accept it after label and database checks. |
 | Session | Authorization, ownership, isolation, and lifetime boundary. | `Session`; SQLite `sessions` row. | Retained and extended with Release 2.1 Launcher ownership and Release 3 teardown state. |
 | Principal | OS identity and maximum delegated policy. | `principals` table and Principal code. | Retained. It is not the direct owner of Release 3 containers or Operations. |
 | Launcher | Stable delegated Session owner. | Design-only in Release 2.1; no Go type or table at this baseline. | Inherited from Release 2.1. Release 3 must not recreate it. |
 | Credential | Rotatable bearer key owned by one Principal or Launcher. | Principal-only `credentials` model. | Inherited from Release 2.1. Credentials initiate work but do not own it. |
 | Owner | Domain object that controls resource lifetime and authorization. | Sessions currently carry nullable `principal_id`. | Always concrete: Launcher owns Session; Session owns Operation and Managed Container. Do not add a generic Owner hierarchy. |
-| Initiator | Subject that started an Operation. | Not stored in `operation`; only `auditPrincipalName` is retained for finish audit. | Operation provenance: type plus authorized identifier where disclosure is permitted. It is not ownership. |
+| Initiator | Subject that started an Operation. | Not stored in `operation`; only `auditPrincipalName` is retained for finish audit. | Internal Operation provenance: type plus authorized identifier. It is not ownership and is never part of the public Operation projection. |
 | Actor | Subject recorded by an audit event. | No generic `actor` field; current audit has fields such as `principal_name` and `credential_id`. | Audit vocabulary only. Do not rename Operation `initiator` to `actor`. |
 | Target | Public resource affected by an Operation. | No common target field. Build/run metadata is embedded directly in `operation`. | Type-specific public target identity; never a Docker backend ID. |
 | Management state | Persistent helper-owned lifecycle state. | Session existence is mostly represented by row presence; Managed Container does not exist. | Session and Managed Container state needed for ownership and recovery. Not Docker runtime state. |
@@ -119,7 +121,7 @@ Working internal boundary names such as `operationStore`, `operationWorker`, `op
 | --- | --- | --- |
 | `build` | In-memory asynchronous process with status, logs, and public cancellation. | Removed from Operation types. `/build` becomes synchronous and returns bounded output and result directly. |
 | `run` | In-memory asynchronous process with status, logs, and public cancellation. | Removed from Operation types. `/run` becomes synchronous and returns bounded output and exit status directly. |
-| — | No managed-container lifecycle. | Add `container.create`, `container.start`, `container.stop`, `container.restart`, and `container.remove`. |
+| — | No managed-container lifecycle. | Add durable `container.start`, `container.stop`, `container.restart`, and `container.remove` types. `container.create` is synchronous and creates no Operation. |
 | — | Session rows are deleted directly. | Add `session.cleanup`. |
 
 There are no persisted Release 2 Operation rows to migrate. Compatibility work concerns public HTTP/CLI behavior, configuration, tests, documentation, and any live-operation assumptions—not database data conversion.
@@ -171,8 +173,8 @@ Release 3 must start from the final implementation of this model. It must not ad
 | --- | --- |
 | `Session.PrincipalID` as direct owner | Consume the final Release 2.1 `LauncherID`; Principal is derived. |
 | Row presence as lifecycle state | Add explicit teardown state required to distinguish active, closing, cleanup failure, and closed tombstone behavior. Exact schema belongs to the Session implementation design. |
-| `deleteSession` / `deleteSessionForPrincipal` immediate DELETE | Replace control flow with `session.cleanup` admission and deterministic cleanup. Physical deletion occurs after successful cleanup and tombstone expiry. |
-| `cleanupExpiredSessions` immediate DELETE at startup | Replace with durable cleanup admission/recovery. Expiry must not bypass container, network, publishing, Operation, or MAC cleanup. |
+| `deleteSession` / `deleteSessionForPrincipal` immediate DELETE | Replace control flow with `session.cleanup` admission and deterministic cleanup. Physical deletion occurs after successful cleanup and a fixed internal ten-minute observation grace. |
+| `cleanupExpiredSessions` immediate DELETE at startup | Replace with durable cleanup admission/recovery. Expiry must not bypass container, network, publishing, Operation, or MAC cleanup. Transient failures retry with persisted bounded backoff; ownership ambiguity remains `cleanup_failed` for Admin action. |
 | `findSessionByToken` checks only expiry and Principal enabled state | Also reject non-active lifecycle states and use final Release 2.1 ownership policy. |
 | `cleanupStaleSessionRuntimeDirs` treats non-active row absence as cleanup authority | Run only after durable ownership cleanup can prove the directory is stale. It must not race a retained cleanup-failure Session. |
 | `sessionRuntimeDir` and Docker config directory | Retain as runtime infrastructure; they are not persistent ownership records. |
@@ -201,7 +203,7 @@ Release 3 introduces a new persistent boundary with at least:
 
 The exact schema and Go names belong to D1. The common source-of-truth rule is already fixed: SQLite proves ownership and Docker Engine provides current runtime observation.
 
-Container backend access is isolated behind one docker-helper-owned adapter using the Docker Engine API rather than added as more unrelated `newDockerCommand` calls across handlers. Engine request types, response streams, and backend identifiers do not become the public domain contract.
+Container backend access is isolated behind one docker-helper-owned adapter using the pinned official `github.com/moby/moby/client` Docker Engine API client rather than added as more unrelated `newDockerCommand` calls across handlers. The client negotiates the daemon API version; docker-helper separately documents and tests its minimum supported Engine API. Engine request types, response streams, and backend identifiers do not become the public domain contract.
 
 ## Configuration migration
 
@@ -223,7 +225,7 @@ Current `auditRecord` contains separate fields such as `principal_name`, `creden
 
 Release 3 should extend the audit vocabulary without making it the Operation schema:
 
-- Operation stores `initiator_type` and the permitted identifier needed for control-plane attribution;
+- Operation stores `initiator_type` and the permitted identifier needed for internal control-plane attribution, but its public projection exposes neither;
 - audit records the actor representation defined by the final Release 2.1 authority model;
 - audit includes public Operation type and target;
 - public and audit fields never contain bearer secrets or BackendContainerID;
@@ -252,9 +254,9 @@ The code comparison exposes the following decisions that must be settled before 
 
 Launcher and final Session ownership names are design-only at the inspected commit. D1 and D0 persistence migrations must be based on the final Release 2.1 schema, not written against nullable Release 2 `principal_id` ownership.
 
-### 2. ManagedContainerID prefix
+### 2. Engine adapter compatibility spike
 
-Operation may retain `op_`, but ManagedContainerID has no current registry value. The prefix must be selected once against existing public and bearer-token prefixes before D1 API fixtures and database migrations are frozen.
+The backend technology and client are settled. Before broad migration, a focused spike must verify `ImageBuild` stream and error handling against the project's BuildKit-enabled and legacy test environments, and the supported daemon matrix must yield one documented minimum Engine API version. This may refine the narrow adapter, not the public capability contract.
 
 ## Executor handoff gate
 
@@ -263,7 +265,6 @@ The operational architect may issue code-reading and D1 interface-design tasks f
 Production implementation tasks that depend on the following must wait until the corresponding blocker is resolved:
 
 - D0 durable persistence and D1 ownership: final Release 2.1 Session/ownership schema;
-- D0 synchronous migration: reconciliation of the baseline Docker CLI task mechanics with the accepted Docker Engine API backend boundary;
-- D1 Managed Container fixtures and API: final identifier prefix and create contract.
+- D0 synchronous migration: the official Moby client adapter, minimum Engine API version, and ImageBuild compatibility evidence.
 
 When the Release 2.1 commit is available, update the baseline commit and replace every design-only Launcher or Session mapping with the actual symbol, table, column, and migration names before implementation starts.

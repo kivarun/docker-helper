@@ -81,6 +81,18 @@ Develop from demonstrated use cases rather than inventing a platform in
 advance. A use case demonstrated by one real operator is still evidence; scale
 of adoption is not a prerequisite for solving a real problem.
 
+## Local agent workloads, not production orchestration
+
+docker-helper is designed for local and small shared-host agent workflows where
+simple operation, bounded authority, and predictable cleanup matter more than
+maximum throughput or continuous availability.
+
+It is not a high-load production orchestrator. It does not promise high
+availability, zero-downtime workload management, automatic reconciliation, or
+cluster scheduling. Operators with those requirements should use systems built
+for them rather than stretching docker-helper into a second orchestration
+platform.
+
 ## Architectural constraints
 
 - one tool — one capability;

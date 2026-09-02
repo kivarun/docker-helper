@@ -15,7 +15,7 @@ A Managed Container:
 - is created within exactly one Session;
 - remains owned by that Session;
 - has a stable docker-helper identity independent of its Docker Engine identifier;
-- persists beyond the operation that created it;
+- persists beyond the synchronous Request that created it;
 - is the authorization target for lifecycle, logs, and exec actions.
 
 The surrounding concepts retain narrower roles:
@@ -31,9 +31,9 @@ All Release 3 capabilities attach to this model. No capability may invent a para
 
 Release 3 keeps Request and Response at the transport layer, Command and Query at the application layer, and Operation as the durable execution record created only by selected asynchronous Commands.
 
-The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. The executor-facing implementation sequence is defined in `release-3-d0-execution-plan.md`. These contracts apply to managed-container lifecycle and Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
+The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. The executor-facing implementation sequence is defined in `release-3-d0-execution-plan.md`. These contracts apply to asynchronous managed-container start, stop, restart, and remove Commands and to Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
 
-`build`, the existing one-shot `run`, and non-interactive exec are synchronous Commands with bounded direct results. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
+`build`, the existing one-shot `run`, `container.create`, and non-interactive exec are synchronous Commands. Process-like Commands return one combined bounded `output`; create returns the stopped Managed Container only after persistent ownership and backend correlation are complete. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
 
 ## Work packages
 
@@ -61,8 +61,9 @@ This package defines the durable object and its relationship with existing Sessi
 
 Responsibilities:
 
-- stable docker-helper container identity;
+- stable `dhmc_` plus 32-lowercase-hex docker-helper container identity;
 - Session ownership;
+- immutable, Session-unique, DNS-label-compatible logical name and one matching network alias;
 - persistent metadata required for authorization and backend correlation;
 - normalized container specification retained by docker-helper;
 - lookup and ownership verification;
@@ -77,7 +78,7 @@ This package must define behavior when:
 - persistent helper state and backend state disagree;
 - the owning Session expires or is removed.
 
-The package also defines the closed-Session tombstone required to observe cleanup completion. Physical Session deletion cascades to its Managed Containers, Operations, and idempotency records; audit retention remains independent.
+The package also defines the closed-Session tombstone required to observe cleanup completion. A successfully closed Session has one fixed internal ten-minute observation grace; it is not an extension of Session TTL or an operator retention setting. Physical Session deletion cascades to its Managed Containers, Operations, and idempotency records; audit retention remains independent. `closing` and `cleanup_failed` Sessions are never removed by this grace timer. Transient cleanup failures are retried with bounded persisted backoff, while ownership ambiguity requires administrative resolution.
 
 Restart handling restores management visibility only. It must not restart, stop, recreate, or otherwise reconcile a container toward a desired state.
 
@@ -107,11 +108,15 @@ Responsibilities:
 
 This package must not introduce a second generic job abstraction beside Operation.
 
-Lifecycle mutations return `202 Accepted`. The CLI waits for terminal status by default and may detach, but remains a stateless protocol adapter. Public Operation cancellation is outside Release 3; internal cancellation exists only where deterministic Session teardown requires it.
+`container.create` returns `201 Created` synchronously with a stopped Managed Container and creates no Operation. It commits a provisional `creating` row before backend creation, completes registration or compensation under a short server-owned context after that commit point, and recovers interrupted bookkeeping from the row and immutable backend labels. It accepts no `Idempotency-Key`; an explicit unique logical name provides conflict detection, and clients never retry an ambiguous create automatically.
+
+Start, stop, restart, and remove return `202 Accepted`. The CLI waits for terminal status by default and may detach, but remains a stateless protocol adapter. Public Operation cancellation is outside Release 3; internal cancellation exists only where deterministic Session teardown requires it.
 
 Inspect status is a Query and creates no Operation.
 
-The detailed design must preserve the accepted Docker-like lifecycle semantics: repeated start/stop postconditions are successful no-ops; restart of a stopped container starts it; removal of a running container stops it internally; no public force or caller-selected stop-timeout control is exposed. Active exec is terminated by teardown and is not reported as `container_busy`. Competing lifecycle mutations still return a non-queued conflict with the active Operation ID.
+The detailed design must preserve the accepted Docker-like lifecycle semantics: repeated start/stop postconditions are successful no-ops; restart of a stopped container starts it; removal of a running container stops it internally; no public force or caller-selected stop-timeout control is exposed. One reloadable administrator setting, `container_stop_timeout`, defaults to ten seconds and applies uniformly to stop, restart, remove, and Session cleanup. Active exec is terminated by teardown and is not reported as `container_busy`. Competing lifecycle mutations still return a non-queued `409` with the active Operation ID.
+
+For observed Docker states `paused`, `restarting`, or `dead`, start/stop/restart return `runtime_state_conflict`, while remove and cleanup attempt safe deletion. A missing backend makes start/stop/restart fail but satisfies remove. An unavailable or unknown backend returns `503` without mutation. Ownership mismatch always fails closed and requires the administrative orphan path.
 
 Completion criterion: every lifecycle mutation has one ownership check, one state-transition contract, one backend execution path, and one externally observable result.
 
@@ -131,7 +136,9 @@ Responsibilities:
 
 External port publishing is not part of this package.
 
-The design must separately decide outbound connectivity and host access. Session isolation does not by itself imply either unrestricted egress or a fully internal Docker network.
+Session isolation does not imply an internal-only Docker network or a new host-access path. The accepted egress and host-access boundary is explicit below.
+
+Release 3 provisions the network lazily on the first `container.create` or one-shot `run`; Session creation itself is database-only and Docker-independent. Concurrent first users serialize to one network. The network persists until Session cleanup and is not recreated silently if it later disappears: future create/run requests return `session_network_missing`, while cleanup treats absence as success.
 
 Release 3 retains ordinary Docker outbound connectivity and adds no host alias, host-access grant, or firewall layer. Managed Containers and one-shot `run` attach to the Session network; build does not.
 
@@ -154,6 +161,8 @@ Container logs are read from Docker Engine under bounded request and response li
 
 Release 3 provides bounded snapshots only. Log following is outside its scope and must not be added implicitly as a side effect of interactive exec streaming.
 
+The public contract is `GET /containers/{id}/logs?tail=200` with `tail` in `1..10000` and a JSON result containing combined `output` and `truncated`. `container_log_max_bytes` is a distinct reloadable limit with a 1 MiB default. Logs are read from the Engine runtime only and are never copied to helper storage, journald, or audit.
+
 Completion criterion: authorized callers can retrieve bounded container logs without receiving direct Docker Engine access or backend-specific identifiers as authority.
 
 ### D5. Exec core
@@ -163,13 +172,15 @@ This package defines command execution inside a Managed Container independently 
 Responsibilities:
 
 - target resolution and ownership verification;
-- command, environment, working-directory, timeout, and cancellation contracts;
+- argv command, optional container-local environment and working-directory, timeout, and cancellation contracts;
 - container-state preconditions;
 - exit status and failure taxonomy;
 - audit attribution;
 - shared execution semantics for non-interactive and interactive modes.
 
 Non-interactive exec reuses the existing synchronous `run` request/response model. It returns combined bounded output and exit status directly and creates no Operation.
+
+Exec inherits the container's configured user. Release 3 exposes no user override, privileged mode, or additional Linux capabilities. All active exec instances are limited to 16 per container, 32 per Session, 32 per owning Principal, and 64 per daemon. Interactive exec is additionally limited to 4 per container, 16 per Session, 16 per Principal, and 64 per daemon; administrators may tune these defaults.
 
 Interactive exec reuses the same authorization and execution core. It must not be implemented as a separate privileged path.
 
@@ -186,7 +197,7 @@ This package adds streaming transport to an already-authorized interactive exec.
 Responsibilities:
 
 - WebSocket upgrade and attachment to one exec instance;
-- stdin, stdout, and stderr framing;
+- binary stdin and combined output framing;
 - TTY and non-TTY behavior;
 - terminal resize when TTY mode is supported;
 - stream close, process exit, cancellation, and disconnect semantics;
@@ -195,6 +206,8 @@ Responsibilities:
 - audit linkage between the stream and the exec action.
 
 The WebSocket protocol must be docker-helper-owned and versionable. Raw Docker attach framing must not become the public contract.
+
+One JSON start frame establishes the exec and the negotiated subprotocol version. Binary frames carry stdin and combined output; text frames carry controls such as terminal resize and completion. Each connection has a 1 MiB outbound queue. On disconnect docker-helper makes a best-effort Ctrl-C, waits about one second, closes stdin with Ctrl-D semantics, and then detaches if the process remains alive. Reconnect and an `exec kill` endpoint are outside Release 3; a detached process continues to count until it exits or its container is torn down.
 
 Completion criterion: interactive exec can be used without exposing a second authorization model, an unbounded relay, or Docker-specific stream framing.
 
@@ -207,20 +220,26 @@ Responsibilities:
 - the supported CPU, memory, process, and related limit vocabulary;
 - normalized units and validation;
 - safe defaults that keep ordinary quick-start workflows free of mandatory resource flags;
-- hierarchical Principal, Launcher, and Session quotas and active reservations;
+- hierarchical root, Principal, Launcher, and Session ceilings;
 - enforcement during container creation;
 - status representation sufficient to inspect the effective limits;
 - stable errors for unsupported or excessive requests.
 
 The public contract exposes docker-helper policy concepts, not arbitrary Docker flags or HostConfig passthrough.
 
-The design must distinguish:
+The design distinguishes:
 
 - a caller's requested value;
 - the Session's authorized ceiling;
 - the effective backend value.
 
-Build resource control is outside this package. Exact quota accounting, supported limit dimensions, reservations, and numeric defaults remain part of the D7 design and are not frozen by this decomposition.
+Every Managed Container and one-shot `run` receives explicit CPU, memory, PIDs, and shared-memory limits. An omitted workload value means the effective Session ceiling, not unbounded Docker behavior or a calculation of remaining quota. A caller may narrow inherited values but never widen them.
+
+The root workload memory pool defaults to 75% of physical RAM rounded down to 256 MiB. The CPU pool defaults to logical CPUs minus the larger of 0.5 CPU or 10%, rounded down to 0.1 CPU. The default per-workload PIDs ceiling is 512 and is clamped by inherited and system ceilings. Swap is disabled. Shared memory defaults to the smaller of 256 MiB and the workload memory limit, may be narrowed explicitly, and never exceeds memory. Disk quotas are outside Release 3.
+
+An omitted Principal, Launcher, or Session ceiling inherits its effective parent ceiling. A second Principal or Launcher that still inherits the full parent produces an operator warning rather than an automatic fractional split. Memory ceilings are decreased only when the subtree has no active workloads; CPU and PIDs decreases apply live; exec-concurrency decreases do not kill existing execs. A cgroup-hierarchy spike must prove aggregate enforcement for both system and rootless deployments before implementation is frozen.
+
+Build resource control is outside this package.
 
 Completion criterion: a Session can start a Managed Container or execute `run` only within its authorized resource envelope, and the effective limits remain inspectable without exposing the full Docker resource surface.
 
@@ -242,6 +261,10 @@ Responsibilities:
 Publishing authority originates outside the untrusted Session through the Release 2.1 delegation model. Release 3 must not create a second delegation mechanism merely for ports.
 
 The Session may request an allowed host port or omit it for automatic allocation. The effective mapping is returned by create and shown with Session grants; no separate range-discovery endpoint is required.
+
+Publishing grants narrow through root, Principal, Launcher, and Session. An omitted child range inherits the full effective parent range and may later be narrowed but never widened. The root default is `20000-29999`; adding a second full-inheriting Principal or Launcher emits an operator warning rather than silently splitting the range. A range cannot be narrowed while an active publication lies outside it.
+
+Each Managed Container may have at most 16 publications. A publication maps one concrete container TCP port to either one explicitly requested allowed host port or one automatically allocated port. The lease is assigned during create, survives stop/start/restart, and is released by remove or Session cleanup. docker-helper prevents collisions among its own Managed Containers but does not reserve a socket or promise that an unrelated host process cannot occupy a port while its container is stopped.
 
 This package does not expose UDP, external host binding, arbitrary Docker networks, network modes, aliases, or routing configuration.
 

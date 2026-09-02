@@ -14,7 +14,7 @@ Release 3 adds the following capabilities.
 
 ### Managed containers
 
-A session may create containers that continue to exist after the operation that created them has completed.
+A Session may synchronously create containers that continue to exist after the creating Request has completed.
 
 Managed containers support an explicit lifecycle:
 
@@ -26,6 +26,10 @@ Managed containers support an explicit lifecycle:
 - remove.
 
 A managed container remains owned by the session under which it was created.
+
+`container create` follows Docker's create semantics: it returns a stopped container and does not start workload execution. The caller uses the separate `start` Command when execution is required. The create specification is immutable in Release 3.
+
+Managed Container storage remains bounded by the existing workspace model. Caller-requested named volumes, arbitrary host paths, `volumes-from`, and a general volume API are outside the release. The writable container layer and image-declared anonymous volumes survive stop/start/restart but are removed with the Managed Container or its owning Session.
 
 Its lifetime is bounded by that Session. When the owning Session expires or is explicitly closed, docker-helper tears down its containers, external publications, and Session network before removing the Session record.
 
@@ -62,12 +66,12 @@ The canonical ownership, state, admission, recovery, idempotency, retention, and
 
 Release 3 uses durable Operations for:
 
-- managed-container create, start, stop, restart, and remove;
+- managed-container start, stop, restart, and remove;
 - Session cleanup.
 
-Queries, `build`, `run`, and both exec modes do not become Operations merely for uniformity. `build` and `run` are synchronous Commands with bounded direct results.
+Queries, `container create`, `build`, `run`, and both exec modes do not become Operations merely for uniformity. `container create` returns `201 Created`; `build` and `run` are synchronous Commands with bounded direct results.
 
-Lifecycle Command admission completes validation, authorization, and conflict checks before creating an Operation. The API returns `202 Accepted`; the CLI waits for terminal status by default and may return immediately with `--detach`.
+Durable lifecycle Command admission completes validation, authorization, and conflict checks before creating an Operation. The API returns `202 Accepted`; the CLI waits for terminal status by default and may return immediately with `--detach`.
 
 The HTTP API may accept an optional `Idempotency-Key` for Commands that create durable Operations. This protocol capability does not require CLI support. The CLI does not generate, retain, or replay idempotency keys and never automatically retries an ambiguous mutation.
 
@@ -75,7 +79,7 @@ Release 3 does not add persistent Operation logs. Operation stores status, times
 
 ### Session networking
 
-Each Session owns a user-defined bridge network. Managed Containers and one-shot `run` containers belonging to the Session attach to that network and may communicate through Session-scoped names.
+Each Session owns a user-defined bridge network. The network is provisioned lazily by the first Managed Container create or one-shot `run`, not by Session creation. Managed Containers and one-shot `run` containers belonging to the Session attach to that network and may communicate through Session-scoped names.
 
 Container-local ports may be used freely inside that network without host publication.
 
@@ -87,7 +91,9 @@ Build execution does not attach to the Session network.
 
 A managed container may explicitly publish selected TCP ports from its Session network to IPv4 loopback on the host.
 
-Publishing authority and port ceilings derive from the owning Launcher. The Session may request an allowed host port or omit it for automatic allocation. The effective loopback address and host port are persisted and returned to the caller.
+Publishing authority and port ceilings narrow monotonically from the daemon root through Principal, Launcher, and Session. An omitted child grant inherits its parent's complete effective range. The root default is `20000-29999`. The Session may request an allowed host port or omit it for automatic allocation. The effective loopback address and host port are persisted and returned to the caller.
+
+A Managed Container may request at most 16 publications. A chosen port is leased for the Managed Container lifetime, survives stop/start/restart, and is released by remove or Session cleanup. docker-helper prevents collisions among its own leases; it does not reserve a stopped container's port against unrelated host processes.
 
 Release 3 does not publish UDP ports or bind to external host interfaces. Port publishing is deliberately narrower than general Docker networking configuration.
 
@@ -114,13 +120,13 @@ In particular:
 - common workflows remain usable through safe defaults without requiring callers to reproduce operator policy;
 - Docker Engine implementation details must not become part of the public docker-helper contract unless explicitly required.
 
-Release 3 uses the Docker Engine API behind a docker-helper-owned backend boundary. Docker request and stream representations are implementation details and do not become the public API.
+Release 3 uses the official `github.com/moby/moby/client` Go module behind a narrow docker-helper-owned backend boundary. API-version negotiation is enabled, a tested minimum Engine API version is enforced, and daemon socket selection comes from docker-helper deployment configuration rather than arbitrary process environment. Moby request and stream representations are implementation details and do not become the public API.
 
 Managed containers are an extension of the existing session model, not a parallel management plane.
 
 Request and Response remain transport concepts. Command and Query are application concepts. Operation is a durable execution record created only by selected asynchronous Commands; it is not a mandatory wrapper around every action.
 
-Terminal Operations remain attached to their owning Session and are deleted when that Session record is physically removed. A closed Session may remain as a short-lived tombstone so authorized management callers can observe cleanup completion. Audit retention is independent and is governed by the operator's journald or external log-storage policy.
+Terminal Operations remain attached to their owning Session and are deleted when that Session record is physically removed. A successfully closed Session remains for a fixed internal 10-minute observation grace period; this is not an extension of Session TTL and is not operator configuration. Audit retention is independent and is governed by the operator's journald or external log-storage policy.
 
 ### Thin CLI
 
@@ -171,9 +177,10 @@ Release 3 does not provide:
 - support for every Docker runtime option;
 - persistent Operation output or log replay;
 - workload-output logging to the daemon logger or journald;
+- production orchestration, high-load service operation, high availability, or zero-downtime deployment;
 - a stateful CLI workflow engine.
 
-A stopped or failed managed container remains stopped or failed until an authorized actor explicitly performs another lifecycle operation. Teardown caused by expiration or explicit closure of the owning Session is the sole ownership-lifecycle exception; it is resource cleanup, not desired-state reconciliation.
+A stopped or failed managed container remains stopped or failed until an authorized actor explicitly performs another lifecycle operation. Teardown caused by expiration or explicit closure of the owning Session is the sole ownership-lifecycle exception; transient teardown failures are retried with bounded backoff because an expired ownership lease must eventually release its resources. Ownership ambiguity is never resolved through automatic deletion.
 
 docker-helper is responsible for controlled access to container functionality, not for maintaining an application's desired state.
 

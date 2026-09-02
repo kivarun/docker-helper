@@ -6,12 +6,12 @@ This document fixes the D0 semantic contract and records an implementation plan 
 
 The inspected baseline is `main` at `c840d4e197e86e1b7a190d4dcea7dd795975d8a5`. Release 2.1 Launcher delegation is still design-only at this commit. Symbol and schema references below describe that exact baseline and must be reconciled once the Release 2.1 implementation lands.
 
-The baseline implementation invokes the Docker CLI. Release 3 has since selected the Docker Engine API behind a docker-helper-owned adapter as its target backend. The CLI-specific inventory remains evidence about code that must be retired. Before D0.1 is assigned, the operational architect must select the Engine client implementation and freeze the adapter methods needed by build, pull, one-shot run, lifecycle, logs, and exec. No executor should introduce a new long-lived `exec.Cmd` abstraction solely to reproduce the baseline mechanics.
+The baseline implementation invokes the Docker CLI. Release 3 uses the official `github.com/moby/moby/client` Docker Engine API client, pinned to a reviewed version, behind a docker-helper-owned adapter. The client negotiates the daemon API version, while docker-helper documents and tests a minimum supported Engine API. The CLI-specific inventory remains evidence about code that must be retired. Before D0.1 is assigned, the operational architect must freeze the narrow adapter methods needed by build, pull, one-shot run, lifecycle, logs, and exec. No executor should introduce a new long-lived `exec.Cmd` abstraction solely to reproduce the baseline mechanics or expose Moby request types outside the adapter.
 
 D0 changes two mechanisms that currently share one in-memory object but have different target semantics:
 
 1. `build` and one-shot `run` become synchronous Commands bound to their HTTP Requests;
-2. durable Operation is introduced for managed-container lifecycle and Session cleanup only.
+2. durable Operation is introduced for managed-container start, stop, restart, remove, and Session cleanup only.
 
 The current in-memory Operation is not migrated or generalized. Its public status/log/cancel contract and record are removed. Existing cancellation, shutdown, and cleanup behavior is retained as an observable requirement, not as a requirement to preserve the Docker CLI process mechanism.
 
@@ -20,9 +20,10 @@ The current in-memory Operation is not migrated or generalized. Its public statu
 The following decisions are already binding:
 
 - `build`, one-shot `run`, and non-interactive exec are synchronous Commands;
+- `container.create` is also synchronous, returns `201 Created` with a stopped Managed Container, and creates no Operation;
 - interactive exec uses WebSocket and is not an Operation;
-- only managed-container lifecycle mutations and `session.cleanup` create durable Operations;
-- synchronous Commands do not survive request loss or daemon restart;
+- only `container.start`, `container.stop`, `container.restart`, `container.remove`, and `session.cleanup` create durable Operations;
+- synchronous process execution does not survive request loss or daemon restart; after create's provisional database commit, only bounded registration or compensation continues under server ownership and restart recovery;
 - the normal CLI remains blocking and returns the workload exit result;
 - `pull`, `build`, one-shot `run`, and non-interactive exec return one combined bounded `output` that is not replayable;
 - a started `run` or exec returns HTTP `200` with its actual `exit_code`, including a non-zero exit;
@@ -249,7 +250,9 @@ Each task is intended to be a focused commit or a small reviewable commit series
 
 ### D0.1 — Introduce the Docker Engine API execution boundary
 
-- select and pin the Engine API client implementation behind one docker-helper-owned adapter;
+- pin the official `github.com/moby/moby/client` dependency behind one docker-helper-owned adapter;
+- enable API-version negotiation and define the minimum tested Engine API version from the supported daemon matrix;
+- spike `ImageBuild` stream/error compatibility with the project's BuildKit-enabled and legacy test environments before freezing the build adapter;
 - migrate build/run backend calls while preserving the current public behavior at this intermediate point;
 - introduce the synchronous-execution admission, shutdown, cancellation, and backend-cleanup owner independently of durable Operation;
 - keep `boundedBuffer` independent of the execution coordinator and durable dispatcher;
@@ -348,7 +351,7 @@ Completion evidence:
 - add Session-authorized lookup and bounded listing with status/type/target filters;
 - return `202 Accepted` and `Location` from a test integration Command using the common admission path only when a real Release 3 Operation type is available;
 - add thin CLI wait/detach rendering with no local persistence, automatic retry, or public cancel;
-- keep `initiator_id` and `origin_request_id` hidden until D9 fixes their authorization rules.
+- keep `initiator_id` and `origin_request_id` internal permanently; the public Operation projection never exposes them.
 
 Do not ship a fake production Operation type merely to exercise D0. Until D2 or Session cleanup supplies a real handler, test the generic boundary with test-only handlers.
 
@@ -398,7 +401,7 @@ D0 persistence and dispatcher tests must prove:
 
 ## Remaining implementation gate
 
-The public D0 contract and target ownership split are fixed. Before D0.1 is assigned, the operational architect must select the Engine client dependency and write the narrow adapter method contracts, including cancellation, shutdown, build-stream decoding, and one-shot-container cleanup. This implementation detail is not permission to reopen the synchronous Command or durable Operation contracts.
+The public D0 contract, target ownership split, and official Moby client dependency are fixed. Before D0.1 is assigned, the operational architect must write the narrow adapter method contracts, including cancellation, shutdown, build-stream decoding, and one-shot-container cleanup, and record the minimum tested Engine API version. The ImageBuild/BuildKit compatibility spike may refine adapter mechanics but is not permission to reopen the synchronous Command or durable Operation contracts.
 
 ## D0 completion gate
 
