@@ -232,6 +232,15 @@ Remove a workspace root from the AppArmor profile.
 .TP
 .B docker-helper apparmor check
 Validate the AppArmor profile.
+.SS SELinux Commands (SELinux System Mode)
+.TP
+.B docker-helper selinux check
+Validate the installed SELinux system-policy foundation: requires the
+docker-helper policy module \fBdocker_helper\fR to be loaded and verifies
+docker-helper-owned file contexts against the active policy defaults (the
+installed executable is required; optional config/state/runtime paths are
+checked only when present). The command is read-only and never mutates
+SELinux state. It requires root and uses the existing host MAC authority.
 .SS Agent Commands
 .TP
 .B docker-helper pull [\-\-system] [\-\-endpoint ENDPOINT] IMAGE

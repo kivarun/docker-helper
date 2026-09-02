@@ -419,6 +419,11 @@ for full syntax:
   admin token; requires the current token, new token shown once, old token
   invalid immediately, no restart).
 - `apparmor` — Manage/check AppArmor roots for an AppArmor system deployment.
+- `selinux` — Inspect SELinux system-policy state for a SELinux system
+  deployment. Subcommand: `check` (validate that the `docker_helper` policy
+  module is loaded and docker-helper-owned file contexts are consistent with
+  the active policy; read-only operator diagnostics that never mutates SELinux
+  state and never inspects dynamic Session MAC resources).
 
 ### General commands
 

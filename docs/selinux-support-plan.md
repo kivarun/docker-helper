@@ -276,9 +276,14 @@ helper validates one PEM X.509 CA and computes the OpenSSL 3.x
 using SHA-1, truncated to four bytes and rendered little-endian. This avoids a
 broad `bin_t` execute permission solely for CA preparation.
 
-The common-case hash corpus was checked against OpenSSL 3.5.7. Differential
-coverage of uncommon ASN.1 string encodings remains a release-hardening task;
-see the dated release audit.
+The subject-hash implementation is independently verified against the
+`openssl x509 -hash -noout` oracle: a checked-in semantic differential corpus
+(`ca_subject_hash_openssl_test.go`) covers simple and multi-valued RDNs, ASCII
+case folding and whitespace classes, all string encodings including non-BMP
+UniversalString, and Unicode edge behavior. A live OpenSSL differential job
+runs the corpus against a real `openssl` binary in CI, and a fuzz target with
+DER bounds hardening protects the raw-subject parser against hostile input.
+There is still no runtime dependency on the `openssl` executable.
 
 ## 7. Packaging contract
 
@@ -300,8 +305,12 @@ The DEB intentionally contains no SELinux module and provisions AppArmor only.
 The current RPM hard-depends on both `apparmor-parser` and `policycoreutils`.
 Fedora/RHEL portability is future work.
 
-The release workflow must install both `checkmodule` and `semodule_package`
-before running `build-packages.sh`; the current isolated release job does not.
+The policy compilation tools are provisioned by the canonical producer
+through the shared Ubuntu platform provisioning path
+(`uat-platform-ubuntu.sh` installs `checkpolicy` and `semodule-utils`), and
+`build-selinux-policy.sh` fails closed when `checkmodule` or
+`semodule_package` is missing. The current release/CI jobs therefore always
+install both tools before `build-packages.sh` runs.
 
 ## 8. Evidence completed
 
@@ -358,9 +367,12 @@ Run the following on openSUSE Tumbleweed:
 11. compatibility with the installed container-selinux/base policy;
 12. `.pp` portability or a documented target-specific replacement.
 
-There is no `docker-helper selinux check` command in the Release 2 CLI. Module,
-label, and AVC diagnostics use standard host tools (`semodule`, `matchpathcon`,
-`stat -Z`, and `ausearch`) during package acceptance.
+Release 2 had no `docker-helper selinux check` command; module, label, and AVC
+diagnostics used standard host tools (`semodule`, `matchpathcon`, `stat -Z`,
+and `ausearch`) during package acceptance. Release 2.1 adds
+`docker-helper selinux check` as a read-only operator diagnostic that validates
+the installed policy module and docker-helper-owned file contexts without
+mutating SELinux state.
 
 ## 10. Future work
 

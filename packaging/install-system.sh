@@ -528,6 +528,8 @@ main() {
 	else
 		info "SELinux workspace MAC coverage is managed by docker-helper sessions"
 		info "(semanage fcontext + restorecon for non-home workspaces)."
+		info "Diagnose the installed SELinux policy with:"
+		info "  docker-helper selinux check"
 	fi
 }
 

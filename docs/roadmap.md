@@ -365,11 +365,14 @@ admin can name a Principal and resolve that Principal's `default` Launcher.
 Explicit authorized selectors remain available when the default is not desired.
 
 Release 2.1 also includes a small operator-UX parity item for mandatory-access
-control diagnostics: add `docker-helper selinux check` as the SELinux-side
-counterpart to the existing `docker-helper apparmor check`. This command is
-diagnostics only; it must not select the active MAC backend or create a second
-runtime authority. Backend selection and fail-closed system-mode enforcement
-remain owned by the existing backend-neutral MAC detection/confinement path.
+control diagnostics: `docker-helper selinux check` (implemented) is the
+SELinux-side counterpart to the existing `docker-helper apparmor check`. It is
+diagnostics only: it validates that the `docker_helper` policy module is loaded
+and that docker-helper-owned file contexts are consistent with the active
+policy, requires root, is strictly read-only, and never selects the active MAC
+backend or creates a second runtime authority. Backend selection and
+fail-closed system-mode enforcement remain owned by the existing
+backend-neutral MAC detection/confinement path (`detectLSM`).
 
 These flows do not add desired state, managed-container lifecycle, restart
 policy, interactive exec, networking, port publishing, or resource-limit
@@ -446,8 +449,15 @@ change the Release-2 gate or the already-defined Launcher ownership model above.
   (plus a length-overflow guard in `parseDERLength`) and a permanent regression
   seed. Production runtime has no `openssl` executable dependency; the external
   oracle is test-only.
-- **Minor historical-document hygiene** may be cleaned during 2.1 when touching
-  those documents, but is not Release-2 work.
+- **Minor historical-document hygiene (implemented).** Stale current-state
+  statements found while touching the SELinux design record were corrected:
+  the OpenSSL subject-hash section now reflects the settled checked-in corpus /
+  live differential CI / fuzzing / DER bounds-hardening state, and the
+  packaging section now reflects the canonical producer installing the SELinux
+  compilation tools through the shared Ubuntu platform provisioning path.
+  Dated audit claims (for example that Release 2 had no `docker-helper selinux
+  check`) are preserved as historical truth. Release-3 documentation debt is
+  out of scope.
 
 The larger test/package architectural debt stays out of 2.1 and remains later
 architectural/test work, especially before or with Release 3: package-main

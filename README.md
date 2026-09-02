@@ -1147,6 +1147,18 @@ loads the module on an enforcing SELinux host. The DEB does not install the
 SELinux module. See [docs/selinux-support-plan.md](docs/selinux-support-plan.md)
 for the policy contract and outstanding distribution UAT.
 
+Diagnose the installed SELinux policy foundation (read-only, requires root):
+
+```bash
+sudo docker-helper selinux check
+```
+
+This verifies the `docker_helper` policy module is loaded and that
+docker-helper-owned file contexts (the installed executable, plus optional
+config/state/runtime paths when present) match the active policy. It never
+mutates SELinux state; daemon startup and reload remain the authoritative
+runtime proof of confinement.
+
 ### AppArmor-confined curl
 
 On some distributions (openSUSE, Ubuntu with `apparmor-profiles`),
