@@ -51,6 +51,51 @@ func generateCredentialToken() (string, error) {
 	return credentialTokenPrefix + hex.EncodeToString(b), nil
 }
 
+// generateCredentialTokenFn is a narrow test seam for credential token
+// generation, matching the package's existing seam style (for example
+// OSUserLookup). Production always calls generateCredentialToken.
+var generateCredentialTokenFn = generateCredentialToken
+
+// insertPrincipalCredentialInTx inserts a Principal credential within the given
+// transaction, participating in an atomic multi-row operation. It returns the
+// credential metadata and its bearer secret exactly once.
+func insertPrincipalCredentialInTx(tx *sql.Tx, principalID int64, principalName, name string) (*CredentialWithPrincipal, string, error) {
+	if name == "" {
+		return nil, "", fmt.Errorf("credential name is required: %w", ErrInvalidCredentialName)
+	}
+	token, err := generateCredentialTokenFn()
+	if err != nil {
+		return nil, "", err
+	}
+	tokenHash := hashCredentialToken(token)
+	credID, err := generateCredentialID()
+	if err != nil {
+		return nil, "", err
+	}
+	now := time.Now().Unix()
+
+	_, err = tx.Exec(
+		`INSERT INTO credentials (id, principal_id, launcher_id, name, token_hash, created_at)
+		 VALUES (?, ?, NULL, ?, ?, ?)`,
+		credID, principalID, name, tokenHash, now,
+	)
+	if err != nil {
+		if isSQLiteUniqueError(err) {
+			return nil, "", fmt.Errorf("credential %q already exists for principal %q: %w", name, principalName, ErrCredentialExists)
+		}
+		return nil, "", fmt.Errorf("cannot create credential: %w", err)
+	}
+
+	return &CredentialWithPrincipal{
+		Credential: Credential{
+			ID:        credID,
+			Name:      name,
+			CreatedAt: time.Unix(now, 0),
+		},
+		PrincipalName: principalName,
+	}, token, nil
+}
+
 // hashCredentialToken returns the SHA-256 hex digest of the token.
 func hashCredentialToken(token string) string {
 	h := sha256.Sum256([]byte(token))

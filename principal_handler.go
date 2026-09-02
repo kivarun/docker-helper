@@ -8,7 +8,8 @@ import (
 )
 
 type createPrincipalRequest struct {
-	Username string `json:"username"`
+	Username        string `json:"username"`
+	IssueCredential bool   `json:"issue_credential,omitempty"`
 }
 
 type setPrincipalRequest struct {
@@ -20,13 +21,15 @@ type allowedRootRequest struct {
 }
 
 type principalResponse struct {
-	OK           bool     `json:"ok"`
-	Username     string   `json:"username"`
-	UID          int      `json:"uid"`
-	GID          int      `json:"gid"`
-	Home         string   `json:"home"`
-	Enabled      bool     `json:"enabled"`
-	AllowedRoots []string `json:"allowed_roots"`
+	OK           bool            `json:"ok"`
+	Username     string          `json:"username"`
+	UID          int             `json:"uid"`
+	GID          int             `json:"gid"`
+	Home         string          `json:"home"`
+	Enabled      bool            `json:"enabled"`
+	AllowedRoots []string        `json:"allowed_roots"`
+	Credential   *credentialJSON `json:"credential,omitempty"`
+	Token        string          `json:"token,omitempty"`
 }
 
 type principalChangedResponse struct {
@@ -82,7 +85,7 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := createPrincipal(a.DB, req.Username, a.getConfig().AllowedRoots)
+	result, cred, token, err := createPrincipalWithOptionalCredential(a.DB, req.Username, a.getConfig().AllowedRoots, req.IssueCredential)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -117,7 +120,14 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		Duration:      duration,
 	})
 
-	writeJSONRaw(ctx, w, http.StatusCreated, principalToResponse(result))
+	resp := principalToResponse(result)
+	if cred != nil {
+		cj := credentialToJSON(*cred)
+		resp.Credential = &cj
+		resp.Token = token
+	}
+
+	writeJSONRaw(ctx, w, http.StatusCreated, resp)
 }
 
 func (a *App) handleShowPrincipal(w http.ResponseWriter, r *http.Request) {

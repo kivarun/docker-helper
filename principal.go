@@ -123,33 +123,44 @@ func findPrincipalIDByUsername(db *sql.DB, username string) (int, error) {
 var ErrPrincipalRootOutsideGlobal = errors.New("principal root outside global allowed roots")
 
 func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (*PrincipalWithRoots, error) {
+	p, _, _, err := createPrincipalWithOptionalCredential(db, username, globalAllowedRoots, false)
+	return p, err
+}
+
+// createPrincipalWithOptionalCredential creates a Principal, its default
+// allowed root, and (when issueCredential is true) an initial Principal
+// credential named "default" as one logical atomic operation in a single
+// transaction. Returns the Principal projection and, when issued, the initial
+// credential and its bearer secret exactly once. If the combined operation
+// cannot complete, no half-created Principal remains.
+func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []string, issueCredential bool) (*PrincipalWithRoots, *CredentialWithPrincipal, string, error) {
 	if username == "" {
-		return nil, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
+		return nil, nil, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
 
 	uid, gid, home, err := resolveOSUser(username)
 	if err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 
 	if home == "" || !filepath.IsAbs(home) {
-		return nil, fmt.Errorf("OS user %q has invalid home %q: must be an absolute path", username, home)
+		return nil, nil, "", fmt.Errorf("OS user %q has invalid home %q: must be an absolute path", username, home)
 	}
 
 	// Canonicalize the home directory and apply the workspace root policy.
 	canonicalHome, err := canonicalizeWorkspacePathForAdd(home)
 	if err != nil {
-		return nil, fmt.Errorf("OS user %q home directory %q is not a valid workspace root: %s", username, home, err)
+		return nil, nil, "", fmt.Errorf("OS user %q home directory %q is not a valid workspace root: %s", username, home, err)
 	}
 
 	// Validate the home directory is under at least one global allowed root.
 	if !isWithinAnyAllowedRoot(canonicalHome, globalAllowedRoots) {
-		return nil, fmt.Errorf("OS user %q home directory %q is not under any global allowed root: %w", username, canonicalHome, ErrPrincipalRootOutsideGlobal)
+		return nil, nil, "", fmt.Errorf("OS user %q home directory %q is not under any global allowed root: %w", username, canonicalHome, ErrPrincipalRootOutsideGlobal)
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("cannot begin transaction: %w", err)
+		return nil, nil, "", fmt.Errorf("cannot begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -160,14 +171,14 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (
 	)
 	if err != nil {
 		if isSQLiteUniqueError(err) {
-			return nil, fmt.Errorf("principal %q already exists: %w", username, ErrPrincipalExists)
+			return nil, nil, "", fmt.Errorf("principal %q already exists: %w", username, ErrPrincipalExists)
 		}
-		return nil, fmt.Errorf("cannot create principal: %w", err)
+		return nil, nil, "", fmt.Errorf("cannot create principal: %w", err)
 	}
 
 	principalID, err := result.LastInsertId()
 	if err != nil {
-		return nil, fmt.Errorf("cannot get principal ID: %w", err)
+		return nil, nil, "", fmt.Errorf("cannot get principal ID: %w", err)
 	}
 
 	if _, err := tx.Exec(
@@ -175,14 +186,27 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (
 		 VALUES (?, ?)`,
 		principalID, canonicalHome,
 	); err != nil {
-		return nil, fmt.Errorf("cannot add default allowed root: %w", err)
+		return nil, nil, "", fmt.Errorf("cannot add default allowed root: %w", err)
+	}
+
+	var cred *CredentialWithPrincipal
+	var token string
+	if issueCredential {
+		cred, token, err = insertPrincipalCredentialInTx(tx, principalID, username, "default")
+		if err != nil {
+			return nil, nil, "", err
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("cannot commit principal creation: %w", err)
+		return nil, nil, "", fmt.Errorf("cannot commit principal creation: %w", err)
 	}
 
-	return findPrincipalByUsername(db, username)
+	p, err := findPrincipalByUsername(db, username)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return p, cred, token, nil
 }
 
 func findPrincipalByUsername(db *sql.DB, username string) (*PrincipalWithRoots, error) {
