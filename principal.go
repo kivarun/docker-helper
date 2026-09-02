@@ -202,9 +202,19 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 		return nil, nil, "", fmt.Errorf("cannot commit principal creation: %w", err)
 	}
 
-	p, err := findPrincipalByUsername(db, username)
-	if err != nil {
-		return nil, nil, "", err
+	// Construct the returned projection from known committed values. No DB read
+	// is required after commit, so a successful commit cannot be followed by a
+	// fallible lookup that would lose the one-time bearer secret.
+	p := &PrincipalWithRoots{
+		Principal: Principal{
+			ID:       int(principalID),
+			Username: username,
+			UID:      uid,
+			GID:      gid,
+			Home:     home,
+			Enabled:  true,
+		},
+		AllowedRoots: []string{canonicalHome},
 	}
 	return p, cred, token, nil
 }

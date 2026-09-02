@@ -152,29 +152,6 @@ func findLauncherByID(db *sql.DB, id string) (*LauncherWithPrincipal, error) {
 	return &l, nil
 }
 
-// findLauncherByPrincipalAndName looks up a Launcher by (principal, name),
-// returning ErrLauncherNotFound when absent.
-func findLauncherByPrincipalAndName(db *sql.DB, principalID int64, name string) (*LauncherWithPrincipal, error) {
-	l, err := scanLauncherBase(db.QueryRow(
-		`SELECT l.id, l.principal_id, p.username, l.name, l.enabled, l.scope_mode, l.created_at
-		 FROM launchers l JOIN principals p ON p.id = l.principal_id
-		 WHERE l.principal_id = ? AND l.name = ?`,
-		principalID, name,
-	))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrLauncherNotFound
-		}
-		return nil, fmt.Errorf("cannot find launcher: %w", err)
-	}
-	roots, err := readLauncherAllowedRoots(db, l.ID)
-	if err != nil {
-		return nil, err
-	}
-	l.AllowedRoots = roots
-	return &l, nil
-}
-
 // listLaunchersForPrincipal returns the Launchers of a Principal ordered by name.
 func listLaunchersForPrincipal(db *sql.DB, principalID int64) ([]LauncherWithPrincipal, error) {
 	rows, err := db.Query(
@@ -295,6 +272,9 @@ func createLauncher(db *sql.DB, principalID int64, principalName, name string, s
 
 	var canonicalRoots []string
 	if scope == LauncherScopeRestricted {
+		if len(allowedRoots) == 0 {
+			return nil, nil, "", fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
+		}
 		effective, err := effectivePrincipalRoots(db, principalID, globalAllowedRoots)
 		if err != nil {
 			return nil, nil, "", err
@@ -304,6 +284,9 @@ func createLauncher(db *sql.DB, principalID int64, principalName, name string, s
 			return nil, nil, "", err
 		}
 	} else {
+		if len(allowedRoots) > 0 {
+			return nil, nil, "", fmt.Errorf("inherit scope cannot carry allowed roots: %w", ErrInvalidAllowedRoots)
+		}
 		scope = LauncherScopeInherit
 	}
 
@@ -355,9 +338,18 @@ func createLauncher(db *sql.DB, principalID int64, principalName, name string, s
 		return nil, nil, "", fmt.Errorf("cannot commit launcher creation: %w", err)
 	}
 
-	l, err := findLauncherByID(db, id)
-	if err != nil {
-		return nil, nil, "", err
+	// Construct the returned projection from known committed values. No DB read
+	// is required after commit, so a successful commit cannot be followed by a
+	// fallible lookup that would lose the one-time bearer secret.
+	l := &LauncherWithPrincipal{
+		ID:            id,
+		PrincipalID:   principalID,
+		PrincipalName: principalName,
+		Name:          name,
+		Enabled:       true,
+		ScopeMode:     scope,
+		AllowedRoots:  canonicalRoots,
+		CreatedAt:     time.Unix(now, 0),
 	}
 	return l, cred, token, nil
 }
@@ -381,14 +373,14 @@ func updateLauncher(db *sql.DB, launcherID string, name *string, enabled *bool) 
 		if err != nil {
 			return nil, err
 		}
-		existing, err := findLauncherByPrincipalAndName(db, cur.PrincipalID, nm)
-		if err != nil && !errors.Is(err, ErrLauncherNotFound) {
-			return nil, err
-		}
-		if existing != nil && existing.ID != launcherID {
-			return nil, fmt.Errorf("launcher %q already exists for principal %q: %w", nm, cur.PrincipalName, ErrLauncherExists)
-		}
+		// SQLite's UNIQUE(principal_id, name) is the final authority on name
+		// uniqueness, so we do not pre-check: a concurrent rename that races
+		// this UPDATE is surfaced by the constraint and mapped to
+		// ErrLauncherExists below rather than surfacing as an internal error.
 		if _, err := tx.Exec(`UPDATE launchers SET name = ? WHERE id = ?`, nm, launcherID); err != nil {
+			if isSQLiteUniqueError(err) {
+				return nil, fmt.Errorf("launcher %q already exists for principal %q: %w", nm, cur.PrincipalName, ErrLauncherExists)
+			}
 			return nil, fmt.Errorf("cannot update launcher name: %w", err)
 		}
 	}
@@ -424,6 +416,9 @@ func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode
 
 	var canonicalRoots []string
 	if scope == LauncherScopeRestricted {
+		if len(allowedRoots) == 0 {
+			return nil, fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
+		}
 		effective, err := effectivePrincipalRoots(db, cur.PrincipalID, globalAllowedRoots)
 		if err != nil {
 			return nil, err
@@ -433,6 +428,9 @@ func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode
 			return nil, err
 		}
 	} else {
+		if len(allowedRoots) > 0 {
+			return nil, fmt.Errorf("inherit scope cannot carry allowed roots: %w", ErrInvalidAllowedRoots)
+		}
 		scope = LauncherScopeInherit
 	}
 

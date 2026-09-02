@@ -237,10 +237,14 @@ func revokeCredential(db *sql.DB, id string) (bool, error) {
 		return false, fmt.Errorf("credential id is required: %w", ErrCredentialNotFound)
 	}
 
-	// Atomic update: only set revoked_at if it's currently NULL.
+	// Atomic update: only set revoked_at if it's currently NULL and the
+	// credential is Principal-owned (principal_id IS NOT NULL). Launcher
+	// credentials are excluded by that ownership predicate, so a Launcher
+	// credential ID behaves as an unknown credential (ErrCredentialNotFound)
+	// and remains byte-for-byte unchanged in the database.
 	now := time.Now().Unix()
 	result, err := db.Exec(
-		`UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+		`UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL AND principal_id IS NOT NULL`,
 		now, id,
 	)
 	if err != nil {
@@ -253,9 +257,10 @@ func revokeCredential(db *sql.DB, id string) (bool, error) {
 	}
 
 	if affected == 0 {
-		// Check if the credential exists at all.
+		// Check whether a Principal-owned credential exists at all, using the
+		// same Principal-ownership predicate as the mutation.
 		var exists int
-		err = db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE id = ?`, id).Scan(&exists)
+		err = db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE id = ? AND principal_id IS NOT NULL`, id).Scan(&exists)
 		if err != nil {
 			return false, fmt.Errorf("cannot check credential existence: %w", err)
 		}
