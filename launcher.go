@@ -261,7 +261,7 @@ func normalizeLauncherName(name string) (string, error) {
 // before any mutation. Returns the Launcher projection and, when
 // issueCredential is true, the issued credential metadata and its bearer secret
 // exactly once.
-func createLauncher(db *sql.DB, principalID int64, principalName, name string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string, issueCredential bool) (*LauncherWithPrincipal, *launcherCredential, string, error) {
+func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string, issueCredential bool) (*LauncherWithPrincipal, *launcherCredential, string, error) {
 	name, err := normalizeLauncherName(name)
 	if err != nil {
 		return nil, nil, "", err
@@ -269,6 +269,15 @@ func createLauncher(db *sql.DB, principalID int64, principalName, name string, s
 	if scope != LauncherScopeInherit && scope != LauncherScopeRestricted {
 		return nil, nil, "", fmt.Errorf("unknown scope %q: %w", scope, ErrInvalidScope)
 	}
+
+	// Resolve the owning Principal's name authoritatively from the database
+	// rather than trusting a caller-supplied name argument, so the returned
+	// projection and error messages always agree with the principals table.
+	owner, err := findPrincipalByID(db, int(principalID))
+	if err != nil {
+		return nil, nil, "", err
+	}
+	principalName := owner.Username
 
 	var canonicalRoots []string
 	if scope == LauncherScopeRestricted {

@@ -173,10 +173,21 @@ func TestPrincipalCreateInitialCredentialAtomicRollback(t *testing.T) {
 
 // TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLookup
 // proves createPrincipalWithOptionalCredential returns a projection built from
-// committed values, so a successful commit cannot be followed by a fallible DB
-// lookup that would lose the one-time bearer secret.
+// committed values: even with every query rejected, the function succeeds and
+// returns the one-time bearer secret because it never queries the DB (it only
+// Execs within the transaction). Were the removed post-commit
+// findPrincipalByUsername still performed, that query would be rejected here.
 func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLookup(t *testing.T) {
-	db := openFreshTestDB(t)
+	dir := t.TempDir()
+	path := dir + "/test.db"
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
 	globalRoots := []string{testAllowedRootDir(t)}
 	home := filepath.Join(globalRoots[0], "home", "t")
 	if err := os.MkdirAll(home, 0755); err != nil {
@@ -184,9 +195,13 @@ func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLooku
 	}
 	installOSUserMock(t, map[string]string{"t": home})
 
-	p, cred, token, err := createPrincipalWithOptionalCredential(db, "t", globalRoots, true)
+	// Reject every query; the creation path must not need any.
+	fq := newFailQueryDB(t, path, errMockQueryFail)
+	defer fq.Close()
+
+	p, cred, token, err := createPrincipalWithOptionalCredential(fq, "t", globalRoots, true)
 	if err != nil {
-		t.Fatalf("createPrincipalWithOptionalCredential: %v", err)
+		t.Fatalf("createPrincipalWithOptionalCredential under query failure: %v", err)
 	}
 	// Projection returned from committed values.
 	if p.Username != "t" || !p.Enabled || p.Home != home {
@@ -198,7 +213,8 @@ func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLooku
 	if cred == nil || cred.Name != "default" || !strings.HasPrefix(token, credentialTokenPrefix) {
 		t.Fatalf("expected issued credential/token, got cred=%+v token=%q", cred, token)
 	}
-	// The issued credential still authenticates, proving commit persisted it.
+	// The issued credential still authenticates on the real DB, proving commit
+	// persisted it.
 	res, err := authenticateCredential(db, token)
 	if err != nil || res.Principal == nil || res.Principal.PrincipalName != "t" {
 		t.Fatalf("issued principal token should authenticate, got err=%v res=%+v", err, res)

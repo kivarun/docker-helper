@@ -236,7 +236,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	l, cred, token, err := createLauncher(a.DB, int64(p.ID), p.Username, name, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots, req.IssueCredential)
+	l, cred, token, err := createLauncher(a.DB, int64(p.ID), name, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots, req.IssueCredential)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

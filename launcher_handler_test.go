@@ -325,7 +325,7 @@ func TestLauncherHandlerPrincipalCredentialForeignLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobsLauncher, _, _, err := createLauncher(app.DB, int64(pb.ID), "bob", "default", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
+	bobsLauncher, _, _, err := createLauncher(app.DB, int64(pb.ID), "default", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
 	if err != nil {
 		t.Fatal(err)
 	}
