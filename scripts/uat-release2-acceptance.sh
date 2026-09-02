@@ -225,6 +225,22 @@ set_up_principal() {
   GLOBAL_CRED_TOKEN="$(printf '%s\n' "$out" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
   [ -n "$GLOBAL_CRED_ID" ] && [ -n "$GLOBAL_CRED_TOKEN" ] || return 1
   printf '%s\n' "$GLOBAL_CRED_TOKEN" > "$credfile"; chmod 600 "$credfile"
+  # The final ownership model realizes a Principal's ownership through an
+  # enabled inherit-scope 'default' Launcher, and a selector-less
+  # principal-credential Session resolves to that Launcher (deriving the
+  # Principal through it). Without it the session create fails closed with
+  # launcher_not_found. There is no Launcher CLI command, so the admin creates
+  # the default Launcher over the raw control-plane API using the system admin
+  # token (never printed; sent only as an Authorization header).
+  ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+  [ -n "$ADMIN_TOKEN" ] || { echo "error: could not read the admin token from /etc/docker-helper/admin.token" >&2; return 1; }
+  LAUNCHER_JSON="$(curl --silent --fail --max-time 5 \
+    --unix-socket "$SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"scope":"inherit"}' "http://localhost/principals/$user/launchers" 2>/dev/null)" \
+    || { echo "error: default launcher create for principal '$user' failed" >&2; return 1; }
+  printf '%s\n' "$LAUNCHER_JSON" | grep -q '"ok":true' \
+    || { echo "error: default launcher create did not report ok: $LAUNCHER_JSON" >&2; return 1; }
   json="$(dh session create --system --token-file "$credfile" --workspace "$home/ws" --json 2>/dev/null)" || return 1
   GLOBAL_SESSION_ID="$(printf '%s' "$json" | json_field id)"
   GLOBAL_SESSION_TOKEN="$(printf '%s' "$json" | json_field token)"
