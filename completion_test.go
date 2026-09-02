@@ -270,6 +270,28 @@ func TestCompletionAdminTokenSubcommands(t *testing.T) {
 	}
 }
 
+// TestCompletionSELinux verifies `selinux` is a root command completion and
+// `check` is a selinux subcommand completion.
+func TestCompletionSELinux(t *testing.T) {
+	script := completionScript(t)
+
+	results := runCompletion(t, script, []string{"docker-helper", ""})
+	if !slices.Contains(results, "selinux") {
+		t.Errorf("root completion must offer selinux, got: %v", results)
+	}
+
+	results = runCompletion(t, script, []string{"docker-helper", "selinux", ""})
+	if len(results) == 0 {
+		t.Fatal("expected selinux subcommand completions")
+	}
+	if !slices.Contains(results, "check") {
+		t.Errorf("selinux completion must offer check, got: %v", results)
+	}
+	if len(results) != 1 || results[0] != "check" {
+		t.Errorf("selinux must complete only check, got: %v", results)
+	}
+}
+
 // TestCompletionNoLegacyAdminHierarchy verifies root completion offers
 // admin-token and never the legacy admin/token hierarchy.
 func TestCompletionNoLegacyAdminHierarchy(t *testing.T) {

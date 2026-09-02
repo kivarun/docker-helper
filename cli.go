@@ -626,6 +626,7 @@ func init() {
 		credentialCommand,
 		adminTokenCommand,
 		appArmorCommand,
+		selinuxCommand,
 		versionCommand,
 		helpCommand,
 		pullCommand,
