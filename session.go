@@ -269,71 +269,36 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 	}, nil
 }
 
-// createSession is the thin user-mode default wrapper over
-// createSessionWithPolicy. It resolves the real daemon-owner 'default' Launcher
-// (provisioned at startup by ensureUserModeOwnership) and creates a Session
-// under the global allowed roots (the user-mode collapsed policy). It is the
-// request-time-equivalent used by tests and any non-selector user-mode caller.
-// System mode has no implicit default and must use explicit selectors.
+// createSession is the thin default-launcher wrapper over
+// createSessionWithPolicy. It leaves all policy resolution to the single
+// authoritative resolveCreatePolicy path (admin authority, omitted selectors)
+// so Session creation has exactly one policy owner: in user mode this resolves
+// the daemon-owner 'default' Launcher under the collapsed global roots; system
+// mode has no implicit default and resolves a missing-selector error. It is
+// the request-time-equivalent used by tests and any non-selector caller.
 func (a *App) createSession(workspace string) (*CreatedSession, error) {
-	if a.getConfig().Mode != ModeUser || a.userModeDefault == nil {
-		return nil, fmt.Errorf("no default launcher available for session creation: %w", ErrInvalidWorkspace)
-	}
-	globalRoots, err := a.appResolvedGlobalRoots()
+	policy, err := a.resolveCreatePolicy(&sessionControlAuthority{isAdmin: true}, createSelector{}, workspace)
 	if err != nil {
-		return nil, fmt.Errorf("cannot resolve allowed roots: %w: %w", err, ErrSystem)
+		return nil, err
 	}
-	launcherID := a.userModeDefault.launcherID
-	return a.createSessionWithPolicy(&sessionCreatePolicy{
-		Workspace:             workspace,
-		EffectiveAllowedRoots: globalRoots,
-		LauncherID:            launcherID,
-		LauncherName:          "default",
-		PrincipalName:         a.userModeDefault.username,
-	})
+	return a.createSessionWithPolicy(policy)
 }
 
 // listSessions returns all active sessions in admin scope.
 func (a *App) listSessions() ([]Session, error) {
-	now := time.Now().Unix()
-
-	rows, err := a.DB.Query(
-		`SELECT `+sessionOwnershipProjection+`
-		 WHERE s.expires_at > ?
-		 ORDER BY s.created_at ASC`,
-		now,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("cannot list sessions: %w", err)
-	}
-	defer rows.Close()
-
-	var sessions []Session
-	for rows.Next() {
-		s, err := scanSessionWithOwnership(rows)
-		if err != nil {
-			return nil, fmt.Errorf("cannot scan session: %w", err)
-		}
-		sessions = append(sessions, s)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate sessions: %w", err)
-	}
-
-	return sessions, nil
+	return a.listSessionsInScope(sessionControlScope{admin: true})
 }
 
-// listSessionsInScope returns active sessions owned by any Launcher in the
-// given authorized Launcher set. A nil/empty set (admin scope) lists all
-// sessions owned by any Launcher.
-func (a *App) listSessionsInScope(launcherIDs map[string]bool) ([]Session, error) {
+// listSessionsInScope returns active sessions owned within the given
+// ownership scope. Admin lists all Launcher-owned Sessions, a Principal scope
+// lists the Sessions owned by that Principal's Launchers, and a Launcher scope
+// lists that Launcher's Sessions. The scope is expressed directly in the
+// ownership query (which JOINs launchers and principals), so no Launcher
+// enumeration or stale snapshot is involved.
+func (a *App) listSessionsInScope(scope sessionControlScope) ([]Session, error) {
 	now := time.Now().Unix()
 
-	pred, args, err := launcherScopePredicate(launcherIDs)
-	if err != nil {
-		return nil, err
-	}
+	pred, args := sessionScopePredicate(scope)
 
 	rows, err := a.DB.Query(
 		`SELECT `+sessionOwnershipProjection+`
@@ -364,12 +329,10 @@ func (a *App) listSessionsInScope(launcherIDs map[string]bool) ([]Session, error
 
 // deleteSessionScoped deletes a session by id within a scope, returning its
 // metadata for audit. A session outside the scope is not found (non-disclosing).
-// A nil scope (admin) deletes any session.
-func (a *App) deleteSessionScoped(id string, launcherIDs map[string]bool) (*Session, error) {
-	pred, args, err := launcherScopePredicate(launcherIDs)
-	if err != nil {
-		return nil, err
-	}
+// The scope is expressed directly in the ownership query; admin deletes any
+// Session.
+func (a *App) deleteSessionScoped(id string, scope sessionControlScope) (*Session, error) {
+	pred, args := sessionScopePredicate(scope)
 
 	selectArgs := append([]any{id}, args...)
 	row := a.DB.QueryRow(
@@ -386,8 +349,9 @@ func (a *App) deleteSessionScoped(id string, launcherIDs map[string]bool) (*Sess
 		return nil, fmt.Errorf("cannot find session: %w: %w", err, ErrDatabase)
 	}
 
-	deleteArgs := append([]any{id}, args...)
-	result, err := a.DB.Exec(`DELETE FROM sessions WHERE id = ?`+pred, deleteArgs...)
+	deletePred, deleteArgs := sessionDeletePredicate(scope)
+	deleteArgs = append([]any{id}, deleteArgs...)
+	result, err := a.DB.Exec(`DELETE FROM sessions WHERE id = ?`+deletePred, deleteArgs...)
 	if err != nil {
 		return &s, fmt.Errorf("cannot delete session: %w: %w", err, ErrDatabase)
 	}
@@ -409,41 +373,40 @@ func (a *App) deleteSessionScoped(id string, launcherIDs map[string]bool) (*Sess
 	return &s, nil
 }
 
-// launcherScopePredicate returns the SQL predicate and args that restrict a
-// Session query to the given Launcher set. A nil scope (admin) matches all
-// Launcher-owned Sessions.
-func launcherScopePredicate(launcherIDs map[string]bool) (string, []any, error) {
-	if launcherIDs == nil {
-		return "", nil, nil
+// sessionDeletePredicate returns the SQL predicate and args that restrict a
+// standalone DELETE FROM sessions statement to the given scope. Unlike the
+// ownership SELECT (which JOINs launchers/principals and can reference their
+// aliases), a DELETE has no join aliases, so the scope is expressed through an
+// explicit subquery. Admin deletes any Session.
+func sessionDeletePredicate(scope sessionControlScope) (string, []any) {
+	switch {
+	case scope.admin:
+		return "", nil
+	case scope.launcherID != "":
+		return " AND launcher_id = ?", []any{scope.launcherID}
+	case scope.principalID != 0:
+		return " AND launcher_id IN (SELECT id FROM launchers WHERE principal_id = ?)", []any{scope.principalID}
+	default:
+		return " AND 0", nil
 	}
-	ids := make([]string, 0, len(launcherIDs))
-	args := make([]any, 0, len(launcherIDs))
-	for id := range launcherIDs {
-		ids = append(ids, id)
-		args = append(args, id)
-	}
-	if len(ids) == 0 {
-		return " AND 0", nil, nil
-	}
-	// Unqualified (not s.launcher_id): this predicate is shared by the SELECT
-	// ownership queries and by the standalone DELETE, where no alias exists.
-	return " AND launcher_id IN (" + placeholderList(len(ids)) + ")", args, nil
 }
 
-// placeholderList returns a SQLite placeholder list "?,?,?" of length n,
-// or "NULL" (impossible match) when n is 0.
-func placeholderList(n int) string {
-	if n <= 0 {
-		return "NULL"
+// sessionScopePredicate returns the SQL predicate and args that restrict a
+// Session ownership query to the given scope. The predicate is appended after
+// "WHERE s.expires_at > ?" (list) or "WHERE s.id = ?" (delete) and references
+// the launchers/principals aliases the shared ownership projection JOINs. An
+// empty/invalid scope matches nothing (fail-closed) rather than broadening.
+func sessionScopePredicate(scope sessionControlScope) (string, []any) {
+	switch {
+	case scope.admin:
+		return "", nil
+	case scope.launcherID != "":
+		return " AND s.launcher_id = ?", []any{scope.launcherID}
+	case scope.principalID != 0:
+		return " AND l.principal_id = ?", []any{scope.principalID}
+	default:
+		return " AND 0", nil
 	}
-	out := ""
-	for i := 0; i < n; i++ {
-		if i > 0 {
-			out += ","
-		}
-		out += "?"
-	}
-	return out
 }
 
 // resolveSessionExecutionIdentity returns the UID:GID for Docker --user for a
@@ -469,7 +432,7 @@ func resolveSessionExecutionIdentity(db *sql.DB, session *Session) (uid, gid int
 }
 
 func (a *App) deleteSession(id string) (*Session, error) {
-	return a.deleteSessionScoped(id, nil)
+	return a.deleteSessionScoped(id, sessionControlScope{admin: true})
 }
 
 func (a *App) findSessionByToken(token string) (*Session, error) {

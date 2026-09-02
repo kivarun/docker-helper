@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -14,6 +15,24 @@ func openFreshTestDB(t *testing.T) *sql.DB {
 	db, err := openDatabase(dir + "/test.db")
 	if err != nil {
 		t.Fatalf("openDatabase() error: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase() error: %v", err)
+	}
+	return db
+}
+
+// openFreshTestDBNoFK opens a fresh test database with foreign-key enforcement
+// disabled, then runs initializeDatabase. It is used only where a fixture must
+// create a referentially dangling row that production would never tolerate.
+func openFreshTestDBNoFK(t *testing.T) *sql.DB {
+	t.Helper()
+	dir := t.TempDir()
+	dsn := "file:" + url.PathEscape(dir+"/test.db") + "?_foreign_keys=off"
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	if err := initializeDatabase(db); err != nil {

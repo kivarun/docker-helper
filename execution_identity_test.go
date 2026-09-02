@@ -13,10 +13,21 @@ import (
 	"testing"
 )
 
-func TestLegacySessionUsesDaemonUIDGID(t *testing.T) {
+// TestUserModeSessionUsesDaemonOwnerUIDGID proves the final user-mode ownership
+// contract: a user-mode Session created through the daemon-owner default
+// Launcher resolves its execution identity to the daemon-owner Principal's
+// persisted UID:GID (the real daemon OS identity), not to any ownerless/admin
+// daemon fallback.
+func TestUserModeSessionUsesDaemonOwnerUIDGID(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	// Create admin session (principal_id = NULL).
+	// The generic fixture provisions the daemon-owner Principal with the real
+	// daemon OS identity (os.Getuid()/os.Getgid()).
+	daemonUID := os.Getuid()
+	daemonGID := os.Getgid()
+
+	// Create the Session through the daemon-owner default Launcher (the same
+	// transparent user-mode path an unauthenticated user-mode client uses).
 	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
@@ -27,13 +38,28 @@ func TestLegacySessionUsesDaemonUIDGID(t *testing.T) {
 		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
 	}
 
-	daemonUID := os.Getuid()
-	daemonGID := os.Getgid()
+	// Execution identity must equal the persisted daemon-owner Principal
+	// identity (the real daemon UID:GID), not a default or fallback.
 	if uid != daemonUID {
-		t.Errorf("UID = %d, want %d (daemon UID)", uid, daemonUID)
+		t.Errorf("UID = %d, want %d (daemon-owner Principal UID)", uid, daemonUID)
 	}
 	if gid != daemonGID {
-		t.Errorf("GID = %d, want %d (daemon GID)", gid, daemonGID)
+		t.Errorf("GID = %d, want %d (daemon-owner Principal GID)", gid, daemonGID)
+	}
+
+	// Prove identity comes from the persisted Principal row, not from the OS
+	// lookup at resolve time.
+	osUserLookupOrig := OSUserLookupByUID
+	defer func() { OSUserLookupByUID = osUserLookupOrig }()
+	OSUserLookupByUID = func(uid int) (username, gid, home string, err error) {
+		return "otheruser", "9999", "/elsewhere", nil
+	}
+	uid, gid, err = resolveSessionExecutionIdentity(app.DB, &result.Session)
+	if err != nil {
+		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
+	}
+	if uid != daemonUID || gid != daemonGID {
+		t.Errorf("identity must come from persisted Principal, got %d:%d, want %d:%d", uid, gid, daemonUID, daemonGID)
 	}
 }
 

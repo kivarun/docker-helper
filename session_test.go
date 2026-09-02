@@ -24,7 +24,7 @@ func provisionDefaultLauncherForDB(t *testing.T, db *sql.DB) string {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
-	owner := provisionTestOwner(t, db, allowedRoot, home)
+	owner := provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 	return owner.launcherID
 }
 

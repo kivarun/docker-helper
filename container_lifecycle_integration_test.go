@@ -309,13 +309,11 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	// Create a readiness marker directory inside the session workspace
-	// so it can be bind-mounted into the container.
-	readyDir := filepath.Join(result.Session.Workspace, "test_ready")
-	if err := os.MkdirAll(readyDir, 0755); err != nil {
-		t.Fatalf("cannot create ready dir: %v", err)
-	}
-	readyFile := filepath.Join(readyDir, "ready")
+	// Create a readiness marker file directly under the session workspace.
+	// User-mode mounts may only bind the Session workspace itself (source "."),
+	// so the workspace root is mounted at /ready and the container's readiness
+	// file lands at <workspace>/ready on the host.
+	readyFile := filepath.Join(result.Session.Workspace, "ready")
 
 	// Start a container that ignores SIGTERM so the graceful phase cannot stop it.
 	// The shell command:
@@ -327,7 +325,7 @@ func TestContainerLifecycleForcedKill(t *testing.T) {
 		"entrypoint": "/bin/sh",
 		"command":    []string{"-c", "trap '' TERM; touch /ready/ready; exec sleep 300"},
 		"mounts": []map[string]any{
-			{"source": "test_ready", "target": "/ready", "read_only": false},
+			{"source": ".", "target": "/ready", "read_only": false},
 		},
 	})
 
@@ -483,13 +481,11 @@ func TestContainerLifecycleForcedCancel(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	// Create a readiness marker directory inside the session workspace
-	// so it can be bind-mounted into the container.
-	readyDir := filepath.Join(result.Session.Workspace, "test_cancel_ready")
-	if err := os.MkdirAll(readyDir, 0755); err != nil {
-		t.Fatalf("cannot create ready dir: %v", err)
-	}
-	readyFile := filepath.Join(readyDir, "ready")
+	// Create a readiness marker file directly under the session workspace.
+	// User-mode mounts may only bind the Session workspace itself (source "."),
+	// so the workspace root is mounted at /ready and the container's readiness
+	// file lands at <workspace>/ready on the host.
+	readyFile := filepath.Join(result.Session.Workspace, "ready")
 
 	// Start a container that ignores SIGTERM.
 	// The shell command:
@@ -501,7 +497,7 @@ func TestContainerLifecycleForcedCancel(t *testing.T) {
 		"entrypoint": "/bin/sh",
 		"command":    []string{"-c", "trap '' TERM; touch /ready/ready; exec sleep 300"},
 		"mounts": []map[string]any{
-			{"source": "test_cancel_ready", "target": "/ready", "read_only": false},
+			{"source": ".", "target": "/ready", "read_only": false},
 		},
 	})
 

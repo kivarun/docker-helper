@@ -9,14 +9,18 @@ import (
 )
 
 // buildLegacyPrincipalDB returns a database whose sessions table has the
-// pre-cutover legacy principal-owned shape (principal_id, no launcher_id) and a
-// real launchers/principals schema, so migrateSessionOwnership can be exercised
-// against the genuine legacy source. principal_id intentionally has no FK so a
-// dangling-reference fixture can be inserted to exercise the migration's
-// fail-closed check (TestMigrateSessionOwnershipDanglingPrincipalFails).
+// pre-cutover legacy principal-owned shape (base columns + nullable
+// principal_id) with its real FK to principals(id) declared, and a real
+// launchers/principals schema, so migrateSessionOwnership can be exercised
+// against the genuine legacy source and classifySessionsSchema can recognize
+// it. FK enforcement is disabled so a referentially dangling fixture can be
+// inserted to exercise the migration's fail-closed check
+// (TestMigrateSessionOwnershipDanglingPrincipalFails); the legacy sessions
+// principal_id FK has no ON DELETE CASCADE, so bad data can only arise when
+// enforcement was historically off.
 func buildLegacyPrincipalDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := openFreshTestDB(t)
+	db := openFreshTestDBNoFK(t)
 	if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
 		t.Fatalf("cannot drop final sessions table: %v", err)
 	}
@@ -27,9 +31,33 @@ func buildLegacyPrincipalDB(t *testing.T) *sql.DB {
 			workspace TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
-			principal_id INTEGER
+			principal_id INTEGER REFERENCES principals(id)
 		)`); err != nil {
 		t.Fatalf("cannot create legacy sessions table: %v", err)
+	}
+	return db
+}
+
+// buildLegacyBareDB returns a database whose sessions table has the pre-R1
+// (bare) shape: only the base columns and no ownership column at all. This is
+// the state initializeDatabase is responsible for bringing forward (bare ->
+// legacy principal) before migrateSessionOwnership rebuilds to the final
+// schema.
+func buildLegacyBareDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db := openFreshTestDBNoFK(t)
+	if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
+		t.Fatalf("cannot drop sessions table: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL UNIQUE,
+			workspace TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`); err != nil {
+		t.Fatalf("cannot create bare sessions table: %v", err)
 	}
 	return db
 }
@@ -270,7 +298,8 @@ func TestClassifySessionsSchema(t *testing.T) {
 		}
 	}
 	{
-		// Hybrid (both columns) must fail closed as unsupported.
+		// Hybrid (both columns) must fail closed as unsupported with a durable
+		// error, never the unsupported class reported as data.
 		db := openFreshTestDB(t)
 		if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
 			t.Fatal(err)
@@ -288,9 +317,112 @@ func TestClassifySessionsSchema(t *testing.T) {
 			t.Fatal(err)
 		}
 		class, err := classifySessionsSchema(db)
-		if err != nil || class != sessionsSchemaUnsupported {
-			t.Errorf("hybrid schema classified as %v (err=%v), want sessionsSchemaUnsupported", class, err)
+		if err == nil || class != sessionsSchemaUnsupported {
+			t.Errorf("hybrid schema classified as %v (err=%v), want sessionsSchemaUnsupported with an error", class, err)
 		}
+	}
+}
+
+// TestClassifySessionsSchemaNegative rejects malformed ownership shapes that
+// must fail closed: each fixture is deliberately a corrupted or wrong sessions
+// table and must return sessionsSchemaUnsupported with a durable error.
+func TestClassifySessionsSchemaNegative(t *testing.T) {
+	// helper rebuilds the sessions table from the given DDL body.
+	rebuild := func(t *testing.T, body string) *sql.DB {
+		t.Helper()
+		db := openFreshTestDB(t)
+		if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE sessions (` + body + `)`); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "launcher FK wrongly targets principals",
+			body: `
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				workspace TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				launcher_id TEXT NOT NULL REFERENCES principals(id)`,
+		},
+		{
+			name: "principal FK wrongly targets launchers",
+			body: `
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				workspace TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				principal_id INTEGER REFERENCES launchers(id)`,
+		},
+		{
+			name: "nullable launcher_id",
+			body: `
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				workspace TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				launcher_id TEXT REFERENCES launchers(id)`,
+		},
+		{
+			name: "launcher FK with ON DELETE CASCADE",
+			body: `
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				workspace TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				launcher_id TEXT NOT NULL REFERENCES launchers(id) ON DELETE CASCADE`,
+		},
+		{
+			name: "missing base column",
+			body: `
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				workspace TEXT NOT NULL,
+				created_at INTEGER NOT NULL`,
+		},
+		{
+			name: "missing token uniqueness",
+			body: `
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL,
+				workspace TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				launcher_id TEXT NOT NULL REFERENCES launchers(id)`,
+		},
+		{
+			name: "extra ownership column beyond canonical final",
+			body: `
+				id TEXT PRIMARY KEY,
+				token_hash TEXT NOT NULL UNIQUE,
+				workspace TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				launcher_id TEXT NOT NULL REFERENCES launchers(id),
+				principal_id INTEGER`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := rebuild(t, tc.body)
+			class, err := classifySessionsSchema(db)
+			if err == nil || class != sessionsSchemaUnsupported {
+				t.Errorf("classifySessionsSchema = (%v, err=%v), want sessionsSchemaUnsupported with an error", class, err)
+			}
+		})
 	}
 }
 
@@ -345,5 +477,108 @@ func TestDefaultLauncherPerPrincipalIsolation(t *testing.T) {
 	defaultForB, err := findDefaultLauncher(db, pidB)
 	if err != nil || defaultForB != laB {
 		t.Errorf("pidB default = %q (err=%v), want distinct launcher %q", defaultForB, err, laB)
+	}
+}
+
+// TestStartupSequenceBareToFinal exercises the full startup chain for an R1
+// bare sessions table: initializeDatabase owns the bare -> legacy-principal
+// step (adding principal_id), then migrateSessionOwnership owns the
+// principal -> final step. The R1 ownerless session is attributed to the
+// user-mode daemon-owner default Launcher and the final schema is produced.
+func TestStartupSequenceBareToFinal(t *testing.T) {
+	db := buildLegacyBareDB(t)
+
+	// An R1 ownerless session row (bare sessions had no ownership column).
+	if _, err := db.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"dhs_r1", "hr1", "/w", time.Now().Unix(), time.Now().Add(time.Hour).Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: initializeDatabase owns bare -> legacy principal.
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+	class, err := classifySessionsSchema(db)
+	if err != nil || class != sessionsSchemaLegacyPrincipal {
+		t.Fatalf("after initializeDatabase schema = %v (err=%v), want sessionsSchemaLegacyPrincipal", class, err)
+	}
+
+	// Provision a user-mode daemon-owner default Launcher for attribution.
+	home := filepath.Join(testAllowedRootDir(t), "daemon-home")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ownerPID, err := insertDaemonOwnerPrincipal(db, "daemonowner", 4242, 4242, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcherID, err := ensureDefaultLauncher(db, ownerPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := &userModeDefaultLauncher{principalID: ownerPID, launcherID: launcherID, username: "daemonowner"}
+
+	// Step 2: migrateSessionOwnership owns principal -> final.
+	res, err := migrateSessionOwnership(db, ModeUser, owner)
+	if err != nil {
+		t.Fatalf("migrateSessionOwnership: %v", err)
+	}
+
+	var hasPrincipal, hasLauncher int
+	if err := db.QueryRow(
+		`SELECT
+			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='principal_id'),
+			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='launcher_id')`,
+	).Scan(&hasPrincipal, &hasLauncher); err != nil {
+		t.Fatal(err)
+	}
+	if hasPrincipal != 0 || hasLauncher != 1 {
+		t.Errorf("final schema: principal_id=%d launcher_id=%d, want 0/1", hasPrincipal, hasLauncher)
+	}
+	if res.attributedUserMode != 1 {
+		t.Errorf("attributedUserMode = %d, want 1", res.attributedUserMode)
+	}
+	var got string
+	if err := db.QueryRow(`SELECT launcher_id FROM sessions WHERE id = 'dhs_r1'`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != launcherID {
+		t.Errorf("R1 session launcher_id = %q, want daemon-owner %q", got, launcherID)
+	}
+}
+
+// TestMigrateSessionOwnershipIntegrityCheckRollback proves the pre-commit
+// foreign_key_check gate (B9) catches a rebuilt sessions table whose row
+// references a launcher that does not exist, failing the migration and rolling
+// back so the legacy table is left intact. The dangling launcher is introduced
+// via the user-mode NULL-owner attribution with a phantom default-Launcher ID;
+// the insert succeeds only because FK enforcement is off in the fixture, and
+// the integrity check reports the violation regardless.
+func TestMigrateSessionOwnershipIntegrityCheckRollback(t *testing.T) {
+	db := buildLegacyPrincipalDB(t)
+	if _, err := db.Exec(
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+		 VALUES (?, ?, ?, ?, ?, NULL)`,
+		"dhs_badlauncher", "hbad", "/w", time.Now().Unix(), time.Now().Add(time.Hour).Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	owner := &userModeDefaultLauncher{principalID: 1, launcherID: "no-such-launcher", username: "u"}
+	_, err := migrateSessionOwnership(db, ModeUser, owner)
+	if err == nil {
+		t.Fatal("expected migration to fail on foreign-key check for dangling launcher")
+	}
+
+	// Transaction rolled back: the legacy sessions table is intact.
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("after rollback session count = %d, want 1", count)
 	}
 }

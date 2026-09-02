@@ -780,8 +780,13 @@ func TestDockerUser(t *testing.T) {
 		t.Errorf("expected status %d, got %d", http.StatusCreated, w.Code)
 	}
 
-	uid := os.Getuid()
-	gid := os.Getgid()
+	// The expected Docker --user identity is the owning Principal's UID:GID,
+	// resolved through the Session's Launcher. It is not derived from an
+	// unrelated assumption about a hard-coded daemon identity.
+	uid, gid, err := resolveSessionExecutionIdentity(app.DB, &result.Session)
+	if err != nil {
+		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
+	}
 	expected := fmt.Sprintf("%d:%d", uid, gid)
 
 	found := false

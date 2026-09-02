@@ -8,62 +8,41 @@ import (
 )
 
 // sessionControlScope is the single internal boundary through which all
-// Session create/list/delete handlers authorize their ownership scope. Admin ->
-// all Launchers; Principal -> its Launchers; Launcher -> exactly itself.
+// Session create/list/delete handlers authorize their ownership scope. Exactly
+// one discriminator is effective: admin -> all Launchers; principalID -> the
+// Sessions owned by that Principal's Launchers; launcherID -> the Sessions
+// owned by exactly that Launcher. It carries no preloaded Launcher enumeration;
+// the boundary is expressed in Session SQL directly.
 type sessionControlScope struct {
-	// admin is true for the system/user admin token authority; launcherIDs are
-	// ignored when admin is set.
+	// admin is true for the system/user admin token authority.
 	admin bool
-	// principalID is non-zero for Principal and Launcher credential
-	// authorities.
+	// principalID is non-zero for a Principal credential authority.
 	principalID int64
-	// launcherIDs is the set of Launcher IDs the authority may manage; nil with
-	// admin is all.
-	launcherIDs map[string]bool
+	// launcherID is the single Launcher ID for a Launcher credential
+	// authority.
+	launcherID string
 }
 
-// resolveSessionControlScope maps an authenticated authority to the Launcher
-// scope it may manage.
-func (a *App) resolveSessionControlScope(auth *sessionControlAuthority) sessionControlScope {
+// resolveSessionControlScope maps an authenticated authority to the ownership
+// scope it may manage. It never queries or preloads Launcher IDs: Principal and
+// Launcher scopes are expressed directly as SQL predicates at use time. Query
+// failures are therefore never swallowed into an empty set here.
+func (a *App) resolveSessionControlScope(auth *sessionControlAuthority) (sessionControlScope, error) {
 	switch {
 	case auth == nil:
-		return sessionControlScope{}
+		return sessionControlScope{}, errors.New("session control authorization missing")
 	case auth.isAdmin:
 		// Admin manages all Launcher-owned Sessions.
-		return sessionControlScope{admin: true}
+		return sessionControlScope{admin: true}, nil
 	case auth.launcherCredential != nil:
 		// A Launcher credential controls exactly itself.
-		return sessionControlScope{
-			principalID: auth.launcherCredential.PrincipalID,
-			launcherIDs: map[string]bool{auth.launcherCredential.LauncherID: true},
-		}
+		return sessionControlScope{launcherID: auth.launcherCredential.LauncherID}, nil
 	case auth.principalCredential != nil:
-		return a.principalLauncherScope(auth.principalCredential.PrincipalID)
+		// A Principal credential controls the Sessions owned by its Launchers.
+		return sessionControlScope{principalID: auth.principalCredential.PrincipalID}, nil
 	default:
-		return sessionControlScope{}
+		return sessionControlScope{}, errors.New("session control authorization has no scope")
 	}
-}
-
-// principalLauncherScope resolves the Launcher IDs owned by a Principal.
-// Returns an empty (but non-nil) set when the Principal has no Launchers.
-func (a *App) principalLauncherScope(principalID int64) sessionControlScope {
-	rows, err := a.DB.Query(`SELECT id FROM launchers WHERE principal_id = ?`, principalID)
-	if err != nil {
-		// Failure to enumerate the scope degrades to no authorization rather
-		// than granting a broader scope, preserving fail-closed behavior for
-		// the caller's eventual 404.
-		return sessionControlScope{principalID: principalID, launcherIDs: map[string]bool{}}
-	}
-	defer rows.Close()
-	ids := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			continue
-		}
-		ids[id] = true
-	}
-	return sessionControlScope{principalID: principalID, launcherIDs: ids}
 }
 
 // createSelector carries the optional create request selectors for a Session.
@@ -268,7 +247,14 @@ func (a *App) resolveCreateLauncher(auth *sessionControlAuthority, sel createSel
 		case sel.principal != "":
 			pid, err := findPrincipalIDByUsername(a.DB, sel.principal)
 			if err != nil {
-				return "", ErrLauncherNotFound
+				// A genuinely missing Principal (no row) is the selected object
+				// being absent: contract not-found, non-disclosing. Any other
+				// failure is a database/system error that must surface, not be
+				// re-labelled as not-found.
+				if errors.Is(err, ErrPrincipalNotFound) {
+					return "", ErrLauncherNotFound
+				}
+				return "", err
 			}
 			return findDefaultLauncher(a.DB, int64(pid))
 		case userMode && a.userModeDefault != nil:

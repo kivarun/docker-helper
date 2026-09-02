@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,10 +12,67 @@ import (
 	"time"
 )
 
+// sessionSelectorField is a Session-request-specific optional string selector
+// field that tracks true field presence. It distinguishes a field that is
+// omitted (present false) from one supplied as "" (present true, value "").
+// JSON null or any non-string value is rejected as an invalid selector rather
+// than silently treated as omitted. This is deliberately a narrow
+// Session-request mechanism, not a generic Optional[T].
+type sessionSelectorField struct {
+	present bool
+	value   string
+}
+
+// errInvalidSessionSelectorValue is returned by unmarshal when a selector
+// field is present with a null or non-string JSON value.
+var errInvalidSessionSelectorValue = errors.New("session selector must be a string")
+
+func (s *sessionSelectorField) UnmarshalJSON(b []byte) error {
+	s.present = true
+	trimmed := bytes.TrimSpace(b)
+	if bytes.Equal(trimmed, []byte("null")) {
+		return errInvalidSessionSelectorValue
+	}
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
+		return errInvalidSessionSelectorValue
+	}
+	s.value = v
+	return nil
+}
+
+// isPresent reports whether the selector field was present in the request.
+func (s *sessionSelectorField) isPresent() bool { return s.present }
+
+// selectorOrEmpty returns the selector value, or "" if it was omitted.
+func (s *sessionSelectorField) selectorOrEmpty() string { return s.value }
+
 type sessionRequest struct {
-	Workspace  string `json:"workspace"`
-	LauncherID string `json:"launcher_id"`
-	Principal  string `json:"principal"`
+	Workspace  string               `json:"workspace"`
+	LauncherID sessionSelectorField `json:"launcher_id"`
+	Principal  sessionSelectorField `json:"principal"`
+}
+
+// validateCreateSelector applies the Session create-selector contract to the
+// presence-aware request fields and returns a normalized createSelector with
+// only non-empty, explicitly-supplied values. Structural conflict has
+// precedence over value validation: both fields explicitly present is always a
+// conflicting_selectors error before any value/lookup check. An explicitly
+// present but empty selector is an invalid_selector error.
+func (req sessionRequest) validateCreateSelector() (createSelector, *createTargetError) {
+	launcherPresent := req.LauncherID.isPresent()
+	principalPresent := req.Principal.isPresent()
+
+	if launcherPresent && principalPresent {
+		return createSelector{}, &createTargetError{status: http.StatusBadRequest, code: "conflicting_selectors", msg: "launcher_id and principal selectors cannot both be provided"}
+	}
+	if launcherPresent && req.LauncherID.selectorOrEmpty() == "" {
+		return createSelector{}, &createTargetError{status: http.StatusBadRequest, code: "invalid_selector", msg: "invalid session selector"}
+	}
+	if principalPresent && req.Principal.selectorOrEmpty() == "" {
+		return createSelector{}, &createTargetError{status: http.StatusBadRequest, code: "invalid_selector", msg: "invalid session selector"}
+	}
+	return createSelector{launcherID: req.LauncherID.selectorOrEmpty(), principal: req.Principal.selectorOrEmpty()}, nil
 }
 
 type sessionJSON struct {
@@ -192,6 +251,15 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
+		if errors.Is(err, errInvalidSessionSelectorValue) {
+			writeRequestContextAudit(ctx, auditRecord{
+				Event:    "session.create",
+				Result:   "invalid_selector",
+				Duration: duration,
+			})
+			writeError(ctx, w, http.StatusBadRequest, "invalid_selector", "invalid session selector")
+			return
+		}
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "session.create",
 			Result:   "invalid_json",
@@ -203,7 +271,21 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 
-	policy, perr := a.resolveCreatePolicy(authCtx, createSelector{launcherID: req.LauncherID, principal: req.Principal}, req.Workspace)
+	sel, selErr := req.validateCreateSelector()
+	if selErr != nil {
+		auditRec := auditRecord{
+			Event:     "session.create",
+			Workspace: req.Workspace,
+			Result:    selErr.code,
+			Duration:  duration,
+		}
+		a.populateSessionAudit(&auditRec, authCtx)
+		writeRequestContextAudit(ctx, auditRec)
+		writeError(ctx, w, selErr.status, selErr.code, selErr.msg)
+		return
+	}
+
+	policy, perr := a.resolveCreatePolicy(authCtx, sel, req.Workspace)
 	if perr != nil {
 		te := classifyCreateTargetError(perr)
 		if te != nil {
@@ -325,14 +407,23 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	scope := a.resolveSessionControlScope(authCtx)
-
-	var sessions []Session
-	if scope.admin {
-		sessions, err = a.listSessions()
-	} else {
-		sessions, err = a.listSessionsInScope(scope.launcherIDs)
+	scope, err := a.resolveSessionControlScope(authCtx)
+	if err != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:    "session.list",
+			Result:   "database_error",
+			Duration: duration,
+		})
+		opLog(ctx).Error("list sessions error",
+			slog.String("operation", "session_list"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
 	}
+
+	sessions, err := a.listSessionsInScope(scope)
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 
@@ -394,14 +485,25 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scope := a.resolveSessionControlScope(authCtx)
+	scope, err := a.resolveSessionControlScope(authCtx)
+	if err != nil {
+		duration := time.Since(started).Round(time.Millisecond).String()
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:     "session.delete",
+			SessionID: id,
+			Result:    "database_error",
+			Duration:  duration,
+		})
+		opLog(ctx).Error("delete session error",
+			slog.String("operation", "session_delete"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
 
 	var session *Session
-	var scopeSet map[string]bool
-	if !scope.admin {
-		scopeSet = scope.launcherIDs
-	}
-	session, err = a.deleteSessionScoped(id, scopeSet)
+	session, err = a.deleteSessionScoped(id, scope)
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 

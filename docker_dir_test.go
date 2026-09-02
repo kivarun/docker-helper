@@ -70,7 +70,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home)
+	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
 	// Create a session.
 	workspace := testWorkspaceDir(t, allowedRoot)
@@ -202,7 +202,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatal(err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home)
+	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
 	// Create a session.
 	workspace2 := testWorkspaceDir(t, allowedRoot)

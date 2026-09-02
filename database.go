@@ -239,28 +239,253 @@ const (
 	sessionsSchemaFinal
 )
 
-// classifySessionsSchema determines the sessions table ownership shape from
-// pragma_table_info. The final schema must never have principal_id re-added.
+// sessionsColumn captures the schema fields of one sessions column.
+type sessionsColumn struct {
+	name    string
+	notNull bool
+	pk      int
+}
+
+// readSessionsColumns returns the sessions columns in declared order.
+func readSessionsColumns(db *sql.DB) ([]sessionsColumn, error) {
+	rows, err := db.Query(
+		`SELECT name, "notnull", pk FROM pragma_table_info('sessions') ORDER BY cid`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read sessions columns: %w", err)
+	}
+	defer rows.Close()
+
+	var cols []sessionsColumn
+	for rows.Next() {
+		var c sessionsColumn
+		if err := rows.Scan(&c.name, &c.notNull, &c.pk); err != nil {
+			return nil, fmt.Errorf("cannot scan sessions column: %w", err)
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions columns: %w", err)
+	}
+	return cols, nil
+}
+
+// sessionsFK captures one foreign key declared on the sessions table.
+type sessionsFK struct {
+	table    string
+	from     string
+	to       string
+	onDelete string
+}
+
+// readSessionsForeignKeys returns all foreign keys declared on sessions.
+func readSessionsForeignKeys(db *sql.DB) ([]sessionsFK, error) {
+	rows, err := db.Query(
+		`SELECT "table", "from", "to", "on_delete" FROM pragma_foreign_key_list('sessions')`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read sessions foreign keys: %w", err)
+	}
+	defer rows.Close()
+
+	var out []sessionsFK
+	for rows.Next() {
+		var fk sessionsFK
+		if err := rows.Scan(&fk.table, &fk.from, &fk.to, &fk.onDelete); err != nil {
+			return nil, fmt.Errorf("cannot scan sessions foreign key: %w", err)
+		}
+		out = append(out, fk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions foreign keys: %w", err)
+	}
+	return out, nil
+}
+
+// sessionsUniqueIndex captures one user-declared unique index on the sessions
+// table (origin 'u' from a UNIQUE constraint or 'c' from a CREATE UNIQUE INDEX
+// statement; never the primary key index).
+type sessionsUniqueIndex struct {
+	name string
+	cols []string
+}
+
+// readSessionsUniqueTokenIndexes returns the user-declared unique indexes on
+// the sessions table with their columns.
+func readSessionsUniqueTokenIndexes(db *sql.DB) ([]sessionsUniqueIndex, error) {
+	rows, err := db.Query(
+		`SELECT name FROM pragma_index_list('sessions') WHERE "unique"=1 AND "origin"!='pk'`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read sessions unique indexes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []sessionsUniqueIndex
+	for rows.Next() {
+		var idx sessionsUniqueIndex
+		if err := rows.Scan(&idx.name); err != nil {
+			return nil, fmt.Errorf("cannot scan sessions unique index: %w", err)
+		}
+		cols, err := credentialsIndexColumns(db, idx.name)
+		if err != nil {
+			return nil, err
+		}
+		idx.cols = cols
+		out = append(out, idx)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sessions unique indexes: %w", err)
+	}
+	return out, nil
+}
+
+// verifySessionsTokenHashUnique fails unless token_hash has a UNIQUE index.
+func verifySessionsTokenHashUnique(db *sql.DB) error {
+	indexes, err := readSessionsUniqueTokenIndexes(db)
+	if err != nil {
+		return err
+	}
+	for _, idx := range indexes {
+		if len(idx.cols) == 1 && idx.cols[0] == "token_hash" {
+			return nil
+		}
+	}
+	return unsupportedSessionsSchema("missing UNIQUE(token_hash)")
+}
+
+// unsupportedSessionsSchema returns a fail-closed error for an unrecognized
+// sessions schema. The detail is a narrow human-readable reason; no destructive
+// normalization is attempted.
+func unsupportedSessionsSchema(detail string) error {
+	return fmt.Errorf("unsupported sessions schema: %s", detail)
+}
+
+// sessionsBaseColumns is the canonical base column set shared by every
+// supported sessions generation.
+var sessionsBaseColumns = []string{"id", "token_hash", "workspace", "created_at", "expires_at"}
+
+// classifySessionsSchema positively recognizes the supported sessions table
+// ownership shapes from SQLite semantic metadata. A malformed table — hybrid
+// owner columns, wrong/missing owner FK, nullable launcher_id, a Launcher FK
+// with ON DELETE CASCADE, missing required base column, broken
+// nullability/PK/unique structure, or an unexpected ownership shape — is
+// rejected as unsupported rather than silently accepted merely because it
+// contains a launcher_id column.
 func classifySessionsSchema(db *sql.DB) (sessionsSchemaClass, error) {
-	var hasPrincipal, hasLauncher int
-	if err := db.QueryRow(
-		`SELECT
-			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='principal_id'),
-			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='launcher_id')`,
-	).Scan(&hasPrincipal, &hasLauncher); err != nil {
-		return sessionsSchemaUnsupported, fmt.Errorf("cannot check sessions schema: %w", err)
+	cols, err := readSessionsColumns(db)
+	if err != nil {
+		return sessionsSchemaUnsupported, err
 	}
+	colSet := make(map[string]sessionsColumn, len(cols))
+	for _, c := range cols {
+		colSet[c.name] = c
+	}
+
+	// Every supported generation shares the canonical base columns and their
+	// required nullability/PK invariants: id primary key; token_hash NOT NULL
+	// and unique; workspace/created_at/expires_at NOT NULL.
+	for _, name := range sessionsBaseColumns {
+		c, ok := colSet[name]
+		if !ok {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema(fmt.Sprintf("missing base column %q", name))
+		}
+		if name == "id" {
+			if c.pk != 1 {
+				return sessionsSchemaUnsupported, unsupportedSessionsSchema("id is not the primary key")
+			}
+			continue
+		}
+		if !c.notNull {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema(fmt.Sprintf("column %q must be NOT NULL", name))
+		}
+	}
+	if err := verifySessionsTokenHashUnique(db); err != nil {
+		return sessionsSchemaUnsupported, err
+	}
+
+	hasPrincipal := false
+	var principalCol sessionsColumn
+	if c, ok := colSet["principal_id"]; ok {
+		hasPrincipal = true
+		principalCol = c
+	}
+	hasLauncher := false
+	var launcherCol sessionsColumn
+	if c, ok := colSet["launcher_id"]; ok {
+		hasLauncher = true
+		launcherCol = c
+	}
+
+	// Hybrid owner columns (both principal_id and launcher_id) are never a
+	// supported generation.
+	if hasPrincipal && hasLauncher {
+		return sessionsSchemaUnsupported, unsupportedSessionsSchema("hybrid ownership columns (principal_id and launcher_id) present")
+	}
+
+	fks, err := readSessionsForeignKeys(db)
+	if err != nil {
+		return sessionsSchemaUnsupported, err
+	}
+
 	switch {
-	case hasLauncher > 0 && hasPrincipal == 0:
-		return sessionsSchemaFinal, nil
-	case hasPrincipal > 0 && hasLauncher == 0:
-		return sessionsSchemaLegacyPrincipal, nil
-	case hasPrincipal == 0 && hasLauncher == 0:
+	case !hasPrincipal && !hasLauncher:
+		if len(cols) != len(sessionsBaseColumns) {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("unexpected bare sessions column set")
+		}
+		if len(fks) != 0 {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("bare sessions schema must not declare foreign keys")
+		}
 		return sessionsSchemaLegacyBare, nil
-	default:
-		// Both present (hybrid) or any other unrecognized shape.
-		return sessionsSchemaUnsupported, nil
+
+	case hasPrincipal && !hasLauncher:
+		if len(cols) != len(sessionsBaseColumns)+1 {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("unexpected legacy-principal sessions column set")
+		}
+		if principalCol.notNull {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("column principal_id must be nullable")
+		}
+		if !hasExactSessionsFK(fks, []sessionsFK{{table: "principals", from: "principal_id", to: "id", onDelete: "NO ACTION"}}) {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("legacy-principal sessions must declare exactly one principal_id -> principals(id) foreign key with no ON DELETE CASCADE")
+		}
+		return sessionsSchemaLegacyPrincipal, nil
+
+	case !hasPrincipal && hasLauncher:
+		if len(cols) != len(sessionsBaseColumns)+1 {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("unexpected final sessions column set")
+		}
+		if !launcherCol.notNull {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("column launcher_id must be NOT NULL")
+		}
+		if !hasExactSessionsFK(fks, []sessionsFK{{table: "launchers", from: "launcher_id", to: "id", onDelete: "NO ACTION"}}) {
+			return sessionsSchemaUnsupported, unsupportedSessionsSchema("final sessions must declare exactly one launcher_id -> launchers(id) foreign key with no ON DELETE CASCADE")
+		}
+		return sessionsSchemaFinal, nil
 	}
+	return sessionsSchemaUnsupported, unsupportedSessionsSchema("unexpected ownership shape")
+}
+
+// hasExactSessionsFK reports whether the sessions table's foreign keys are
+// exactly the given set (order-insensitive). An additional FK, a missing
+// canonical FK, or a canonical FK with unexpected ON DELETE behavior is not
+// accepted.
+func hasExactSessionsFK(got, want []sessionsFK) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // credentialsSchemaClass identifies the supported credentials table shapes.

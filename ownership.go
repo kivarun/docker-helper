@@ -130,8 +130,13 @@ func insertDaemonOwnerPrincipal(db *sql.DB, username string, uid, gid int, home 
 // migrateSessionOwnership, so legacy user-mode principal_id IS NULL Sessions
 // can be attributed to the real daemon owner.
 //
-// It fails closed on any UID/GID/home conflict with an existing Principal and
-// never rewrites operator-imposed Principal policy.
+// The transparent user-mode chain is exactly: daemon-owner Principal (enabled,
+// ZERO principal_allowed_roots => collapsed to the global roots) with an
+// enabled, inherit-scope 'default' Launcher carrying ZERO launcher_allowed_roots
+// and no provisioning-time credential. An existing Principal/Launcher that
+// conflicts with this contract fails closed; operator-imposed state is never
+// silently rewritten (no auto-enable, no root deletion, no restricted->inherit
+// mutation).
 func ensureUserModeOwnership(db *sql.DB, mode DeploymentMode) (*userModeDefaultLauncher, error) {
 	if mode != ModeUser {
 		return nil, nil
@@ -155,29 +160,98 @@ func ensureUserModeOwnership(db *sql.DB, mode DeploymentMode) (*userModeDefaultL
 		return nil, fmt.Errorf("daemon-owner OS user %q has invalid GID %q", username, gidStr)
 	}
 
+	// Canonicalize the OS home once, with the same semantics used to store the
+	// daemon-owner identity, so a symlinked home resolves, stores, and compares
+	// identically across restarts (FIX B6).
+	canonicalHome, err := canonicalizeWorkspacePathForAdd(home)
+	if err != nil {
+		return nil, fmt.Errorf("daemon-owner home %q is not a valid workspace root: %w", home, err)
+	}
+
 	var principalID int64
 	existing, err := findPrincipalByUsername(db, username)
 	if errors.Is(err, ErrPrincipalNotFound) {
-		principalID, err = insertDaemonOwnerPrincipal(db, username, uid, gid, home)
+		principalID, err = insertDaemonOwnerPrincipal(db, username, uid, gid, canonicalHome)
 		if err != nil {
 			return nil, err
 		}
 	} else if err != nil {
 		return nil, err
 	} else {
-		// A Principal exists under this username; verify the stored identity
-		// matches the resolved daemon-owner OS identity before reuse.
-		if existing.UID != uid || existing.GID != gid || existing.Home != home {
-			return nil, fmt.Errorf("daemon-owner principal %q UID/GID/home conflicts with resolved OS identity", username)
+		// A Principal exists under this username; verify it still matches the
+		// transparent user-mode contract before reuse.
+		if err := validateUserModePrincipalContract(existing, username, uid, gid, canonicalHome); err != nil {
+			return nil, err
 		}
 		principalID = int64(existing.ID)
 	}
 
-	launcherID, err := ensureDefaultLauncher(db, principalID)
+	launcherID, err := ensureUserModeDefaultLauncher(db, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("cannot provision daemon-owner default Launcher: %w", err)
 	}
 	return &userModeDefaultLauncher{principalID: principalID, launcherID: launcherID, username: username}, nil
+}
+
+// validateUserModePrincipalContract fails closed unless the existing Principal
+// matches the transparent user-mode contract: enabled, ZERO principal_allowed_roots
+// rows (so its roots collapse onto the global roots), and UID/GID/home matching
+// the resolved OS daemon-owner identity.
+func validateUserModePrincipalContract(p *PrincipalWithRoots, username string, uid, gid int, home string) error {
+	if !p.Enabled {
+		return fmt.Errorf("daemon-owner principal %q is disabled; user-mode requires it enabled", username)
+	}
+	if len(p.AllowedRoots) != 0 {
+		return fmt.Errorf("daemon-owner principal %q has principal_allowed_roots rows; user-mode requires none", username)
+	}
+	if p.UID != uid || p.GID != gid || p.Home != home {
+		return fmt.Errorf("daemon-owner principal %q UID/GID/home conflicts with resolved OS identity", username)
+	}
+	return nil
+}
+
+// ensureUserModeDefaultLauncher returns the daemon-owner Principal's 'default'
+// Launcher, creating the canonical transparent Launcher if absent. If a
+// 'default' Launcher already exists it is validated against the transparent
+// user-mode contract and fails closed on conflict rather than being rewritten.
+func ensureUserModeDefaultLauncher(db *sql.DB, principalID int64) (string, error) {
+	launcherID, err := findDefaultLauncher(db, principalID)
+	if err == nil {
+		if verr := validateUserModeDefaultLauncherContract(db, launcherID); verr != nil {
+			return "", verr
+		}
+		return launcherID, nil
+	}
+	if errors.Is(err, ErrLauncherNotFound) {
+		return ensureDefaultLauncher(db, principalID)
+	}
+	return "", err
+}
+
+// validateUserModeDefaultLauncherContract fails closed unless the existing
+// 'default' Launcher matches the transparent user-mode contract: enabled,
+// scope inherit, and ZERO launcher_allowed_roots rows.
+func validateUserModeDefaultLauncherContract(db *sql.DB, launcherID string) error {
+	var enabled int
+	var scope string
+	err := db.QueryRow(`SELECT enabled, scope_mode FROM launchers WHERE id = ?`, launcherID).Scan(&enabled, &scope)
+	if err != nil {
+		return fmt.Errorf("cannot read daemon-owner default launcher: %w", err)
+	}
+	if enabled != 1 {
+		return fmt.Errorf("daemon-owner default launcher %q is disabled; user-mode requires it enabled", launcherID)
+	}
+	if scope != string(LauncherScopeInherit) {
+		return fmt.Errorf("daemon-owner default launcher %q scope %q is not inherit", launcherID, scope)
+	}
+	var rootCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM launcher_allowed_roots WHERE launcher_id = ?`, launcherID).Scan(&rootCount); err != nil {
+		return fmt.Errorf("cannot count daemon-owner default launcher allowed roots: %w", err)
+	}
+	if rootCount != 0 {
+		return fmt.Errorf("daemon-owner default launcher %q has launcher_allowed_roots rows; user-mode requires none", launcherID)
+	}
+	return nil
 }
 
 func parseInt(s string) (int, error) {
@@ -228,7 +302,12 @@ func migrateSessionOwnership(db *sql.DB, mode DeploymentMode, userModeDefault *u
 		// Already at the final Launcher-owned schema; never re-add principal_id.
 		return &sessionMigrationResult{}, nil
 	}
-	if class != sessionsSchemaLegacyPrincipal && class != sessionsSchemaLegacyBare {
+	// The bare R1 shape is owned by initializeDatabase, which adds
+	// principal_id before this rebuild runs. This function therefore only ever
+	// consumes the legacy principal-owned source (principal_id present,
+	// launcher_id absent) or the final schema handled above; anything else is
+	// unsupported and fails closed.
+	if class != sessionsSchemaLegacyPrincipal {
 		return nil, fmt.Errorf("unsupported sessions schema for ownership migration")
 	}
 
@@ -356,6 +435,15 @@ func migrateSessionOwnership(db *sql.DB, mode DeploymentMode, userModeDefault *u
 		return nil, fmt.Errorf("cannot rename sessions table: %w", err)
 	}
 
+	// Integrity gate before commit: the rebuilt sessions table must have no
+	// foreign-key violations (e.g. a dangling launcher_id). Fail (and roll back,
+	// leaving the legacy table intact) rather than commit a corrupt result. This
+	// is independent of whether FK enforcement is on for this connection: the
+	// check reports existing violations even when enforcement is disabled.
+	if err := checkSessionsForeignKeys(tx); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("cannot commit session ownership migration: %w", err)
 	}
@@ -366,4 +454,22 @@ func migrateSessionOwnership(db *sql.DB, mode DeploymentMode, userModeDefault *u
 		invalidated:         nullCount - attributedUser,
 	}
 	return result, nil
+}
+
+// checkSessionsForeignKeys fails the migration if any foreign-key violation
+// exists in the rebuilt database. PRAGMA foreign_key_check returns one row per
+// violation regardless of whether FK enforcement is enabled on this
+// connection; no rows means integrity holds.
+func checkSessionsForeignKeys(tx *sql.Tx) error {
+	var table, parent string
+	var rowid int64
+	var fkid int
+	err := tx.QueryRow(`PRAGMA foreign_key_check`).Scan(&table, &rowid, &parent, &fkid)
+	if err == nil {
+		return fmt.Errorf("session ownership migration integrity check failed: foreign key violation in %s (rowid %d, parent %s, fkid %d)", table, rowid, parent, fkid)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return fmt.Errorf("cannot run session ownership integrity check: %w", err)
 }

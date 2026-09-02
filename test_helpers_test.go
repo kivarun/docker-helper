@@ -256,24 +256,29 @@ func newTestApp(t *testing.T) *App {
 	// Provision a user-mode daemon-owner Principal + 'default' Launcher so that
 	// session creation through the shared model works without a manual owner.
 	// The daemon-owner Principal has no allowed-root rows (collapsed global).
+	// The owner identity mirrors the real daemon process identity so that
+	// session execution UID:GID resolves to the daemon's own identity (the
+	// same invariant the production user-mode Owner chain guarantees).
 	home := filepath.Join(allowedRoot, "daemon-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create daemon-owner home: %v", err)
 	}
-	owner := provisionTestOwner(t, db, allowedRoot, home)
+	owner := provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 	app.userModeDefault = owner
 
 	return app
 }
 
-// provisionTestOwner provisions an enabled Principal and its 'default'
-// inherit-scope Launcher via the production ownership helpers. The Principal is
-// created with no allowed-root rows (collapsed global policy). home must be a
-// valid, non-forbidden absolute directory.
-func provisionTestOwner(t *testing.T, db *sql.DB, allowedRoot, home string) *userModeDefaultLauncher {
+// provisionTestOwner provisions an enabled Principal (with the given explicit
+// uid/gid identity) and its 'default' inherit-scope Launcher via the production
+// ownership helpers. The Principal is created with no allowed-root rows
+// (collapsed global policy). home must be a valid, non-forbidden absolute
+// directory. Execution identity is owned explicitly by the caller so identity
+// tests control the exact uid/gid rather than relying on an implicit owner.
+func provisionTestOwner(t *testing.T, db *sql.DB, allowedRoot, home string, uid, gid int) *userModeDefaultLauncher {
 	t.Helper()
 	const username = "dhtestowner"
-	pid, err := insertDaemonOwnerPrincipal(db, username, 1000, 1000, home)
+	pid, err := insertDaemonOwnerPrincipal(db, username, uid, gid, home)
 	if err != nil {
 		t.Fatalf("cannot provision test owner principal: %v", err)
 	}

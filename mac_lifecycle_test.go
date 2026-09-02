@@ -140,7 +140,7 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create daemon-owner home: %v", err)
 	}
-	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home)
+	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid())
 
 	return app, mac, driver
 }
@@ -269,7 +269,7 @@ func testMACLauncherID(t *testing.T, db *sql.DB) string {
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create launcher home: %v", err)
 	}
-	return provisionTestOwner(t, db, allowedRoot, home).launcherID
+	return provisionTestOwner(t, db, allowedRoot, home, os.Getuid(), os.Getgid()).launcherID
 }
 
 // TestMACLifecycleWarningUsesOperationalLogger verifies that MAC

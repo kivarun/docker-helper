@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"testing"
 )
@@ -347,9 +346,16 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 	}
 	op.Wait()
 
+	// The expected Docker --user identity is the owning Principal's UID:GID,
+	// resolved through the Session's Launcher, not an assumed daemon identity.
+	expectedUID, expectedGID, err := resolveSessionExecutionIdentity(app.DB, &result.Session)
+	if err != nil {
+		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
+	}
+
 	// --config is first, then --cidfile is inserted after --user, before other options.
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
-	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--security-opt", "label=disable"}
+	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--user", fmt.Sprintf("%d:%d", expectedUID, expectedGID), "--security-opt", "label=disable"}
 	for i, expected := range baseArgs {
 		if capturedArgs[i] != expected {
 			t.Fatalf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])
