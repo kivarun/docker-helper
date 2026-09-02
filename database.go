@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -200,6 +201,259 @@ func initializeDatabase(db *sql.DB) error {
 	return nil
 }
 
+// credentialsSchemaClass identifies the supported credentials table shapes.
+type credentialsSchemaClass int
+
+const (
+	// credentialsSchemaUnsupported is any schema the classifier does not
+	// recognize. Database initialization fails closed rather than guessing.
+	credentialsSchemaUnsupported credentialsSchemaClass = iota
+	// credentialsSchemaPre21 is the supported Principal-only source schema
+	// (with or without the historical table-level UNIQUE(principal_id, name)).
+	credentialsSchemaPre21
+	// credentialsSchemaFinal is the canonical concrete-owner schema.
+	credentialsSchemaFinal
+)
+
+// unsupportedCredentialsSchema returns a clear fail-closed error for an
+// unrecognized credentials schema. The detail is a narrow human-readable
+// reason; no destructive normalization is attempted.
+func unsupportedCredentialsSchema(detail string) error {
+	return fmt.Errorf("unsupported credentials schema: %s", detail)
+}
+
+// credentialsColumn captures the schema fields of one column.
+type credentialsColumn struct {
+	name    string
+	notNull bool
+	pk      int
+}
+
+// readCredentialsColumns returns the credentials columns in declared order.
+func readCredentialsColumns(db *sql.DB) ([]credentialsColumn, error) {
+	rows, err := db.Query(
+		`SELECT name, "notnull", pk FROM pragma_table_info('credentials') ORDER BY cid`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read credentials columns: %w", err)
+	}
+	defer rows.Close()
+
+	var cols []credentialsColumn
+	for rows.Next() {
+		var c credentialsColumn
+		if err := rows.Scan(&c.name, &c.notNull, &c.pk); err != nil {
+			return nil, fmt.Errorf("cannot scan credentials column: %w", err)
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate credentials columns: %w", err)
+	}
+	return cols, nil
+}
+
+// verifyCredentialsForeignKeys fails unless the schema declares the concrete
+// owner FKs: principal_id -> principals(id) and launcher_id -> launchers(id).
+func verifyCredentialsForeignKeys(db *sql.DB) error {
+	rows, err := db.Query(
+		`SELECT "table", "from", "to" FROM pragma_foreign_key_list('credentials')`,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot read credentials foreign keys: %w", err)
+	}
+	defer rows.Close()
+
+	foundPrincipal := false
+	foundLauncher := false
+	for rows.Next() {
+		var tbl, from, to string
+		if err := rows.Scan(&tbl, &from, &to); err != nil {
+			return fmt.Errorf("cannot scan credentials foreign key: %w", err)
+		}
+		if tbl == "principals" && from == "principal_id" && to == "id" {
+			foundPrincipal = true
+		}
+		if tbl == "launchers" && from == "launcher_id" && to == "id" {
+			foundLauncher = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate credentials foreign keys: %w", err)
+	}
+	if !foundPrincipal {
+		return unsupportedCredentialsSchema("missing principal_id foreign key")
+	}
+	if !foundLauncher {
+		return unsupportedCredentialsSchema("missing launcher_id foreign key")
+	}
+	return nil
+}
+
+// indexColumns returns the column names covered by the named index.
+func indexColumns(db *sql.DB, idxName string) ([]string, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_index_info(?)`, idxName)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read index %q columns: %w", idxName, err)
+	}
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var name sql.NullString
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("cannot scan index %q column: %w", idxName, err)
+		}
+		if name.Valid {
+			cols = append(cols, name.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate index %q columns: %w", idxName, err)
+	}
+	return cols, nil
+}
+
+// hasUniqueIndexOnColumn reports whether a user-declared UNIQUE index covers
+// exactly the given column.
+func hasUniqueIndexOnColumn(db *sql.DB, col string) (bool, error) {
+	rows, err := db.Query(
+		`SELECT name FROM pragma_index_list('credentials') WHERE "unique"=1 AND "origin"='u'`,
+	)
+	if err != nil {
+		return false, fmt.Errorf("cannot read credentials indexes: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var idxName string
+		if err := rows.Scan(&idxName); err != nil {
+			return false, fmt.Errorf("cannot scan credentials index: %w", err)
+		}
+		cols, err := indexColumns(db, idxName)
+		if err != nil {
+			return false, err
+		}
+		if len(cols) == 1 && cols[0] == col {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate credentials indexes: %w", err)
+	}
+	return false, nil
+}
+
+// verifyCredentialsOwnerCheck fails unless the credentials table declares the
+// concrete-owner CHECK. SQLite exposes CHECK constraints only through the stored
+// table DDL, so sqlite_master is inspected here (normalized) and nowhere else.
+func verifyCredentialsOwnerCheck(db *sql.DB) error {
+	var ddl sql.NullString
+	err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='credentials'`,
+	).Scan(&ddl)
+	if err != nil {
+		return fmt.Errorf("cannot inspect credentials table definition: %w", err)
+	}
+	if !ddl.Valid || ddl.String == "" {
+		return unsupportedCredentialsSchema("credentials table definition unavailable")
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(ddl.String), ""))
+	if !strings.Contains(normalized, "check(") {
+		return unsupportedCredentialsSchema("missing concrete-owner check")
+	}
+	if !strings.Contains(normalized, "principal_idisnotnullandlauncher_idisnullandnameisnotnull") {
+		return unsupportedCredentialsSchema("missing Principal credential owner check")
+	}
+	if !strings.Contains(normalized, "principal_idisnullandlauncher_idisnotnullandnameisnull") {
+		return unsupportedCredentialsSchema("missing Launcher credential owner check")
+	}
+	return nil
+}
+
+// classifyCredentialsSchema classifies the credentials table as a supported
+// migration source (pre-2.1 Principal-only), the final concrete-owner schema,
+// or unsupported. A mere launcher_id column is not enough to be considered
+// final: the full structural invariants (nullable owner/name shape, concrete
+// owner foreign keys, UNIQUE(launcher_id), and the concrete-owner CHECK) must
+// hold, otherwise initialization fails closed instead of accepting a
+// partial/corrupt schema as final.
+func classifyCredentialsSchema(db *sql.DB) (credentialsSchemaClass, error) {
+	cols, err := readCredentialsColumns(db)
+	if err != nil {
+		return credentialsSchemaUnsupported, err
+	}
+
+	colSet := make(map[string]credentialsColumn, len(cols))
+	for _, c := range cols {
+		colSet[c.name] = c
+	}
+
+	if _, hasLauncher := colSet["launcher_id"]; !hasLauncher {
+		// Pre-2.1 Principal-only source. Must be exactly the six canonical
+		// columns with the Principal-only required semantics.
+		required := []string{"id", "principal_id", "name", "token_hash", "created_at", "revoked_at"}
+		if len(cols) != len(required) {
+			return credentialsSchemaUnsupported, unsupportedCredentialsSchema("unexpected credentials column set")
+		}
+		for _, name := range required {
+			if _, ok := colSet[name]; !ok {
+				return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("missing column %q", name))
+			}
+		}
+		if colSet["id"].pk != 1 {
+			return credentialsSchemaUnsupported, unsupportedCredentialsSchema("id is not the primary key")
+		}
+		for _, name := range []string{"principal_id", "name", "token_hash", "created_at"} {
+			if !colSet[name].notNull {
+				return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("column %q must be NOT NULL", name))
+			}
+		}
+		return credentialsSchemaPre21, nil
+	}
+
+	// launcher_id present -> must be the final concrete-owner schema.
+	required := []string{"id", "principal_id", "launcher_id", "name", "token_hash", "created_at", "revoked_at"}
+	if len(cols) != len(required) {
+		return credentialsSchemaUnsupported, unsupportedCredentialsSchema("unexpected credentials column set")
+	}
+	for _, name := range required {
+		if _, ok := colSet[name]; !ok {
+			return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("missing column %q", name))
+		}
+	}
+	// Owner/name columns are nullable in the final schema.
+	for _, name := range []string{"principal_id", "launcher_id", "name"} {
+		if colSet[name].notNull {
+			return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("column %q must be nullable", name))
+		}
+	}
+	if colSet["id"].pk != 1 {
+		return credentialsSchemaUnsupported, unsupportedCredentialsSchema("id is not the primary key")
+	}
+	for _, name := range []string{"token_hash", "created_at"} {
+		if !colSet[name].notNull {
+			return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("column %q must be NOT NULL", name))
+		}
+	}
+	if err := verifyCredentialsForeignKeys(db); err != nil {
+		return credentialsSchemaUnsupported, err
+	}
+	for _, name := range []string{"launcher_id", "token_hash"} {
+		ok, err := hasUniqueIndexOnColumn(db, name)
+		if err != nil {
+			return credentialsSchemaUnsupported, err
+		}
+		if !ok {
+			return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("missing UNIQUE(%s)", name))
+		}
+	}
+	if err := verifyCredentialsOwnerCheck(db); err != nil {
+		return credentialsSchemaUnsupported, err
+	}
+	return credentialsSchemaFinal, nil
+}
+
 // migrateCredentialsToConcreteOwnerSchema migrates a pre-2.1 credentials table
 // to the final single-table, single-concrete-owner schema in one atomic
 // transaction. Every existing Principal credential row is preserved exactly:
@@ -207,26 +461,24 @@ func initializeDatabase(db *sql.DB) error {
 // and launcher_id is set to NULL. No Launcher credential is fabricated and no
 // existing credential is issued or revoked during migration.
 //
-// Detection is by schema introspection: if the credentials table already has
-// the launcher_id column it is already at the final schema and this is a no-op.
-// This covers both the current v2.0 schema (principal_id NOT NULL, partial
-// active-name index) and the older schema with a table-level
-// UNIQUE(principal_id, name): both lack launcher_id and are rebuilt. The
-// table-level hard UNIQUE is dropped by the rebuild; active-name uniqueness is
-// re-enforced by the partial index created by the caller after this returns.
+// The schema is classified before any mutation. A valid final concrete-owner
+// schema is accepted unchanged; an unsupported or partial schema fails closed
+// and is never destructively normalized. The pre-2.1 source covers both the
+// current v2.0 schema (principal_id NOT NULL, partial active-name index) and
+// the older schema with a table-level UNIQUE(principal_id, name): both lack
+// launcher_id and are rebuilt. The table-level hard UNIQUE is dropped by the
+// rebuild; active-name uniqueness is re-enforced by the partial index created
+// by the caller after this returns.
 //
 // A crash before commit leaves the old table usable; a crash after commit
-// leaves the final table usable and the next call detects the final schema.
+// leaves the final table usable and the next call classifies it as final.
 func migrateCredentialsToConcreteOwnerSchema(db *sql.DB) error {
-	var launcherCol int
-	err := db.QueryRow(
-		`SELECT COUNT(*) FROM pragma_table_info('credentials') WHERE name='launcher_id';`,
-	).Scan(&launcherCol)
+	class, err := classifyCredentialsSchema(db)
 	if err != nil {
-		return fmt.Errorf("cannot inspect credentials schema: %w", err)
+		return err
 	}
-	if launcherCol > 0 {
-		// Already at the final concrete-owner schema.
+	if class == credentialsSchemaFinal {
+		// Already at the final concrete-owner schema; never mutate it.
 		return nil
 	}
 

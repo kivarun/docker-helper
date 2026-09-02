@@ -384,3 +384,178 @@ func nullOrInt(v int64) sql.NullInt64 {
 	}
 	return sql.NullInt64{Int64: v, Valid: true}
 }
+
+// TestCredentialsSchemaClassifierSupported verifies the classifier accepts both
+// the pre-2.1 Principal-only source schema and the valid final concrete-owner
+// schema.
+func TestCredentialsSchemaClassifierSupported(t *testing.T) {
+	// Case 1: old Principal-only schema classifies as a migration source.
+	dir := t.TempDir()
+	db, err := openDatabase(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER
+		);
+	`); err != nil {
+		t.Fatalf("create v2.0 schema: %v", err)
+	}
+	class, err := classifyCredentialsSchema(db)
+	if err != nil {
+		t.Fatalf("classify pre-2.1 schema: %v", err)
+	}
+	if class != credentialsSchemaPre21 {
+		t.Errorf("expected pre-2.1 class, got %v", class)
+	}
+	db.Close()
+
+	// Case 2: valid final schema classifies as final and stays untouched.
+	final := openFreshTestDB(t)
+	class, err = classifyCredentialsSchema(final)
+	if err != nil {
+		t.Fatalf("classify final schema: %v", err)
+	}
+	if class != credentialsSchemaFinal {
+		t.Errorf("expected final class, got %v", class)
+	}
+	// A valid final schema must not be mutated by a repeated migration.
+	if err := migrateCredentialsToConcreteOwnerSchema(final); err != nil {
+		t.Fatalf("re-migrate final schema: %v", err)
+	}
+	if class, err = classifyCredentialsSchema(final); err != nil {
+		t.Fatalf("reclassify final schema: %v", err)
+	}
+	if class != credentialsSchemaFinal {
+		t.Errorf("expected final class after re-migrate, got %v", class)
+	}
+}
+
+// mustFailClosedOnCredentialsSchema builds a credentials table with the given
+// DDL and asserts initializeDatabase fails closed with a clear
+// "unsupported credentials schema" error rather than accepting or normalizing it.
+func mustFailClosedOnCredentialsSchema(t *testing.T, ddl string) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := openDatabase(dir + "/test.db")
+	if err != nil {
+		t.Fatalf("openDatabase() error: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(ddl); err != nil {
+		t.Fatalf("create credentials schema: %v", err)
+	}
+	err = initializeDatabase(db)
+	if err == nil {
+		t.Fatalf("expected initializeDatabase to fail closed on unsupported credentials schema")
+	}
+	if !strings.Contains(err.Error(), "unsupported credentials schema") {
+		t.Errorf("expected clear unsupported credentials schema error, got: %v", err)
+	}
+}
+
+// TestCredentialsSchemaPartialLauncherFailsClosed: launcher_id added manually
+// but the final constraints (nullable owner/name, FKs, UNIQUE, CHECK) are
+// absent. The database must fail closed rather than accept it as final.
+func TestCredentialsSchemaPartialLauncherFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			launcher_id TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
+		);
+	`)
+}
+
+// TestCredentialsSchemaLauncherFKMissingFailsClosed: launcher_id present but the
+// launcher_id foreign key is missing.
+func TestCredentialsSchemaLauncherFKMissingFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
+		);
+	`)
+}
+
+// TestCredentialsSchemaLauncherUniqueMissingFailsClosed: launcher_id present but
+// UNIQUE(launcher_id) is missing.
+func TestCredentialsSchemaLauncherUniqueMissingFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
+		);
+	`)
+}
+
+// TestCredentialsSchemaCheckMissingFailsClosed: launcher_id present but the
+// concrete-owner CHECK is missing.
+func TestCredentialsSchemaCheckMissingFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id)
+		);
+	`)
+}
+
+// TestCredentialsSchemaExtraColumnFailsClosed: an unsupported pre-2.1 schema
+// with an unexpected extra column must fail closed rather than silently
+// dropping that column through migration.
+func TestCredentialsSchemaExtraColumnFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			extra_column TEXT
+		);
+	`)
+}
