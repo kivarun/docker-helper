@@ -166,8 +166,14 @@ reg_setup_principal() {
     -H 'Content-Type: application/json' \
     -d '{"scope":"inherit"}' "http://localhost/principals/$user/launchers" 2>/dev/null || true)"
   launcher_json="$(cat /tmp/reg-launcher.json 2>/dev/null || true)"
-  printf '%s\n' "$launcher_json" | grep -q '"ok":true' \
-    || { echo "error: default launcher create for principal '$user' failed (http=$launcher_http)" >&2; return 1; }
+  # Idempotent: a fresh create reports ok:true; reusing a principal whose
+  # default Launcher already exists (e.g. the same guest reused across stages)
+  # reports 409 launcher_exists. Either confirms the Launcher is present.
+  if ! printf '%s\n' "$launcher_json" | grep -q '"ok":true' \
+    && ! printf '%s\n' "$launcher_json" | grep -q '"launcher_exists"'; then
+    echo "error: default launcher create for principal '$user' failed (http=$launcher_http)" >&2
+    return 1
+  fi
   printf '%s' "$home"
 }
 

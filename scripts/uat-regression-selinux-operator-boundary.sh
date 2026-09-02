@@ -52,12 +52,20 @@ fi
 RULE_COUNT_BEFORE="$(semanage fcontext -l -C 2>/dev/null | grep -Fc "$BND")"
 reg_info "operator fcontext rules matching $BND before session: $RULE_COUNT_BEFORE"
 
+# --- Session owner (principal + default Launcher + credential) -----------------------
+# A Session owner is always a Launcher; create the principal Session through the
+# shared lib (principal + default Launcher + credential) so it uses the existing
+# operator boundary under the final ownership model.
+SEL_P="selbnd"; SEL_CRED="/tmp/selbnd.tok"
+reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
+
 # --- Session uses the existing compatible coverage --------------------------------------
-SESS_JSON="$(dh session create --system --workspace "$BND/ws" --json 2>&1)" || {
-  reg_fail "session create could not use the operator boundary: $(printf '%s' "$SESS_JSON" | redact | head -3)"
+reg_session "$SEL_CRED" "$BND/ws" || {
+  reg_fail "session create could not use the operator boundary"
   reg_result
 }
-SID="$(printf '%s' "$SESS_JSON" | json_field id)"
+SID="$REG_SESSION_ID"
 [ -n "$SID" ] || { reg_fail "session create returned no id"; reg_result; }
 reg_ok "session created inside the operator-owned boundary"
 

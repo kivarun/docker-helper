@@ -86,13 +86,21 @@ reg_ok "temporary permissive docker_helper_t active (reversible; removed on exit
 AVC_START="$(date '+%m/%d/%Y %H:%M:%S')"
 reg_info "AVC evidence window starts $AVC_START"
 
+# --- Session owner (principal + default Launcher + credential) -------------------------
+# A Session owner is always a Launcher. Create the principal Session through the
+# shared lib (principal + default Launcher + credential) so the real lifecycle
+# (relabel usr_t -> docker_helper_workspace_t and back) is exercised under the
+# final ownership model, not a selector-less admin Session.
+SEL_P="selavc"; SEL_CRED="/tmp/selavc.tok"
+reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
+
 # --- REAL lifecycle: session create (initial relabel usr_t -> workspace_t) ----------
-SESS_JSON="$(dh session create --system --workspace "$WS" --json 2>&1)" || {
-  reg_fail "session create failed even with docker_helper_t permissive: $(printf '%s' "$SESS_JSON" | redact | head -3)"
+reg_session "$SEL_CRED" "$WS" || {
+  reg_fail "session create failed even with docker_helper_t permissive"
   reg_result
 }
-SID="$(printf '%s' "$SESS_JSON" | json_field id)"
-STOK="$(printf '%s' "$SESS_JSON" | json_field token)"
+SID="$REG_SESSION_ID"; STOK="$REG_SESSION_TOKEN"
 [ -n "$SID" ] && [ -n "$STOK" ] || { reg_fail "session create returned no id/token"; reg_result; }
 reg_ok "session created (initial relabel usr_t -> docker_helper_workspace_t completed)"
 

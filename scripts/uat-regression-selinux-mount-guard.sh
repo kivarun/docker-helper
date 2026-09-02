@@ -72,7 +72,14 @@ if ! mount --bind "$OUT" "$WS/mnt" 2>/dev/null; then
 fi
 
 # --- real Session create must be rejected by the guard ----------------------------
-SESS_JSON="$(dh session create --system --workspace "$WS" --json 2>&1)"
+# A Session owner is always a Launcher. Establish the principal's default Launcher
+# + a credential (shared lib) and create the Session with that credential, so the
+# create actually reaches the mount-boundary guard instead of being rejected as a
+# selector-less admin Session (missing_launcher_selector).
+SEL_P="selguard"; SEL_CRED="/tmp/selguard.tok"
+reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
+SESS_JSON="$(dh session create --system --token-file "$SEL_CRED" --workspace "$WS" --json 2>&1)"
 SESS_EC=$?
 if [ "$SESS_EC" -eq 0 ]; then
   reg_fail "session create unexpectedly SUCCEEDED despite a mount beneath the workspace"

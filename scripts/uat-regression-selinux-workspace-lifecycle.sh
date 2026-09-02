@@ -59,13 +59,22 @@ mkdir -p "$WS/rw"
 chmod 0755 "$WS" "$WS/rw"
 reg_info "workspace: $WS"
 
+# --- session owner (principal + default Launcher + credential) ---------------------
+# Under the final ownership model a Session owner is always a Launcher and a
+# selector-less principal Session resolves to the principal's default Launcher.
+# Establish one (via the shared lib) and create the Session with its credential
+# so authorization + the /opt workspace MAC lifecycle are actually exercised
+# (never a selector-less admin Session, which the model now rejects).
+SEL_P="selws"; SEL_CRED="/tmp/selws.tok"
+reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; reg_result; }
+reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
+
 # --- session creation ---------------------------------------------------------------
-SESS_JSON="$(dh session create --system --workspace "$WS" --json 2>&1)" || {
-  reg_fail "session create failed (authorization permits /opt): $(printf '%s' "$SESS_JSON" | redact | head -3)"
+reg_session "$SEL_CRED" "$WS" || {
+  reg_fail "session create failed (authorization permits /opt)"
   reg_result
 }
-SID="$(printf '%s' "$SESS_JSON" | json_field id)"
-STOK="$(printf '%s' "$SESS_JSON" | json_field token)"
+SID="$REG_SESSION_ID"; STOK="$REG_SESSION_TOKEN"
 [ -n "$SID" ] && [ -n "$STOK" ] || { reg_fail "session create returned no id/token"; reg_result; }
 reg_ok "session created under /opt (authorization + MAC preparation)"
 
