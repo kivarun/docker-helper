@@ -142,13 +142,32 @@ dh() { /usr/bin/docker-helper "$@"; }
 # reg_setup_principal USER creates (or reuses) the OS user + docker-helper
 # principal (enabled), and prints the user's home directory.
 reg_setup_principal() {
-  local user="$1" home
+  local user="$1" home admin_token launcher_http launcher_json
   if ! getent passwd "$user" >/dev/null 2>&1; then
     useradd -m -s /bin/bash "$user" || return 1
   fi
   home="$(getent passwd "$user" | cut -d: -f6)"
   dh principal create --system "$user" >/dev/null 2>&1 || true
   dh principal set --system "$user" enabled true >/dev/null 2>&1 || true
+  # Final ownership model: a selector-less principal Session resolves to the
+  # principal's inherit-scope 'default' Launcher, so that Launcher must exist
+  # before any reg_session. There is no Launcher CLI command, so the admin
+  # creates it over the raw control-plane API using the system admin token
+  # (never printed; sent only as an Authorization header). The regression
+  # runners always exercise the candidate release, which implements the
+  # Launcher API, so the create must report ok:true.
+  admin_token="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+  if [ -z "$admin_token" ]; then
+    echo "error: could not read the admin token from /etc/docker-helper/admin.token" >&2
+    return 1
+  fi
+  launcher_http="$(curl --silent --output /tmp/reg-launcher.json --write-out '%{http_code}' --max-time 5 \
+    --unix-socket /run/docker-helper/docker-helper.sock -H "Authorization: Bearer $admin_token" \
+    -H 'Content-Type: application/json' \
+    -d '{"scope":"inherit"}' "http://localhost/principals/$user/launchers" 2>/dev/null || true)"
+  launcher_json="$(cat /tmp/reg-launcher.json 2>/dev/null || true)"
+  printf '%s\n' "$launcher_json" | grep -q '"ok":true' \
+    || { echo "error: default launcher create for principal '$user' failed (http=$launcher_http)" >&2; return 1; }
   printf '%s' "$home"
 }
 
