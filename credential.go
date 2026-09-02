@@ -29,9 +29,11 @@ type CredentialWithPrincipal struct {
 	PrincipalName string
 }
 
-// credentialToken* define the single internal Principal-credential token
-// format: a random 32-byte (256-bit) entropy value, lowercase-hex encoded and
-// prefixed with "dhc_". The generator and the install-time validator both
+// credentialToken* define the single internal credential token format: a
+// random 32-byte (256-bit) entropy value, lowercase-hex encoded and prefixed
+// with "dhc_". The same bearer format is used for Principal and Launcher
+// credentials; the concrete owner is determined from persistent state, never
+// from a bearer prefix. The generator and the install-time validator both
 // consume this definition.
 const (
 	credentialTokenPrefix       = "dhc_"
@@ -228,6 +230,10 @@ var ErrPrincipalDisabled = errors.New("principal disabled")
 // ErrCredentialRevoked is returned when the credential has been revoked.
 var ErrCredentialRevoked = errors.New("credential revoked")
 
+// ErrLauncherDisabled is returned when a Launcher credential's owning Launcher
+// is disabled.
+var ErrLauncherDisabled = errors.New("launcher disabled")
+
 // PrincipalCredentialAuth contains the information needed to authorize a principal request.
 type PrincipalCredentialAuth struct {
 	PrincipalID           int64
@@ -236,26 +242,48 @@ type PrincipalCredentialAuth struct {
 	PrincipalAllowedRoots []string
 }
 
-// authenticateCredential looks up a bearer token as a Principal credential.
-// Returns the authenticated Principal and Principal allowed roots on success.
+// LauncherCredentialAuth contains the information needed to authorize a
+// Launcher credential. It carries only narrow provenance/authorization fields:
+// the owning Launcher, the credential, and the derived owning Principal. A
+// Launcher credential is NOT yet authorized for Session control in this stage.
+type LauncherCredentialAuth struct {
+	LauncherID    string
+	CredentialID  string
+	PrincipalID   int64
+	PrincipalName string
+	LauncherName  string
+}
+
+// credentialAuthResult is the discriminated result of a single credential
+// token lookup. Exactly one of Principal or Launcher is set, determined from
+// persistent state. It is authentication plumbing only, not a generic domain
+// Owner hierarchy.
+type credentialAuthResult struct {
+	Principal *PrincipalCredentialAuth
+	Launcher  *LauncherCredentialAuth
+}
+
+// authenticateCredential determines the concrete owner of a bearer token from
+// persistent state in a single token lookup. Returns the discriminated result
+// on success.
 // Returns ErrCredentialNotFound for unknown token.
 // Returns ErrCredentialRevoked for revoked credentials.
 // Returns ErrPrincipalDisabled for disabled principals.
-func authenticateCredential(db *sql.DB, token string) (*PrincipalCredentialAuth, error) {
+// Returns ErrLauncherDisabled for disabled Launchers.
+func authenticateCredential(db *sql.DB, token string) (*credentialAuthResult, error) {
 	tokenHash := hashCredentialToken(token)
 
-	var credID, principalName string
-	var principalID int64
+	var credID string
+	var principalID sql.NullInt64
+	var launcherID sql.NullString
 	var revokedAt sql.NullInt64
-	var enabled int
 	row := db.QueryRow(
-		`SELECT c.id, p.id, p.username, c.revoked_at, p.enabled
+		`SELECT c.id, c.principal_id, c.launcher_id, c.revoked_at
 		 FROM credentials c
-		 JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`,
 		tokenHash,
 	)
-	err := row.Scan(&credID, &principalID, &principalName, &revokedAt, &enabled)
+	err := row.Scan(&credID, &principalID, &launcherID, &revokedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("credential not found: %w", ErrCredentialNotFound)
@@ -267,6 +295,35 @@ func authenticateCredential(db *sql.DB, token string) (*PrincipalCredentialAuth,
 		return nil, fmt.Errorf("credential revoked: %w", ErrCredentialRevoked)
 	}
 
+	// A non-null launcher_id means the concrete owner is a Launcher.
+	if launcherID.Valid {
+		return authenticateLauncherCredentialOwner(db, credID, launcherID.String)
+	}
+
+	// Otherwise the concrete owner is a Principal (principal_id IS NOT NULL per
+	// the concrete-owner CHECK).
+	if !principalID.Valid {
+		return nil, fmt.Errorf("credential not found: %w", ErrCredentialNotFound)
+	}
+	return authenticatePrincipalCredentialOwner(db, credID, principalID.Int64)
+}
+
+// authenticatePrincipalCredentialOwner completes authentication for a
+// Principal-owned credential, preserving the existing Principal credential
+// semantics including allowed roots.
+func authenticatePrincipalCredentialOwner(db *sql.DB, credID string, principalID int64) (*credentialAuthResult, error) {
+	var principalName string
+	var enabled int
+	err := db.QueryRow(
+		`SELECT username, enabled FROM principals WHERE id = ?`,
+		principalID,
+	).Scan(&principalName, &enabled)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("principal not found: %w", ErrCredentialNotFound)
+		}
+		return nil, fmt.Errorf("cannot authenticate credential: %w", err)
+	}
 	if enabled == 0 {
 		return nil, ErrPrincipalDisabled
 	}
@@ -295,10 +352,52 @@ func authenticateCredential(db *sql.DB, token string) (*PrincipalCredentialAuth,
 		return nil, fmt.Errorf("iterate allowed roots: %w", err)
 	}
 
-	return &PrincipalCredentialAuth{
-		PrincipalID:           principalID,
-		PrincipalName:         principalName,
-		CredentialID:          credID,
-		PrincipalAllowedRoots: principalAllowedRoots,
+	return &credentialAuthResult{
+		Principal: &PrincipalCredentialAuth{
+			PrincipalID:           principalID,
+			PrincipalName:         principalName,
+			CredentialID:          credID,
+			PrincipalAllowedRoots: principalAllowedRoots,
+		},
+	}, nil
+}
+
+// authenticateLauncherCredentialOwner completes authentication for a
+// Launcher-owned credential.
+func authenticateLauncherCredentialOwner(db *sql.DB, credID, launcherID string) (*credentialAuthResult, error) {
+	var launcherName string
+	var launcherEnabled int
+	var principalID int64
+	var principalName string
+	var principalEnabled int
+	err := db.QueryRow(
+		`SELECT l.name, l.enabled, l.principal_id, p.username, p.enabled
+		 FROM launchers l
+		 JOIN principals p ON p.id = l.principal_id
+		 WHERE l.id = ?`,
+		launcherID,
+	).Scan(&launcherName, &launcherEnabled, &principalID, &principalName, &principalEnabled)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Launcher deleted/missing: cannot authenticate. Returned
+			// non-disclosing, the same as an unknown token.
+			return nil, fmt.Errorf("credential not found: %w", ErrCredentialNotFound)
+		}
+		return nil, fmt.Errorf("cannot authenticate credential: %w", err)
+	}
+	if launcherEnabled == 0 {
+		return nil, ErrLauncherDisabled
+	}
+	if principalEnabled == 0 {
+		return nil, ErrPrincipalDisabled
+	}
+	return &credentialAuthResult{
+		Launcher: &LauncherCredentialAuth{
+			LauncherID:    launcherID,
+			CredentialID:  credID,
+			PrincipalID:   principalID,
+			PrincipalName: principalName,
+			LauncherName:  launcherName,
+		},
 	}, nil
 }

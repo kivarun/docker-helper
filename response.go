@@ -122,6 +122,17 @@ func writeUnauthorizedSessionControl(ctx context.Context, w http.ResponseWriter)
 	})
 }
 
+// writeUnauthorizedLauncherControl writes the non-disclosing unauthorized
+// response for the Launcher control plane.
+func writeUnauthorizedLauncherControl(ctx context.Context, w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeJSON(ctx, w, http.StatusUnauthorized, response{
+		OK:      false,
+		Code:    "unauthorized",
+		Message: "Authentication required for launcher management.",
+	})
+}
+
 func writeAuthFailure(ctx context.Context, r *http.Request, result string) {
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:  "auth.failure",

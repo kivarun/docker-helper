@@ -2789,8 +2789,11 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticateCredential: %v", err)
 	}
-	stalePrincipalID := auth.PrincipalID
-	staleAllowedRoots := auth.PrincipalAllowedRoots
+	if auth.Principal == nil {
+		t.Fatal("expected a Principal credential auth result")
+	}
+	stalePrincipalID := auth.Principal.PrincipalID
+	staleAllowedRoots := auth.Principal.PrincipalAllowedRoots
 
 	// Disable the principal (simulates concurrent disable).
 	result, err := persistPrincipalEnabledChange(app.DB, "staleauthuser", false)

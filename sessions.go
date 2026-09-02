@@ -87,16 +87,26 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 		return &sessionControlAuthority{isAdmin: true}, nil
 	}
 
-	// Try Principal credential.
+	// Try credential authentication. A valid credential may be Principal-owned
+	// or Launcher-owned. During Stage 1.2 a Launcher credential is NOT yet
+	// authorized for Session control, so it is treated as an unauthorized,
+	// non-disclosing request.
 	authResult, err := authenticateCredential(a.DB, token)
 	if err == nil {
-		return &sessionControlAuthority{principalCredential: authResult}, nil
+		if authResult.Launcher != nil {
+			// A valid Launcher credential cannot yet control Sessions.
+			writeAuthFailure(ctx, r, "credential.unauthorized")
+			writeUnauthorizedSessionControl(ctx, w)
+			return nil, nil
+		}
+		return &sessionControlAuthority{principalCredential: authResult.Principal}, nil
 	}
 
 	// Credential auth failed. Check if it's a database error.
 	if !errors.Is(err, ErrCredentialNotFound) &&
 		!errors.Is(err, ErrCredentialRevoked) &&
-		!errors.Is(err, ErrPrincipalDisabled) {
+		!errors.Is(err, ErrPrincipalDisabled) &&
+		!errors.Is(err, ErrLauncherDisabled) {
 		writeAuthFailure(ctx, r, "credential.database_error")
 		opLog(ctx).Error("session control auth database error",
 			slog.String("operation", "session_auth"),
@@ -106,7 +116,9 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 		return nil, err
 	}
 
-	// Single auth failure for any credential reason.
+	// Single auth failure for any credential reason. Launcher-disabled and
+	// principal-disabled map to the same non-disclosing codes already used for
+	// principal credentials.
 	resultCode := "credential.not_found"
 	if errors.Is(err, ErrCredentialRevoked) {
 		resultCode = "credential.revoked"

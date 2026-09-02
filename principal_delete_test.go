@@ -576,8 +576,11 @@ func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("credential should still exist: %v", err)
 	}
-	if cred.PrincipalName != "discreduser" {
-		t.Errorf("credential principal mismatch: got %q", cred.PrincipalName)
+	if cred.Principal == nil {
+		t.Fatal("expected a Principal credential auth result")
+	}
+	if cred.Principal.PrincipalName != "discreduser" {
+		t.Errorf("credential principal mismatch: got %q", cred.Principal.PrincipalName)
 	}
 
 	reqBody := map[string]string{"workspace": filepath.Join(home, "proj")}

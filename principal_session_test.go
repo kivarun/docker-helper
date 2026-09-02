@@ -43,14 +43,16 @@ func TestCredentialAuthValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticateCredential() error: %v", err)
 	}
-
-	if auth.PrincipalName != "authuser" {
-		t.Errorf("principal = %q, want %q", auth.PrincipalName, "authuser")
+	if auth.Principal == nil {
+		t.Fatal("expected a Principal credential auth result")
 	}
-	if auth.CredentialID != cred.ID {
-		t.Errorf("credential ID = %q, want %q", auth.CredentialID, cred.ID)
+	if auth.Principal.PrincipalName != "authuser" {
+		t.Errorf("principal = %q, want %q", auth.Principal.PrincipalName, "authuser")
 	}
-	if len(auth.PrincipalAllowedRoots) == 0 {
+	if auth.Principal.CredentialID != cred.ID {
+		t.Errorf("credential ID = %q, want %q", auth.Principal.CredentialID, cred.ID)
+	}
+	if len(auth.Principal.PrincipalAllowedRoots) == 0 {
 		t.Error("expected at least one allowed root")
 	}
 }
