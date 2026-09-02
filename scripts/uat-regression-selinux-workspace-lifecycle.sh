@@ -73,6 +73,13 @@ reg_setup_principal "$SEL_P" >/dev/null || { reg_fail "principal setup failed"; 
 dh principal allowed-root add --system "$SEL_P" /opt >/dev/null 2>&1 || { reg_fail "principal allowed-root add failed"; reg_result; }
 reg_principal_credential "$SEL_P" "$SEL_CRED" || { reg_fail "credential create failed"; reg_result; }
 
+# The container runs as the principal's unprivileged uid:gid
+# (resolveSessionExecutionIdentity), so the workspace root the container writes
+# into (via the rw:/mnt/rw mount) must be owned by that principal — otherwise a
+# root-owned 0755 directory yields an intermittent EACCES (no AVC). Mirrors the
+# mount-pin regression.
+chown -R "$SEL_P:$SEL_P" "$WS" >/dev/null 2>&1 || { reg_fail "workspace chown to principal failed"; reg_result; }
+
 # --- session creation ---------------------------------------------------------------
 reg_session "$SEL_CRED" "$WS" || {
   reg_fail "session create failed (authorization permits /opt)"
