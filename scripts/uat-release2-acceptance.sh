@@ -356,38 +356,11 @@ else
   acc_ok "audit contains no session bearer token"
 fi
 
-# Legacy/non-principal semantics: an admin (global) session run must omit
-# principal_name. The negative assertion is only meaningful after the run
-# actually succeeded AND produced a run.start audit event attributed to this
-# session; otherwise an empty/missing event would falsely look like "no
-# principal_name".
-ADMIN_SESS_JSON="$(dh session create --system --workspace "$A_WORKSPACE/ws" --json 2>/dev/null)"
-ADMIN_SESS_ID="$(printf '%s' "$ADMIN_SESS_JSON" | json_field id)"
-ADMIN_SESS_TOKEN="$(printf '%s' "$ADMIN_SESS_JSON" | json_field token)"
-if [ -z "$ADMIN_SESS_ID" ] || [ -z "$ADMIN_SESS_TOKEN" ]; then
-  acc_blocked "could not create admin session for legacy audit check"
-else
-  BEFORE2="$(date -u +'%Y-%m-%d %H:%M:%S')"
-  sleep 0.1
-  ADMIN_RUN_OUT="$(DOCKER_HELPER_SESSION_TOKEN="$ADMIN_SESS_TOKEN" \
-    dh run --image alpine:3.24 -- sh -ec 'true' 2>&1)"
-  ADMIN_RUN_EC=$?
-  if [ "$ADMIN_RUN_EC" -ne 0 ]; then
-    acc_fail "admin-session run failed (rc=$ADMIN_RUN_EC); legacy audit check cannot proceed: $(printf '%s\n' "$ADMIN_RUN_OUT" | redact | tail -3)"
-  else
-    ADMIN_EVENT="$(journalctl --utc -u docker-helper.service --since "$BEFORE2" --no-pager 2>/dev/null \
-      | grep '"stream":"audit"' | grep '"event":"run.start"' | tail -1 || true)"
-    if [ -z "$ADMIN_EVENT" ]; then
-      acc_fail "no run.start audit event recorded for the admin-session run"
-    elif ! printf '%s\n' "$ADMIN_EVENT" | grep -q "\"session_id\":\"$ADMIN_SESS_ID\""; then
-      acc_fail "admin-session run.start audit event lacks session_id=$ADMIN_SESS_ID: $ADMIN_EVENT"
-    elif printf '%s\n' "$ADMIN_EVENT" | grep -q 'principal_name'; then
-      acc_fail "legacy admin-session audit unexpectedly carries principal_name"
-    else
-      acc_ok "legacy admin-session audit omits principal_name (unchanged semantics)"
-    fi
-  fi
-fi
+# Stage 1.3 retired the selector-less / global-root admin Session: every Session
+# is owned by a Launcher, and the Principal is derived through that Launcher. A
+# session run's run.start audit event therefore always carries the owning
+# principal_name. The former "legacy admin session audit omits principal_name"
+# check asserted the retired model and no longer applies.
 
 # ==============================================================================
 # scenario C: registry login end-to-end + session isolation

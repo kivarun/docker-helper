@@ -426,6 +426,36 @@ func TestClassifySessionsSchemaNegative(t *testing.T) {
 	}
 }
 
+// TestClassifySessionsSchemaPartialUniqueRejected verifies that a PARTIAL unique
+// index on token_hash is not accepted as proof of global token_hash uniqueness.
+// A partial unique index only enforces uniqueness within its WHERE predicate, so
+// positive recognition must require an unconditional unique index and reject the
+// partial one as unsupported.
+func TestClassifySessionsSchemaPartialUniqueRejected(t *testing.T) {
+	db := openFreshTestDB(t)
+	if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL,
+			workspace TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			launcher_id TEXT NOT NULL REFERENCES launchers(id)
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX sessions_token_hash_partial ON sessions(token_hash) WHERE expires_at > 0`); err != nil {
+		t.Fatal(err)
+	}
+	class, err := classifySessionsSchema(db)
+	if err == nil || class != sessionsSchemaUnsupported {
+		t.Errorf("classifySessionsSchema = (%v, err=%v), want sessionsSchemaUnsupported with an error", class, err)
+	}
+}
+
 // TestDefaultLauncherPerPrincipalIsolation ensures a Principal's 'default'
 // Launcher is scoped to that Principal: request-time and provisioning resolution
 // never leak another Principal's Launcher, and a session owned by one

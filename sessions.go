@@ -15,27 +15,29 @@ import (
 // sessionSelectorField is a Session-request-specific optional string selector
 // field that tracks true field presence. It distinguishes a field that is
 // omitted (present false) from one supplied as "" (present true, value "").
-// JSON null or any non-string value is rejected as an invalid selector rather
-// than silently treated as omitted. This is deliberately a narrow
-// Session-request mechanism, not a generic Optional[T].
+// JSON null or any non-string value is recorded as present but invalid rather
+// than silently treated as omitted. Value validity is interpreted only by
+// validateCreateSelector, so structural conflict (both selector fields present)
+// takes precedence over an individually invalid value. This is deliberately a
+// narrow Session-request mechanism, not a generic Optional[T].
 type sessionSelectorField struct {
 	present bool
+	invalid bool
 	value   string
 }
 
-// errInvalidSessionSelectorValue is returned by unmarshal when a selector
-// field is present with a null or non-string JSON value.
-var errInvalidSessionSelectorValue = errors.New("session selector must be a string")
-
 func (s *sessionSelectorField) UnmarshalJSON(b []byte) error {
 	s.present = true
+	s.invalid = false
 	trimmed := bytes.TrimSpace(b)
 	if bytes.Equal(trimmed, []byte("null")) {
-		return errInvalidSessionSelectorValue
+		s.invalid = true
+		return nil
 	}
 	var v string
 	if err := json.Unmarshal(b, &v); err != nil {
-		return errInvalidSessionSelectorValue
+		s.invalid = true
+		return nil
 	}
 	s.value = v
 	return nil
@@ -43,6 +45,10 @@ func (s *sessionSelectorField) UnmarshalJSON(b []byte) error {
 
 // isPresent reports whether the selector field was present in the request.
 func (s *sessionSelectorField) isPresent() bool { return s.present }
+
+// isInvalid reports whether the present selector value was malformed (null or
+// non-string), distinct from an explicitly-empty string.
+func (s *sessionSelectorField) isInvalid() bool { return s.invalid }
 
 // selectorOrEmpty returns the selector value, or "" if it was omitted.
 func (s *sessionSelectorField) selectorOrEmpty() string { return s.value }
@@ -66,10 +72,10 @@ func (req sessionRequest) validateCreateSelector() (createSelector, *createTarge
 	if launcherPresent && principalPresent {
 		return createSelector{}, &createTargetError{status: http.StatusBadRequest, code: "conflicting_selectors", msg: "launcher_id and principal selectors cannot both be provided"}
 	}
-	if launcherPresent && req.LauncherID.selectorOrEmpty() == "" {
+	if launcherPresent && (req.LauncherID.isInvalid() || req.LauncherID.selectorOrEmpty() == "") {
 		return createSelector{}, &createTargetError{status: http.StatusBadRequest, code: "invalid_selector", msg: "invalid session selector"}
 	}
-	if principalPresent && req.Principal.selectorOrEmpty() == "" {
+	if principalPresent && (req.Principal.isInvalid() || req.Principal.selectorOrEmpty() == "") {
 		return createSelector{}, &createTargetError{status: http.StatusBadRequest, code: "invalid_selector", msg: "invalid session selector"}
 	}
 	return createSelector{launcherID: req.LauncherID.selectorOrEmpty(), principal: req.Principal.selectorOrEmpty()}, nil
@@ -251,15 +257,6 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
-		if errors.Is(err, errInvalidSessionSelectorValue) {
-			writeRequestContextAudit(ctx, auditRecord{
-				Event:    "session.create",
-				Result:   "invalid_selector",
-				Duration: duration,
-			})
-			writeError(ctx, w, http.StatusBadRequest, "invalid_selector", "invalid session selector")
-			return
-		}
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:    "session.create",
 			Result:   "invalid_json",

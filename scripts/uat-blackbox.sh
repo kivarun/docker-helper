@@ -241,7 +241,7 @@ mac_audit_start
 
 DIAG_PRINTED=0
 SERVER_PID=""
-SESSION_ADMIN_ID=""
+ADMIN_CREATED_ID=""
 SESSION_PRINC_ID=""
 CRED_FILE="/tmp/uat-credential.token"
 unset DOCKER_HELPER_SESSION_TOKEN
@@ -290,8 +290,8 @@ cleanup() {
     kill "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
-  if [ -n "$SESSION_ADMIN_ID" ]; then
-    docker-helper session delete --system --id "$SESSION_ADMIN_ID" >/dev/null 2>&1 || true
+  if [ -n "$ADMIN_CREATED_ID" ]; then
+    docker-helper session delete --system --id "$ADMIN_CREATED_ID" >/dev/null 2>&1 || true
   fi
   if [ -n "$SESSION_PRINC_ID" ]; then
     docker-helper session delete --system --id "$SESSION_PRINC_ID" >/dev/null 2>&1 || true
@@ -458,13 +458,44 @@ CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
 printf '%s\n' "$CRED_TOKEN" > "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 
-# Admin session (operator token -> global scope). Container identity = root.
-SESSION_ADMIN_JSON="$(docker-helper session create --system --workspace "$WS" --json)" \
-  || fail_uat "admin session create failed"
-SESSION_ADMIN_ID="$(printf '%s\n' "$SESSION_ADMIN_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
-SESSION_ADMIN_TOKEN="$(printf '%s\n' "$SESSION_ADMIN_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
-[ -n "$SESSION_ADMIN_ID" ] && [ -n "$SESSION_ADMIN_TOKEN" ] \
-  || fail_uat "admin session create returned no id/token"
+# --- Focused control-plane proof: Admin is creation authority, not owner. ---
+# The final model retires selector-less / global-root admin Sessions: a Session
+# owner is always a Launcher, and the Principal is derived through that
+# Launcher. An Admin MAY create a Session bound to any Principal via a raw API
+# request carrying a `principal` selector; the Session is owned by that
+# Principal's Launcher. The admin token is read from /etc/docker-helper/admin.token
+# (written by system init) and sent only as an Authorization header.
+ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+[ -n "$ADMIN_TOKEN" ] || fail_uat "could not read the admin token from /etc/docker-helper/admin.token"
+
+# Negative: an admin create with NO selector must fail closed with
+# 400 missing_launcher_selector — never create a selector-less session.
+NO_SEL_OUT="$(dh session create --system --workspace "$WS" 2>&1)"; NO_SEL_RC=$?
+[ "$NO_SEL_RC" -ne 0 ] \
+  || fail_uat "admin selector-less session create unexpectedly succeeded"
+printf '%s\n' "$NO_SEL_OUT" | grep -q 'missing_launcher_selector' \
+  || fail_uat "admin selector-less session create should report missing_launcher_selector: $NO_SEL_OUT"
+
+# Positive: admin creates a Session bound to the runner Principal's default
+# Launcher via the `principal` selector over the raw control-plane API. The
+# creator is the Admin, but the Session owner is the Principal's Launcher.
+ADMIN_CREATED_JSON="$(curl --silent --fail --max-time 5 \
+  --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"workspace\":\"$WS\",\"principal\":\"$PRINCIPAL\"}" http://localhost/sessions)" \
+  || fail_uat "admin-created (principal-selector) session POST failed"
+ADMIN_CREATED_ID="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"id": "\K[^"]+' | head -1)"
+ADMIN_CREATED_TOKEN="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"token": "\K[^"]+' | head -1)"
+ADMIN_CREATED_LID="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"launcher_id": "\K[^"]+' | head -1)"
+ADMIN_CREATED_LAUNCHER="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"launcher": "\K[^"]+' | head -1)"
+ADMIN_CREATED_PRINC="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"principal": "\K[^"]+' | head -1)"
+[ -n "$ADMIN_CREATED_ID" ] && [ -n "$ADMIN_CREATED_TOKEN" ] \
+  || fail_uat "admin-created session returned no id/token"
+[ -n "$ADMIN_CREATED_LID" ] \
+  || fail_uat "admin-created session must carry a non-empty launcher_id: $ADMIN_CREATED_JSON"
+[ "$ADMIN_CREATED_PRINC" = "$PRINCIPAL" ] \
+  || fail_uat "admin-created session must resolve to principal '$PRINCIPAL', got '$ADMIN_CREATED_PRINC'"
+info "admin-created session (control-plane proof): $ADMIN_CREATED_ID -> launcher $ADMIN_CREATED_LID ($ADMIN_CREATED_LAUNCHER, principal $ADMIN_CREATED_PRINC)"
 
 # Principal session (credential token -> principal scope). Container identity
 # = the principal's OS uid/gid. Proves the credential -> session -> run path.
@@ -475,7 +506,6 @@ SESSION_PRINC_TOKEN="$(printf '%s\n' "$SESSION_PRINC_JSON" | grep -oP '"token": 
 [ -n "$SESSION_PRINC_ID" ] && [ -n "$SESSION_PRINC_TOKEN" ] \
   || fail_uat "principal session create returned no id/token"
 
-info "admin session:     $SESSION_ADMIN_ID"
 info "principal session: $SESSION_PRINC_ID (principal $PRINCIPAL)"
 
 # ==============================================================================
@@ -485,16 +515,17 @@ info "principal session: $SESSION_PRINC_ID (principal $PRINCIPAL)"
 PUID="$(id -u "$PRINCIPAL")"
 PGID="$(id -g "$PRINCIPAL")"
 
-say "phase 4: pull + run via the admin session"
-export DOCKER_HELPER_SESSION_TOKEN="$SESSION_ADMIN_TOKEN"
+say "phase 4: pull + run via the principal-credential session"
+export DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN"
 docker-helper pull alpine:3.24 || fail_uat "docker-helper pull alpine:3.24 failed"
 
-# Admin session container runs as root; verify uid/gid/pwd semantics.
-BASIC_ADMIN_SCRIPT='test "$(id -u)" = "0" && test "$(id -g)" = "0" && test "$(pwd)" = "/tmp" && echo BASIC-ADMIN-OK'
-BASIC_ADMIN_OUT="$(docker-helper run --image alpine:3.24 --workdir /tmp -- sh -ec "$BASIC_ADMIN_SCRIPT")" \
-  || fail_uat "admin-session basic run failed"
-printf '%s\n' "$BASIC_ADMIN_OUT" | grep -q 'BASIC-ADMIN-OK' \
-  || fail_uat "admin-session identity check did not match: $BASIC_ADMIN_OUT"
+# The working Session owner is a Launcher; the container runs as the owning
+# Principal's OS uid/gid. There is no root/admin Session owner or root
+# execution special case anymore.
+say "phase 4: run identity via the principal-credential session"
+docker-helper run --image alpine:3.24 --workdir /tmp -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && test \"\$(id -g)\" = \"$PGID\" && echo BASIC-PRINC-OK" \
+  | grep -q 'BASIC-PRINC-OK' \
+  || fail_uat "principal-session identity check failed (expected uid=$PUID gid=$PGID)"
 
 # Container exit-code propagation (exit 42 must surface as 42).
 docker-helper run --image alpine:3.24 -- sh -ec 'exit 42' >/dev/null 2>&1 \
@@ -504,15 +535,22 @@ docker-helper run --image alpine:3.24 -- sh -ec 'exit 42' >/dev/null 2>&1
 EC=$?
 [ "$EC" = "42" ] || fail_uat "expected container exit code 42, got $EC"
 
-# Principal session container runs as the principal uid/gid.
-say "phase 4: run via the principal session (credential path)"
-DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN" \
-  docker-helper run --image alpine:3.24 --workdir /tmp -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && test \"\$(id -g)\" = \"$PGID\" && echo BASIC-PRINC-OK" \
-  | grep -q 'BASIC-PRINC-OK' \
-  || fail_uat "principal-session identity check failed (expected uid=$PUID gid=$PGID)"
+# Execution identity of the admin-created Session derives from its owning
+# Principal (uid/gid), not root and not the daemon/admin identity.
+say "phase 4: admin-created Session execution identity = owning Principal"
+ADMIN_CREATED_RUN="$(DOCKER_HELPER_SESSION_TOKEN="$ADMIN_CREATED_TOKEN" \
+  docker-helper run --image alpine:3.24 --workdir /tmp -- sh -ec "test \"\$(id -u)\" = \"$PUID\" && test \"\$(id -g)\" = \"$PGID\" && echo ADMIN-CREATED-IDENTITY-OK")" \
+  || fail_uat "admin-created session run failed"
+printf '%s\n' "$ADMIN_CREATED_RUN" | grep -q 'ADMIN-CREATED-IDENTITY-OK' \
+  || fail_uat "admin-created session identity check failed (expected uid=$PUID gid=$PGID): $ADMIN_CREATED_RUN"
 
-# Switch back to the admin session for the remaining heavy operations.
-export DOCKER_HELPER_SESSION_TOKEN="$SESSION_ADMIN_TOKEN"
+# The focused admin-created Session proof is complete; delete it.
+docker-helper session delete --system --id "$ADMIN_CREATED_ID" >/dev/null 2>&1 \
+  || fail_uat "admin-created session delete failed"
+unset ADMIN_CREATED_TOKEN
+
+# Switch back to the principal-credential session for the remaining operations.
+export DOCKER_HELPER_SESSION_TOKEN="$SESSION_PRINC_TOKEN"
 
 # ==============================================================================
 # Phase 5: workspace mount behavior

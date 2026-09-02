@@ -460,6 +460,12 @@ func TestCreateSessionRequest(t *testing.T) {
 	if !strings.Contains(capturedPayload, `"workspace":"/home/user/proj"`) {
 		t.Errorf("expected workspace in body, got: %s", capturedPayload)
 	}
+	if strings.Contains(capturedPayload, `"launcher_id"`) {
+		t.Errorf("unset launcher_id selector must be omitted from the session-create body, got: %s", capturedPayload)
+	}
+	if strings.Contains(capturedPayload, `"principal"`) {
+		t.Errorf("unset principal selector must be omitted from the session-create body, got: %s", capturedPayload)
+	}
 	if !result.OK {
 		t.Fatal("expected ok=true")
 	}

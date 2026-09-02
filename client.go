@@ -138,8 +138,17 @@ func (c *apiClient) listSessions() (*listSessionsResponse, error) {
 	return &result, nil
 }
 
+// createSessionClientRequest is the narrow wire request the CLI sends to create
+// a Session. The CLI never supplies Session selectors (Launcher/Principal
+// selection is a Stage-1.5 feature); the daemon resolves ownership from the
+// authenticating client. It deliberately stays separate from the server-side
+// sessionRequest, which carries presence-aware selector fields.
+type createSessionClientRequest struct {
+	Workspace string `json:"workspace"`
+}
+
 func (c *apiClient) createSession(workspace string) (*createSessionResponse, error) {
-	body, err := json.Marshal(sessionRequest{Workspace: workspace})
+	body, err := json.Marshal(createSessionClientRequest{Workspace: workspace})
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}

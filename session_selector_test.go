@@ -44,7 +44,7 @@ func TestCreateSessionSelectorMatrix(t *testing.T) {
 		{name: "both supplied valid", body: `{"workspace":"` + ws + `","launcher_id":"l","principal":"p"}`, want: http.StatusBadRequest, code: "conflicting_selectors"},
 		{name: "both supplied one empty", body: `{"workspace":"` + ws + `","launcher_id":"l","principal":""}`, want: http.StatusBadRequest, code: "conflicting_selectors"},
 		{name: "both supplied both empty", body: `{"workspace":"` + ws + `","launcher_id":"","principal":""}`, want: http.StatusBadRequest, code: "conflicting_selectors"},
-		{name: "both supplied one null", body: `{"workspace":"` + ws + `","launcher_id":null,"principal":"p"}`, want: http.StatusBadRequest, code: "invalid_selector"},
+		{name: "both supplied one null", body: `{"workspace":"` + ws + `","launcher_id":null,"principal":"p"}`, want: http.StatusBadRequest, code: "conflicting_selectors"},
 	}
 
 	for _, tc := range cases {

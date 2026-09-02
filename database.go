@@ -306,15 +306,16 @@ func readSessionsForeignKeys(db *sql.DB) ([]sessionsFK, error) {
 // table (origin 'u' from a UNIQUE constraint or 'c' from a CREATE UNIQUE INDEX
 // statement; never the primary key index).
 type sessionsUniqueIndex struct {
-	name string
-	cols []string
+	name    string
+	cols    []string
+	partial bool
 }
 
 // readSessionsUniqueTokenIndexes returns the user-declared unique indexes on
-// the sessions table with their columns.
+// the sessions table with their columns and partial-index flag.
 func readSessionsUniqueTokenIndexes(db *sql.DB) ([]sessionsUniqueIndex, error) {
 	rows, err := db.Query(
-		`SELECT name FROM pragma_index_list('sessions') WHERE "unique"=1 AND "origin"!='pk'`,
+		`SELECT name, "partial" FROM pragma_index_list('sessions') WHERE "unique"=1 AND "origin"!='pk'`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read sessions unique indexes: %w", err)
@@ -324,9 +325,11 @@ func readSessionsUniqueTokenIndexes(db *sql.DB) ([]sessionsUniqueIndex, error) {
 	var out []sessionsUniqueIndex
 	for rows.Next() {
 		var idx sessionsUniqueIndex
-		if err := rows.Scan(&idx.name); err != nil {
+		var partial int
+		if err := rows.Scan(&idx.name, &partial); err != nil {
 			return nil, fmt.Errorf("cannot scan sessions unique index: %w", err)
 		}
+		idx.partial = partial == 1
 		cols, err := credentialsIndexColumns(db, idx.name)
 		if err != nil {
 			return nil, err
@@ -340,14 +343,16 @@ func readSessionsUniqueTokenIndexes(db *sql.DB) ([]sessionsUniqueIndex, error) {
 	return out, nil
 }
 
-// verifySessionsTokenHashUnique fails unless token_hash has a UNIQUE index.
+// verifySessionsTokenHashUnique fails unless token_hash has an unconditional
+// (non-partial) UNIQUE index. A partial unique index does not establish global
+// token_hash uniqueness, so it is not accepted as proof of it.
 func verifySessionsTokenHashUnique(db *sql.DB) error {
 	indexes, err := readSessionsUniqueTokenIndexes(db)
 	if err != nil {
 		return err
 	}
 	for _, idx := range indexes {
-		if len(idx.cols) == 1 && idx.cols[0] == "token_hash" {
+		if !idx.partial && len(idx.cols) == 1 && idx.cols[0] == "token_hash" {
 			return nil
 		}
 	}
