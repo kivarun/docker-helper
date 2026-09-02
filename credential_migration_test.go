@@ -413,6 +413,8 @@ func TestCredentialsSchemaClassifierSupported(t *testing.T) {
 			revoked_at INTEGER,
 			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
 		);
+		CREATE UNIQUE INDEX credentials_active_name_unique
+			ON credentials(principal_id, name) WHERE revoked_at IS NULL;
 	`); err != nil {
 		t.Fatalf("create v2.0 schema: %v", err)
 	}
@@ -701,5 +703,111 @@ func TestCredentialsSchemaExtraUniquePrincipalFailsClosed(t *testing.T) {
 				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
 			)
 		);
+	`)
+}
+
+// TestCredentialsPre21NeitherNameUniqueFailsClosed: a pre-2.1 Principal-only
+// source without any name-uniqueness generation must fail closed, even though
+// columns and the Principal FK are otherwise correct.
+func TestCredentialsPre21NeitherNameUniqueFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE
+		);
+	`)
+}
+
+// TestCredentialsPre21BothNameUniqueFailsClosed: a pre-2.1 Principal-only source
+// declaring both name-uniqueness generations must fail closed.
+func TestCredentialsPre21BothNameUniqueFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name)
+		);
+		CREATE UNIQUE INDEX credentials_active_name_unique
+			ON credentials(principal_id, name) WHERE revoked_at IS NULL;
+	`)
+}
+
+// TestCredentialsPre21ExtraFKFailsClosed: a pre-2.1 Principal-only source with
+// an additional foreign key beyond the canonical Principal FK must fail closed.
+func TestCredentialsPre21ExtraFKFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (name) REFERENCES external_table(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name)
+		);
+	`)
+}
+
+// TestCredentialsSchemaExtraFKFailsClosed: the final schema with an additional
+// foreign key beyond the two canonical owner FKs must fail closed.
+func TestCredentialsSchemaExtraFKFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			FOREIGN KEY (name) REFERENCES external_table(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
+		);
+	`)
+}
+
+// TestCredentialsActiveNamePredicateOrOneFailsClosed: the active-name partial
+// index with a predicate such as "revoked_at IS NULL OR 1=1" must fail closed
+// because the normalized predicate is not exactly "revoked_at IS NULL".
+func TestCredentialsActiveNamePredicateOrOneFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id),
+			CHECK (
+				(principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
+				OR
+				(principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL)
+			)
+		);
+		CREATE UNIQUE INDEX credentials_active_name_unique
+			ON credentials(principal_id, name) WHERE revoked_at IS NULL OR 1=1;
 	`)
 }

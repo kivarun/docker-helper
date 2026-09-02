@@ -253,50 +253,65 @@ func readCredentialsColumns(db *sql.DB) ([]credentialsColumn, error) {
 	return cols, nil
 }
 
-// verifyCredentialsForeignKeys fails unless the schema declares the concrete
-// owner FKs with exact ON DELETE CASCADE semantics: principal_id -> principals(id)
-// and launcher_id -> launchers(id). A matching table/from/to with NO ACTION /
-// RESTRICT / SET NULL is NOT canonical.
-func verifyCredentialsForeignKeys(db *sql.DB) error {
-	if err := verifyCredentialsFK(db, "principals", "principal_id", "id"); err != nil {
-		return err
-	}
-	if err := verifyCredentialsFK(db, "launchers", "launcher_id", "id"); err != nil {
-		return err
-	}
-	return nil
+// credentialsFK captures one foreign key declared on the credentials table.
+type credentialsFK struct {
+	table    string
+	from     string
+	to       string
+	onDelete string
 }
 
-// verifyCredentialsPrincipalFK fails unless the Principal FK
-// principal_id -> principals(id) ON DELETE CASCADE is present.
-func verifyCredentialsPrincipalFK(db *sql.DB) error {
-	return verifyCredentialsFK(db, "principals", "principal_id", "id")
-}
-
-// verifyCredentialsFK fails unless the credentials table declares a foreign
-// key with the given target table/from/to and ON DELETE CASCADE.
-func verifyCredentialsFK(db *sql.DB, tbl, from, to string) error {
+// readCredentialsForeignKeys returns all foreign keys declared on credentials.
+func readCredentialsForeignKeys(db *sql.DB) ([]credentialsFK, error) {
 	rows, err := db.Query(
 		`SELECT "table", "from", "to", "on_delete" FROM pragma_foreign_key_list('credentials')`,
 	)
 	if err != nil {
-		return fmt.Errorf("cannot read credentials foreign keys: %w", err)
+		return nil, fmt.Errorf("cannot read credentials foreign keys: %w", err)
 	}
 	defer rows.Close()
 
+	var out []credentialsFK
 	for rows.Next() {
-		var fkTable, fkFrom, fkTo, onDelete string
-		if err := rows.Scan(&fkTable, &fkFrom, &fkTo, &onDelete); err != nil {
-			return fmt.Errorf("cannot scan credentials foreign key: %w", err)
+		var fk credentialsFK
+		if err := rows.Scan(&fk.table, &fk.from, &fk.to, &fk.onDelete); err != nil {
+			return nil, fmt.Errorf("cannot scan credentials foreign key: %w", err)
 		}
-		if fkTable == tbl && fkFrom == from && fkTo == to && onDelete == "CASCADE" {
-			return nil
-		}
+		out = append(out, fk)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate credentials foreign keys: %w", err)
+		return nil, fmt.Errorf("iterate credentials foreign keys: %w", err)
 	}
-	return unsupportedCredentialsSchema(fmt.Sprintf("missing %s -> %s(%s) foreign key with ON DELETE CASCADE", from, tbl, to))
+	return out, nil
+}
+
+// verifyCredentialsForeignKeySet fails unless the credentials table's foreign
+// keys are exactly the given canonical set (order-insensitive). Positive
+// recognition is exact: an additional FK is unsupported, and a canonical FK
+// with anything other than ON DELETE CASCADE is unsupported.
+func verifyCredentialsForeignKeySet(db *sql.DB, want []credentialsFK) error {
+	got, err := readCredentialsForeignKeys(db)
+	if err != nil {
+		return err
+	}
+	if len(got) != len(want) {
+		return unsupportedCredentialsSchema(fmt.Sprintf("expected exactly %d foreign key(s), found %d", len(want), len(got)))
+	}
+	for _, w := range want {
+		if !containsCredentialsFK(got, w) {
+			return unsupportedCredentialsSchema(fmt.Sprintf("missing %s -> %s(%s) foreign key with ON DELETE CASCADE", w.from, w.table, w.to))
+		}
+	}
+	return nil
+}
+
+func containsCredentialsFK(fks []credentialsFK, want credentialsFK) bool {
+	for _, fk := range fks {
+		if fk == want {
+			return true
+		}
+	}
+	return false
 }
 
 // credentialsIndexColumns returns the column names covered by the named index.
@@ -321,36 +336,6 @@ func credentialsIndexColumns(db *sql.DB, idxName string) ([]string, error) {
 		return nil, fmt.Errorf("iterate index %q columns: %w", idxName, err)
 	}
 	return cols, nil
-}
-
-// credentialsHasUniqueIndexOnColumn reports whether a user-declared UNIQUE
-// index covers exactly the given column.
-func credentialsHasUniqueIndexOnColumn(db *sql.DB, col string) (bool, error) {
-	rows, err := db.Query(
-		`SELECT name FROM pragma_index_list('credentials') WHERE "unique"=1 AND "origin"='u'`,
-	)
-	if err != nil {
-		return false, fmt.Errorf("cannot read credentials indexes: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var idxName string
-		if err := rows.Scan(&idxName); err != nil {
-			return false, fmt.Errorf("cannot scan credentials index: %w", err)
-		}
-		cols, err := credentialsIndexColumns(db, idxName)
-		if err != nil {
-			return false, err
-		}
-		if len(cols) == 1 && cols[0] == col {
-			return true, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("iterate credentials indexes: %w", err)
-	}
-	return false, nil
 }
 
 // credentialsUniqueIndex captures one user-declared unique index on the
@@ -408,6 +393,20 @@ func readCredentialsUniqueIndexes(db *sql.DB) ([]credentialsUniqueIndex, error) 
 	return out, nil
 }
 
+// isActiveNameIndex reports whether idx is the canonical Principal active-name
+// partial unique index: credentials_active_name_unique on (principal_id, name)
+// with the exact normalized predicate WHERE revoked_at IS NULL. Positive
+// recognition is exact; a predicate such as "revoked_at IS NULL OR 1=1" is
+// not canonical.
+func isActiveNameIndex(idx credentialsUniqueIndex) bool {
+	return idx.partial &&
+		idx.name == "credentials_active_name_unique" &&
+		len(idx.cols) == 2 &&
+		idx.cols[0] == "principal_id" &&
+		idx.cols[1] == "name" &&
+		strings.HasSuffix(idx.where, "whererevoked_atisnull")
+}
+
 // verifyCredentialsUniqueness fails unless the final schema's unique indexes
 // are exactly the canonical set: UNIQUE(token_hash), UNIQUE(launcher_id), and
 // (when present) the expected Principal active-name partial unique index. Any
@@ -427,9 +426,7 @@ func verifyCredentialsUniqueness(db *sql.DB) error {
 			foundTokenHash = true
 		case !idx.partial && len(idx.cols) == 1 && idx.cols[0] == "launcher_id":
 			foundLauncher = true
-		case idx.partial && idx.name == "credentials_active_name_unique" &&
-			len(idx.cols) == 2 && idx.cols[0] == "principal_id" && idx.cols[1] == "name" &&
-			strings.Contains(idx.where, "revoked_atisnull"):
+		case isActiveNameIndex(idx):
 			// Expected Principal active-name partial unique index; canonical when present.
 		default:
 			return unsupportedCredentialsSchema(fmt.Sprintf("unexpected unique index on %q", idx.cols))
@@ -440,6 +437,46 @@ func verifyCredentialsUniqueness(db *sql.DB) error {
 	}
 	if !foundLauncher {
 		return unsupportedCredentialsSchema("missing UNIQUE(launcher_id)")
+	}
+	return nil
+}
+
+// verifyPre21NameUniqueness fails unless the pre-2.1 source has exactly one
+// supported name-uniqueness generation: either the historical table-level
+// UNIQUE(principal_id, name) or the current credentials_active_name_unique
+// partial index on (principal_id, name) WHERE revoked_at IS NULL. Neither or
+// both is unsupported. token_hash must also be UNIQUE.
+func verifyPre21NameUniqueness(db *sql.DB) error {
+	indexes, err := readCredentialsUniqueIndexes(db)
+	if err != nil {
+		return err
+	}
+
+	foundTokenHash := false
+	hasHardUnique := false
+	hasActiveName := false
+	for _, idx := range indexes {
+		switch {
+		case !idx.partial && len(idx.cols) == 1 && idx.cols[0] == "token_hash":
+			foundTokenHash = true
+		case !idx.partial && len(idx.cols) == 2 && idx.cols[0] == "principal_id" && idx.cols[1] == "name":
+			// Historical generation: table-level hard UNIQUE(principal_id, name).
+			hasHardUnique = true
+		case isActiveNameIndex(idx):
+			// Current generation: active-name partial unique index.
+			hasActiveName = true
+		default:
+			return unsupportedCredentialsSchema(fmt.Sprintf("unexpected unique index on %q", idx.cols))
+		}
+	}
+	if !foundTokenHash {
+		return unsupportedCredentialsSchema("missing UNIQUE(token_hash)")
+	}
+	if hasHardUnique == hasActiveName {
+		if hasHardUnique {
+			return unsupportedCredentialsSchema("both name-uniqueness generations present")
+		}
+		return unsupportedCredentialsSchema("missing name-uniqueness generation")
 	}
 	return nil
 }
@@ -522,16 +559,14 @@ func classifyCredentialsSchema(db *sql.DB) (credentialsSchemaClass, error) {
 				return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("column %q must be NOT NULL", name))
 			}
 		}
-		// token_hash must have a UNIQUE constraint.
-		ok, err := credentialsHasUniqueIndexOnColumn(db, "token_hash")
-		if err != nil {
+		// Exactly one supported name-uniqueness generation plus UNIQUE(token_hash).
+		if err := verifyPre21NameUniqueness(db); err != nil {
 			return credentialsSchemaUnsupported, err
 		}
-		if !ok {
-			return credentialsSchemaUnsupported, unsupportedCredentialsSchema("missing UNIQUE(token_hash)")
-		}
-		// Principal FK must exist with ON DELETE CASCADE.
-		if err := verifyCredentialsPrincipalFK(db); err != nil {
+		// Exactly one FK: the canonical Principal FK.
+		if err := verifyCredentialsForeignKeySet(db, []credentialsFK{
+			{table: "principals", from: "principal_id", to: "id", onDelete: "CASCADE"},
+		}); err != nil {
 			return credentialsSchemaUnsupported, err
 		}
 		return credentialsSchemaPre21, nil
@@ -561,7 +596,10 @@ func classifyCredentialsSchema(db *sql.DB) (credentialsSchemaClass, error) {
 			return credentialsSchemaUnsupported, unsupportedCredentialsSchema(fmt.Sprintf("column %q must be NOT NULL", name))
 		}
 	}
-	if err := verifyCredentialsForeignKeys(db); err != nil {
+	if err := verifyCredentialsForeignKeySet(db, []credentialsFK{
+		{table: "principals", from: "principal_id", to: "id", onDelete: "CASCADE"},
+		{table: "launchers", from: "launcher_id", to: "id", onDelete: "CASCADE"},
+	}); err != nil {
 		return credentialsSchemaUnsupported, err
 	}
 	if err := verifyCredentialsUniqueness(db); err != nil {
