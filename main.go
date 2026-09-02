@@ -216,6 +216,16 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
 	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
+	mux.HandleFunc("POST /principals/{username}/launchers", app.handleCreateLauncher)
+	mux.HandleFunc("GET /principals/{username}/launchers", app.handleListLaunchers)
+	mux.HandleFunc("GET /launchers/{id}", app.handleShowLauncher)
+	mux.HandleFunc("PATCH /launchers/{id}", app.handlePatchLauncher)
+	mux.HandleFunc("PUT /launchers/{id}/allowed-roots", app.handleReplaceLauncherAllowedRoots)
+	mux.HandleFunc("DELETE /launchers/{id}", app.handleDeleteLauncher)
+	mux.HandleFunc("PUT /launchers/{id}/credential", app.handleIssueLauncherCredential)
+	mux.HandleFunc("GET /launchers/{id}/credential", app.handleGetLauncherCredential)
+	mux.HandleFunc("POST /launchers/{id}/credential/rotate", app.handleRotateLauncherCredential)
+	mux.HandleFunc("DELETE /launchers/{id}/credential", app.handleDeleteLauncherCredential)
 	mux.HandleFunc("POST /admin/token/rotate", app.handleRotateAdminToken)
 }
 

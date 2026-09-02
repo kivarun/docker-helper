@@ -26,6 +26,10 @@ type auditRecord struct {
 	CredentialID         string       `json:"credential_id,omitempty"`
 	CredentialName       string       `json:"credential_name,omitempty"`
 	CredentialChanged    *bool        `json:"credential_changed,omitempty"`
+	LauncherID           string       `json:"launcher_id,omitempty"`
+	LauncherName         string       `json:"launcher_name,omitempty"`
+	LauncherScope        string       `json:"launcher_scope,omitempty"`
+	LauncherEnabled      *bool        `json:"launcher_enabled,omitempty"`
 	Result               string       `json:"result,omitempty"`
 	ExitCode             *int         `json:"exit_code,omitempty"`
 	Duration             string       `json:"duration,omitempty"`
