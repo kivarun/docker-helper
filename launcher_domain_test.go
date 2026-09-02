@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -672,8 +673,12 @@ func TestLauncherCredentialAuthDisabledPrincipal(t *testing.T) {
 }
 
 // TestLauncherCredentialCannotControlSessions proves a valid Launcher
-// credential cannot yet create/list/delete Sessions in Stage 1.2.
-func TestLauncherCredentialCannotControlSessions(t *testing.T) {
+// TestLauncherCredentialControlsOwnSessions verifies the Stage 1.3 selector
+// matrix for Session control: a Launcher credential is authorized to create,
+// list, and delete Sessions within exactly its own Launcher, while a foreign or
+// invalid selector is rejected non-disclosing (never a principal-selector
+// leak), and access to a Session outside its scope is a 404.
+func TestLauncherCredentialControlsOwnSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	globalRoots := app.Config.AllowedRoots
 	home := filepath.Join(globalRoots[0], "home", "victor")
@@ -696,34 +701,76 @@ func TestLauncherCredentialCannotControlSessions(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /sessions", app.handleCreateSession)
-	body := strings.NewReader(`{"workspace":"/nonexistent"}`)
-	req := httptest.NewRequest(http.MethodPost, "/sessions", body)
+
+	// Create with a selectable invalid selector: a launcher_id other than self
+	// is non-disclosing 404, regardless of existence.
+	badBody := strings.NewReader(`{"workspace":"/x","launcher_id":"dhl_elsewhere"}`)
+	req := httptest.NewRequest(http.MethodPost, "/sessions", badBody)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for Launcher credential session create, got %d", w.Code)
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "launcher_not_found") {
+		t.Errorf("launcher credential foreign selector: expected 404 launcher_not_found, got %d %s", w.Code, w.Body.String())
 	}
 
-	// Launcher credential is denied on GET /sessions.
+	// A principal selector on a Launcher credential is invalid (not a 401);
+	// the credential is authorized but the selector form is rejected.
+	selBody := strings.NewReader(`{"workspace":"/x","principal":"victor"}`)
+	req = httptest.NewRequest(http.MethodPost, "/sessions", selBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_selector") {
+		t.Errorf("launcher credential principal selector: expected 400 invalid_selector, got %d %s", w.Code, w.Body.String())
+	}
+
+	// Create with a valid workspace (inside the principal's home, which is its
+	// effective allowed-root ceiling) succeeds: Launcher credential is
+	// authorized within its own scope (not 401).
+	workspace := testWorkspaceDir(t, home)
+	okBody := strings.NewReader(`{"workspace":"` + workspace + `"}`)
+	req = httptest.NewRequest(http.MethodPost, "/sessions", okBody)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Errorf("launcher credential session create: expected 201, got %d %s", w.Code, w.Body.String())
+	}
+	var created createSessionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Session.LauncherID == "" {
+		t.Error("created session must carry a launcher_id")
+	}
+
+	// List: the Launcher credential sees exactly its own Session (200).
 	mux.HandleFunc("GET /sessions", app.handleListSessions)
-	req2 := httptest.NewRequest(http.MethodGet, "/sessions", nil)
-	req2.Header.Set("Authorization", "Bearer "+token)
-	w2 := httptest.NewRecorder()
-	mux.ServeHTTP(w2, req2)
-	if w2.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for Launcher credential session list, got %d", w2.Code)
+	lreq := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	lreq.Header.Set("Authorization", "Bearer "+token)
+	lw := httptest.NewRecorder()
+	mux.ServeHTTP(lw, lreq)
+	if lw.Code != http.StatusOK {
+		t.Errorf("launcher credential session list: expected 200, got %d", lw.Code)
+	} else {
+		var listed listSessionsResponse
+		if err := json.Unmarshal(lw.Body.Bytes(), &listed); err != nil {
+			t.Fatal(err)
+		}
+		if len(listed.Sessions) != 1 || listed.Sessions[0].ID != created.Session.ID {
+			t.Errorf("launcher credential must list only its own session, got %d sessions", len(listed.Sessions))
+		}
 	}
 
-	// Launcher credential is denied on DELETE /sessions/{id}.
+	// Delete of a Session outside its scope is a non-disclosing 404, and the
+	// Launcher credential is not denied with 401.
 	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
-	req3 := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_x", nil)
-	req3.Header.Set("Authorization", "Bearer "+token)
-	w3 := httptest.NewRecorder()
-	mux.ServeHTTP(w3, req3)
-	if w3.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for Launcher credential session delete, got %d", w3.Code)
+	dreq := httptest.NewRequest(http.MethodDelete, "/sessions/dhs_foreign", nil)
+	dreq.Header.Set("Authorization", "Bearer "+token)
+	dw := httptest.NewRecorder()
+	mux.ServeHTTP(dw, dreq)
+	if dw.Code != http.StatusNotFound || !strings.Contains(dw.Body.String(), "session_not_found") {
+		t.Errorf("launcher credential foreign session delete: expected 404 session_not_found, got %d %s", dw.Code, dw.Body.String())
 	}
 }
 

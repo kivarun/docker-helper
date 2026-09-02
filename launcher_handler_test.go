@@ -372,10 +372,15 @@ func TestLauncherHandlerLauncherCredentialUnauthorizedControl(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("launcher credential create: expected 401, got %d", w.Code)
 	}
-	// Nor control Sessions.
+	// A Launcher credential can create Sessions within its own scope (Stage 1.3
+	// selector matrix), so it is NOT denied here with 401; an invalid workspace
+	// reaches the workspace-validation path instead of an authorization failure.
 	w = launcherRequest(t, app, http.MethodPost, "/sessions", launcherToken, `{"workspace":"/x"}`)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("launcher credential session create: expected 401, got %d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("launcher credential session create: expected 400 invalid_workspace, got %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_workspace") {
+		t.Fatalf("launcher credential session create: expected invalid_workspace code, got %s", w.Body.String())
 	}
 }
 

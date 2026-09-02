@@ -210,10 +210,11 @@ func TestLauncherAllowedRoots(t *testing.T) {
 	}
 }
 
-// TestSessionsNonChangeInvariant protects the Stage 1.1 boundary: after
-// initializeDatabase, sessions must still carry principal_id and must NOT yet
-// carry launcher_id. This prevents accidentally performing Stage 1.3 early.
-func TestSessionsNonChangeInvariant(t *testing.T) {
+// TestSessionsFinalSchemaInvariant protects the Stage 1.3 cutover boundary:
+// after initializeDatabase on a fresh DB, sessions must carry launcher_id and
+// must NOT carry principal_id. Legacy schemas are handled only by the
+// classifier/migration path, never by re-adding principal_id to the live DDL.
+func TestSessionsFinalSchemaInvariant(t *testing.T) {
 	db := openFreshTestDB(t)
 
 	var principalCol int
@@ -222,8 +223,8 @@ func TestSessionsNonChangeInvariant(t *testing.T) {
 	).Scan(&principalCol); err != nil {
 		t.Fatalf("cannot inspect sessions schema: %v", err)
 	}
-	if principalCol != 1 {
-		t.Errorf("expected sessions to have principal_id, found %d", principalCol)
+	if principalCol != 0 {
+		t.Errorf("expected final schema to NOT have principal_id, found %d", principalCol)
 	}
 
 	var launcherCol int
@@ -232,7 +233,7 @@ func TestSessionsNonChangeInvariant(t *testing.T) {
 	).Scan(&launcherCol); err != nil {
 		t.Fatalf("cannot inspect sessions schema: %v", err)
 	}
-	if launcherCol != 0 {
-		t.Errorf("expected sessions to NOT have launcher_id in Stage 1.1, found %d", launcherCol)
+	if launcherCol != 1 {
+		t.Errorf("expected final schema to have launcher_id, found %d", launcherCol)
 	}
 }

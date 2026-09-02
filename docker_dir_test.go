@@ -29,7 +29,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	allowedRoot := dir
+	allowedRoot := testAllowedRootDir(t)
 	// Create a RuntimeDir where MkdirAll will fail: put a regular file
 	// at the path where the sessions subdirectory would be created.
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -53,6 +53,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
+		Mode:                  ModeUser,
 	}
 
 	hash := sha256.Sum256([]byte(testAdminToken))
@@ -62,6 +63,14 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 		AdminTokenHash:      hash,
 		OperationSupervisor: newOperationSupervisor(),
 	}
+
+	// Provision a user-mode daemon-owner Principal + 'default' Launcher so
+	// that session creation resolves a valid session owner.
+	home := filepath.Join(allowedRoot, "daemon-home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home)
 
 	// Create a session.
 	workspace := testWorkspaceDir(t, allowedRoot)
@@ -152,7 +161,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
 
-	allowedRoot := dir
+	allowedRoot := testAllowedRootDir(t)
 	// Create a RuntimeDir where MkdirAll will fail: put a regular file
 	// at the path where the sessions subdirectory would be created.
 	runtimeDir := filepath.Join(dir, "runtime")
@@ -176,6 +185,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
+		Mode:                  ModeUser,
 	}
 
 	hash := sha256.Sum256([]byte(testAdminToken))
@@ -185,6 +195,14 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 		AdminTokenHash:      hash,
 		OperationSupervisor: newOperationSupervisor(),
 	}
+
+	// Provision a user-mode daemon-owner Principal + 'default' Launcher so
+	// that session creation resolves a valid session owner.
+	home := filepath.Join(allowedRoot, "daemon-home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home)
 
 	// Create a session.
 	workspace2 := testWorkspaceDir(t, allowedRoot)

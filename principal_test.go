@@ -1356,11 +1356,12 @@ func TestListPrincipalSummaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listPrincipalSummaries() error: %v", err)
 	}
-	if len(summaries) != 2 {
-		t.Fatalf("expected 2 principals, got %d", len(summaries))
+	if len(summaries) != 3 {
+		t.Fatalf("expected 3 principals, got %d", len(summaries))
 	}
 
-	// Verify sorted by username
+	// Verify sorted by username (bootstrap daemon-owner sorts after the
+	// user-created alice and bob).
 	if summaries[0].Username != "alice" {
 		t.Errorf("first principal = %q, want %q", summaries[0].Username, "alice")
 	}
@@ -1378,6 +1379,18 @@ func TestListPrincipalSummaries(t *testing.T) {
 	}
 	if summaries[0] != wantAlice {
 		t.Errorf("alice summary = %+v, want %+v", summaries[0], wantAlice)
+	}
+
+	// The bootstrap daemon-owner principal is listed with its stored identity.
+	wantOwner := principalSummary{
+		Username: "dhtestowner",
+		UID:      1000,
+		GID:      1000,
+		Home:     filepath.Join(app.Config.AllowedRoots[0], "daemon-home"),
+		Enabled:  true,
+	}
+	if summaries[2] != wantOwner {
+		t.Errorf("owner summary = %+v, want %+v", summaries[2], wantOwner)
 	}
 }
 
@@ -1424,8 +1437,8 @@ func TestPrincipalHTTPList(t *testing.T) {
 	if !resp.OK {
 		t.Error("expected ok=true")
 	}
-	if len(resp.Principals) != 1 {
-		t.Fatalf("expected 1 principal, got %d", len(resp.Principals))
+	if len(resp.Principals) != 2 {
+		t.Fatalf("expected 2 principals, got %d", len(resp.Principals))
 	}
 	want := principalSummary{
 		Username: "carol",
@@ -1436,6 +1449,17 @@ func TestPrincipalHTTPList(t *testing.T) {
 	}
 	if resp.Principals[0] != want {
 		t.Errorf("summary = %+v, want %+v", resp.Principals[0], want)
+	}
+	// The bootstrap daemon-owner principal sorts after carol.
+	wantOwner := principalSummary{
+		Username: "dhtestowner",
+		UID:      1000,
+		GID:      1000,
+		Home:     filepath.Join(app.Config.AllowedRoots[0], "daemon-home"),
+		Enabled:  true,
+	}
+	if resp.Principals[1] != wantOwner {
+		t.Errorf("owner summary = %+v, want %+v", resp.Principals[1], wantOwner)
 	}
 }
 
@@ -1450,8 +1474,28 @@ func TestPrincipalHTTPListEmpty(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if got := strings.TrimSpace(w.Body.String()); got != `{"ok":true,"principals":[]}` {
-		t.Errorf("empty list body = %q, want %q", got, `{"ok":true,"principals":[]}`)
+
+	// In user mode the daemon-owner is bootstrapped, so a list with no
+	// additional principals created must contain exactly the daemon-owner.
+	var resp listPrincipalsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("cannot decode response: %v", err)
+	}
+	if !resp.OK {
+		t.Error("expected ok=true")
+	}
+	if len(resp.Principals) != 1 {
+		t.Fatalf("expected exactly 1 principal (the daemon-owner), got %d", len(resp.Principals))
+	}
+	wantOwner := principalSummary{
+		Username: "dhtestowner",
+		UID:      1000,
+		GID:      1000,
+		Home:     filepath.Join(app.Config.AllowedRoots[0], "daemon-home"),
+		Enabled:  true,
+	}
+	if resp.Principals[0] != wantOwner {
+		t.Errorf("only principal = %+v, want %+v", resp.Principals[0], wantOwner)
 	}
 }
 
@@ -1493,14 +1537,20 @@ func TestPrincipalHTTPListDisabledIncluded(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
 	}
-	if len(resp.Principals) != 1 {
-		t.Fatalf("expected 1 principal, got %d", len(resp.Principals))
+	if len(resp.Principals) != 2 {
+		t.Fatalf("expected 2 principals, got %d", len(resp.Principals))
 	}
 	if resp.Principals[0].Username != "dave" {
 		t.Fatalf("username = %q, want dave", resp.Principals[0].Username)
 	}
 	if resp.Principals[0].Enabled {
 		t.Error("disabled principal must be listed with enabled=false")
+	}
+	if resp.Principals[1].Username != "dhtestowner" {
+		t.Errorf("second principal = %q, want dhtestowner", resp.Principals[1].Username)
+	}
+	if !resp.Principals[1].Enabled {
+		t.Error("bootstrap daemon-owner must be listed with enabled=true")
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -11,6 +12,21 @@ import (
 	"testing"
 	"time"
 )
+
+// provisionDefaultLauncherForDB provisions an enabled daemon-owner Principal
+// and its 'default' Launcher against an arbitrary (non-newTestApp) test
+// database, and returns the Launcher's ID. It mirrors newTestApp's owner
+// provisioning so bare-DB fixtures can reference a valid launcher_id.
+func provisionDefaultLauncherForDB(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	allowedRoot := testAllowedRootDir(t)
+	home := filepath.Join(allowedRoot, "daemon-home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	owner := provisionTestOwner(t, db, allowedRoot, home)
+	return owner.launcherID
+}
 
 func TestCreateSession(t *testing.T) {
 	app := newTestApp(t)
@@ -324,11 +340,12 @@ func TestCleanupExpiredSessions(t *testing.T) {
 
 	// Create an expired session (expires_at in the past).
 	_, err := app.DB.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"dhs_expired", "hash1", app.Config.AllowedRoots[0],
 		time.Now().Add(-2*time.Hour).Unix(),
 		time.Now().Add(-1*time.Hour).Unix(),
+		app.userModeDefault.launcherID,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert expired session: %v", err)
@@ -337,10 +354,11 @@ func TestCleanupExpiredSessions(t *testing.T) {
 	// Create a session expiring exactly now (should be cleaned up).
 	now := time.Now().Unix()
 	_, err = app.DB.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"dhs_expires_now", "hash2", app.Config.AllowedRoots[0],
 		now-3600, now,
+		app.userModeDefault.launcherID,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert boundary session: %v", err)
@@ -348,10 +366,11 @@ func TestCleanupExpiredSessions(t *testing.T) {
 
 	// Create an active session (expires_at in the future).
 	_, err = app.DB.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
 		"dhs_active", "hash3", app.Config.AllowedRoots[0],
 		now, now+3600,
+		app.userModeDefault.launcherID,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert active session: %v", err)
@@ -442,11 +461,12 @@ func TestSessionCleanupCLI(t *testing.T) {
 		t.Fatalf("openDatabase() error: %v", err)
 	}
 	defer db.Close()
+	launcherID := provisionDefaultLauncherForDB(t, db)
 	now := time.Now().Unix()
 	if _, err := db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		"dhs_cli_expired", "hash_cli", dir, now-7200, now-3600,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"dhs_cli_expired", "hash_cli", dir, now-7200, now-3600, launcherID,
 	); err != nil {
 		t.Fatalf("cannot insert expired session: %v", err)
 	}
@@ -567,21 +587,22 @@ func TestSessionCleanupWithRuntimeDirs(t *testing.T) {
 	}
 	defer db.Close()
 
+	launcherID := provisionDefaultLauncherForDB(t, db)
 	now := time.Now().Unix()
 
 	_, err = db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		"dhs_active", "hash_active", dir, now, now+3600,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"dhs_active", "hash_active", dir, now, now+3600, launcherID,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert active session: %v", err)
 	}
 
 	_, err = db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		"dhs_expired", "hash_expired", dir, now-7200, now-3600,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"dhs_expired", "hash_expired", dir, now-7200, now-3600, launcherID,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert expired session: %v", err)
@@ -684,11 +705,12 @@ func TestSessionCleanupRuntimeError(t *testing.T) {
 	}
 	defer db.Close()
 
+	launcherID := provisionDefaultLauncherForDB(t, db)
 	now := time.Now().Unix()
 	_, err = db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		"dhs_expired", "hash_expired", dir, now-7200, now-3600,
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"dhs_expired", "hash_expired", dir, now-7200, now-3600, launcherID,
 	)
 	if err != nil {
 		t.Fatalf("cannot insert expired session: %v", err)

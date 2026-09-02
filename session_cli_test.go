@@ -46,10 +46,11 @@ func TestSessionCleanupDaemonLockHeld(t *testing.T) {
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
+	launcherID := provisionDefaultLauncherForDB(t, db)
 	_, err = db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"sess-expired", "hash1", "/workspace", time.Now().Add(-2*time.Hour).Unix(), time.Now().Add(-1*time.Hour).Unix(), nil,
+		"sess-expired", "hash1", "/workspace", time.Now().Add(-2*time.Hour).Unix(), time.Now().Add(-1*time.Hour).Unix(), launcherID,
 	)
 	if err != nil {
 		t.Fatalf("insert expired session: %v", err)
@@ -144,10 +145,11 @@ func TestSessionCleanupOffline(t *testing.T) {
 	if err := initializeDatabase(db); err != nil {
 		t.Fatalf("initializeDatabase: %v", err)
 	}
+	launcherID := provisionDefaultLauncherForDB(t, db)
 	_, err = db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"sess-expired", "hash1", "/workspace", time.Now().Add(-2*time.Hour).Unix(), time.Now().Add(-1*time.Hour).Unix(), nil,
+		"sess-expired", "hash1", "/workspace", time.Now().Add(-2*time.Hour).Unix(), time.Now().Add(-1*time.Hour).Unix(), launcherID,
 	)
 	if err != nil {
 		t.Fatalf("insert expired session: %v", err)

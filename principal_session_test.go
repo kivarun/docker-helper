@@ -177,9 +177,11 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 		return "1033", "1033", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "sessuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "sessuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "sessuser", "oc")
 	if err != nil {
@@ -207,17 +209,28 @@ func TestCredentialCreatesSessionWithPrincipalID(t *testing.T) {
 		t.Fatalf("cannot decode response: %v", err)
 	}
 
-	// Check that the session has principal_id set.
-	var principalID sql.NullInt64
-	err = app.DB.QueryRow(
-		`SELECT principal_id FROM sessions WHERE id = ?`,
-		resp.Session.ID,
-	).Scan(&principalID)
-	if err != nil {
-		t.Fatalf("cannot query principal_id: %v", err)
+	// The session must be owned by the principal's default Launcher. Verify
+	// the stored launcher_id points at a Launcher owned by the principal, and
+	// that the JSON principal projection shows the principal's name.
+	if resp.Session.LauncherID == "" {
+		t.Fatal("expected session to have a launcher_id")
 	}
-	if !principalID.Valid {
-		t.Error("expected principal_id to be set")
+	if resp.Session.Principal == nil {
+		t.Fatal("expected principal name in session JSON")
+	}
+	if *resp.Session.Principal != "sessuser" {
+		t.Errorf("expected principal %q, got %q", "sessuser", *resp.Session.Principal)
+	}
+	var ownerID int64
+	err = app.DB.QueryRow(
+		`SELECT l.principal_id FROM launchers l JOIN sessions s ON s.launcher_id = l.id WHERE s.id = ?`,
+		resp.Session.ID,
+	).Scan(&ownerID)
+	if err != nil {
+		t.Fatalf("cannot query owning launcher principal: %v", err)
+	}
+	if ownerID != int64(p.ID) {
+		t.Errorf("session launcher owned by principal %d, want %d", ownerID, int64(p.ID))
 	}
 }
 
@@ -245,17 +258,29 @@ func TestAdminCreatesSessionWithNULLPrincipalID(t *testing.T) {
 		t.Fatalf("cannot decode response: %v", err)
 	}
 
-	// Check that the session has principal_id = NULL.
-	var principalID sql.NullInt64
-	err := app.DB.QueryRow(
-		`SELECT principal_id FROM sessions WHERE id = ?`,
-		resp.Session.ID,
-	).Scan(&principalID)
-	if err != nil {
-		t.Fatalf("cannot query principal_id: %v", err)
+	// In the Launcher-owned model there is no principal_id column and no
+	// ownerless session. An admin-created session (user mode, no selector) is
+	// owned by the daemon-owner default Launcher.
+	if resp.Session.LauncherID != app.userModeDefault.launcherID {
+		t.Errorf("admin session launcher_id = %q, want daemon-owner default %q", resp.Session.LauncherID, app.userModeDefault.launcherID)
 	}
-	if principalID.Valid {
-		t.Error("expected principal_id to be NULL for admin session")
+
+	var launcherID string
+	err := app.DB.QueryRow(`SELECT launcher_id FROM sessions WHERE id = ?`, resp.Session.ID).Scan(&launcherID)
+	if err != nil {
+		t.Fatalf("cannot query session launcher_id: %v", err)
+	}
+	if launcherID != app.userModeDefault.launcherID {
+		t.Errorf("stored launcher_id = %q, want %q", launcherID, app.userModeDefault.launcherID)
+	}
+
+	var colCount int
+	err = app.DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'principal_id'`).Scan(&colCount)
+	if err != nil {
+		t.Fatalf("cannot inspect sessions schema: %v", err)
+	}
+	if colCount != 0 {
+		t.Errorf("sessions schema must not have a principal_id column, found %d", colCount)
 	}
 }
 
@@ -274,9 +299,11 @@ func TestPrincipalWorkspaceInsideFirstRoot(t *testing.T) {
 		return "1034", "1034", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "wsuser1", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "wsuser1", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "wsuser1", "oc")
 	if err != nil {
@@ -319,9 +346,11 @@ func TestPrincipalWorkspaceInsideSecondRoot(t *testing.T) {
 		return "1035", "1035", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "wsuser2", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "wsuser2", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add second allowed root.
 	if _, _, err := addPrincipalAllowedRoot(app.DB, "wsuser2", secondRoot, app.Config.AllowedRoots); err != nil {
@@ -369,9 +398,11 @@ func TestPrincipalWorkspaceOutsideAllRootsRejected(t *testing.T) {
 		return "1036", "1036", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "wsuser3", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "wsuser3", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Do NOT add outsideRoot as allowed root.
 	_, token, err := createCredential(app.DB, "wsuser3", "oc")
@@ -420,12 +451,16 @@ func TestPrincipalSeesOnlyOwnSessions(t *testing.T) {
 		return "", "", "", fmt.Errorf("not found")
 	}
 
-	if _, err := createPrincipal(app.DB, "owner1", app.Config.AllowedRoots); err != nil {
+	p1, err := createPrincipal(app.DB, "owner1", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal(owner1) error: %v", err)
 	}
-	if _, err := createPrincipal(app.DB, "owner2", app.Config.AllowedRoots); err != nil {
+	mustAddDefaultLauncher(t, app.DB, int64(p1.ID))
+	p2, err := createPrincipal(app.DB, "owner2", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal(owner2) error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p2.ID))
 
 	_, token1, err := createCredential(app.DB, "owner1", "oc")
 	if err != nil {
@@ -546,9 +581,11 @@ func TestAdminSeesAllSessions(t *testing.T) {
 		return "1040", "1040", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "adminseesuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "adminseesuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Create admin session.
 	adminResult, err := app.createSession(home)
@@ -611,9 +648,11 @@ func TestPrincipalDeletesOwnSession(t *testing.T) {
 		return "1041", "1041", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "delownuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "delownuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "delownuser", "oc")
 	if err != nil {
@@ -675,12 +714,16 @@ func TestPrincipalDeletingOtherPrincipalSessionReturns404(t *testing.T) {
 		return "", "", "", fmt.Errorf("not found")
 	}
 
-	if _, err := createPrincipal(app.DB, "delother1", app.Config.AllowedRoots); err != nil {
+	p1, err := createPrincipal(app.DB, "delother1", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal(delother1) error: %v", err)
 	}
-	if _, err := createPrincipal(app.DB, "delother2", app.Config.AllowedRoots); err != nil {
+	mustAddDefaultLauncher(t, app.DB, int64(p1.ID))
+	p2, err := createPrincipal(app.DB, "delother2", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal(delother2) error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p2.ID))
 
 	_, token1, err := createCredential(app.DB, "delother1", "oc")
 	if err != nil {
@@ -780,9 +823,11 @@ func TestAdminDeletesAnySession(t *testing.T) {
 		return "1045", "1045", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "admindeluser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "admindeluser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "admindeluser", "oc")
 	if err != nil {
@@ -835,9 +880,11 @@ func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 		return "1046", "1046", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "surviveuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "surviveuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	cred, token, err := createCredential(app.DB, "surviveuser", "oc")
 	if err != nil {
@@ -949,9 +996,11 @@ func TestSessionTokenInvalidatedOnPrincipalDisable(t *testing.T) {
 		return "1047", "1047", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "survivedisuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "survivedisuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "survivedisuser", "oc")
 	if err != nil {
@@ -1104,9 +1153,11 @@ func TestCredentialAuthNoAdminFailureAudit(t *testing.T) {
 		return "1060", "1060", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "noadminfail", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "noadminfail", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "noadminfail", "oc")
 	if err != nil {
@@ -1200,9 +1251,11 @@ func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 		return "1061", "1061", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "principalresp", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "principalresp", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "principalresp", "oc")
 	if err != nil {
@@ -1229,11 +1282,11 @@ func TestCredentialCreateSessionReturnsPrincipal(t *testing.T) {
 		t.Fatalf("cannot decode response: %v", err)
 	}
 
-	if resp.Session.PrincipalName == nil {
+	if resp.Session.Principal == nil {
 		t.Fatal("expected principal name in response")
 	}
-	if *resp.Session.PrincipalName != "principalresp" {
-		t.Errorf("expected principal 'principalresp', got %q", *resp.Session.PrincipalName)
+	if *resp.Session.Principal != "principalresp" {
+		t.Errorf("expected principal 'principalresp', got %q", *resp.Session.Principal)
 	}
 }
 
@@ -1310,9 +1363,11 @@ func TestGlobalPolicyNarrowing(t *testing.T) {
 		return "1050", "1050", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "narrowuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "narrowuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add the broad root to the principal.
 	if _, _, err := addPrincipalAllowedRoot(app.DB, "narrowuser", broadRoot, app.Config.AllowedRoots); err != nil {
@@ -1385,9 +1440,11 @@ func TestStalePrincipalRootOutsideGlobal(t *testing.T) {
 		return "1051", "1051", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "staleuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "staleuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Add a root that will become stale.
 	if _, _, err := addPrincipalAllowedRoot(app.DB, "staleuser", staleRoot, app.Config.AllowedRoots); err != nil {

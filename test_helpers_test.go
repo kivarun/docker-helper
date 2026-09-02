@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -244,12 +245,67 @@ func newTestApp(t *testing.T) *App {
 		OperationRetentionTTL: 10 * time.Minute,
 		OperationMaxCompleted: 200,
 		OperationLogMaxBytes:  4 * 1024 * 1024,
+		Mode:                  ModeUser,
 	}
 
-	return &App{
+	app := &App{
 		Config: cfg,
 		DB:     db,
 	}
+
+	// Provision a user-mode daemon-owner Principal + 'default' Launcher so that
+	// session creation through the shared model works without a manual owner.
+	// The daemon-owner Principal has no allowed-root rows (collapsed global).
+	home := filepath.Join(allowedRoot, "daemon-home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatalf("cannot create daemon-owner home: %v", err)
+	}
+	owner := provisionTestOwner(t, db, allowedRoot, home)
+	app.userModeDefault = owner
+
+	return app
+}
+
+// provisionTestOwner provisions an enabled Principal and its 'default'
+// inherit-scope Launcher via the production ownership helpers. The Principal is
+// created with no allowed-root rows (collapsed global policy). home must be a
+// valid, non-forbidden absolute directory.
+func provisionTestOwner(t *testing.T, db *sql.DB, allowedRoot, home string) *userModeDefaultLauncher {
+	t.Helper()
+	const username = "dhtestowner"
+	pid, err := insertDaemonOwnerPrincipal(db, username, 1000, 1000, home)
+	if err != nil {
+		t.Fatalf("cannot provision test owner principal: %v", err)
+	}
+	launcherID, err := ensureDefaultLauncher(db, pid)
+	if err != nil {
+		t.Fatalf("cannot provision test owner default launcher: %v", err)
+	}
+	return &userModeDefaultLauncher{principalID: pid, launcherID: launcherID, username: username}
+}
+
+// mustAddDefaultLauncher provisions a named Principal's 'default' inherit
+// Launcher and returns its ID, failing the test on error. It is the shared
+// setup for tests that create Sessions via a Principal credential, because in
+// the cutover model those Sessions are owned by the Principal's default
+// Launcher.
+func mustAddDefaultLauncher(t *testing.T, db *sql.DB, principalID int64) string {
+	t.Helper()
+	l, _, _, err := createLauncher(db, principalID, "default", LauncherScopeInherit, nil, nil, false)
+	if err != nil {
+		t.Fatalf("createLauncher(default) for principal %d: %v", principalID, err)
+	}
+	return l.ID
+}
+
+// principalIDByName resolves a test-created Principal's internal ID.
+func principalIDByName(t *testing.T, db *sql.DB, username string) int64 {
+	t.Helper()
+	id, err := findPrincipalIDByUsername(db, username)
+	if err != nil {
+		t.Fatalf("findPrincipalIDByUsername(%s): %v", username, err)
+	}
+	return int64(id)
 }
 
 // newTestAppWithAdminToken creates an admin-authorized test app with the

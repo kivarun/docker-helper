@@ -51,9 +51,11 @@ func TestPrincipalSessionUsesPrincipalUIDGID(t *testing.T) {
 		return "2001", "2001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "execuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "execuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "execuser", "oc")
 	if err != nil {
@@ -123,12 +125,16 @@ func TestDifferentPrincipalsDifferentUIDGID(t *testing.T) {
 		return "", "", "", fmt.Errorf("not found")
 	}
 
-	if _, err := createPrincipal(app.DB, "diffuser1", app.Config.AllowedRoots); err != nil {
+	p1, err := createPrincipal(app.DB, "diffuser1", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal(diffuser1) error: %v", err)
 	}
-	if _, err := createPrincipal(app.DB, "diffuser2", app.Config.AllowedRoots); err != nil {
+	mustAddDefaultLauncher(t, app.DB, int64(p1.ID))
+	p2, err := createPrincipal(app.DB, "diffuser2", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal(diffuser2) error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p2.ID))
 
 	_, token1, err := createCredential(app.DB, "diffuser1", "oc")
 	if err != nil {
@@ -204,9 +210,11 @@ func TestDisabledPrincipalSessionInvalidated(t *testing.T) {
 		return "4001", "4001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "disabledexecuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "disabledexecuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "disabledexecuser", "oc")
 	if err != nil {
@@ -261,9 +269,11 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 		return "5001", "5001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "revokedexecuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "revokedexecuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	cred, token, err := createCredential(app.DB, "revokedexecuser", "oc")
 	if err != nil {
@@ -356,9 +366,11 @@ func TestPrincipalIdentityDBError(t *testing.T) {
 		return "6001", "6001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "dberruser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "dberruser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "dberruser", "oc")
 	if err != nil {
@@ -414,9 +426,11 @@ func TestPrincipalSessionAuditContainsPrincipalName(t *testing.T) {
 		return "7001", "7001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "auditexecuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "auditexecuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "auditexecuser", "oc")
 	if err != nil {
@@ -472,9 +486,11 @@ func TestResolveSessionExecutionIdentityFromDB(t *testing.T) {
 		return "8001", "8001", home, nil
 	}
 
-	if _, err := createPrincipal(app.DB, "fromdbuser", app.Config.AllowedRoots); err != nil {
+	p, err := createPrincipal(app.DB, "fromdbuser", app.Config.AllowedRoots)
+	if err != nil {
 		t.Fatalf("createPrincipal() error: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	_, token, err := createCredential(app.DB, "fromdbuser", "oc")
 	if err != nil {

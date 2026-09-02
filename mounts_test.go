@@ -63,13 +63,22 @@ func TestMountSourceDotMountsWorkspace(t *testing.T) {
 
 func TestMountRelativeSubdir(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	app.OperationSupervisor = newOperationSupervisor()
+	mockDetectLSM(t, LSMAppArmor, nil)
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			PinnedPath: sourcePath,
+			cleanup:    func() error { return nil },
+		}, nil
+	}
 
 	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		t.Fatalf("cannot create subdir: %v", err)
 	}
 
-	result, err := app.createSession(subdir)
+	result, err := createSystemSession(t, app, subdir)
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -104,8 +113,17 @@ func TestMountRelativeSubdir(t *testing.T) {
 
 func TestMountRegularFile(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
+	app.OperationSupervisor = newOperationSupervisor()
+	mockDetectLSM(t, LSMAppArmor, nil)
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			PinnedPath: sourcePath,
+			cleanup:    func() error { return nil },
+		}, nil
+	}
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -528,7 +546,7 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -579,7 +597,7 @@ func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -630,7 +648,7 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}
@@ -686,7 +704,7 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession() error: %v", err)
 	}

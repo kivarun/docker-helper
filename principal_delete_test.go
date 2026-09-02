@@ -32,6 +32,7 @@ func TestPrincipalDeleteRemovesAllData(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "deluser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "deluser"))
 
 	if _, _, err := addPrincipalAllowedRoot(app.DB, "deluser", home, app.Config.AllowedRoots); err != nil {
 		t.Fatalf("addAllowedRoot: %v", err)
@@ -106,6 +107,7 @@ func TestPrincipalDeleteSessionTokenInvalidated(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "deltokenuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "deltokenuser"))
 
 	_, credToken, err := createCredential(app.DB, "deltokenuser", "laptop")
 	if err != nil {
@@ -229,6 +231,7 @@ func TestPrincipalDisableDeletesSessions(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "disuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "disuser"))
 
 	_, credToken, err := createCredential(app.DB, "disuser", "laptop")
 	if err != nil {
@@ -327,6 +330,7 @@ func TestPrincipalEnableDoesNotRestoreSessions(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "disenuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "disenuser"))
 
 	_, credToken, err := createCredential(app.DB, "disenuser", "laptop")
 	if err != nil {
@@ -559,6 +563,7 @@ func TestPrincipalDisableCredentialStillWorks(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "discreduser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "discreduser"))
 
 	_, credToken, err := createCredential(app.DB, "discreduser", "laptop")
 	if err != nil {
@@ -615,6 +620,7 @@ func TestPrincipalDisableSessionTokenUnauthorized(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "disauthuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "disauthuser"))
 
 	_, credToken, err := createCredential(app.DB, "disauthuser", "laptop")
 	if err != nil {
@@ -801,6 +807,7 @@ func TestPrincipalDeleteMultipleSessions(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "delsessuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "delsessuser"))
 
 	_, credToken, err := createCredential(app.DB, "delsessuser", "laptop")
 	if err != nil {
@@ -862,6 +869,7 @@ func TestPrincipalDeleteWithExpiredSessions(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "delexpuser", app.Config.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "delexpuser"))
 
 	_, credToken, err := createCredential(app.DB, "delexpuser", "laptop")
 	if err != nil {
@@ -923,6 +931,7 @@ func TestPrincipalDisableConcurrentConfigReload(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "configraceuser", baseCfg.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "configraceuser"))
 
 	// Create a credential and session for the principal.
 	_, credToken, err := createCredential(app.DB, "configraceuser", "test-cred")
@@ -1019,6 +1028,7 @@ func TestPrincipalDeleteConcurrentConfigReload(t *testing.T) {
 	if _, err := createPrincipal(app.DB, "delconfigraceuser", baseCfg.AllowedRoots); err != nil {
 		t.Fatalf("createPrincipal: %v", err)
 	}
+	mustAddDefaultLauncher(t, app.DB, principalIDByName(t, app.DB, "delconfigraceuser"))
 
 	// Create a credential and session for the principal.
 	_, credToken, err := createCredential(app.DB, "delconfigraceuser", "test-cred")

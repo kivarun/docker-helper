@@ -128,9 +128,10 @@ func TestPrintSessionsTableNoToken(t *testing.T) {
 
 func TestPrintSessionsTablePrincipal(t *testing.T) {
 	principal := "alice"
+	launcher := "default"
 	sessions := []sessionJSON{
-		{ID: "dhs_001", PrincipalName: &principal, Workspace: "/srv/ws-a", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
-		{ID: "dhs_002", PrincipalName: nil, Workspace: "/srv/ws-b", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
+		{ID: "dhs_001", Principal: &principal, Launcher: &launcher, Workspace: "/srv/ws-a", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
+		{ID: "dhs_002", Principal: nil, Launcher: nil, Workspace: "/srv/ws-b", CreatedAt: "2024-01-01T00:00:00Z", ExpiresAt: "2024-01-02T00:00:00Z"},
 	}
 
 	var buf strings.Builder
@@ -142,16 +143,16 @@ func TestPrintSessionsTablePrincipal(t *testing.T) {
 	}
 
 	header := strings.Fields(lines[0])
-	if len(header) != 5 {
-		t.Fatalf("expected 5 header columns, got %d: %v", len(header), header)
+	if len(header) != 6 {
+		t.Fatalf("expected 6 header columns, got %d: %v", len(header), header)
 	}
-	if !slices.Equal(header, []string{"ID", "PRINCIPAL", "WORKSPACE", "CREATED", "EXPIRES"}) {
-		t.Errorf("header = %v, want [ID PRINCIPAL WORKSPACE CREATED EXPIRES]", header)
+	if !slices.Equal(header, []string{"ID", "PRINCIPAL", "LAUNCHER", "WORKSPACE", "CREATED", "EXPIRES"}) {
+		t.Errorf("header = %v, want [ID PRINCIPAL LAUNCHER WORKSPACE CREATED EXPIRES]", header)
 	}
 
 	first := strings.Fields(lines[1])
-	if len(first) != 5 {
-		t.Fatalf("expected 5 fields in first data row, got %d: %v", len(first), first)
+	if len(first) != 6 {
+		t.Fatalf("expected 6 fields in first data row, got %d: %v", len(first), first)
 	}
 	if first[0] != "dhs_001" {
 		t.Errorf("fields[0] = %q, want %q", first[0], "dhs_001")
@@ -159,16 +160,22 @@ func TestPrintSessionsTablePrincipal(t *testing.T) {
 	if first[1] != "alice" {
 		t.Errorf("fields[1] = %q, want %q", first[1], "alice")
 	}
+	if first[2] != "default" {
+		t.Errorf("fields[2] = %q, want %q", first[2], "default")
+	}
 
 	second := strings.Fields(lines[2])
-	if len(second) != 5 {
-		t.Fatalf("expected 5 fields in second data row, got %d: %v", len(second), second)
+	if len(second) != 6 {
+		t.Fatalf("expected 6 fields in second data row, got %d: %v", len(second), second)
 	}
 	if second[0] != "dhs_002" {
 		t.Errorf("fields[0] = %q, want %q", second[0], "dhs_002")
 	}
 	if second[1] != "-" {
 		t.Errorf("fields[1] = %q, want %q", second[1], "-")
+	}
+	if second[2] != "-" {
+		t.Errorf("fields[2] = %q, want %q", second[2], "-")
 	}
 }
 

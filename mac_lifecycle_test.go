@@ -134,6 +134,14 @@ func setupTestMACCoordinator(t *testing.T) (*App, *sessionMACCoordinator, *testW
 		MACCoordinator: mac,
 	}
 
+	// Provision a user-mode daemon-owner Principal + 'default' Launcher so that
+	// sessions created through the shared model reference a real launcher_id.
+	home := filepath.Join(allowedRoot, "daemon-home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatalf("cannot create daemon-owner home: %v", err)
+	}
+	app.userModeDefault = provisionTestOwner(t, db, allowedRoot, home)
+
 	return app, mac, driver
 }
 
@@ -152,12 +160,12 @@ func TestNewSessionMACCoordinatorRejectsNilDriver(t *testing.T) {
 }
 
 // insertTestSession inserts a test session into the database.
-func insertTestSession(t *testing.T, db *sql.DB, sessionID, workspace string) {
+func insertTestSession(t *testing.T, db *sql.DB, launcherID, sessionID, workspace string) {
 	t.Helper()
 	_, err := db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sessionID, "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil,
+		sessionID, "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 	)
 	if err != nil {
 		t.Fatalf("insertTestSession: %v", err)
@@ -178,7 +186,7 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 
 	// Create session binding.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -233,14 +241,35 @@ func TestLeaseReleaseConditionalBoundaryCleanup(t *testing.T) {
 }
 
 // insertTestSessionTx inserts a test session (used in callback).
-func insertTestSessionTx(db *sql.DB, sessionID, workspace string) error {
+func insertTestSessionTx(db *sql.DB, launcherID, sessionID, workspace string) error {
 	tokenHash := fmt.Sprintf("hash_%s", sessionID)
 	_, err := db.Exec(
-		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+		`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sessionID, tokenHash, workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil,
+		sessionID, tokenHash, workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 	)
 	return err
+}
+
+// testMACLauncherID provisions an enabled daemon-owner Principal and its
+// 'default' Launcher for tests that build their own DB outside
+// setupTestMACCoordinator, returning a valid launcher_id for session inserts.
+func testMACLauncherID(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	// Reuse an already-provisioned daemon-owner default Launcher if present so
+	// that multiple session inserts in one test share a single launcher_id.
+	const username = "dhtestowner"
+	if p, err := findPrincipalByUsername(db, username); err == nil {
+		if lid, lerr := findDefaultLauncher(db, int64(p.ID)); lerr == nil {
+			return lid
+		}
+	}
+	allowedRoot := testAllowedRootDir(t)
+	home := filepath.Join(allowedRoot, "home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatalf("cannot create launcher home: %v", err)
+	}
+	return provisionTestOwner(t, db, allowedRoot, home).launcherID
 }
 
 // TestMACLifecycleWarningUsesOperationalLogger verifies that MAC
@@ -267,7 +296,7 @@ func TestMACLifecycleWarningUsesOperationalLogger(t *testing.T) {
 	triggerWarning := func(sessionID string) {
 		t.Helper()
 		if _, err := mac.CreateSessionBinding(workspace, sessionID, func(cov workspaceMACCoverage) error {
-			return insertTestSessionTx(app.DB, sessionID, workspace)
+			return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, sessionID, workspace)
 		}); err != nil {
 			t.Fatalf("CreateSessionBinding: %v", err)
 		}
@@ -691,7 +720,7 @@ func TestSELinuxRestoreconFailureFailsClosed(t *testing.T) {
 	mac := newSessionMACCoordinator(db, driver)
 
 	_, err = mac.CreateSessionBinding("/data/workspace", "sess-1", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-1", "/data/workspace")
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-1", "/data/workspace")
 	})
 	if err == nil {
 		t.Fatal("CreateSessionBinding should fail when restorecon fails")
@@ -716,7 +745,7 @@ func TestLeaseReleaseIdempotent(t *testing.T) {
 
 	// Create session binding.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(app.DB, "sess-1", workspace)
+		return insertTestSessionTx(app.DB, app.userModeDefault.launcherID, "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding: %v", err)
@@ -804,7 +833,7 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 
 	// Create parent session binding.
 	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-parent", parentWS)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-parent", parentWS)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding parent: %v", err)
@@ -812,7 +841,7 @@ func TestDeferredBoundaryCleanupChildThenParent(t *testing.T) {
 
 	// Create child session binding.
 	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-child", childWS)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-child", childWS)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding child: %v", err)
@@ -895,7 +924,7 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 
 	// Create parent session binding.
 	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-parent", parentWS)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-parent", parentWS)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding parent: %v", err)
@@ -903,7 +932,7 @@ func TestDeferredBoundaryCleanupParentThenChild(t *testing.T) {
 
 	// Create child session binding.
 	_, err = mac.CreateSessionBinding(childWS, "sess-child", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-child", childWS)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-child", childWS)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding child: %v", err)
@@ -975,14 +1004,14 @@ func TestDeferredBoundaryExactMatch(t *testing.T) {
 
 	// Create two session bindings on the same workspace.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-1", workspace)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding sess-1: %v", err)
 	}
 
 	_, err = mac.CreateSessionBinding(workspace, "sess-2", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-2", workspace)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-2", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding sess-2: %v", err)
@@ -1061,7 +1090,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 
 	// Create boundary with apparmor driver.
 	_, err = mac1.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-1", workspace)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-1", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding with apparmor: %v", err)
@@ -1098,7 +1127,7 @@ func TestBackendSwitchOwnership(t *testing.T) {
 
 	// selinux can create its own boundary at the same path.
 	_, err = mac2.CreateSessionBinding(workspace, "sess-2", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-2", workspace)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-2", workspace)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding with selinux: %v", err)
@@ -1197,9 +1226,11 @@ func TestRunHandlerPinCleanupFailureRetainsLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
+	launcherID := testMACLauncherID(t, db)
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
 	})
 	if err != nil {
@@ -1327,9 +1358,11 @@ func TestRunHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
+	launcherID := testMACLauncherID(t, db)
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
 	})
 	if err != nil {
@@ -1445,9 +1478,11 @@ func TestBuildHandlerStagingCleanupFailureRetainsLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
+	launcherID := testMACLauncherID(t, db)
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
 	})
 	if err != nil {
@@ -1578,9 +1613,11 @@ func TestBuildHandlerCleanupSuccessReleasesLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
+	launcherID := testMACLauncherID(t, db)
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
 	})
 	if err != nil {
@@ -1709,9 +1746,11 @@ func TestAdmitRejectionRunPinsBeforeLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
+	launcherID := testMACLauncherID(t, db)
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
 	})
 	if err != nil {
@@ -1820,9 +1859,11 @@ func TestAdmitRejectionBuildStagingBeforeLease(t *testing.T) {
 	}
 	tokenHash := sha256.Sum256([]byte(token))
 
+	launcherID := testMACLauncherID(t, db)
+
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
-		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+		_, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			"sess-1", hex.EncodeToString(tokenHash[:]), workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 		return err
 	})
 	if err != nil {
@@ -2095,8 +2136,9 @@ func TestSELinuxReconcileCreatesDurableCoverage(t *testing.T) {
 
 	// Insert a live session so ReconcileLiveSessions has something to reconcile.
 	workspace := "/data/workspace"
-	_, err = db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id) VALUES (?, ?, ?, ?, ?, ?)`,
-		"sess-reconcile", "hash", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), nil)
+	launcherID := testMACLauncherID(t, db)
+	_, err = db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		"sess-reconcile", "hash", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID)
 	if err != nil {
 		t.Fatalf("insert session: %v", err)
 	}
@@ -2239,7 +2281,7 @@ func TestDeferredStaleBoundaryCleanup(t *testing.T) {
 
 	// Create parent session binding (the only live consumer).
 	_, err = mac.CreateSessionBinding(parentWS, "sess-parent", func(cov workspaceMACCoverage) error {
-		return insertTestSessionTx(db, "sess-parent", parentWS)
+		return insertTestSessionTx(db, testMACLauncherID(t, db), "sess-parent", parentWS)
 	})
 	if err != nil {
 		t.Fatalf("CreateSessionBinding parent: %v", err)
@@ -2337,13 +2379,14 @@ func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
+	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := app.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 		)
 		return err
 	})
@@ -2419,13 +2462,14 @@ func TestPrincipalDeleteReleasesMACBindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
+	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := app.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 		)
 		return err
 	})
@@ -2501,13 +2545,14 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
+	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := app.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 		)
 		return err
 	})
@@ -2600,13 +2645,14 @@ func TestPrincipalDeleteLeasePreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
+	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create a session with MAC binding.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := app.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 		)
 		return err
 	})
@@ -2689,13 +2735,14 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findPrincipalIDByUsername: %v", err)
 	}
+	launcherID := mustAddDefaultLauncher(t, app.DB, int64(principalID))
 
 	// Create two sessions on the same workspace boundary.
 	_, err = mac.CreateSessionBinding(workspace, "sess-1", func(cov workspaceMACCoverage) error {
 		_, err := app.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+			"sess-1", "hash1", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 		)
 		return err
 	})
@@ -2705,9 +2752,9 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 
 	_, err = mac.CreateSessionBinding(workspace, "sess-2", func(cov workspaceMACCoverage) error {
 		_, err := app.DB.Exec(
-			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, principal_id)
+			`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			"sess-2", "hash2", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), principalID,
+			"sess-2", "hash2", workspace, time.Now().Unix(), time.Now().Add(24*time.Hour).Unix(), launcherID,
 		)
 		return err
 	})
@@ -2795,6 +2842,13 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	stalePrincipalID := auth.Principal.PrincipalID
 	staleAllowedRoots := auth.Principal.PrincipalAllowedRoots
 
+	// Provision the principal's default Launcher (the Session-creation owner in
+	// the cutover model).
+	launcher, _, _, err := createLauncher(app.DB, stalePrincipalID, "default", LauncherScopeInherit, nil, app.getConfig().AllowedRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+
 	// Disable the principal (simulates concurrent disable).
 	result, err := persistPrincipalEnabledChange(app.DB, "staleauthuser", false)
 	if err != nil {
@@ -2815,7 +2869,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	_, err = app.createSessionWithPolicy(&sessionCreatePolicy{
 		Workspace:             projDir,
 		EffectiveAllowedRoots: effectiveRoots,
-		PrincipalID:           &stalePrincipalID,
+		LauncherID:            launcher.ID,
 	})
 
 	// createSessionWithPolicy must fail because the principal is disabled.
@@ -2826,8 +2880,8 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	// Verify no Session row was created.
 	var count int
 	err = app.DB.QueryRow(
-		`SELECT COUNT(*) FROM sessions WHERE principal_id = ?`,
-		stalePrincipalID,
+		`SELECT COUNT(*) FROM sessions WHERE launcher_id = ?`,
+		launcher.ID,
 	).Scan(&count)
 	if err != nil {
 		t.Fatalf("query session: %v", err)

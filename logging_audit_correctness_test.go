@@ -592,10 +592,12 @@ func TestBuildStartFailureOperationalDiagnostic(t *testing.T) {
 }
 
 func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
+	mockDetectLSM(t, LSMAppArmor, nil)
 	_, opBuf := setupTestLogging(t)
 	app := newTestAppWithAdminToken(t)
+	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,6 +611,15 @@ func TestRunStartFailureOperationalDiagnostic(t *testing.T) {
 	}
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "nonexistent-docker-binary")
+	}
+
+	// In system mode the mount source is pinned before the run starts. Provide
+	// a succeeding pin so the operation proceeds to the docker start failure.
+	app.PinWorkspaceMountSourceFn = func(workspace, sourcePath, runtimeDir, operationID string, mountIndex int) (*pinnedMount, error) {
+		return &pinnedMount{
+			PinnedPath: "/tmp/test-mount",
+			cleanup:    func() error { return nil },
+		}, nil
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewReader([]byte(fmt.Sprintf(
@@ -783,6 +794,8 @@ func TestSessionCleanupCorrelationField(t *testing.T) {
 	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
 		t.Fatal(err)
 	}
+	pid := principalIDByName(t, app.DB, username)
+	mustAddDefaultLauncher(t, app.DB, pid)
 
 	// Create a credential and session for the principal.
 	_, credToken, err := createCredential(app.DB, username, "laptop")
@@ -902,6 +915,8 @@ func TestSessionDeleteCleanupCorrelation(t *testing.T) {
 	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
 		t.Fatal(err)
 	}
+	pid := principalIDByName(t, app.DB, username)
+	mustAddDefaultLauncher(t, app.DB, pid)
 
 	// Create a credential and session for the principal.
 	_, credToken, err := createCredential(app.DB, username, "laptop")
@@ -1126,7 +1141,7 @@ func TestRunPinnedMountCleanupCorrelation(t *testing.T) {
 	app.OperationSupervisor = newOperationSupervisor()
 	app.Config.Mode = ModeSystem
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
