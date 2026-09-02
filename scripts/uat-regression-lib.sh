@@ -142,9 +142,35 @@ dh() { /usr/bin/docker-helper "$@"; }
 # reg_setup_principal USER creates (or reuses) the OS user + docker-helper
 # principal (enabled), and prints the user's home directory.
 reg_setup_principal() {
-  local user="$1" home admin_token launcher_http launcher_json
+  local user="$1" home admin_token launcher_http launcher_json root root_ok home_base
+  # The OS user's home must be under a global allowed root, or `principal
+  # create` rejects it (final model). Pick a home base that is under an
+  # existing allowed root: prefer /home when it is itself allowed (the common
+  # default), otherwise fall back to /opt when allowed, else the first root.
+  home_base=""
+  root_ok=0
+  while read -r root; do
+    [ -n "$root" ] || continue
+    case "$root" in
+      /home|/home/*)
+        if [ "$root" = "/home" ]; then home_base="/home"; root_ok=1; break; fi
+        ;;
+    esac
+  done <<< "$(dh config allowed-root list 2>/dev/null || true)"
+  if [ "$root_ok" != 1 ]; then
+    if dh config allowed-root list 2>/dev/null | grep -qx '/opt'; then
+      home_base="/opt"; root_ok=1
+    fi
+  fi
+  if [ "$root_ok" != 1 ]; then
+    home_base="$(dh config allowed-root list 2>/dev/null | sed -n '1p')"
+  fi
+  if [ -z "$home_base" ]; then
+    echo "error: no global allowed root under which to place principal '$user' home" >&2
+    return 1
+  fi
   if ! getent passwd "$user" >/dev/null 2>&1; then
-    useradd -m -s /bin/bash "$user" || return 1
+    useradd -m -d "$home_base/$user" -s /bin/bash "$user" || return 1
   fi
   home="$(getent passwd "$user" | cut -d: -f6)"
   dh principal create --system "$user" >/dev/null 2>&1 || true
