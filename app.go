@@ -40,6 +40,9 @@ type App struct {
 	// MACCoordinator is the session MAC coordinator owner.
 	// nil in user mode or when no MAC driver is active.
 	MACCoordinator *sessionMACCoordinator
+	// userModeDefault is the user-mode daemon-owner Principal/Launcher resolved
+	// at startup by ensureUserModeOwnership. nil in system mode.
+	userModeDefault *userModeDefaultLauncher
 }
 
 // pinWorkspaceMountSource calls PinWorkspaceMountSourceFn if set, otherwise the

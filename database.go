@@ -39,7 +39,7 @@ func initializeDatabase(db *sql.DB) error {
 			workspace TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			expires_at INTEGER NOT NULL,
-			principal_id INTEGER REFERENCES principals(id)
+			launcher_id TEXT NOT NULL REFERENCES launchers(id)
 		);
 
 		CREATE TABLE IF NOT EXISTS principals (
@@ -100,18 +100,33 @@ func initializeDatabase(db *sql.DB) error {
 		return fmt.Errorf("cannot create tables: %w", err)
 	}
 
-	// Additive migration: add principal_id to sessions if it doesn't exist.
-	// This allows upgrading from an R1 database that only has sessions without principal_id.
-	var count int
-	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='principal_id';`).Scan(&count)
+	// Classify the sessions schema and bring pre-cutover tables forward.
+	//
+	// The canonical fresh-database sessions table is the final Launcher-owned
+	// shape (launcher_id NOT NULL, no principal_id). A final table must NEVER
+	// have principal_id re-added on a later startup, so the R1 additive rule is
+	// retired for any table that already carries launcher_id.
+	class, err := classifySessionsSchema(db)
 	if err != nil {
-		return fmt.Errorf("cannot check sessions schema: %w", err)
+		return err
 	}
-	if count == 0 {
-		_, err = db.Exec(`ALTER TABLE sessions ADD COLUMN principal_id INTEGER REFERENCES principals(id)`)
-		if err != nil {
+	switch class {
+	case sessionsSchemaFinal:
+		// Canonical Launcher-owned schema; no cutover work needed here.
+	case sessionsSchemaLegacyBare:
+		// R1 sessions table with neither ownership column. This is the only
+		// remaining case where the old principal_id additive rule applies: it
+		// turns the bare table into the legacy principal-owned source that
+		// migrateSessionOwnership (run from runDaemon) later rebuilds.
+		if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN principal_id INTEGER REFERENCES principals(id)`); err != nil {
 			return fmt.Errorf("cannot add principal_id to sessions: %w", err)
 		}
+	case sessionsSchemaLegacyPrincipal:
+		// principal_id present and no launcher_id: the legitimate pre-cutover
+		// source for Session ownership cutover. initializeDatabase leaves it
+		// in place; migrateSessionOwnership rebuilds it to the final schema.
+	case sessionsSchemaUnsupported:
+		return fmt.Errorf("unsupported sessions schema")
 	}
 
 	// Migrate any pre-2.1 credentials table to the final single-table,
@@ -199,6 +214,53 @@ func initializeDatabase(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+// sessionsSchemaClass classifies the sessions table ownership shape. Ownership
+// is exactly one of: legacy bare (neither column), legacy principal-owned
+// (principal_id, no launcher_id), final Launcher-owned (launcher_id, no
+// principal_id), or unsupported (hybrid/other => fail closed).
+type sessionsSchemaClass int
+
+const (
+	// sessionsSchemaUnsupported is any hybrid or unrecognized shape (for
+	// example both principal_id and launcher_id present). Initialization fails
+	// closed rather than guessing at ownership.
+	sessionsSchemaUnsupported sessionsSchemaClass = iota
+	// sessionsSchemaLegacyBare is a pre-cutover R1 table with neither the old
+	// principal_id nor the final launcher_id.
+	sessionsSchemaLegacyBare
+	// sessionsSchemaLegacyPrincipal is the pre-cutover principal-owned source
+	// (principal_id present, launcher_id absent) that migrateSessionOwnership
+	// rebuilds to the final schema.
+	sessionsSchemaLegacyPrincipal
+	// sessionsSchemaFinal is the canonical Launcher-owned schema (launcher_id
+	// present, principal_id absent).
+	sessionsSchemaFinal
+)
+
+// classifySessionsSchema determines the sessions table ownership shape from
+// pragma_table_info. The final schema must never have principal_id re-added.
+func classifySessionsSchema(db *sql.DB) (sessionsSchemaClass, error) {
+	var hasPrincipal, hasLauncher int
+	if err := db.QueryRow(
+		`SELECT
+			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='principal_id'),
+			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='launcher_id')`,
+	).Scan(&hasPrincipal, &hasLauncher); err != nil {
+		return sessionsSchemaUnsupported, fmt.Errorf("cannot check sessions schema: %w", err)
+	}
+	switch {
+	case hasLauncher > 0 && hasPrincipal == 0:
+		return sessionsSchemaFinal, nil
+	case hasPrincipal > 0 && hasLauncher == 0:
+		return sessionsSchemaLegacyPrincipal, nil
+	case hasPrincipal == 0 && hasLauncher == 0:
+		return sessionsSchemaLegacyBare, nil
+	default:
+		// Both present (hybrid) or any other unrecognized shape.
+		return sessionsSchemaUnsupported, nil
+	}
 }
 
 // credentialsSchemaClass identifies the supported credentials table shapes.

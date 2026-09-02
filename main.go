@@ -285,6 +285,23 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
+		// User-mode ownership provisioning: resolve the real daemon-owner OS
+		// identity and its Principal/'default' Launcher. System mode skips this.
+		userModeDefault, err := ensureUserModeOwnership(db, cfg.Mode)
+		if err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+
+		// Session ownership cutover: rebuild any pre-cutover (principal-owned)
+		// sessions table to the final Launcher-owned schema. Idempotent: a no-op
+		// on the final schema. Must run after user-mode ownership provisioning
+		// and before any other Session consumers.
+		if _, err := migrateSessionOwnership(db, cfg.Mode, userModeDefault); err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+
 		if _, err := cleanupExpiredSessions(db); err != nil {
 			serveStartupError(err, "")
 			return err
@@ -323,6 +340,7 @@ func runDaemon(stdout, stderr io.Writer) error {
 			AdminTokenHash:      adminHash,
 			OperationSupervisor: newOperationSupervisor(),
 			MACCoordinator:      macCoordinator,
+			userModeDefault:     userModeDefault,
 		}
 
 		mux := http.NewServeMux()
