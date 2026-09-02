@@ -1384,8 +1384,8 @@ func TestListPrincipalSummaries(t *testing.T) {
 	// The bootstrap daemon-owner principal is listed with its stored identity.
 	wantOwner := principalSummary{
 		Username: "dhtestowner",
-		UID:      1000,
-		GID:      1000,
+		UID:      os.Getuid(),
+		GID:      os.Getgid(),
 		Home:     filepath.Join(app.Config.AllowedRoots[0], "daemon-home"),
 		Enabled:  true,
 	}
@@ -1453,8 +1453,8 @@ func TestPrincipalHTTPList(t *testing.T) {
 	// The bootstrap daemon-owner principal sorts after carol.
 	wantOwner := principalSummary{
 		Username: "dhtestowner",
-		UID:      1000,
-		GID:      1000,
+		UID:      os.Getuid(),
+		GID:      os.Getgid(),
 		Home:     filepath.Join(app.Config.AllowedRoots[0], "daemon-home"),
 		Enabled:  true,
 	}
@@ -1489,8 +1489,8 @@ func TestPrincipalHTTPListEmpty(t *testing.T) {
 	}
 	wantOwner := principalSummary{
 		Username: "dhtestowner",
-		UID:      1000,
-		GID:      1000,
+		UID:      os.Getuid(),
+		GID:      os.Getgid(),
 		Home:     filepath.Join(app.Config.AllowedRoots[0], "daemon-home"),
 		Enabled:  true,
 	}
