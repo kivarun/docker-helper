@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,12 +57,13 @@ var selinuxCheckPaths = []string{
 // diagnostics. It owns no MAC lifecycle state and never mutates SELinux.
 //
 // Seams are injectable for tests: runCommand executes the read-only external
-// commands, detectLSM is the single host MAC authority, and pathExists reports
-// whether a host path is present.
+// commands, detectLSM is the single host MAC authority, and statPath reports
+// whether a host path is present, distinguishing a genuine absence from a
+// stat error so presence that cannot be determined never looks absent.
 type selinuxCheckVerifier struct {
 	runCommand func(string, ...string) ([]byte, error)
 	detectLSM  func() (LSMBackend, error)
-	pathExists func(string) bool
+	statPath   func(string) (present bool, err error)
 }
 
 func newProductionSELinuxCheckVerifier() *selinuxCheckVerifier {
@@ -71,9 +73,15 @@ func newProductionSELinuxCheckVerifier() *selinuxCheckVerifier {
 			return c.CombinedOutput()
 		},
 		detectLSM: detectLSM,
-		pathExists: func(p string) bool {
+		statPath: func(p string) (bool, error) {
 			_, err := os.Stat(p)
-			return err == nil
+			if err == nil {
+				return true, nil
+			}
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil
+			}
+			return false, fmt.Errorf("cannot determine presence of %s: %w", p, err)
 		},
 	}
 }
@@ -145,17 +153,26 @@ func (v *selinuxCheckVerifier) checkPolicyModule() error {
 
 // checkFileContexts verifies docker-helper-owned file contexts against the
 // active policy defaults using the read-only `matchpathcon -V`. The installed
-// executable is required; the remaining paths are optional (absent is not a
-// failure, but a present path whose context mismatches is).
+// executable is required; the remaining paths are optional (genuinely absent
+// is not a failure, a present path whose context mismatches is, and presence
+// that cannot be determined fails diagnostically rather than being skipped).
 func (v *selinuxCheckVerifier) checkFileContexts() error {
-	if !v.pathExists(selinuxCheckExecutable) {
+	present, err := v.statPath(selinuxCheckExecutable)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return fmt.Errorf("installed executable %s not found", selinuxCheckExecutable)
 	}
 	if err := v.verifyFileContext(selinuxCheckExecutable); err != nil {
 		return err
 	}
 	for _, p := range selinuxCheckPaths {
-		if !v.pathExists(p) {
+		present, err := v.statPath(p)
+		if err != nil {
+			return err
+		}
+		if !present {
 			continue
 		}
 		if err := v.verifyFileContext(p); err != nil {

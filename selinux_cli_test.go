@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -38,7 +39,7 @@ func newTestSELinuxCheckVerifier(rec *cmdRecorder) *selinuxCheckVerifier {
 	return &selinuxCheckVerifier{
 		runCommand: rec.run,
 		detectLSM:  func() (LSMBackend, error) { return LSMSELinux, nil },
-		pathExists: func(string) bool { return true },
+		statPath:   func(string) (bool, error) { return true, nil },
 	}
 }
 
@@ -191,7 +192,12 @@ func TestSELinuxCheckExecutableContextFails(t *testing.T) {
 func TestSELinuxCheckOptionalPathAbsentOK(t *testing.T) {
 	rec := &cmdRecorder{}
 	v := newTestSELinuxCheckVerifier(rec)
-	v.pathExists = func(p string) bool { return p == selinuxCheckExecutable }
+	v.statPath = func(p string) (bool, error) {
+		if p == selinuxCheckExecutable {
+			return true, nil
+		}
+		return false, nil
+	}
 	if err := v.check(); err != nil {
 		t.Fatalf("expected success when optional paths are absent, got: %v", err)
 	}
@@ -200,6 +206,54 @@ func TestSELinuxCheckOptionalPathAbsentOK(t *testing.T) {
 		if c[0] == "matchpathcon" && c[1] == "-V" && c[2] != selinuxCheckExecutable {
 			t.Errorf("must not verify absent optional path, got: %v", c)
 		}
+	}
+}
+
+func TestSELinuxCheckOptionalPathStatErrorFails(t *testing.T) {
+	rec := &cmdRecorder{}
+	v := newTestSELinuxCheckVerifier(rec)
+	v.statPath = func(p string) (bool, error) {
+		if p == selinuxCheckExecutable {
+			return true, nil
+		}
+		if p == "/etc/docker-helper" {
+			return false, fmt.Errorf("cannot determine presence of %s: %w", p, errors.New("permission denied"))
+		}
+		return false, nil
+	}
+	err := v.check()
+	if err == nil {
+		t.Fatal("expected failure when an optional path's presence cannot be determined")
+	}
+	if !strings.Contains(err.Error(), "/etc/docker-helper") {
+		t.Errorf("expected optional path in diagnostic, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("expected underlying stat error in diagnostic, got: %v", err)
+	}
+}
+
+func TestSELinuxCheckExecutableStatErrorFails(t *testing.T) {
+	rec := &cmdRecorder{}
+	v := newTestSELinuxCheckVerifier(rec)
+	v.statPath = func(p string) (bool, error) {
+		if p == selinuxCheckExecutable {
+			return false, fmt.Errorf("cannot determine presence of %s: %w", p, errors.New("input/output error"))
+		}
+		return false, nil
+	}
+	err := v.check()
+	if err == nil {
+		t.Fatal("expected failure when the executable's presence cannot be determined")
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Errorf("stat error must not be reported as 'not found', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), selinuxCheckExecutable) {
+		t.Errorf("expected executable path in diagnostic, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "input/output error") {
+		t.Errorf("expected underlying stat error in diagnostic, got: %v", err)
 	}
 }
 
