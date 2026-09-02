@@ -223,7 +223,8 @@ state is the baseline at `b5cc231e84e33924cd317505ce50ad38a13440c3`.
 
 ### Startup ordering (must be preserved and extended)
 
-`runDaemon` (`main.go:228`) holds the daemon instance lock and runs, in order:
+`runDaemon` (`main.go:228`) currently holds the daemon instance lock and runs,
+in order:
 
 1. `loadAdminToken`
 2. `openDatabase`
@@ -232,8 +233,31 @@ state is the baseline at `b5cc231e84e33924cd317505ce50ad38a13440c3`.
 5. `newMACCoordinatorForMode` + `ReconcileLiveSessions`
 6. `cleanupStaleSessionRuntimeDirs`
 
-The plan's migration and invalidation must slot into this order without
-weakening it (see Persistence migration).
+Stage 1.3 deliberately extends this ordering to:
+
+```text
+loadAdminToken
+openDatabase
+initializeDatabase
+ensureUserModeOwnership        (ModeUser only)
+migrateSessionOwnership        (old schema only; mode-aware)
+cleanupExpiredSessions
+newMACCoordinatorForMode + ReconcileLiveSessions
+cleanupStaleSessionRuntimeDirs
+```
+
+`ensureUserModeOwnership` must run before Session ownership migration so legacy
+user-mode `principal_id IS NULL` Sessions can be attributed to the real
+local daemon owner and its `default` Launcher. In system mode no such local
+attribution exists; legacy admin-created NULL-owner Sessions are invalidated.
+
+The existing Release-1 additive migration that says “if `sessions.principal_id`
+is absent, add it” is **not valid on the final 2.1 schema**. Stage 1.3 must
+replace/guard that migration at the same time as the canonical `sessions` schema
+changes: a final table containing `launcher_id` must never have `principal_id`
+re-added on a later startup. The R1 migration remains applicable only to a
+pre-cutover legacy sessions table that has neither final Launcher ownership nor
+the old Principal ownership column.
 
 ### Operator client / CLI wiring
 
@@ -341,8 +365,14 @@ reviewed in Stage 1.2.
 Do **not** add `sessions.launcher_id` as a permanent second authority beside a
 kept `principal_id`. The target is a rebuilt `sessions` table without
 `principal_id`. Cutover runs inside the daemon lock as a dedicated migration
-step `migrateSessionOwnership` invoked from `runDaemon` **immediately after**
-`initializeDatabase` and **before** `cleanupExpiredSessions`.
+step `migrateSessionOwnership` invoked from `runDaemon` after
+`ensureUserModeOwnership` (when applicable) and before `cleanupExpiredSessions`.
+
+At the same Stage 1.3 boundary, `initializeDatabase` must switch the canonical
+fresh-database `sessions` DDL to the final `launcher_id` schema and retire the
+old unconditional R1 `principal_id` additive rule for any table that already
+has `launcher_id`. This prevents the removed second-authority column from being
+reintroduced on the next daemon restart.
 
 Ordered steps:
 
@@ -350,6 +380,9 @@ Ordered steps:
    For every Principal that currently owns at least one Session, create (if
    absent) that Principal's `default` Launcher with `scope_mode = inherit`.
    Idempotent: `INSERT OR IGNORE` on `(principal_id, name)`.
+
+   In user mode, `ensureUserModeOwnership` has already resolved/created the real
+   daemon-owner Principal and its `default` Launcher before this migration runs.
 
 2. **Rebuild `sessions`** to the final shape in one atomic transaction:
 
@@ -367,24 +400,28 @@ Ordered steps:
    Copy rows, resolving the new `launcher_id`:
    - Principal-attributable rows (old `principal_id IS NOT NULL`) →
      that Principal's `default` Launcher.
-   - Admin-created rows (old `principal_id IS NULL`) → **invalidated**, not
-     copied (see step 3).
+   - User-mode legacy rows with old `principal_id IS NULL` → the already
+     resolved real daemon-owner `default` Launcher.
+   - System-mode admin-created rows with old `principal_id IS NULL` →
+     **invalidated**, not copied (see step 3).
 
    `launcher_id` is non-null. There is **no** `ON DELETE CASCADE` from Launcher
    to Session; Launcher deletion must go through the checked Session/runtime/MAC
    lifecycle, not a DB cascade.
 
 3. **Invalidate legacy admin-created Sessions that cannot be attributed.**
-   These rows are dropped in the same transaction. In user mode, sessions that
-   are attributable to the real daemon-owner OS identity are migrated (see
-   User-mode compatibility); only genuinely non-attributable admin-created
-   sessions are invalidated.
+   In system mode, old `principal_id IS NULL` rows have no valid Principal →
+   Launcher ownership chain and are dropped in the same transaction. In user
+   mode, the per-user database and real daemon-owner identity provide the
+   attribution described above, so those rows migrate instead of being
+   discarded.
 
 4. **Make Launcher ownership non-null and remove `principal_id` from
-   authorization.** After the rebuild no production query selects, filters, or
-   authorizes on a stored `principal_id`. `Session.PrincipalID` is replaced by
-   `Session.LauncherID`; `PrincipalName` becomes a derived projection through
-   the Launcher.
+   authorization and schema.** After the rebuild no production query selects,
+   filters, or authorizes on a stored `principal_id`. `Session.PrincipalID` is
+   replaced by `Session.LauncherID`; `PrincipalName` becomes a derived
+   projection through the Launcher. A subsequent `initializeDatabase` must
+   recognize this final schema and must not recreate `principal_id`.
 
 Why invalidated legacy Sessions leave **no permanent helper-owned MAC or
 runtime state**: invalidated rows are removed from the DB, so they are absent
@@ -417,7 +454,9 @@ old schema intact and the next startup re-runs `migrateSessionOwnership`. A
 crash after commit means ownership is already final and the migration's
 detection (does `sessions` still have `principal_id`? does it have
 `launcher_id`?) skips rework. Detection uses `pragma_table_info`, matching the
-existing `initializeDatabase` pattern.
+existing `initializeDatabase` pattern. The final-schema branch of
+`initializeDatabase` must treat `launcher_id` as authoritative and must never
+re-add the retired `principal_id` column.
 
 ## Authentication / authorization
 
@@ -453,8 +492,9 @@ Admin | Principal credential | Launcher credential
 ```
 
 `authenticateSessionControlRequest` (`sessions.go:59`) keeps the order: admin
-token, then Principal credential, then Launcher credential. A Session bearer
-never authenticates a session-control request (that path is data-plane only via
+token, then credential authentication, with the persistent credential owner
+determining Principal vs Launcher authority. A Session bearer never
+authenticates a session-control request (that path is data-plane only via
 `findSessionByToken`).
 
 ### ONE common Session ownership lookup / authorization boundary
@@ -494,25 +534,32 @@ Resolution by authority:
 
 | Authority | launcher_id absent | launcher_id == self | another launcher | principal selector |
 | --- | --- | --- | --- | --- |
-| Launcher credential | self | self | not found/denied (no disclosure) | invalid |
-| Principal credential | that Principal's `default` Launcher | must belong to that Principal (else not found) | not found | unnecessary; selecting another Principal is invalid |
-| Admin | requires either selector | explicit Launcher | explicit Launcher | that Principal's `default` Launcher |
+| Launcher credential | self | self | `404 launcher_not_found` | invalid (`400 invalid_selector`) |
+| Principal credential | that Principal's `default` Launcher | must belong to that Principal (else `404 launcher_not_found`) | `404 launcher_not_found` | invalid (`400 invalid_selector`) |
+| System-mode Admin | invalid: selector required | explicit Launcher | explicit Launcher | that Principal's `default` Launcher |
+| User-mode Admin | local daemon-owner `default` Launcher | explicit Launcher | explicit Launcher | explicit local/known Principal resolution |
 
-Admin must provide **exactly one** of `launcher_id` or `principal`. Supplying
-both, or neither, is an invalid request. Do not create an ownerless Session.
+System-mode Admin must provide **exactly one** of `launcher_id` or `principal`.
+User-mode Admin may omit both: omission is the compatibility default that
+resolves the real daemon-owner OS identity's `default` Launcher. No path may
+create an ownerless Session.
 
-**Exact invalid-selector behavior when both selector forms are supplied:**
+**Exact invalid-selector behavior:**
 
-- Admin with both `launcher_id` and `principal` → HTTP `400`, error code
+- Any caller supplying both `launcher_id` and `principal` → HTTP `400`,
   `conflicting_selectors`.
-- Principal credential with a `principal` selector (even matching its own) →
-  HTTP `400`, `invalid_selector` (the selector is unnecessary and must not
-  select another Principal).
-- Principal credential with `launcher_id` not attached to its Principal → HTTP
-  `404` `launcher_not_found` (non-disclosing).
-- Launcher credential with any `principal` selector, or with a `launcher_id`
-  that is not itself → HTTP `404`/`400` as appropriate without disclosing
-  whether another Launcher exists.
+- Principal credential supplying any `principal` selector (even matching its
+  own Principal) → HTTP `400`, `invalid_selector`.
+- Principal credential selecting a Launcher outside its Principal → HTTP `404`,
+  `launcher_not_found`.
+- Launcher credential supplying any `principal` selector → HTTP `400`,
+  `invalid_selector`.
+- Launcher credential supplying a `launcher_id` other than itself → HTTP `404`,
+  `launcher_not_found`, regardless of whether that Launcher exists.
+- System-mode Admin supplying neither selector → HTTP `400`,
+  `missing_launcher_selector`.
+- User-mode Admin supplying neither selector → resolve local daemon-owner
+  `default`; this is not an error.
 
 After resolution, **all** callers (Admin, Principal, Launcher, and user-mode)
 use the same shared path:
@@ -583,12 +630,18 @@ The daemon-owner OS identity is the effective UID that runs the daemon
 user-mode sessions and runtime state). No synthetic cross-user identity is
 invented.
 
-**Automatic provisioning.** In user mode, at startup (inside the daemon lock,
-after `initializeDatabase`), the daemon resolves or creates the daemon-owner
-`Principal` (keyed by the real OS identity) and its `default` Launcher. This is
-transparent: the ordinary user never sees it and never configures it. The
-provisioned Principal is an ownership marker, not a separately operated
-identity.
+**Automatic provisioning.** In user mode, startup inside the daemon lock runs
+`ensureUserModeOwnership` immediately after `initializeDatabase` and before
+`migrateSessionOwnership`. It resolves the real daemon-owner OS account from the
+process UID, then resolves or creates the corresponding Principal record and
+its `default` Launcher. The real OS UID/GID remain the execution identity; the
+stored Principal is the persistent ownership link required by the common model.
+The ordinary user never has to create or select it.
+
+Legacy user-mode `principal_id IS NULL` Sessions are attributable because the
+user-mode state database belongs to that one daemon-owner deployment; Stage 1.3
+maps them to this already-resolved default Launcher. System mode does not use
+this rule.
 
 **Collapsed policy — no second authority.** The daemon-owner Principal is
 created with **no `principal_allowed_roots` rows**. Its effective roots are
@@ -647,6 +700,32 @@ Freeze the agreed resource layout. Session endpoints remain structurally
 stable (`POST /sessions`, `GET /sessions`, `DELETE /sessions/{id}`) with the
 Session request/response extended as described.
 
+### Principal creation with optional initial credential
+
+Existing `POST /principals` remains administrator-authorized and is extended
+without changing omission behavior. Request:
+
+```json
+{
+  "username": "alice",
+  "issue_credential": false
+}
+```
+
+- `issue_credential` omitted → `false`, preserving existing direct-API
+  behavior.
+- `issue_credential: false` → create only the Principal.
+- `issue_credential: true` → in the same public operation create the Principal
+  and its initial Principal credential named `default`; return that bearer
+  secret exactly once in the successful response.
+- If the combined operation cannot complete, it must not leave a silently
+  half-provisioned “success” result; implementation must define one
+  transactional/compensating owner for Principal + optional initial credential.
+- The daemon never prompts. Interactive prompting is a CLI concern.
+
+The existing plural Principal credential endpoints remain authoritative for
+later create/list/revoke operations.
+
 ### Launcher endpoints
 
 ```text
@@ -663,7 +742,7 @@ POST   /launchers/{id}/credential/rotate
 DELETE /launchers/{id}/credential
 ```
 
-### Creation
+### Launcher creation
 
 `POST /principals/{username}/launchers` (admin-authorized; also consumed by
 Principal-credential Launcher management under its own Principal). Request:
@@ -681,15 +760,17 @@ Principal-credential Launcher management under its own Principal). Request:
 - `scope` omitted (or `inherit`) with `allowed_roots` omitted → `inherit`.
 - `scope: "restricted"` requires `allowed_roots` (one or more); each root is
   validated against the current effective Principal roots on write.
-- `issue_credential` defaults to `false` in the raw API for compatibility
-  (omission must not silently change existing direct API behavior). When
-  `true`, the response returns the new Launcher credential secret exactly once.
+- `issue_credential` defaults to `false` in the raw API for compatibility.
+  When `true`, the response returns the new Launcher credential secret exactly
+  once.
 
 ### Allowed-root replacement
 
-For `PUT /launchers/{id}/allowed-roots`, do **not** let an empty-list accident
-silently broaden a restricted Launcher to inherit. Use an explicit mode in the
-update contract:
+`PUT /launchers/{id}/allowed-roots` is the **single atomic Launcher scope
+mutation**. Do not implement a separate add/remove HTTP mutation and do not
+make the CLI perform GET → local edit → PUT read-modify-write.
+
+Use an explicit complete replacement:
 
 ```json
 { "scope": "inherit" }
@@ -703,7 +784,9 @@ or
 
 `restricted` with an empty/omitted `allowed_roots` is rejected
 (`400`, `invalid_allowed_roots`). Setting `inherit` clears stored roots.
-`PATCH /launchers/{id}` handles `name`/`enabled` and `scope_mode` consistently.
+`PATCH /launchers/{id}` changes only Launcher scalar identity/state such as
+`name` and `enabled`; it does **not** provide a second `scope_mode` mutation
+path.
 
 ### Credential endpoints (singular Launcher resource)
 
@@ -728,7 +811,7 @@ beyond the single creation/rotation return, never in logs, and never in audit.
 ### New `launcher` command tree
 
 Add `launcherCommand` to the root tree (`cli.go:618`) and to `completion.go`.
-Subcommands mirror the HTTP surface:
+Subcommands mirror the HTTP ownership model:
 
 ```text
 docker-helper launcher create [--principal USER] [--name NAME]
@@ -736,11 +819,17 @@ docker-helper launcher create [--principal USER] [--name NAME]
 docker-helper launcher list [--principal USER]
 docker-helper launcher show LAUNCHER_ID
 docker-helper launcher set LAUNCHER_ID --enabled true|false [--name NAME]
-docker-helper launcher allowed-root add|remove LAUNCHER_ID PATH
+docker-helper launcher scope set LAUNCHER_ID --inherit
+docker-helper launcher scope set LAUNCHER_ID --allowed-root PATH [--allowed-root PATH]...
 docker-helper launcher credential issue LAUNCHER_ID
 docker-helper launcher credential rotate LAUNCHER_ID
 docker-helper launcher credential delete LAUNCHER_ID
 ```
+
+`launcher scope set` sends one complete `PUT /launchers/{id}/allowed-roots`
+replacement. It never fetches the current list and performs local
+read-modify-write. `--inherit` and one-or-more `--allowed-root` are mutually
+exclusive; the latter selects `restricted` scope.
 
 ### Prompt / default behavior
 
@@ -749,10 +838,11 @@ docker-helper launcher credential delete LAUNCHER_ID
   credential; defaults `name=default`, `scope=inherit`; asks
   "Create launcher credential now? [Y/n]" (default yes) when interactive.
   `principal create` likewise asks whether to issue the initial Principal
-  credential.
+  credential; accepting maps to `POST /principals` with
+  `issue_credential=true`, not to a hidden second CLI workflow.
 - **Non-interactive CLI must explicitly choose** `--issue-credential` or
-  `--no-credential` when the command would otherwise prompt. It must never wait
-  for a prompt.
+  `--no-credential` when Principal or Launcher creation would otherwise prompt.
+  It must never wait for a prompt.
 - **No prompting logic lives in the daemon.** The daemon API takes an explicit
   `issue_credential` boolean; prompting is a CLI concern.
 
@@ -790,11 +880,14 @@ correlation labels sufficient to carry Session, Launcher, and Principal
 identity, e.g.:
 
 ```text
-com.dockerhelper.owner.session_id    = <session id>
-com.dockerhelper.owner.launcher_id   = <launcher id>
-com.dockerhelper.owner.principal     = <principal username>
-com.dockerhelper.owner.schema        = 1
+com.dockerhelper.session.id       = <session id>
+com.dockerhelper.launcher.id      = <launcher id>
+com.dockerhelper.principal.name   = <principal username>
+com.dockerhelper.correlation.schema = 1
 ```
+
+The namespace is deliberately neutral: only Launcher is the Session owner; the
+Session and Principal labels are correlation/provenance, not additional owners.
 
 - User input cannot override them (the run request has no label passthrough
   today, and the labels are appended by the helper).
@@ -840,16 +933,23 @@ fixtures. Required coverage (from the concept, mapped to owners):
   rejected, replacement authorized, no second Launcher credential created.
 - Principal access only to Launchers attached to that Principal; cross-Launcher
   `404` non-disclosure.
-- Default vs explicit Launcher selection; admin requires exactly one selector;
+- Default vs explicit Launcher selection; system-mode Admin requires exactly
+  one selector, while user-mode Admin omission resolves the local default;
   conflicting-selector and invalid-selector behavior.
 - Launcher and Principal disable/delete cleanup boundaries (Sessions
   invalidated, MAC/runtime cleaned via existing owners, no cascade substitute).
 - Migration: 2.0 credentials preserved byte-for-byte as Principal credentials;
-  attributable Sessions → default Launcher; non-attributable admin Sessions
-  invalidated; no permanent MAC/runtime state from invalidated Sessions.
+  attributable Principal Sessions → default Launcher; user-mode NULL-owner
+  Sessions → local daemon-owner default Launcher; system-mode non-attributable
+  admin Sessions invalidated; final startup never re-adds `principal_id`; no
+  permanent MAC/runtime state from invalidated Sessions.
 - User-mode: transparent daemon-owner ownership; quick start requires no
   Principal/Launcher/credential; effective global-root semantics preserved.
-- Runtime correlation labels; checked cleanup.
+- Principal create with omitted/false/true `issue_credential`, one returned
+  secret, and no half-provisioned success contract.
+- Atomic Launcher scope replacement; no CLI read-modify-write policy mutation.
+- Runtime correlation labels use neutral Session/Launcher/Principal namespaces;
+  checked cleanup.
 - CLI prompt/default and mandatory non-interactive choice.
 - HTTP status/error-code/audit/secret-redaction contracts.
 
