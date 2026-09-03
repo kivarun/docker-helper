@@ -950,10 +950,17 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 	}{
 		{
 			name:       "createPrincipal",
-			call:       func(c *apiClient) error { _, err := c.createPrincipal("bob"); return err },
+			call:       func(c *apiClient) error { _, err := c.createPrincipal("bob", false); return err },
 			wantMethod: "POST",
 			wantURI:    "/principals",
 			wantBody:   `{"username":"bob"}`,
+		},
+		{
+			name:       "createPrincipalWithCredential",
+			call:       func(c *apiClient) error { _, err := c.createPrincipal("bob", true); return err },
+			wantMethod: "POST",
+			wantURI:    "/principals",
+			wantBody:   `{"username":"bob","issue_credential":true}`,
 		},
 		{
 			name:       "listPrincipals",

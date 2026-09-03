@@ -742,6 +742,22 @@ POST   /launchers/{id}/credential/rotate
 DELETE /launchers/{id}/credential
 ```
 
+### Operator auth introspection (`GET /auth`)
+
+`GET /auth` returns the authenticated identity of the operator token so the CLI
+can infer the target Principal when `--principal` is omitted:
+
+- admin token → `{"authority":"admin"}`
+- Principal credential → `{"authority":"principal","principal":"alice"}`
+- Launcher credential → `{"authority":"launcher","launcher_id":"dhl_...","principal":"alice"}`
+
+No credential IDs, bearer tokens, roots, or UID/GID are returned. A Session
+token does not authenticate; invalid/revoked/disabled credentials follow
+existing non-disclosing semantics. The response is derived from persistent
+state via the existing admin-token / `authenticateCredential` plumbing; it is
+never inferred from the process user or token prefix. No new create/list
+Launcher HTTP endpoint is added by this mechanism.
+
 ### Launcher creation
 
 `POST /principals/{username}/launchers` (admin-authorized; also consumed by
@@ -818,9 +834,9 @@ docker-helper launcher create [--principal USER] [--name NAME]
     [--allowed-root PATH]... [--issue-credential | --no-credential]
 docker-helper launcher list [--principal USER]
 docker-helper launcher show LAUNCHER_ID
-docker-helper launcher set LAUNCHER_ID --enabled true|false [--name NAME]
-docker-helper launcher scope set LAUNCHER_ID --inherit
-docker-helper launcher scope set LAUNCHER_ID --allowed-root PATH [--allowed-root PATH]...
+docker-helper launcher set [--name NAME] [--enabled true|false] LAUNCHER_ID
+docker-helper launcher delete LAUNCHER_ID
+docker-helper launcher scope set [--inherit | --allowed-root PATH [--allowed-root PATH]...] LAUNCHER_ID
 docker-helper launcher credential issue LAUNCHER_ID
 docker-helper launcher credential rotate LAUNCHER_ID
 docker-helper launcher credential delete LAUNCHER_ID

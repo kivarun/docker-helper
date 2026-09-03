@@ -161,8 +161,11 @@ workspace is handled by the session lifecycle at session creation.
 Remove a global allowed root.
 .SS Principal Commands
 .TP
-.B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
-Create a new principal.
+.B docker-helper principal create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-issue-credential | \-\-no-credential] USER
+Create a new principal. By default the CLI prompts whether to issue an
+initial principal credential; the prompt is suppressed by
+\fB\-\-issue-credential\fR (issue) or \fB\-\-no-credential\fR (do not).
+In non-interactive use one of these flags is required.
 .TP
 .B docker-helper principal list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
 List all principals (username, UID, GID, home, enabled).
@@ -182,6 +185,43 @@ Add an allowed root for a principal.
 .TP
 .B docker-helper principal allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Remove an allowed root from a principal.
+.SS Launcher Commands
+.TP
+.B docker-helper launcher create [\-\-principal USER] [\-\-name NAME] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential]
+Create a launcher for a principal. If \fB\-\-principal\fR is omitted it is
+inferred from the authenticated credential via \fBGET /auth\fR. The launcher
+name defaults to \fBdefault\fR. With no \fB\-\-allowed-root\fR the scope is
+\fBinherit\fR; with one or more it is \fBrestricted\fR. The CLI prompts whether
+to issue a launcher credential unless \fB\-\-issue-credential\fR or
+\fB\-\-no-credential\fR is given; in non-interactive use one of these flags is
+required.
+.TP
+.B docker-helper launcher list [\-\-principal USER] [\-\-json]
+List launchers. The principal is inferred as for \fBlauncher create\fR when
+\fB\-\-principal\fR is omitted.
+.TP
+.B docker-helper launcher show LAUNCHER_ID
+Show launcher details.
+.TP
+.B docker-helper launcher set [\-\-name NAME] [\-\-enabled true|false] LAUNCHER_ID
+Modify a launcher with at least one of \fB\-\-name\fR or \fB\-\-enabled\fR.
+.TP
+.B docker-helper launcher delete LAUNCHER_ID
+Delete a launcher.
+.TP
+.B docker-helper launcher scope set [\-\-inherit | \-\-allowed-root PATH [\-\-allowed-root PATH]...] LAUNCHER_ID
+Replace a launcher scope atomically. \fB\-\-inherit\fR and
+\fB\-\-allowed-root\fR are mutually exclusive; restricted scope requires at
+least one allowed root.
+.TP
+.B docker-helper launcher credential issue LAUNCHER_ID
+Issue a launcher credential and print its bearer secret once.
+.TP
+.B docker-helper launcher credential rotate LAUNCHER_ID
+Rotate a launcher credential and print the new bearer secret once.
+.TP
+.B docker-helper launcher credential delete LAUNCHER_ID
+Delete a launcher's credential. No secret is printed.
 .SS Credential Commands
 .TP
 .B docker-helper credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER

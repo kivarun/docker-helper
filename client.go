@@ -381,8 +381,8 @@ func (c *apiClient) operationLogs(ctx context.Context, opID string, offset int64
 	return &result, nil
 }
 
-func (c *apiClient) createPrincipal(username string) (*principalResponse, error) {
-	body, err := json.Marshal(createPrincipalRequest{Username: username})
+func (c *apiClient) createPrincipal(username string, issueCredential bool) (*principalResponse, error) {
+	body, err := json.Marshal(createPrincipalRequest{Username: username, IssueCredential: issueCredential})
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
@@ -608,4 +608,205 @@ func (c *apiClient) deletePrincipal(username string) error {
 		return parseAPIError(resp.StatusCode, body)
 	}
 	return nil
+}
+
+// auth reports the authenticated identity of the current operator token via
+// GET /auth. The CLI uses it to infer the Principal when --principal is omitted.
+func (c *apiClient) auth() (*authResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/auth", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result authResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// createLauncherClientRequest is the narrow wire request the CLI sends to
+// create a Launcher. The CLI maps --name/--allowed-root defaults into the
+// existing HTTP create request; the daemon remains the policy authority.
+type createLauncherClientRequest struct {
+	Name            string   `json:"name"`
+	Scope           string   `json:"scope"`
+	AllowedRoots    []string `json:"allowed_roots"`
+	IssueCredential bool     `json:"issue_credential"`
+}
+
+func (c *apiClient) createLauncher(username string, req createLauncherClientRequest) (*createLauncherResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("POST", "/principals/"+url.PathEscape(username)+"/launchers", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result createLauncherResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) listLaunchers(username string) (*listLaunchersResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/principals/"+url.PathEscape(username)+"/launchers", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result listLaunchersResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) showLauncher(id string) (*launcherJSON, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/launchers/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var launcher launcherJSON
+	if err := json.Unmarshal(respBody, &launcher); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &launcher, nil
+}
+
+func (c *apiClient) patchLauncher(id string, req patchLauncherRequest) (*launcherJSON, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("PATCH", "/launchers/"+url.PathEscape(id), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var launcher launcherJSON
+	if err := json.Unmarshal(respBody, &launcher); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &launcher, nil
+}
+
+func (c *apiClient) replaceLauncherScope(id string, req allowedRootsReplaceRequest) (*launcherJSON, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("cannot encode request: %w", err)
+	}
+
+	resp, err := c.doAuthenticatedRequest("PUT", "/launchers/"+url.PathEscape(id)+"/allowed-roots", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var launcher launcherJSON
+	if err := json.Unmarshal(respBody, &launcher); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &launcher, nil
+}
+
+func (c *apiClient) deleteLauncher(id string) error {
+	resp, err := c.doAuthenticatedRequest("DELETE", "/launchers/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	_, err = c.readResponseBody(resp)
+	return err
+}
+
+func (c *apiClient) issueLauncherCredential(id string) (*launcherCredentialResponse, error) {
+	resp, err := c.doAuthenticatedRequest("PUT", "/launchers/"+url.PathEscape(id)+"/credential", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result launcherCredentialResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) rotateLauncherCredential(id string) (*launcherCredentialResponse, error) {
+	resp, err := c.doAuthenticatedRequest("POST", "/launchers/"+url.PathEscape(id)+"/credential/rotate", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result launcherCredentialResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *apiClient) deleteLauncherCredential(id string) error {
+	resp, err := c.doAuthenticatedRequest("DELETE", "/launchers/"+url.PathEscape(id)+"/credential", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	_, err = c.readResponseBody(resp)
+	return err
 }

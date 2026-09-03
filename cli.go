@@ -623,6 +623,7 @@ func init() {
 		sessionCommand,
 		configCommand,
 		principalCommand,
+		launcherCommand,
 		credentialCommand,
 		adminTokenCommand,
 		appArmorCommand,

@@ -5,6 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+
+	"golang.org/x/term"
 )
 
 var principalCommand = &Command{
@@ -23,15 +26,24 @@ var principalCommand = &Command{
 var principalCreateCommand = &Command{
 	Name:       "create",
 	Summary:    "Create a new principal",
-	Usage:      "docker-helper principal create [--system] [--endpoint ENDPOINT] [--token-file PATH] USER",
+	Usage:      "docker-helper principal create [--system] [--endpoint ENDPOINT] [--token-file PATH] [--issue-credential | --no-credential] USER",
 	MinPosArgs: 1,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		issueCredential := fs.Bool("issue-credential", false, "Issue an initial principal credential")
+		noCredential := fs.Bool("no-credential", false, "Do not issue an initial principal credential")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
 				username := args[0]
+
+				issue, err := resolveIssueCredential(*issueCredential, *noCredential,
+					"Create principal credential now? [Y/n]", os.Stdin, stderr, term.IsTerminal(int(os.Stdin.Fd())))
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 2
+				}
 
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
@@ -43,7 +55,7 @@ var principalCreateCommand = &Command{
 					return 1
 				}
 
-				result, err := client.createPrincipal(username)
+				result, err := client.createPrincipal(username, issue)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

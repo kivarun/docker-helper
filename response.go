@@ -133,6 +133,17 @@ func writeUnauthorizedLauncherControl(ctx context.Context, w http.ResponseWriter
 	})
 }
 
+// writeUnauthorizedAuth writes the non-disclosing unauthorized response for
+// GET /auth operator auth introspection.
+func writeUnauthorizedAuth(ctx context.Context, w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	writeJSON(ctx, w, http.StatusUnauthorized, response{
+		OK:      false,
+		Code:    "unauthorized",
+		Message: "Authentication required.",
+	})
+}
+
 func writeAuthFailure(ctx context.Context, r *http.Request, result string) {
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:  "auth.failure",
