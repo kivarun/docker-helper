@@ -14,6 +14,19 @@ packaging, README, or man pages are changed by this stage.
 - Baseline commit at task creation: `b5cc231e84e33924cd317505ce50ad38a13440c3`
 - Design input (conceptual rationale): [`release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md)
 
+**Implementation status: complete.** All six stages (1.1 persistence
+foundation through 1.5 CLI/simple defaults) are implemented on `main`, with
+the final implementation state at `ed5c7963a055ab15696b68d7cbecc70ec5b79611`.
+Stage 1.6 (release integration) completes the release with the
+documentation/public-contract reconciliation, the Release 3 vocabulary map
+update to the actual 2.1 symbols, the v2.0.0 → 2.1 upgrade-migration and
+launcher-hierarchy acceptance scenarios
+(`scripts/uat-release2-acceptance.sh`, scenarios G/H), and the audit
+provenance/bearer-leak coverage (`launcher_audit_test.go`). The canonical
+current-behavior reference is [`architecture.md`](architecture.md)
+("Launcher ownership"); the Release 3 vocabulary map is pinned to the final
+2.1 implementation commit.
+
 This plan is the binding contract. The concept document remains the rationale
 and is not duplicated here; readers needing the *why* should start there.
 
