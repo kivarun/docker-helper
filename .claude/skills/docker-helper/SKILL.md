@@ -12,14 +12,15 @@ Never:
 - invoke `docker` directly;
 - access `docker.sock`;
 - start, stop, reload, or configure Docker Helper;
-- create, list, delete, or otherwise manage Docker Helper sessions, unless
-  the environment explicitly provisions this agent with a Docker Helper
-  credential (see Delegated identity below);
+- create, list, or delete Docker Helper sessions when the environment
+  provisioned this agent only with a Session token: Session management
+  requires a Docker Helper credential (Launcher or Principal — see Delegated
+  identity below) and is then allowed only as permitted by that authority;
 - look for or use the Docker Helper administrative token;
 - print, log, echo, or otherwise expose `DOCKER_HELPER_SESSION_TOKEN` or a
   Docker Helper credential token;
 - fall back to direct Docker access if a Docker Helper operation fails;
-- use operator commands: `serve`, `init`, `reload`, `session`, `config`,
+- use administrative/operator commands: `serve`, `init`, `reload`, `config`,
   `principal`, `launcher`, `credential`.
 
 ## Delegated identity
@@ -46,17 +47,10 @@ and use the returned session token for Docker operations exactly as
 described below.
 
 `GET /auth` (HTTP, with the installed credential as the Bearer token)
-reports the authority:
-
-```bash
-curl --silent --show-error \
-  --unix-socket "$SOCKET" \
-  -H "Authorization: Bearer $DOCKER_HELPER_CREDENTIAL" \
-  http://localhost/auth
-```
-
-The response is `{"authority":"launcher",...}` or
-`{"authority":"principal",...}`. Do not display any token value.
+reports the authority: the response is `{"authority":"launcher",...}` or
+`{"authority":"principal",...}`. The credential is consumed by the existing
+client resolution from the canonical installed credential file; do not copy
+it into shell variables or command text, and do not display any token value.
 
 If the environment provides only `DOCKER_HELPER_SESSION_TOKEN` and no
 credential, skip this section entirely: do not create, list, or delete
@@ -154,7 +148,10 @@ docker-helper help registry
 docker-helper help registry login
 ```
 
-Do not use operator commands: `serve`, `init`, `reload`, `session`, `config`.
+Do not use administrative/operator commands: `serve`, `init`, `reload`,
+`config`, `principal`, `launcher`, `credential`. The `session` subcommands
+(create, list, delete) require a Docker Helper credential (Launcher or
+Principal); with only a Session token, do not use them.
 
 ## Pull
 
