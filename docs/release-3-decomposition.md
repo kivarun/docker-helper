@@ -33,7 +33,7 @@ All Release 3 capabilities attach to this model. No capability may invent a para
 
 Release 3 keeps Request and Response at the transport layer, Command and Query at the application layer, and Operation as the durable execution record created only by selected asynchronous Commands.
 
-The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. The executor-facing implementation sequence is defined in `release-3-d0-execution-plan.md`. These contracts apply to asynchronous managed-container start, stop, restart, and remove Commands and to Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
+The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. The executor-facing implementation sequence is defined in `release-3-d0-execution-plan.md`. These contracts apply to asynchronous managed-container start, stop, restart, remove, and administrator repair Commands and to Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
 
 `build`, the existing one-shot `run`, `container.create`, and non-interactive exec are synchronous Commands. Process-like Commands return one combined bounded `output`; create returns the stopped Managed Container only after persistent ownership and backend correlation are complete. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
 
@@ -72,6 +72,8 @@ Responsibilities:
 - lookup and ownership verification;
 - projection of backend runtime state into a bounded public status model;
 - integrity metadata that distinguishes docker-helper-owned backend objects from foreign objects.
+- startup, read-time, mutation-preflight, and fixed once-per-minute read-only
+  integrity observation without autonomous mutation.
 
 This package must define behavior when:
 
@@ -92,11 +94,12 @@ Completion criterion: docker-helper can resolve a Managed Container by its own i
 This package implements the explicit Managed Container lifecycle:
 
 - create;
+- list and show;
 - start;
 - stop;
 - restart;
-- inspect status;
-- remove.
+- remove;
+- administrator policy repair.
 
 Responsibilities:
 
@@ -107,7 +110,13 @@ Responsibilities:
 - consistent failure and partial-failure semantics;
 - audit attribution;
 - type-specific durable Operation admission, execution, recovery, outcome, and conflict handling through the D0 foundation;
-- cleanup or compensation when creation fails after allocating some resources.
+- cleanup or compensation when creation fails after allocating some resources;
+- credential-scope listing with narrowing ownership filters and bounded cursor
+  pagination;
+- administrator force removal for ownership mismatch without exposing a
+  general Docker deletion capability;
+- user-facing troubleshooting and safe recovery guidance for every public
+  runtime state and Condition.
 
 This package must not introduce a second generic job abstraction beside Operation.
 
@@ -115,11 +124,31 @@ This package must not introduce a second generic job abstraction beside Operatio
 
 A start of an already running container and a stop of an already stopped one return `200 OK` with the current container representation, create no Operation, and create no idempotency record. Lifecycle work that mutates state returns `202 Accepted`. An existing matching idempotency record is resolved before the current-state no-op check so a lost accepted response returns its original Operation. The CLI hides the transport distinction, waits for accepted work by default, and may detach, but remains a stateless protocol adapter. Public Operation cancellation is outside Release 3; internal cancellation exists only where deterministic Session teardown requires it.
 
-Inspect status is a Query and creates no Operation.
+List and show are Queries and create no Operation. Their public projection is
+docker-helper management data plus normalized runtime observation, never raw
+Docker inspect data.
 
-The detailed design must preserve the accepted Docker-like lifecycle semantics: repeated start/stop postconditions are successful no-ops; restart is one Operation composed from the full docker-helper stop path followed by the full start path, with a persisted internal step that makes crash recovery idempotent; restart of a stopped container begins at start; removal of a running container stops it internally; no public force or caller-selected stop-timeout control is exposed. One reloadable administrator setting, `container_stop_timeout`, defaults to ten seconds and applies uniformly to stop, restart, remove, and Session cleanup. Active exec is terminated by teardown and is not reported as `container_busy`. Competing lifecycle mutations still return a non-queued `409` with the active Operation ID.
+The package must preserve the state and Command matrix in
+`release-3-managed-container-lifecycle.md`. In particular, repeated start/stop
+postconditions are successful no-ops; start resumes a container paused outside
+docker-helper; restart is one Operation composed from the full docker-helper
+stop path followed by the full start path, with a persisted internal step that
+makes crash recovery idempotent; restart of a stopped container begins at
+start; and removal is the explicit supported resolution for verified unusual
+states. One reloadable administrator setting, `container_stop_timeout`,
+defaults to ten seconds and applies uniformly to stop, restart, remove, and
+Session cleanup. Callers cannot select a different timeout or a Docker-style
+immediate-kill mode.
 
-For observed Docker states `paused`, `restarting`, or `dead`, start/stop/restart return `runtime_state_conflict`, while remove and cleanup attempt safe deletion. A missing backend makes start/stop/restart fail but satisfies remove. An unavailable or unknown backend returns `503` without mutation. Ownership mismatch always fails closed and requires the administrative orphan path.
+Administrator `container remove --force` exists only for the exact recorded
+backend after `ownership_mismatch`; it does not alter stop semantics. A missing
+backend makes start/stop/restart fail but allows synchronous persistent cleanup
+without an Operation. `policy_mismatch` may be repaired only through explicit
+administrator `container.repair` or resolved through authorized removal.
+Session cleanup automatically deletes all resources with proven Session
+ownership, but integrity observation never deletes or repairs anything.
+Competing lifecycle mutations still return a non-queued `409` with the active
+Operation ID and are not reported as `container_busy`.
 
 Completion criterion: every lifecycle mutation has one ownership check, one state-transition contract, one backend execution path, and one externally observable result.
 
@@ -286,6 +315,8 @@ Responsibilities:
 - audit event vocabulary;
 - configuration and policy documentation;
 - operator, user, and agent-facing documentation;
+- local troubleshooting sections and CLI recovery hints for the capability
+  that owns each public Condition;
 - compatibility with the normal blocking Release 2 CLI experience for run and build, while intentionally replacing their asynchronous HTTP Operation workflow;
 - packaging and service-upgrade verification.
 
@@ -342,7 +373,7 @@ The decomposition produces the following detailed design documents:
 
 1. `release-3-operation-model.md` — cross-cutting durable execution, recovery, idempotency, retention, and client boundaries;
 2. `release-3-managed-container-domain.md` — identity, ownership, lifetime, persistence, and runtime status;
-3. `release-3-managed-container-lifecycle.md` — commands, transitions, concurrency, and removal;
+3. `release-3-managed-container-lifecycle.md` — accepted commands, token-scope listing, transitions, integrity observation, repair, removal, and troubleshooting;
 4. `release-3-session-networking.md` — isolation, naming, attachment, and cleanup;
 5. `release-3-logs-and-exec.md` — log retrieval and common exec semantics;
 6. `release-3-interactive-streaming.md` — WebSocket and terminal protocol;
@@ -351,4 +382,13 @@ The decomposition produces the following detailed design documents:
 9. `release-3-api-cli.md` — public surface and compatibility;
 10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
 
-The Operation model and Managed Container domain are the two foundation designs. `release-3-vocabulary-and-implementation-map.md` is their implementation bridge to the Release 2 codebase and the Release 2.1 Launcher design. `release-3-d0-execution-plan.md` turns the common Operation foundation into ordered executor tasks and test gates. Each remaining owner document must be contract-ready before its package is assigned, but need not prescribe code-ready mechanics that belong to the operational architect. The next blocking designs are lifecycle semantics and the networking, resource, and publishing inputs that form the immutable container creation contract.
+The Operation model, Managed Container domain, and Managed Container lifecycle
+contract are accepted foundation designs.
+`release-3-vocabulary-and-implementation-map.md` is their implementation bridge
+to the Release 2 codebase and the Release 2.1 Launcher design.
+`release-3-d0-execution-plan.md` turns the common Operation foundation into
+ordered executor tasks and test gates. Each remaining owner document must be
+contract-ready before its package is assigned, but need not prescribe
+code-ready mechanics that belong to the operational architect. The next
+blocking designs are the networking, resource, and publishing inputs that form
+the immutable container creation contract.

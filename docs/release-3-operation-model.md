@@ -4,7 +4,7 @@
 
 This document is the canonical Release 3 design for durable Operations.
 
-Operation is a cross-cutting execution abstraction. It is used by asynchronous managed-container start, stop, restart, and remove Commands and by Session cleanup. It does not belong to the Managed Container domain and must not be reimplemented separately by any feature package.
+Operation is a cross-cutting execution abstraction. It is used by asynchronous managed-container start, stop, restart, remove, and administrator repair Commands and by Session cleanup. It does not belong to the Managed Container domain and must not be reimplemented separately by any feature package.
 
 Resource-specific designs define Command validation, backend effects, and type-specific recovery. They may extend typed input and outcome data, but they must preserve the common ownership, state, admission, recovery, retention, and client boundaries defined here.
 
@@ -33,6 +33,7 @@ Release 3 durable work includes:
 - `container.stop`;
 - `container.restart`;
 - `container.remove`;
+- `container.repair`;
 - `session.cleanup`.
 
 Queries, synchronous `container.create`, `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. `container.create` returns the stopped resource directly. `build`, `run`, and non-interactive exec return one combined bounded `output` synchronously. Interactive exec uses WebSocket transport. None gains durable recovery, persisted output, or replay semantics.
@@ -119,7 +120,8 @@ A lifecycle Command that requires mutation returns `202 Accepted`, the Operation
 The API exposes:
 
 - lookup by Operation ID;
-- bounded listing within the owning Session;
+- bounded listing within the authenticating administrator, Principal, Launcher,
+  or Session ownership scope, with filters that may only narrow that scope;
 - simple `status`, `type`, and public-target filters.
 
 It exposes no generic progress percentage, log URL, replay cursor, or cancellation URL. A terminal public representation is immutable.
@@ -180,6 +182,7 @@ The Release 3 recovery contracts are:
 | `container.stop` | Confirm the stopped postcondition and continue stop only when required. |
 | `container.restart` | Persist an internal `stop` then `start` step and recover by repeating the current idempotent step; never infer completion from timestamps or replay a monolithic backend restart. |
 | `container.remove` | Treat absence of the verified backend object as the achieved postcondition. |
+| `container.repair` | Re-observe the verified backend and idempotently reapply only the mutable helper-owned policy recorded for an explicit `policy_mismatch`; never recreate or change workload runtime intent. |
 | `session.cleanup` | Re-enumerate Session-owned resources and continue deterministic teardown. |
 
 The established Operation ID prefix is `op_` and is retained for the new durable model. The existing internal `build` and `run` discriminators are retired because both Commands become synchronous. There are no persisted Release 2 Operation rows to migrate.
@@ -221,7 +224,7 @@ Terminal Operations remain attached to their owning Session. Release 3 defines n
 
 A successfully closed Session remains for a fixed internal 10-minute observation grace period so authorized management callers can inspect the terminal `session.cleanup` result. `closing` and `cleanup_failed` Sessions are never removed by this timer. Physical Session deletion removes its Operations and idempotency records through foreign-key cascade.
 
-One `session.cleanup` Operation represents exactly one immutable cleanup attempt. A transient failure such as backend unavailability or bounded timeout terminates that Operation as `failed`; the Session remains `closing` and stores the attempt count and `cleanup_retry_at`. When retry is due, the server creates a new `session.cleanup` Operation. An authorized Principal, owning Launcher, or administrator may request an immediate new attempt when none is active. Ownership mismatch and other ambiguous authority failures move the Session to `cleanup_failed` and require administrator action. This Session-owned retry schedule does not add an Operation retry state or a generic retry framework and is not workload reconciliation.
+One `session.cleanup` Operation represents exactly one immutable cleanup attempt. A transient failure such as backend unavailability or bounded timeout terminates that Operation as `failed`; the Session remains `closing` and stores the attempt count and `cleanup_retry_at`. When retry is due, the server creates a new `session.cleanup` Operation. An authorized Principal, owning Launcher, or administrator may request an immediate new attempt when none is active. Cleanup removes all Session resources whose ownership is proven, including resources in unusual runtime states or `policy_mismatch`. Ownership mismatch and other ambiguous authority failures move the Session to `cleanup_failed` and require administrator action. This Session-owned retry schedule does not add an Operation retry state or a generic retry framework and is not workload reconciliation.
 
 Operation records are working control-plane state. Permanent security history belongs to the structured audit stream.
 
@@ -258,7 +261,7 @@ The common persistence design must support:
 
 Exact tables, columns, indexes, worker-claim mechanics, and migration ordering belong to the implementation design.
 
-The implementation must retire the current in-memory build/run Operation API and move both Commands into bounded synchronous request handling. Durable Operation persistence and workers are introduced only for managed-container start, stop, restart, remove, and Session cleanup. Synchronous Managed Container creation owns a separate provisional resource-state recovery contract and is not another generic execution abstraction. Changes to existing states, API fields, configuration, and CLI behavior require an explicit compatibility rule; no persisted Release 2 Operation data exists.
+The implementation must retire the current in-memory build/run Operation API and move both Commands into bounded synchronous request handling. Durable Operation persistence and workers are introduced only for managed-container start, stop, restart, remove, administrator policy repair, and Session cleanup. Synchronous Managed Container creation owns a separate provisional resource-state recovery contract and is not another generic execution abstraction. Changes to existing states, API fields, configuration, and CLI behavior require an explicit compatibility rule; no persisted Release 2 Operation data exists.
 
 The canonical current-to-target symbol, API, configuration, and test migration is recorded in `release-3-vocabulary-and-implementation-map.md`. Ordered implementation tasks, the target ownership split, dispatcher mechanics, and test gates are defined in `release-3-d0-execution-plan.md`.
 

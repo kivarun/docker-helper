@@ -25,7 +25,7 @@ The Session is both the authorization boundary and the resource-lifetime boundar
 
 A Managed Container outlives the synchronous Request that created it, but not the Session that owns it.
 
-While a Session is active, its bearer token may perform the Managed Container operations authorized by the Session contract. The owning Principal, owning Launcher, and administrator retain their higher-level management authority as defined by the Release 2.1 delegation model.
+While a Session is active, its bearer token may perform the Managed Container operations authorized by the Session contract. The owning Principal and owning Launcher may act within their delegated subtrees. The administrator may perform every ordinary Managed Container Command and Query and the administrator-only recovery Commands. Higher-level action remains attached to the owning Session, obeys its resource policy, and does not transfer ownership.
 
 Session ownership remains unchanged throughout the Managed Container lifetime. Release 3 does not support transfer, reassignment, or adoption into a different Session.
 
@@ -90,7 +90,8 @@ The following Managed Container lifecycle Commands may create durable Operations
 - `container.start`;
 - `container.stop`;
 - `container.restart`;
-- `container.remove`.
+- `container.remove`;
+- administrator-only `container.repair`.
 
 `container.create` is a synchronous Command and creates no Operation. ManagedContainerID is allocated before backend container creation so that the persistent ownership row and Docker ownership metadata can refer to the same target during crash recovery. A start of an already running container and a stop of an already stopped one return HTTP `200 OK` as successful no-ops and create no Operation; lifecycle work that changes state returns `202 Accepted`.
 
@@ -177,7 +178,7 @@ Verification requires both a persistent Managed Container record and matching ba
 
 ## Status model
 
-Managed status and runtime status are separate dimensions.
+Internal management state and public runtime status are separate dimensions.
 
 ### Management state
 
@@ -192,6 +193,10 @@ Management state is owned by docker-helper persistent state.
 
 Start, stop, and restart do not create database management states such as `starting`, `stopping`, or `restarting`. Their progress belongs to Operation; the resulting runtime state is observed from Docker Engine.
 
+Management state is not exposed in the public Container representation. It is
+persistent recovery and cleanup data, not a second state machine that callers
+must interpret.
+
 After successful removal, the Managed Container record is deleted. Release 3 does not retain an additional permanent container tombstone. The Operation remains available while its owning Session exists; the audit stream retains historical attribution independently.
 
 ### Runtime state
@@ -200,14 +205,19 @@ Runtime state is a normalized observation of Docker Engine.
 
 The bounded public vocabulary is:
 
-- `created`;
+- `stopped`;
 - `running`;
 - `paused`;
-- `restarting`;
-- `exited`;
+- `transitioning`;
 - `dead`;
 - `missing`;
 - `unknown`.
+
+`stopped` combines backend `created` and `exited` observations because both
+have the same docker-helper lifecycle semantics. `transitioning` combines a
+backend restart or removal in progress. `paused` remains visible because a
+paused container retains processes and consumes resources; docker-helper does
+not expose pause or unpause as capabilities.
 
 `missing` means the persistent Managed Container exists but its verified backend object does not.
 
@@ -220,15 +230,26 @@ Stable conditions provide the reason when management and runtime data cannot be 
 - `backend_unavailable`;
 - `backend_missing`;
 - `ownership_mismatch`;
+- `policy_mismatch`;
 - `cleanup_failed`.
 
 Conditions do not trigger autonomous workload repair.
 
 ### Public show projection
 
-docker-helper never returns raw Docker inspect data. `container show` exposes the ManagedContainerID, name, owning Session, management and runtime state, condition, image reference, command argv, workdir, environment key names without values, mounts, resource limits, shared-memory limit, port publications, and timestamps.
+docker-helper never returns raw Docker inspect data. `container show` exposes
+the ManagedContainerID, name, owning Session, requested image reference,
+normalized runtime state, optional Condition, effective resource limits,
+effective port publications, creation time, and optional active lifecycle
+Operation identity.
 
-BackendContainerID, raw backend labels, environment values, and Docker network or endpoint identifiers are omitted. Command argv is returned only by the explicit show Query; it is excluded from list results, daemon logs, and audit. Callers are instructed not to place secrets in argv because docker-helper cannot identify them reliably.
+Internal management state, BackendContainerID, raw backend labels and
+HostConfig, environment names and values, command argv, workdir, immutable
+Docker image ID, full mount configuration, and Docker network or endpoint
+identifiers are omitted. The caller created the workload specification;
+docker-helper reports only the management, policy, and recovery information it
+owns. The exact lifecycle representation and list projection are defined in
+`release-3-managed-container-lifecycle.md`.
 
 ## Create consistency model
 
@@ -288,9 +309,35 @@ The following cases fail closed.
 | --- | --- | --- |
 | Managed Container exists | Matching backend object exists | Verify ownership and report observed runtime state. |
 | Managed Container exists | Backend object absent | Report `missing`; do not recreate. |
-| Managed Container exists | Backend object or ownership metadata conflicts | Report `ownership_mismatch`; deny ordinary operations. |
+| Managed Container exists | Immutable ownership metadata conflicts | Report `ownership_mismatch`; deny ordinary operations. |
+| Managed Container exists | Ownership matches but mutable helper policy conflicts | Report `policy_mismatch`; never repair automatically. |
 | Managed Container exists | Backend unavailable | Report `unknown` with `backend_unavailable`; do not substitute cached state. |
-| No Managed Container exists | Backend object carries docker-helper ownership metadata | Treat as an orphaned backend object; do not adopt automatically. |
+| No Managed Container exists | Backend object carries the complete valid docker-helper ownership-label set | Treat as an orphaned backend object; do not adopt automatically. |
+
+Names, partial labels, and visually similar Docker objects are not correlation
+evidence. A normal lookup starts from persistent Managed Container identity;
+absence of that record returns `404` even when Docker contains a similar name.
+
+### Integrity scan
+
+Startup observation, read-time observation, and mutation preflight are
+supplemented by a read-only integrity scan once per minute. The scan compares
+persistent records with Docker objects in the exact docker-helper ownership
+namespace and verifies backend correlation, immutable ownership metadata,
+Session-network membership and alias, diagnostic backend name, resource policy,
+and verifiable publication data.
+
+The scan detects missing objects, orphans, ownership mismatch, and policy
+mismatch. It emits an operational warning and audit observation only when the
+detected Condition changes. It never creates an Operation, repairs policy,
+adopts an object, starts or stops a workload, or deletes a resource.
+
+The fixed interval avoids another Release 3 configuration setting. A
+real-Docker performance test with a large object set must measure complete-pass
+time, Docker API call volume, daemon load, and prevention of overlapping scans
+before implementation is frozen. The scan detects accidental out-of-band
+changes; root and direct Docker-socket access remain outside the docker-helper
+threat model.
 
 ## Orphaned backend objects
 
@@ -318,21 +365,31 @@ Orphan adoption is outside Release 3. A later design may add it if operational e
 
 ## Accepted lifecycle semantics
 
-Lifecycle Commands express an explicit caller intent rather than requiring the caller to reproduce Docker's prerequisite steps.
+The canonical Command, Query, HTTP, CLI, state, repair, removal, and
+troubleshooting contracts are defined in
+`release-3-managed-container-lifecycle.md`. The domain-level invariants are:
 
 - `create` is synchronous, returns a stopped container, and creates no Operation;
 - `start` for an already running container is a successful no-op and creates no Operation;
 - `stop` for an already stopped container is a successful no-op and creates no Operation;
+- `start` for a container paused outside docker-helper resumes it to `running` without exposing pause or unpause Commands;
 - `restart` is one Operation implemented as persisted internal `stop` then `start` steps; it performs the full docker-helper stop path followed by the full docker-helper start path, and a stopped container begins at the `start` step;
 - `remove` stops a running container internally before removing it;
-- Release 3 exposes no public force flag and no caller-selected stop timeout;
+- a missing backend satisfies the backend postcondition for remove, so the persistent record and leases are removed synchronously without an Operation;
+- administrator `container.repair` is an explicit durable Operation for mutable `policy_mismatch` only;
+- ordinary callers receive no force mode; administrator `container remove --force` exists only to delete the exact recorded backend object after `ownership_mismatch` and does not skip graceful stop;
+- no caller can select the stop timeout;
 - stop behavior uses the reloadable administrator setting `container_stop_timeout`, default `10s`, for `stop`, `restart`, `remove`, and Session teardown;
 - accepted `stop`, `restart`, `remove`, and Session teardown close exec admission and terminate active exec instances; active exec is not a lifecycle conflict;
 - a competing lifecycle mutation returns `409 Conflict` with the active Operation ID and is never queued; the stable error code must not be `container_busy`.
 
-The detailed lifecycle design must map these rules across every observed runtime state and define their recovery evidence without changing the accepted caller-facing behavior.
-
-Out-of-band Docker states do not expand the supported lifecycle. `paused`, `restarting`, and `dead` return `409 runtime_state_conflict` for start, stop, and restart; remove and Session cleanup may attempt bounded safe deletion. A missing backend object rejects start, stop, and restart but is the achieved backend postcondition for remove. Backend unavailability returns `503 backend_unavailable` without mutation. Ownership mismatch denies ordinary lifecycle and requires administrative resolution.
+Remove is the explicit supported resolution for a verified resource that the
+caller does not want to repair. No diagnostic state or integrity-scan result
+causes automatic deletion. Explicit Session closure and TTL expiration are the
+sole ownership-lifecycle exception: Session cleanup automatically removes all
+resources whose Session ownership is proven. Policy mismatch and unusual
+runtime state do not block that cleanup; ownership ambiguity does and leaves the
+Session in `cleanup_failed` for administrator action.
 
 ## Persistent data boundary
 
@@ -351,14 +408,23 @@ It does not retain environment values, registry credentials, a secret-bearing Do
 
 Exact schema columns, indexes, and migration ordering belong to the implementation design. Field names must preserve the distinction between ManagedContainerID, BackendContainerID, name, management state, runtime observation, and Operation identity.
 
+## Troubleshooting
+
+Domain troubleshooting follows the source-of-truth boundary: operators may use
+Docker inspection to diagnose runtime reality, but they must not repair
+docker-helper by editing SQLite manually. The supported actions for missing,
+unavailable, ownership-mismatched, policy-mismatched, dead, paused, and orphaned
+objects are defined in `release-3-managed-container-lifecycle.md` and must be
+repeated in the owning CLI help, man pages, and user documentation when the
+capability is implemented.
+
 ## Deferred to subsequent designs
 
 The following decisions are intentionally outside this document:
 
-- type-specific recovery evidence for accepted lifecycle Operations;
 - Session-network provisioning and cleanup mechanics;
 - supported resource constraints;
 - port-publication grants and allocation;
 - logs and exec request contracts;
 - WebSocket framing and terminal behavior;
-- HTTP and CLI command layout beyond the required orphan administration surface.
+- exact create, networking, resource-limit, publishing, logs, exec, and streaming request fields owned by their later designs.

@@ -19,11 +19,12 @@ A Session may synchronously create containers that continue to exist after the c
 Managed containers support an explicit lifecycle:
 
 - create;
+- list and show;
 - start;
 - stop;
 - restart;
-- inspect status;
-- remove.
+- remove;
+- administrator policy repair.
 
 A managed container remains owned by the session under which it was created.
 
@@ -34,6 +35,11 @@ Each Managed Container has one immutable Session-local `name`. A caller may prov
 Managed Container storage remains bounded by the existing workspace model. Caller-requested named volumes, arbitrary host paths, `volumes-from`, and a general volume API are outside the release. The writable container layer and image-declared anonymous volumes survive stop/start/restart but are removed with the Managed Container or its owning Session.
 
 Its lifetime is bounded by that Session. When the owning Session expires or is explicitly closed, docker-helper tears down its containers, external publications, and Session network before removing the Session record.
+
+Integrity observation never deletes or mutates a container. Explicit Session
+closure and TTL expiration are the ownership-lifecycle exception: cleanup
+automatically removes every Session resource whose ownership remains proven.
+All other removal or repair requires an explicit authorized Command.
 
 An authorized Principal, owning Launcher, or administrator may renew an active Session. Renewal resets its expiration to the effective maximum Session TTL from the time of renewal. A Session cannot renew itself, and renewal is never implicit or activity-based.
 
@@ -69,6 +75,7 @@ The canonical ownership, state, admission, recovery, idempotency, retention, and
 Release 3 uses durable Operations for:
 
 - managed-container start, stop, restart, and remove;
+- administrator repair of a verified mutable policy mismatch;
 - Session cleanup.
 
 Queries, `container create`, `build`, `run`, and both exec modes do not become Operations merely for uniformity. `container create` returns `201 Created`; `build` and `run` are synchronous Commands with bounded direct results.
@@ -121,6 +128,19 @@ In particular:
 - new lifecycle and streaming operations must not bypass existing authorization checks;
 - common workflows remain usable through safe defaults without requiring callers to reproduce operator policy;
 - Docker Engine implementation details must not become part of the public docker-helper contract unless explicitly required.
+
+Managed Container visibility follows the authenticating credential scope:
+administrator, Principal subtree, Launcher subtree, or one Session. List
+filters may narrow that scope but can never expand it. Administrators can invoke
+all ordinary Commands and Queries and the administrator-only repair, force
+removal, and orphan-removal paths; execution remains attached to the owning
+Session and its policy.
+
+Startup, read-time observation, mutation preflight, and a fixed once-per-minute
+read-only integrity scan detect backend disappearance, orphaned labelled
+objects, ownership mismatch, and mutable policy mismatch. Detection emits
+state-change diagnostics but never performs automatic repair, adoption,
+restart, stop, or removal.
 
 Release 3 uses the official `github.com/moby/moby/client` Go module behind a narrow docker-helper-owned backend boundary. API-version negotiation is enabled, a tested minimum Engine API version is enforced, and daemon socket selection comes from docker-helper deployment configuration rather than arbitrary process environment. The adapter preserves the existing Session-scoped private-registry behavior by supplying the required credentials explicitly to pull and build calls; Engine API migration must not expose credentials to container creation, durable state, logs, audit, or errors. Moby request and stream representations are implementation details and do not become the public API.
 

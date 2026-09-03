@@ -13,7 +13,8 @@ The current Docker CLI reads a Session-scoped Docker configuration directory. En
 D0 changes two mechanisms that currently share one in-memory object but have different target semantics:
 
 1. `build` and one-shot `run` become synchronous Commands bound to their HTTP Requests;
-2. durable Operation is introduced for managed-container start, stop, restart, remove, and Session cleanup only.
+2. durable Operation is introduced for managed-container start, stop, restart,
+   remove, administrator policy repair, and Session cleanup only.
 
 The current in-memory Operation is not migrated or generalized. Its public status/log/cancel contract and record are removed. Existing cancellation, shutdown, and cleanup behavior is retained as an observable requirement, not as a requirement to preserve the Docker CLI process mechanism.
 
@@ -24,7 +25,11 @@ The following decisions are already binding:
 - `build`, one-shot `run`, and non-interactive exec are synchronous Commands;
 - `container.create` is also synchronous, returns `201 Created` with a stopped Managed Container, and creates no Operation;
 - interactive exec uses WebSocket and is not an Operation;
-- durable Operation types are limited to `container.start`, `container.stop`, `container.restart`, `container.remove`, and `session.cleanup`; a state-matching start or stop returns `200 OK` as a no-op and creates neither an Operation nor an idempotency record;
+- durable Operation types are limited to `container.start`, `container.stop`,
+  `container.restart`, `container.remove`, `container.repair`, and
+  `session.cleanup`; repair is administrator-only, while a state-matching start
+  or stop returns `200 OK` as a no-op and creates neither an Operation nor an
+  idempotency record;
 - synchronous process execution does not survive request loss or daemon restart; after create's provisional database commit, only bounded registration or compensation continues under server ownership and restart recovery;
 - the normal CLI remains blocking and returns the workload exit result;
 - `pull`, `build`, one-shot `run`, and non-interactive exec return one combined bounded `output` that is not replayable;

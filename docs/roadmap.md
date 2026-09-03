@@ -471,8 +471,8 @@ consolidation/parallelization.
 
 Release 3 is reserved for the larger runtime architecture:
 
-- managed containers with explicit create, start, stop, restart, inspect,
-  remove, and bounded log-snapshot operations;
+- managed containers with explicit create, list, show, start, stop, restart,
+  remove, administrator policy repair, and bounded log-snapshot operations;
 - synchronous non-interactive exec with bounded direct output;
 - interactive exec over WebSocket;
 - per-Session networking;
@@ -485,13 +485,19 @@ copied into daemon logs, audit, or journald.
 
 Managed-container creation is synchronous and returns a stopped container with
 its effective Session-local name and DNS alias. State-changing start, stop,
-restart, remove, and Session cleanup use the durable Operation model; an
-already-satisfied start or stop is a synchronous no-op. Build, one-shot run,
-and non-interactive exec remain synchronous; interactive exec uses WebSocket
-and ends when expiration cleanup removes its owning container.
+restart, remove, administrator policy repair, and Session cleanup use the
+durable Operation model; an already-satisfied start or stop is a synchronous
+no-op, while removal of an already-missing backend cleans the persistent record
+synchronously. Build, one-shot run, and non-interactive exec remain
+synchronous; interactive exec uses WebSocket and ends when expiration cleanup
+removes its owning container.
 
-A managed container is not desired state. Release 3 does not add automatic
-recovery, reconciliation, or restart-policy semantics.
+A managed container is not desired state. Release 3 adds a fixed
+once-per-minute read-only integrity scan, but no automatic workload recovery,
+repair, adoption, diagnostic-triggered deletion, reconciliation, or
+restart-policy semantics. Explicit closure and Session TTL expiration remain
+the ownership-lifecycle exception and automatically remove resources whose
+Session ownership is proven.
 
 Begin Release 3 with binding lifecycle, ownership, API, failure, cleanup, and
 compatibility contracts. Do not let implementation convenience create a second
@@ -504,6 +510,7 @@ Release 3 foundation documents:
 - [`release-3-operation-model.md`](release-3-operation-model.md) — durable execution contract;
 - [`release-3-d0-execution-plan.md`](release-3-d0-execution-plan.md) — Operation foundation and synchronous-command migration plan;
 - [`release-3-managed-container-domain.md`](release-3-managed-container-domain.md) — identity, ownership, and lifetime;
+- [`release-3-managed-container-lifecycle.md`](release-3-managed-container-lifecycle.md) — lifecycle, scoped listing, divergence, repair, removal, and troubleshooting;
 - [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.
 
 ## Possible 4.0 / use-case driven
