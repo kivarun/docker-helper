@@ -4,7 +4,7 @@
 
 This document is the canonical Release 3 design for durable Operations.
 
-Operation is a cross-cutting execution abstraction. It is used by asynchronous managed-container start, stop, restart, remove, and administrator repair Commands and by Session cleanup. It does not belong to the Managed Container domain and must not be reimplemented separately by any feature package.
+Operation is a cross-cutting execution abstraction. It is used by asynchronous managed-container start, stop, restart, remove, and administrator repair Commands, explicit Session network repair, and Session cleanup. It does not belong to the Managed Container domain and must not be reimplemented separately by any feature package.
 
 Resource-specific designs define Command validation, backend effects, and type-specific recovery. They may extend typed input and outcome data, but they must preserve the common ownership, state, admission, recovery, retention, and client boundaries defined here.
 
@@ -34,6 +34,7 @@ Release 3 durable work includes:
 - `container.restart`;
 - `container.remove`;
 - `container.repair`;
+- `session.repair`;
 - `session.cleanup`.
 
 Queries, synchronous `container.create`, `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. `container.create` returns the stopped resource directly. `build`, `run`, and non-interactive exec return one combined bounded `output` synchronously. Interactive exec uses WebSocket transport. None gains durable recovery, persisted output, or replay semantics.
@@ -183,6 +184,7 @@ The Release 3 recovery contracts are:
 | `container.restart` | Persist an internal `stop` then `start` step and recover by repeating the current idempotent step; never infer completion from timestamps or replay a monolithic backend restart. |
 | `container.remove` | Treat absence of the verified backend object as the achieved postcondition. |
 | `container.repair` | Re-observe the verified backend and idempotently reapply only the mutable helper-owned policy recorded for an explicit `policy_mismatch`; never recreate or change workload runtime intent. |
+| `session.repair` | Re-observe a missing Session Network, recreate and correlate only the canonical network, and idempotently reconnect every verified Managed Container; never use or remove a foreign same-name network. |
 | `session.cleanup` | Re-enumerate Session-owned resources and continue deterministic teardown. |
 
 The established Operation ID prefix is `op_` and is retained for the new durable model. The existing internal `build` and `run` discriminators are retired because both Commands become synchronous. There are no persisted Release 2 Operation rows to migrate.
@@ -261,7 +263,7 @@ The common persistence design must support:
 
 Exact tables, columns, indexes, worker-claim mechanics, and migration ordering belong to the implementation design.
 
-The implementation must retire the current in-memory build/run Operation API and move both Commands into bounded synchronous request handling. Durable Operation persistence and workers are introduced only for managed-container start, stop, restart, remove, administrator policy repair, and Session cleanup. Synchronous Managed Container creation owns a separate provisional resource-state recovery contract and is not another generic execution abstraction. Changes to existing states, API fields, configuration, and CLI behavior require an explicit compatibility rule; no persisted Release 2 Operation data exists.
+The implementation must retire the current in-memory build/run Operation API and move both Commands into bounded synchronous request handling. Durable Operation persistence and workers are introduced only for managed-container start, stop, restart, remove, administrator policy repair, explicit Session network repair, and Session cleanup. Synchronous Managed Container creation owns a separate provisional resource-state recovery contract and is not another generic execution abstraction. Changes to existing states, API fields, configuration, and CLI behavior require an explicit compatibility rule; no persisted Release 2 Operation data exists.
 
 The canonical current-to-target symbol, API, configuration, and test migration is recorded in `release-3-vocabulary-and-implementation-map.md`. Ordered implementation tasks, the target ownership split, dispatcher mechanics, and test gates are defined in `release-3-d0-execution-plan.md`.
 

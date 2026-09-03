@@ -33,7 +33,7 @@ All Release 3 capabilities attach to this model. No capability may invent a para
 
 Release 3 keeps Request and Response at the transport layer, Command and Query at the application layer, and Operation as the durable execution record created only by selected asynchronous Commands.
 
-The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. The executor-facing implementation sequence is defined in `release-3-d0-execution-plan.md`. These contracts apply to asynchronous managed-container start, stop, restart, remove, and administrator repair Commands and to Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
+The canonical common contract is `release-3-operation-model.md`. The current-to-target terminology and code migration are fixed in `release-3-vocabulary-and-implementation-map.md`. The executor-facing implementation sequence is defined in `release-3-d0-execution-plan.md`. These contracts apply to asynchronous managed-container start, stop, restart, remove, and administrator repair Commands and to explicit Session network repair and Session cleanup. Feature packages provide type-specific validation, execution, recovery, and outcomes; they must not redefine the common state machine, persistence ownership, idempotency, retention, or thin-client boundary.
 
 `build`, the existing one-shot `run`, `container.create`, and non-interactive exec are synchronous Commands. Process-like Commands return one combined bounded `output`; create returns the stopped Managed Container only after persistent ownership and backend correlation are complete. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
 
@@ -164,15 +164,20 @@ Responsibilities:
 - preventing accidental attachment to another Session's network;
 - backend ownership labels or equivalent integrity markers;
 - network cleanup tied to the chosen Session and container lifetime rules;
-- restart-safe discovery of the existing network without autonomous service reconciliation.
+- restart-safe discovery of the existing network without autonomous service reconciliation;
+- explicit whole-Session repair after externally caused network loss.
 
 External port publishing is not part of this package.
 
 Session isolation does not imply an internal-only Docker network or a new host-access path. The accepted egress and host-access boundary is explicit below.
 
-Release 3 provisions the network lazily on the first `container.create` or one-shot `run`; Session creation itself is database-only and Docker-independent. Concurrent first users serialize to one network. Its diagnostic Docker name is `dhsn-<full-session-id>`; all named Docker resources owned directly by a Session use a stable resource-type prefix and include that full Session ID, while labels remain the ownership authority. The network persists until Session cleanup and is not recreated silently if it later disappears: future create/run requests return `session_network_missing`, while cleanup treats absence as success.
+Release 3 provisions the network lazily on the first `container.create` or one-shot `run`; Session creation itself is database-only and Docker-independent. Concurrent first users serialize to one network. Its diagnostic Docker name is `dhsn-<full-session-id>`; all named Docker resources owned directly by a Session use a stable resource-type prefix and include that full Session ID, while labels remain the ownership authority.
+
+Network absence with no Managed Containers is the normal lazy state and the next network-dependent Command may create it. Absence while Managed Containers exist is reported as `network_missing`; network-dependent admission is blocked until an explicit, durable `session.repair` recreates the network and reconnects every container whose ownership is proven. Integrity observation never invokes repair. A foreign network occupying the diagnostic name is neither used nor removed and produces `network_name_conflict`. Cleanup treats an already-absent network as success.
 
 Release 3 retains ordinary Docker outbound connectivity and adds no host alias, host-access grant, or firewall layer. Managed Containers and one-shot `run` attach to the Session network; build does not.
+
+The canonical contract is `release-3-session-networking.md`.
 
 Completion criterion: two containers in one Session can communicate by an approved name, while a container from another Session cannot join or address that network through docker-helper.
 
@@ -374,7 +379,7 @@ The decomposition produces the following detailed design documents:
 1. `release-3-operation-model.md` — cross-cutting durable execution, recovery, idempotency, retention, and client boundaries;
 2. `release-3-managed-container-domain.md` — identity, ownership, lifetime, persistence, and runtime status;
 3. `release-3-managed-container-lifecycle.md` — accepted commands, token-scope listing, transitions, integrity observation, repair, removal, and troubleshooting;
-4. `release-3-session-networking.md` — isolation, naming, attachment, and cleanup;
+4. `release-3-session-networking.md` — isolation, naming, attachment, explicit repair, and cleanup;
 5. `release-3-logs-and-exec.md` — log retrieval and common exec semantics;
 6. `release-3-interactive-streaming.md` — WebSocket and terminal protocol;
 7. `release-3-resource-constraints.md` — supported limits and authorization ceilings;
@@ -382,13 +387,13 @@ The decomposition produces the following detailed design documents:
 9. `release-3-api-cli.md` — public surface and compatibility;
 10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
 
-The Operation model, Managed Container domain, and Managed Container lifecycle
-contract are accepted foundation designs.
+The Operation model, Managed Container domain, Managed Container lifecycle, and
+Session networking contracts are accepted foundation designs.
 `release-3-vocabulary-and-implementation-map.md` is their implementation bridge
 to the Release 2 codebase and the Release 2.1 Launcher design.
 `release-3-d0-execution-plan.md` turns the common Operation foundation into
 ordered executor tasks and test gates. Each remaining owner document must be
 contract-ready before its package is assigned, but need not prescribe
 code-ready mechanics that belong to the operational architect. The next
-blocking designs are the networking, resource, and publishing inputs that form
-the immutable container creation contract.
+blocking designs are the resource and publishing inputs that complete the
+immutable container creation contract.

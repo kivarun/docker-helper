@@ -76,6 +76,8 @@ Release 3 uses durable Operations for:
 
 - managed-container start, stop, restart, and remove;
 - administrator repair of a verified mutable policy mismatch;
+- explicit repair of a missing Session Network on which Managed Containers
+  depend;
 - Session cleanup.
 
 Queries, `container create`, `build`, `run`, and both exec modes do not become Operations merely for uniformity. `container create` returns `201 Created`; `build` and `run` are synchronous Commands with bounded direct results.
@@ -90,11 +92,21 @@ Release 3 does not add persistent Operation logs. Operation stores status, times
 
 Each Session owns a user-defined bridge network. The network is provisioned lazily by the first Managed Container create or one-shot `run`, not by Session creation. Managed Containers and one-shot `run` containers belonging to the Session attach to that network and may communicate through Session-scoped names.
 
+Network absence is a valid lazy state while the Session has no Managed
+Containers. If a network disappears while Managed Containers exist, the
+read-only integrity observer reports `network_missing` and network-dependent
+work is blocked until an authorized caller explicitly runs `session repair`.
+Repair is durable because it may need to reconnect multiple verified
+containers. It never adopts, removes, or attaches to a foreign same-name Docker
+network.
+
 Container-local ports may be used freely inside that network without host publication.
 
 The network retains ordinary Docker outbound connectivity. Release 3 adds no special host alias, host-access grant, or firewall layer. Its isolation guarantee separates Session networks; it does not claim to be a complete outbound or host-network sandbox.
 
 Build execution does not attach to the Session network.
+
+The complete contract is `release-3-session-networking.md`.
 
 ### Port publishing
 

@@ -297,6 +297,10 @@ The scan detects accidental or operational out-of-band changes. It is not a
 security boundary against an actor with root or direct Docker-socket access;
 such an actor is outside the docker-helper threat model.
 
+Absence of the whole Session Network is a Session-level condition rather than
+one Managed Container's `policy_mismatch`. Its observation and explicit
+`session repair` path are defined in `release-3-session-networking.md`.
+
 The one-minute interval is a fixed Release 3 constant rather than a new
 operator setting. Before the implementation is frozen, a real-Docker
 performance test must measure complete-pass time, Docker API call volume, and
@@ -479,6 +483,10 @@ Troubleshooting sections rather than relying on one context-free error list.
 | `dead` | Remove the container; Release 3 does not attempt workload recovery. |
 | persistent `transitioning` | Check `active_operation_id`; if no helper Operation owns the transition, an authorized caller may choose remove. |
 | orphan | Administrator uses the orphan list/show/remove surface; no adoption is available. |
+
+Whole-Session `network_missing` troubleshooting belongs to
+`release-3-session-networking.md`; it is not resolved by iterating
+`container repair` manually.
 
 Troubleshooting may direct an administrator to Docker's diagnostic tools, but
 must not instruct operators to edit docker-helper SQLite state manually.

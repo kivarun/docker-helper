@@ -14,7 +14,8 @@ D0 changes two mechanisms that currently share one in-memory object but have dif
 
 1. `build` and one-shot `run` become synchronous Commands bound to their HTTP Requests;
 2. durable Operation is introduced for managed-container start, stop, restart,
-   remove, administrator policy repair, and Session cleanup only.
+   remove, administrator policy repair, explicit Session network repair, and
+   Session cleanup only.
 
 The current in-memory Operation is not migrated or generalized. Its public status/log/cancel contract and record are removed. Existing cancellation, shutdown, and cleanup behavior is retained as an observable requirement, not as a requirement to preserve the Docker CLI process mechanism.
 
@@ -27,9 +28,10 @@ The following decisions are already binding:
 - interactive exec uses WebSocket and is not an Operation;
 - durable Operation types are limited to `container.start`, `container.stop`,
   `container.restart`, `container.remove`, `container.repair`, and
-  `session.cleanup`; repair is administrator-only, while a state-matching start
-  or stop returns `200 OK` as a no-op and creates neither an Operation nor an
-  idempotency record;
+  `session.repair` and `session.cleanup`; container policy repair is
+  administrator-only, while Session network repair follows Session credential
+  scope; a state-matching start or stop returns `200 OK` as a no-op and creates
+  neither an Operation nor an idempotency record;
 - synchronous process execution does not survive request loss or daemon restart; after create's provisional database commit, only bounded registration or compensation continues under server ownership and restart recovery;
 - the normal CLI remains blocking and returns the workload exit result;
 - `pull`, `build`, one-shot `run`, and non-interactive exec return one combined bounded `output` that is not replayable;
@@ -369,7 +371,9 @@ Completion evidence:
 - add thin CLI wait/detach rendering with no local persistence, automatic retry, or public cancel;
 - keep `initiator_id` and `origin_request_id` internal permanently; the public Operation projection never exposes them.
 
-Do not ship a fake production Operation type merely to exercise D0. Until D2 or Session cleanup supplies a real handler, test the generic boundary with test-only handlers.
+Do not ship a fake production Operation type merely to exercise D0. Until D2,
+D3 Session repair, or Session cleanup supplies a real handler, test the generic
+boundary with test-only handlers.
 
 ## Test migration inventory
 
