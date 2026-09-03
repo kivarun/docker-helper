@@ -463,6 +463,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Create run operation and register it.
 	op := newRunOperation(session.ID, req.Image, bufSize, session.PrincipalName)
+	op.LauncherID = session.LauncherID
 	op.auditCommandArgCount = cmdArgCount
 	op.auditMounts = mountAudit
 	op.auditEnvKeys = envNames
@@ -567,6 +568,12 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		"--rm",
 		"--user", fmt.Sprintf("%d:%d", execUID, execGID),
 		"--security-opt", securityOpt,
+	}
+
+	// Add the reserved helper-owned runtime labels. Values derive from the
+	// resolved Session ownership chain, never from caller input.
+	for _, l := range runtimeLabelsFor(session) {
+		args = append(args, "--label", l)
 	}
 
 	if op.cidfile != "" {

@@ -469,31 +469,3 @@ func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode
 	}
 	return findLauncherByID(db, launcherID)
 }
-
-// deleteLauncher removes a Launcher. Its roots and optional credential are
-// removed via FK cascade. In Stage 1.2 there are no Launcher-owned Sessions, so
-// no Session cleanup runs here.
-func deleteLauncher(db *sql.DB, launcherID string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("cannot begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	var exists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM launchers WHERE id = ?`, launcherID).Scan(&exists); err != nil {
-		return fmt.Errorf("cannot check launcher: %w", err)
-	}
-	if exists == 0 {
-		return ErrLauncherNotFound
-	}
-
-	if _, err := tx.Exec(`DELETE FROM launchers WHERE id = ?`, launcherID); err != nil {
-		return fmt.Errorf("cannot delete launcher: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("cannot commit launcher deletion: %w", err)
-	}
-	return nil
-}

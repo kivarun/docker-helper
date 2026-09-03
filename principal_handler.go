@@ -229,11 +229,22 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := a.applyPrincipalEnabledChange(username, *req.Enabled)
+	var result principalEnabledChangeResult
+	var changeErr error
+	if *req.Enabled {
+		// Re-enabling commits enabled=true first; only after that success does
+		// the Principal reopen Operation admission across its Launchers (quiesce
+		// is the runtime companion of durable disabled state).
+		result, changeErr = a.enablePrincipalLaunchers(username)
+	} else {
+		// Disabling quiesces every Launcher beneath the Principal before the
+		// disable commits and keeps them quiesced on success.
+		result, changeErr = a.disablePrincipalLaunchers(username)
+	}
 	duration := time.Since(started).Round(time.Millisecond).String()
 	changed := result.Changed
 
-	if err != nil {
+	if changeErr != nil {
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:         "principal.enabled_change",
 			PrincipalName: username,
@@ -241,12 +252,12 @@ func (a *App) handleSetPrincipal(w http.ResponseWriter, r *http.Request) {
 			Duration:      duration,
 		})
 
-		if isErrPrincipalNotFound(err) {
+		if isErrPrincipalNotFound(changeErr) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		} else {
 			opLog(ctx).Error("principal set failed",
 				slog.String("operation", "principal_set"),
-				slog.String("error", err.Error()),
+				slog.String("error", changeErr.Error()),
 			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
@@ -513,7 +524,7 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionIDs, err := a.deletePrincipalWithMAC(username)
+	sessionIDs, err := a.deletePrincipalChecked(ctx, username)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -525,6 +536,14 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 				Duration:      duration,
 			})
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+		} else if isErrLauncherRuntimeActive(err) {
+			writeRequestContextAudit(ctx, auditRecord{
+				Event:         "principal.delete",
+				PrincipalName: username,
+				Result:        "launcher_runtime_active",
+				Duration:      duration,
+			})
+			writeError(ctx, w, http.StatusConflict, "launcher_runtime_active", "principal has active launcher runtime")
 		} else {
 			writeRequestContextAudit(ctx, auditRecord{
 				Event:         "principal.delete",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
@@ -251,6 +252,12 @@ func newTestApp(t *testing.T) *App {
 	app := &App{
 		Config: cfg,
 		DB:     db,
+		// Default to no observable helper runtime so ordinary lifecycle tests
+		// that do not exercise Docker can delete Launchers/Principals cleanly.
+		// Docker runtime-inspection tests override this seam explicitly.
+		InspectHelperContainers: func(ctx context.Context, launcherID string) ([]helperContainer, error) {
+			return nil, nil
+		},
 	}
 
 	// Provision a user-mode daemon-owner Principal + 'default' Launcher so that

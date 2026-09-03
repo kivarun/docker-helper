@@ -40,6 +40,10 @@ type App struct {
 	// MACCoordinator is the session MAC coordinator owner.
 	// nil in user mode or when no MAC driver is active.
 	MACCoordinator *sessionMACCoordinator
+	// InspectHelperContainers, when set, overrides the Docker-based helper
+	// container inspection used by checked Launcher/Principal deletion. It is a
+	// narrow test seam; production default shells out to the Docker CLI.
+	InspectHelperContainers func(ctx context.Context, launcherID string) ([]helperContainer, error)
 	// userModeDefault is the user-mode daemon-owner Principal/Launcher resolved
 	// at startup by ensureUserModeOwnership. nil in system mode.
 	userModeDefault *userModeDefaultLauncher

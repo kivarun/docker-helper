@@ -93,6 +93,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	// Create the operation first so we have an ID for staging.
 	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName)
+	op.LauncherID = session.LauncherID
 	op.auditBuildArgKeys = buildArgKeys
 
 	// Stage the build context into an isolated directory.

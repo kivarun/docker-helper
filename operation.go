@@ -54,6 +54,7 @@ type operation struct {
 	mu            sync.Mutex
 	ID            string         `json:"operation_id"`
 	SessionID     string         `json:"session_id"`
+	LauncherID    string         `json:"launcher_id,omitempty"`
 	Kind          string         `json:"kind"`
 	State         operationState `json:"status"`
 	CreatedAt     time.Time      `json:"created_at"`
@@ -148,6 +149,12 @@ type operationSupervisor struct {
 	mu       sync.RWMutex
 	ops      map[string]*operation
 	shutting bool
+	// quiesced holds Launcher IDs for which new operation admission is
+	// currently refused. Checked Launcher/Principal deletion sets it as the
+	// operation-admission closing point: once set, no new Operation may be
+	// admitted for that Launcher, while Operations admitted before it remain
+	// visible to checked cleanup.
+	quiesced map[string]bool
 }
 
 func newOperationSupervisor() *operationSupervisor {
@@ -156,13 +163,16 @@ func newOperationSupervisor() *operationSupervisor {
 	}
 }
 
-// admit atomically checks the shutdown gate and registers the operation.
-// Returns true if the operation was admitted, false if the supervisor is shutting down.
-// The caller must not start the operation process if admit returns false.
+// admit atomically checks the shutdown gate and the per-Launcher quiesce gate,
+// then registers the operation. Returns true if admitted. The caller must not
+// start the operation process if admit returns false.
 func (s *operationSupervisor) admit(op *operation) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.shutting {
+		return false
+	}
+	if s.quiesced[op.LauncherID] {
 		return false
 	}
 	s.ops[op.ID] = op

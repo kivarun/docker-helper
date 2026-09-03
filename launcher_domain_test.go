@@ -436,8 +436,8 @@ func TestLauncherDeleteRemovesRootsAndCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := deleteLauncher(db, l.ID); err != nil {
-		t.Fatalf("deleteLauncher: %v", err)
+	if err := deleteLauncherRow(db, l.ID); err != nil {
+		t.Fatalf("deleteLauncherRow: %v", err)
 	}
 	if _, err := findLauncherByID(db, l.ID); !errors.Is(err, ErrLauncherNotFound) {
 		t.Fatalf("expected launcher gone, got: %v", err)
@@ -456,7 +456,7 @@ func TestLauncherDeleteRemovesRootsAndCredential(t *testing.T) {
 
 func TestLauncherDeleteNotFound(t *testing.T) {
 	db := openFreshTestDB(t)
-	if err := deleteLauncher(db, "dhl_missing"); !errors.Is(err, ErrLauncherNotFound) {
+	if err := deleteLauncherRow(db, "dhl_missing"); !errors.Is(err, ErrLauncherNotFound) {
 		t.Fatalf("expected ErrLauncherNotFound, got: %v", err)
 	}
 }

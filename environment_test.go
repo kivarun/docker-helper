@@ -353,7 +353,8 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 		t.Fatalf("resolveSessionExecutionIdentity() error: %v", err)
 	}
 
-	// --config is first, then --cidfile is inserted after --user, before other options.
+	// --config is first, then --cidfile is inserted after the reserved helper
+	// runtime labels, before other options.
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
 	baseArgs := []string{"--config", dockerDir, "run", "--rm", "--user", fmt.Sprintf("%d:%d", expectedUID, expectedGID), "--security-opt", "label=disable"}
 	for i, expected := range baseArgs {
@@ -361,14 +362,30 @@ func TestRunEnvironmentDockerArgsOrder(t *testing.T) {
 			t.Fatalf("arg[%d]: expected %q, got %q", i, expected, capturedArgs[i])
 		}
 	}
-	if len(capturedArgs) < 8 || capturedArgs[8] != "--cidfile" {
-		t.Fatalf("expected --cidfile at arg[8], got %v", capturedArgs)
+	// The reserved helper-owned runtime labels derive from the resolved Session
+	// ownership chain (schema, session id, launcher id, principal name), never
+	// from caller input. They are emitted in that exact order.
+	labelStart := len(baseArgs)
+	expectedLabels := []string{
+		"--label", runtimeLabelSchema + "=" + runtimeLabelSchemaValue,
+		"--label", runtimeLabelSessionID + "=" + result.Session.ID,
+		"--label", runtimeLabelLauncherID + "=" + result.Session.LauncherID,
+		"--label", runtimeLabelPrincipalName + "=" + result.Session.PrincipalName,
 	}
-	if len(capturedArgs) < 9 || capturedArgs[9] == "" {
-		t.Fatalf("expected cidfile path at arg[9], got %v", capturedArgs)
+	for i, expected := range expectedLabels {
+		if capturedArgs[labelStart+i] != expected {
+			t.Fatalf("label arg[%d]: expected %q, got %q", labelStart+i, expected, capturedArgs[labelStart+i])
+		}
+	}
+	cidfileIndex := labelStart + len(expectedLabels)
+	if len(capturedArgs) < cidfileIndex+1 || capturedArgs[cidfileIndex] != "--cidfile" {
+		t.Fatalf("expected --cidfile at arg[%d], got %v", cidfileIndex, capturedArgs)
+	}
+	if len(capturedArgs) < cidfileIndex+2 || capturedArgs[cidfileIndex+1] == "" {
+		t.Fatalf("expected cidfile path at arg[%d], got %v", cidfileIndex+1, capturedArgs)
 	}
 	// Skip the cidfile args for the rest of the comparison.
-	remainingArgs := capturedArgs[10:]
+	remainingArgs := capturedArgs[cidfileIndex+2:]
 	expectedRemaining := []string{"--entrypoint", "/bin/sh", "--env", "KEY=value", "alpine:latest", "-c", "echo hello"}
 	if len(remainingArgs) != len(expectedRemaining) {
 		t.Fatalf("expected %d remaining args, got %d: %v", len(expectedRemaining), len(remainingArgs), remainingArgs)

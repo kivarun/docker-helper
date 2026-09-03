@@ -400,8 +400,91 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := updateLauncher(a.DB, id, req.Name, req.Enabled)
+	// Disabling a Launcher is a lifecycle transition: it invalidates only that
+	// Launcher's Sessions, releases MAC bindings, and cleans Session runtime
+	// dirs. It never recreates Sessions on re-enable and never kills Operations.
+	isDisable := req.Enabled != nil && !*req.Enabled
+
 	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if isDisable {
+		var disableErr error
+		if req.Name != nil {
+			if _, err := updateLauncher(a.DB, id, req.Name, nil); err != nil {
+				disableErr = err
+			}
+		}
+		// disableLauncher quiesces Operation admission before the disable
+		// commits and keeps it closed on success (quiesce is the runtime
+		// companion of durable disabled state).
+		var revoked []string
+		if disableErr == nil {
+			if rev, err := a.disableLauncher(id); err != nil {
+				disableErr = err
+			} else {
+				revoked = rev
+			}
+		}
+		if disableErr != nil {
+			writeRequestContextAudit(ctx, auditRecord{
+				Event:      "launcher.update",
+				LauncherID: l.ID,
+				Result:     "error",
+				Duration:   duration,
+			})
+			switch {
+			case isErrLauncherNotFound(disableErr):
+				writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+			case isErrLauncherExists(disableErr):
+				writeError(ctx, w, http.StatusConflict, "launcher_exists", "launcher already exists")
+			case isErrInvalidLauncherName(disableErr):
+				writeError(ctx, w, http.StatusBadRequest, "invalid_launcher_name", "invalid launcher name")
+			default:
+				opLog(ctx).Error("launcher update failed",
+					slog.String("operation", "launcher_update"),
+					slog.String("error", disableErr.Error()),
+				)
+				writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			}
+			return
+		}
+
+		// Best-effort cleanup of Session runtime directories after the DB
+		// disable and MAC release committed.
+		cfg := a.getConfig()
+		for _, sessionID := range revoked {
+			if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, sessionID); err != nil {
+				opLog(ctx).Warn("failed to clean up session runtime directory",
+					slog.String("operation", "launcher_disable"),
+					slog.String("launcher_id", id),
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+
+		updated, err := findLauncherByID(a.DB, id)
+		if err != nil {
+			opLog(ctx).Error("launcher lookup after disable failed",
+				slog.String("operation", "launcher_update"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		writeRequestContextAudit(ctx, auditRecord{
+			Event:           "launcher.update",
+			LauncherID:      updated.ID,
+			LauncherName:    updated.Name,
+			LauncherEnabled: &updated.Enabled,
+			Result:          "success",
+			Duration:        duration,
+		})
+		writeJSONRaw(ctx, w, http.StatusOK, launcherToJSON(*updated))
+		return
+	}
+
+	updated, err := updateLauncher(a.DB, id, req.Name, req.Enabled)
 	if err != nil {
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:      "launcher.update",
@@ -424,6 +507,27 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
+	}
+
+	// Enabling commits enabled=true first; only after that success does the
+	// Launcher's admission re-sync to the effective hierarchical authorities
+	// (Principal.enabled && Launcher.enabled). A Launcher enabled while its
+	// Principal is disabled stays quiesced.
+	if req.Enabled != nil && *req.Enabled {
+		if err := a.syncLauncherAdmission(id); err != nil {
+			writeRequestContextAudit(ctx, auditRecord{
+				Event:      "launcher.update",
+				LauncherID: l.ID,
+				Result:     "error",
+				Duration:   duration,
+			})
+			opLog(ctx).Error("launcher admission resync failed",
+				slog.String("operation", "launcher_update"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
 	}
 
 	writeRequestContextAudit(ctx, auditRecord{
@@ -560,17 +664,21 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := deleteLauncher(a.DB, id); err != nil {
-		duration := time.Since(started).Round(time.Millisecond).String()
+	sessionIDs, err := a.deleteLauncherChecked(ctx, id)
+	duration := time.Since(started).Round(time.Millisecond).String()
+	if err != nil {
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:      "launcher.delete",
 			LauncherID: l.ID,
 			Result:     "error",
 			Duration:   duration,
 		})
-		if isErrLauncherNotFound(err) {
+		switch {
+		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
-		} else {
+		case isErrLauncherRuntimeActive(err):
+			writeError(ctx, w, http.StatusConflict, "launcher_runtime_active", "launcher has active runtime")
+		default:
 			opLog(ctx).Error("launcher delete failed",
 				slog.String("operation", "launcher_delete"),
 				slog.String("error", err.Error()),
@@ -580,12 +688,24 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Best-effort cleanup of runtime directories for deleted sessions.
+	cfg := a.getConfig()
+	for _, sessionID := range sessionIDs {
+		if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, sessionID); err != nil {
+			opLog(ctx).Warn("failed to clean up session runtime directory",
+				slog.String("operation", "launcher_delete"),
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
 	writeRequestContextAudit(ctx, auditRecord{
 		Event:        "launcher.delete",
 		LauncherID:   l.ID,
 		LauncherName: l.Name,
 		Result:       "success",
-		Duration:     time.Since(started).Round(time.Millisecond).String(),
+		Duration:     duration,
 	})
 
 	w.WriteHeader(http.StatusNoContent)
