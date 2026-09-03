@@ -236,7 +236,9 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.lifecycleMu.Lock()
 	l, cred, token, err := createLauncher(a.DB, int64(p.ID), name, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots, req.IssueCredential)
+	a.lifecycleMu.Unlock()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -407,6 +409,13 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 
 	duration := time.Since(started).Round(time.Millisecond).String()
 
+	// The enable/disable transition is a lifecycle mutation: hold lifecycleMu
+	// for the whole PATCH so it cannot interleave with another Launcher/Principal
+	// lifecycle mutation on the same ownership, and so the disable calls the
+	// lock-already-held variant (lifecycleMu is not reentrant).
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+
 	if isDisable {
 		var disableErr error
 		if req.Name != nil {
@@ -419,7 +428,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 		// companion of durable disabled state).
 		var revoked []string
 		if disableErr == nil {
-			if rev, err := a.disableLauncher(id); err != nil {
+			if rev, err := a.disableLauncherLocked(id); err != nil {
 				disableErr = err
 			} else {
 				revoked = rev

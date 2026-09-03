@@ -19,8 +19,16 @@ import (
 var ErrStaleRotation = errors.New("stale admin token rotation")
 
 type App struct {
-	mu                  sync.RWMutex
-	Config              *Config
+	mu     sync.RWMutex
+	Config *Config
+	// lifecycleMu serializes ownership-lifecycle control-plane mutations that
+	// share admission authority (Launcher create / enabled transition / delete,
+	// Principal enabled transition / delete). It excludes Session and data-plane
+	// (admit / pull / build / run) requests and read-only ownership queries, so
+	// only lifecycle mutations contend. It is never acquired recursively; the
+	// lifecycle mutators split into lock-owning and *Locked-variant
+	// (lock-already-held) helpers.
+	lifecycleMu         sync.Mutex
 	DB                  *sql.DB
 	AdminTokenHash      [sha256.Size]byte
 	ExecCommandContext  func(context.Context, string, ...string) *exec.Cmd

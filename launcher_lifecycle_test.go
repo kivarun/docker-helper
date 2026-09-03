@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1046,5 +1048,259 @@ func TestHierarchyPrincipalDisableEnablePreservesLauncherEnabled(t *testing.T) {
 	}
 	if got := launcherEnabled(lbID); got != wantB {
 		t.Errorf("launcher B launcher.enabled mutated by principal disable/enable: got %d, want %d", got, wantB)
+	}
+}
+
+// TestRaceLauncherDeleteExcludesConcurrentEnable proves the lifecycle lock
+// serializes a checked Launcher delete against a concurrent enable. The delete
+// holds lifecycleMu across its runtime inspection (after the disable+quiesce
+// admission-closing prologue and before the owner removal), so the concurrent
+// enable cannot enter its critical section and reopen operation admission
+// before the delete removes the Launcher row. Without the lock, the enable
+// would interleave between the prologue and the row removal, reopening
+// admission for a Launcher about to be deleted so an Operation could admit
+// against a vanishing owner.
+// TestRaceLauncherDeleteExcludesConcurrentEnable proves the lifecycle lock
+// serializes a checked Launcher delete against a concurrent enable that contends
+// for the same ownership. The delete holds lifecycleMu across its runtime
+// inspection (after the disable+quiesce admission-closing prologue and before
+// the owner removal), so the concurrent enable cannot reach its own critical
+// section and reopen operation admission before the delete removes the Launcher
+// row; once the delete releases the lock the enable runs and finds the owner
+// gone (ErrLauncherNotFound), rather than resurrecting an owner for an Operation.
+// This is proven deterministically by (a) the point-in-time state at the barrier
+// and (b) the enable's final outcome, both of which require the serialization.
+func TestRaceLauncherDeleteExcludesConcurrentEnable(t *testing.T) {
+	db, laID, _ := launcherLifecycleDB(t)
+	app, atQuiesce, release := quiesceBarrierApp(t, db)
+
+	var deleteErr error
+	deleteDone := make(chan struct{})
+	go func() {
+		defer close(deleteDone)
+		_, deleteErr = app.deleteLauncherChecked(context.Background(), laID)
+	}()
+
+	// The delete has disabled + quiesced the launcher and parked at the runtime
+	// inspection, still holding lifecycleMu.
+	<-atQuiesce
+
+	// Launch a concurrent enable that contends for the same lifecycle lock.
+	enableDone := make(chan error, 1)
+	go func() {
+		enableDone <- app.enableLauncher(laID)
+	}()
+
+	// Point-in-time state at the barrier: a pre-disable-resolved Session
+	// request must still fail admit(), and durable + supervisor authorities
+	// agree (enabled=false + quiesced). The delete has not yet removed the row,
+	// so if the concurrent enable had interleaved, admission would be open.
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
+		t.Fatal(err)
+	} else if enabled {
+		t.Fatal("launcher re-enabled while the delete holds the lifecycle lock")
+	}
+	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Fatal("operation admission reopened while the delete holds the lifecycle lock")
+	}
+	op := newTestOperation(t, operationRunning, time.Time{})
+	op.LauncherID = laID
+	if app.OperationSupervisor.admit(op) {
+		t.Fatal("operation admitted against a launcher being concurrently deleted")
+	}
+
+	close(release)
+	<-deleteDone
+	if deleteErr != nil {
+		t.Fatalf("delete should succeed, got %v", deleteErr)
+	}
+
+	// Final outcome: because the delete held lifecycleMu across the row removal,
+	// the serialized enable runs only after the owner is gone. It must refuse
+	// (ErrLauncherNotFound) rather than reopen admission for a vanishing owner.
+	if err := <-enableDone; !errors.Is(err, ErrLauncherNotFound) {
+		t.Fatalf("concurrent enable should refuse the deleted launcher, got %v", err)
+	}
+	if _, err := findLauncherByID(db, laID); !errors.Is(err, ErrLauncherNotFound) {
+		t.Fatalf("expected launcher deleted, got %v", err)
+	}
+}
+
+// TestRacePrincipalDeleteExcludesConcurrentLauncherCreate proves the lifecycle
+// lock serializes a checked Principal delete against a concurrent Launcher
+// create that contends for the same ownership beneath that Principal. The delete
+// holds lifecycleMu across its runtime inspection, so no Launcher can be created
+// (unchecked) while the delete owns the ownership; the create's locked section
+// (inside handleCreateLauncher) runs only after the delete's critical section.
+// After the delete wins, the create fails principal-not-found. Proven
+// deterministically by (a) the point-in-time launcher count at the barrier and
+// (b) the create's final 404. The create is driven through the real locked
+// handler.
+func TestRacePrincipalDeleteExcludesConcurrentLauncherCreate(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	app.OperationSupervisor = newOperationSupervisor()
+	setupLauncherHandlerPrincipal(t, app, "owner")
+
+	atInspect := make(chan struct{})
+	release := make(chan struct{})
+	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
+		close(atInspect)
+		<-release
+		return nil, nil
+	}
+	// One launcher beneath the Principal so the delete has something to inspect.
+	pid := principalIDByName(t, app.DB, "owner")
+	mustAddDefaultLauncher(t, app.DB, pid)
+
+	var deleteCode int
+	deleteDone := make(chan struct{})
+	go func() {
+		defer close(deleteDone)
+		deleteCode = launcherRequest(t, app, http.MethodDelete, "/principals/owner", testAdminToken, "").Code
+	}()
+
+	// The delete has disabled + quiesced the launcher and parked at inspection,
+	// still holding lifecycleMu.
+	<-atInspect
+
+	// Launch a concurrent Launcher create that contends for the same lifecycle
+	// lock as the delete.
+	createDone := make(chan int, 1)
+	go func() {
+		createDone <- launcherRequest(t, app, http.MethodPost, "/principals/owner/launchers", testAdminToken,
+			`{"name":"new","scope":"inherit"}`).Code
+	}()
+
+	// Point-in-time barrier: no Launcher was created mid-delete — the Principal
+	// still has exactly its single launcher (the delete's prologue disabled it).
+	ids, err := principalLaunchers(app.DB, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("expected no launcher created mid-delete (1 total), got %d", len(ids))
+	}
+
+	close(release)
+	<-deleteDone
+	if deleteCode != http.StatusNoContent {
+		t.Fatalf("delete principal: expected 204, got %d", deleteCode)
+	}
+
+	// After the delete wins (Principal removed), the create fails
+	// principal-not-found rather than producing an orphaned/unchecked launcher.
+	if code := <-createDone; code != http.StatusNotFound {
+		t.Fatalf("concurrent create after principal delete: expected 404, got %d", code)
+	}
+}
+
+// TestRaceConcurrentDisableEnableFinalAdmissionAgrees proves that bursts of
+// concurrent Launcher disable/enable, serialized by the lifecycle lock, always
+// leave the supervisor admission agreeing with the durable hierarchical
+// authorities (Principal.enabled && Launcher.enabled). It forbids the two
+// inconsistent states: enabled=false + unquiesced, and effectively-enabled +
+// quiesced.
+func TestRaceConcurrentDisableEnableFinalAdmissionAgrees(t *testing.T) {
+	db, laID, _ := launcherLifecycleDB(t)
+	app := deleteLifecycleApp(t, db)
+
+	const rounds = 50
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < rounds; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			app.disableLauncher(laID)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			app.enableLauncher(laID)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Final invariant: supervisor admission agrees with durable authorities.
+	closed, err := effectiveLauncherClosed(db, laID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.OperationSupervisor.isLauncherQuiesced(laID); got != closed {
+		t.Fatalf("final supervisor admission disagrees with durable authorities: quiesced=%v effectiveClosed=%v", got, closed)
+	}
+}
+
+// TestRaceInspectionErrorRestoreExcludesConcurrentEnable proves the lifecycle
+// lock also serializes a concurrent enable against an inspection-error delete,
+// so the checked-deletion restoration cannot overwrite a concurrent transition.
+// The delete parks at inspection (holding lifecycleMu), the inspection errors,
+// and the concurrent enable can only run after the delete releases the lock; it
+// then runs against the already-restored, re-synced state and leaves admission
+// consistent with the durable authorities. This preserves the 0a36d16
+// inspection-error restoration semantics under concurrency. Proven
+// deterministically by the point-in-time admit() refusal at the barrier and the
+// final restored-state + admission-consistency assertions.
+func TestRaceInspectionErrorRestoreExcludesConcurrentEnable(t *testing.T) {
+	db, laID, _ := launcherLifecycleDB(t)
+	app := deleteLifecycleApp(t, db)
+
+	atInspect := make(chan struct{})
+	release := make(chan struct{})
+	sentinel := errors.New("docker cli unavailable")
+	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
+		close(atInspect)
+		<-release
+		return nil, sentinel
+	}
+
+	var deleteErr error
+	deleteDone := make(chan struct{})
+	go func() {
+		defer close(deleteDone)
+		_, deleteErr = app.deleteLauncherChecked(context.Background(), laID)
+	}()
+
+	<-atInspect
+
+	// Launch a concurrent enable that contends for the same lifecycle lock.
+	enableDone := make(chan error, 1)
+	go func() {
+		enableDone <- app.enableLauncher(laID)
+	}()
+
+	// Point-in-time barrier: a pre-disable-resolved Session request must still
+	// fail admit() while the delete owns the ownership and the enable contends
+	// for the same lock.
+	op := newTestOperation(t, operationRunning, time.Time{})
+	op.LauncherID = laID
+	if app.OperationSupervisor.admit(op) {
+		t.Fatal("operation admitted while delete pending and enable serialized behind it")
+	}
+
+	close(release)
+	<-deleteDone
+	if !errors.Is(deleteErr, sentinel) {
+		t.Fatalf("expected inspection error to refuse the delete, got %v", deleteErr)
+	}
+	// Restoration preserved the prior enabled state.
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Fatal("inspection-error delete did not restore the launcher to its prior enabled state")
+	}
+	// The serialized enable now runs against the restored, re-synced state and
+	// must leave admission consistent with the durable authorities.
+	if err := <-enableDone; err != nil {
+		t.Fatalf("enable after restore should succeed, got %v", err)
+	}
+	closed, err := effectiveLauncherClosed(db, laID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.OperationSupervisor.isLauncherQuiesced(laID); got != closed {
+		t.Fatalf("admission disagrees with authorities after restore+enable: quiesced=%v effectiveClosed=%v", got, closed)
 	}
 }

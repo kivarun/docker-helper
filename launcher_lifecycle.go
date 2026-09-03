@@ -422,7 +422,19 @@ func (a *App) restoreLauncherStateAfterFailedDelete(ctx context.Context, prior l
 // the durable disabled state, and only a subsequent enable reopens admission.
 // If the DB transition fails before committing, admission is restored. Returns
 // the invalidated Session IDs for runtime-directory cleanup.
+//
+// disableLauncher is a lock-owning lifecycle mutator: it holds lifecycleMu for
+// the whole transition so it cannot interleave with another Launcher/Principal
+// lifecycle mutation on the same ownership.
 func (a *App) disableLauncher(launcherID string) ([]string, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.disableLauncherLocked(launcherID)
+}
+
+// disableLauncherLocked is the lock-already-held form of disableLauncher. It is
+// used internally by lifecycle mutators that already hold lifecycleMu.
+func (a *App) disableLauncherLocked(launcherID string) ([]string, error) {
 	a.OperationSupervisor.quiesceLauncher(launcherID)
 	result, err := a.applyLauncherEnabledChange(launcherID, false)
 	if err != nil {
@@ -439,7 +451,18 @@ func (a *App) disableLauncher(launcherID string) ([]string, error) {
 // quiesced; admission reopens only once both authorities are enabled. Sessions
 // are never recreated; a fresh Session must be created against the enabled
 // Launcher and enabled Principal.
+//
+// enableLauncher is a lock-owning lifecycle mutator: it holds lifecycleMu for
+// the whole transition.
 func (a *App) enableLauncher(launcherID string) error {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.enableLauncherLocked(launcherID)
+}
+
+// enableLauncherLocked is the lock-already-held form of enableLauncher. It is
+// used internally by lifecycle mutators that already hold lifecycleMu.
+func (a *App) enableLauncherLocked(launcherID string) error {
 	if _, err := a.applyLauncherEnabledChange(launcherID, true); err != nil {
 		return err
 	}
@@ -467,13 +490,27 @@ func (a *App) enableLauncher(launcherID string) error {
 // closes admission (post-quiesce admits return false), while every pre-quiesce
 // admitted Operation is visible to the step-2 check, and on refusal the row is
 // preserved. It never kills a genuinely running Operation.
+//
+// deleteLauncherChecked is a lock-owning lifecycle mutator: it holds lifecycleMu
+// across the runtime inspection so no competing enable/disable/delete of the
+// same Launcher can interleave between the admission-closing prologue and the
+// owner removal.
 func (a *App) deleteLauncherChecked(ctx context.Context, launcherID string) ([]string, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.deleteLauncherCheckedLocked(ctx, launcherID)
+}
+
+// deleteLauncherCheckedLocked is the lock-already-held form of
+// deleteLauncherChecked. It is used internally by lifecycle mutators that
+// already hold lifecycleMu.
+func (a *App) deleteLauncherCheckedLocked(ctx context.Context, launcherID string) ([]string, error) {
 	prior, err := launcherEnabledState(a.DB, launcherID)
 	if err != nil {
 		return nil, err
 	}
 
-	revoked, err := a.disableLauncher(launcherID)
+	revoked, err := a.disableLauncherLocked(launcherID)
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +573,21 @@ func principalLaunchers(db *sql.DB, principalID int64) ([]string, error) {
 // restores every Launcher to its prior enabled state and re-opens admission so
 // the Principal is not left half-torn-down. On a clean check it removes stale
 // containers and delegates the committed removal to the Principal delete owner.
+//
+// deletePrincipalChecked is a lock-owning lifecycle mutator: it holds lifecycleMu
+// across the whole check so no Launcher can be created beneath this Principal,
+// and no Launcher/Principal enable-disable can interleave, while the checked
+// deletion proceeds.
 func (a *App) deletePrincipalChecked(ctx context.Context, username string) ([]string, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.deletePrincipalCheckedLocked(ctx, username)
+}
+
+// deletePrincipalCheckedLocked is the lock-already-held form of
+// deletePrincipalChecked. It is used internally by lifecycle mutators that
+// already hold lifecycleMu.
+func (a *App) deletePrincipalCheckedLocked(ctx context.Context, username string) ([]string, error) {
 	principalID, err := findPrincipalIDByUsername(a.DB, username)
 	if err != nil {
 		return nil, err
@@ -554,7 +605,7 @@ func (a *App) deletePrincipalChecked(ctx context.Context, username string) ([]st
 
 	var revokedAll []string
 	for _, lid := range launchers {
-		revoked, err := a.disableLauncher(lid)
+		revoked, err := a.disableLauncherLocked(lid)
 		if err != nil {
 			// disableLauncher restored admission for the Launcher whose DB
 			// transition failed; Launchers already durably disabled in this
@@ -611,7 +662,20 @@ func (a *App) principalLaunchersByUsername(username string) ([]string, error) {
 // keeps them quiesced on a successful disable because quiesce is the runtime
 // companion of durable disabled state, and restores them only if the DB
 // transition fails before it commits.
+//
+// disablePrincipalLaunchers is a lock-owning lifecycle mutator: it holds
+// lifecycleMu for the whole transition so it cannot interleave with a
+// concurrent Launcher-enabled/Principal relation mutation on the same ownership.
 func (a *App) disablePrincipalLaunchers(username string) (principalEnabledChangeResult, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.disablePrincipalLaunchersLocked(username)
+}
+
+// disablePrincipalLaunchersLocked is the lock-already-held form of
+// disablePrincipalLaunchers. It is used internally by lifecycle mutators that
+// already hold lifecycleMu.
+func (a *App) disablePrincipalLaunchersLocked(username string) (principalEnabledChangeResult, error) {
 	launchers, err := a.principalLaunchersByUsername(username)
 	if err != nil {
 		return principalEnabledChangeResult{}, err
@@ -636,7 +700,19 @@ func (a *App) disablePrincipalLaunchers(username string) (principalEnabledChange
 // individually-disabled Launchers stay quiesced. It never mutates child
 // Launcher.enabled values. Sessions are never recreated; fresh Sessions must be
 // created against the re-enabled Principal.
+//
+// enablePrincipalLaunchers is a lock-owning lifecycle mutator: it holds
+// lifecycleMu for the whole transition.
 func (a *App) enablePrincipalLaunchers(username string) (principalEnabledChangeResult, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.enablePrincipalLaunchersLocked(username)
+}
+
+// enablePrincipalLaunchersLocked is the lock-already-held form of
+// enablePrincipalLaunchers. It is used internally by lifecycle mutators that
+// already hold lifecycleMu.
+func (a *App) enablePrincipalLaunchersLocked(username string) (principalEnabledChangeResult, error) {
 	launchers, err := a.principalLaunchersByUsername(username)
 	if err != nil {
 		return principalEnabledChangeResult{}, err
