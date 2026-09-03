@@ -224,7 +224,11 @@ set_up_principal() {
   fi
   home="$(getent passwd "$user" | cut -d: -f6)"
   mkdir -p "$home/ws"; chown -R "$user:$user" "$home/ws"
-  dh principal create --system --no-credential "$user" >/dev/null 2>&1 || true
+  # The candidate CLI requires --issue-credential/--no-credential on
+  # non-interactive stdin; the v2.0.0 upgrade baseline (scenarios F/G) predates
+  # the flags. Try the candidate form first, then the baseline form.
+  dh principal create --system --no-credential "$user" >/dev/null 2>&1 \
+    || dh principal create --system "$user" >/dev/null 2>&1 || true
   dh principal set --system "$user" enabled true >/dev/null 2>&1 || true
   dh principal allowed-root add --system "$user" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
   rm -f "$credfile"
@@ -1335,7 +1339,7 @@ fi
 H_HOME="$(getent passwd "$H_USER" | cut -d: -f6)"
 H_WS="$H_HOME/ws"
 H_SUB="$H_HOME/sub"
-mkdir -p "$H_SUB"; chown -R "$H_USER:$H_USER" "$H_SUB"
+mkdir -p "$H_SUB/ws"; chown -R "$H_USER:$H_USER" "$H_SUB"
 H_ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 
 # H1: two launchers with separate namespaces.
@@ -1359,7 +1363,9 @@ printf '%s\n' "$H_BETA_TOK" > "$CRED_DIR/lnc-beta.tok"; chmod 600 "$CRED_DIR/lnc
 
 H_ALPHA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
 H_ALPHA_SESS="$(printf '%s' "$H_ALPHA_SESS_JSON" | json_field id || true)"
-H_BETA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-beta.tok" --workspace "$H_SUB" --json 2>/dev/null || true)"
+# The beta workspace must be a proper subdirectory of the Launcher allowed
+# root; the root itself ($H_SUB) is rejected with 400 invalid_workspace.
+H_BETA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-beta.tok" --workspace "$H_SUB/ws" --json 2>/dev/null || true)"
 H_BETA_SESS="$(printf '%s' "$H_BETA_SESS_JSON" | json_field id || true)"
 if [ -n "$H_ALPHA_SESS" ] && [ -n "$H_BETA_SESS" ]; then
   acc_ok "each launcher created its own session (alpha=$H_ALPHA_SESS, beta=$H_BETA_SESS)"
