@@ -10,6 +10,14 @@
 #   C  registry login end-to-end + session isolation (self-contained registry)
 #   D  bounded restart/shutdown with active operations
 #   E  user-mode + system-mode deployment coexistence
+#   G  v2.0.0 -> candidate upgrade ownership migration (depth proofs: credential
+#      identity retention, default-Launcher attribution, non-attributable admin
+#      session invalidation, no fabricated Launcher credential, restart
+#      idempotency, final schema, migrated-Launcher functionality)
+#   H  launcher hierarchy, isolation, rotation, and lifecycle on the candidate
+#      (separate namespaces, cross-launcher non-disclosure, rotation continuity,
+#      restricted scope, stale-root rejection, disable propagation, checked
+#      delete, bearer/provenance audit checks)
 #   F  DEB native lifecycle: install(upgrade baseline v2.0.0) ->
 #      upgrade(candidate) -> reinstall(candidate) -> remove -> purge
 #
@@ -984,6 +992,490 @@ wait "$E_USER_SERVE_PID" 2>/dev/null || true
 userdel -r "$E_USER" >/dev/null 2>&1 || true
 rm -rf "$E_XDG_RUNTIME"
 systemctl stop docker-helper.service >/dev/null 2>&1 || true
+
+# ==============================================================================
+# scenario G: v2.0.0 -> candidate upgrade ownership migration (depth proofs)
+#
+# Seeds real v2.0.0 state (principal + credential + attributable principal
+# session + a non-attributable admin session), upgrades to the exact candidate
+# DEB, and proves the migration contract end-to-end on real packages:
+#   G1  pre-upgrade Principal credential still authenticates with its retained
+#       identity (GET /auth authority=principal, principal=<user>)
+#   G2  the attributable v2.0 session is re-owned by the principal's 'default'
+#       Launcher (session list shows launcher=default, principal=<user>)
+#   G3  the pre-upgrade credential still creates sessions (auth semantics kept)
+#   G4  exactly one 'default' inherit Launcher exists for the principal
+#   G5  the non-attributable admin session was invalidated: absent from the
+#       session list and its bearer rejected (401), never left ownerless
+#   G6  no Launcher credential was fabricated for the migrated default
+#       Launcher (GET credential -> 404 launcher_credential_not_found)
+#   G7  restart idempotency: after a daemon restart the migrated ownership is
+#       unchanged and the final sessions schema never re-gains principal_id
+#       (schema asserted via the python3 sqlite3 stdlib)
+#   G8  the migrated default Launcher is fully functional: credential issue,
+#       launcher-credential session create, and rotate (old rejected, new
+#       works, same credential ID)
+# ==============================================================================
+scenario "G: upgrade ownership migration"
+
+G_USER="uatr2upg"
+G_CRED="$CRED_DIR/upg.tok"
+
+G_BASELINE_DEB=""
+if upgrade_baseline_fetch_deb /tmp/r2ac-g-baseline.deb >/dev/null 2>&1; then
+  G_BASELINE_DEB="/tmp/r2ac-g-baseline.deb"
+  acc_ok "v2.0.0 baseline DEB resolved and SHA-256 verified (migration scenario)"
+else
+  acc_blocked "could not resolve/verify the v2.0.0 baseline DEB (migration scenario)"
+fi
+
+if [ -n "$G_BASELINE_DEB" ]; then
+  # clean slate; install the exact baseline and seed v2.0.0 state.
+  systemctl stop docker-helper.service >/dev/null 2>&1 || true
+  dpkg -P docker-helper >/dev/null 2>&1 || true
+  rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
+  if dpkg -i "$G_BASELINE_DEB" >/tmp/r2ac-g-install.log 2>&1 \
+      && [ "$(docker-helper version)" = "$UPGRADE_BASELINE_VERSION" ]; then
+    acc_ok "v2.0.0 baseline installed for migration seeding"
+  else
+    acc_fail "v2.0.0 baseline install failed (see /tmp/r2ac-g-install.log)"
+  fi
+  if docker-helper init --allowed-root "$ALLOWED_ROOT" >/dev/null 2>&1; then
+    acc_ok "system init on v2.0.0 baseline (migration scenario)"
+  else
+    acc_fail "system init failed on v2.0.0 baseline (migration scenario)"
+  fi
+  systemctl enable --now docker-helper.service >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet docker-helper.service && break
+    sleep 1
+  done
+  wait_health "$SOCK" || acc_fail "v2.0.0 daemon not healthy (migration scenario)"
+
+  # Seed attributable principal-owned state through v2.0.0's own semantics.
+  if set_up_principal "$G_USER" "$G_CRED"; then
+    G_SESSION_ID="$GLOBAL_SESSION_ID"
+    G_ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+    acc_ok "v2.0.0 principal + credential + attributable session seeded ($G_SESSION_ID)"
+  else
+    G_SESSION_ID=""
+    acc_fail "v2.0.0 principal seeding failed (migration scenario)"
+  fi
+  # Seed a non-attributable admin session (v2.0.0 admin sessions carry no
+  # owner): the candidate migration must invalidate it.
+  G_ADMIN_SESS_ID=""
+  G_ADMIN_SESS_TOKEN=""
+  G_HOME="$(getent passwd "$G_USER" | cut -d: -f6)"
+  mkdir -p "$G_HOME/ws-admin"; chown -R "$G_USER:$G_USER" "$G_HOME/ws-admin"
+  if [ -n "${G_ADMIN_TOKEN:-}" ]; then
+    G_ADMIN_SESS_JSON="$(dh session create --system --token-file /etc/docker-helper/admin.token --workspace "$G_HOME/ws-admin" --json 2>/dev/null || true)"
+    G_ADMIN_SESS_ID="$(printf '%s' "$G_ADMIN_SESS_JSON" | json_field id || true)"
+    G_ADMIN_SESS_TOKEN="$(printf '%s' "$G_ADMIN_SESS_JSON" | json_field token || true)"
+    if [ -n "$G_ADMIN_SESS_ID" ]; then
+      acc_ok "v2.0.0 non-attributable admin session seeded ($G_ADMIN_SESS_ID)"
+    else
+      acc_fail "v2.0.0 admin session seeding failed (migration scenario)"
+    fi
+  fi
+
+  # Upgrade to the exact candidate DEB.
+  if dpkg -i "$ARTIFACT_PATH_IN" >/tmp/r2ac-g-upgrade.log 2>&1 \
+      && [ "$(docker-helper version)" = "$VERSION" ]; then
+    acc_ok "upgraded to candidate DEB ($VERSION) for migration proof"
+  else
+    acc_fail "upgrade to candidate failed (see /tmp/r2ac-g-upgrade.log)"
+  fi
+  systemctl is-active --quiet docker-helper.service \
+    || { systemctl start docker-helper.service >/dev/null 2>&1 || true; }
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet docker-helper.service && break
+    sleep 1
+  done
+  wait_health "$SOCK" || acc_fail "daemon not healthy after migration upgrade"
+
+  # G1: pre-upgrade credential still authenticates with retained identity.
+  G_TOK="$(cat "$G_CRED" 2>/dev/null || true)"
+  G_AUTH_HTTP="$(curl --silent --output /tmp/r2ac-g-auth.json --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H "Authorization: Bearer $G_TOK" http://localhost/auth 2>/dev/null || true)"
+  if [ "$G_AUTH_HTTP" = 200 ] \
+      && grep -q '"authority":"principal"' /tmp/r2ac-g-auth.json \
+      && grep -q "\"principal\":\"$G_USER\"" /tmp/r2ac-g-auth.json; then
+    acc_ok "pre-upgrade credential authenticates as principal $G_USER (identity retained)"
+  else
+    acc_fail "pre-upgrade credential identity check failed (http=$G_AUTH_HTTP)"
+  fi
+
+  # G2: attributable session re-owned by the 'default' Launcher.
+  if [ -n "${G_SESSION_ID:-}" ]; then
+    G_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+    if printf '%s\n' "$G_LIST" | grep -q "$G_SESSION_ID" \
+        && printf '%s\n' "$G_LIST" | grep -q '"launcher": "default"' \
+        && printf '%s\n' "$G_LIST" | grep -q "\"principal\": \"$G_USER\""; then
+      acc_ok "migrated session owned by principal's default Launcher"
+    else
+      acc_fail "migrated session ownership wrong: $(printf '%s\n' "$G_LIST" | redact | tail -3)"
+    fi
+  fi
+
+  # G3: pre-upgrade credential still creates sessions.
+  G_NEW_JSON="$(dh session create --system --token-file "$G_CRED" --workspace "$G_HOME/ws" --json 2>/dev/null || true)"
+  G_NEW_ID="$(printf '%s' "$G_NEW_JSON" | json_field id || true)"
+  if [ -n "$G_NEW_ID" ]; then
+    acc_ok "pre-upgrade credential still creates sessions ($G_NEW_ID)"
+  else
+    acc_fail "pre-upgrade credential lost session-creation capability"
+  fi
+
+  # G4: exactly one 'default' inherit Launcher for the principal.
+  G_LAUNCHERS="$(dh launcher list --system --principal "$G_USER" --json 2>/dev/null)"
+  G_LCOUNT="$(printf '%s\n' "$G_LAUNCHERS" | grep -c '"id": "dhl_' || true)"
+  if [ "$G_LCOUNT" = 1 ] \
+      && printf '%s\n' "$G_LAUNCHERS" | grep -q '"name": "default"' \
+      && printf '%s\n' "$G_LAUNCHERS" | grep -q '"scope": "inherit"'; then
+    acc_ok "exactly one default inherit Launcher exists for $G_USER"
+  else
+    acc_fail "default Launcher provisioning wrong after migration (count=$G_LCOUNT)"
+  fi
+  G_DEFAULT_ID="$(printf '%s\n' "$G_LAUNCHERS" | json_field id || true)"
+
+  # G5: non-attributable admin session invalidated, never left ownerless.
+  if [ -n "${G_ADMIN_SESS_ID:-}" ]; then
+    G_LIST2="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+    if printf '%s\n' "$G_LIST2" | grep -q "$G_ADMIN_SESS_ID"; then
+      acc_fail "non-attributable admin session survived migration (must be invalidated)"
+    else
+      acc_ok "non-attributable admin session invalidated by migration"
+    fi
+    G_OLD_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $G_ADMIN_SESS_TOKEN" http://localhost/auth 2>/dev/null || true)"
+    if [ "$G_OLD_HTTP" = 401 ]; then
+      acc_ok "invalidated admin session bearer is rejected (401)"
+    else
+      acc_fail "invalidated admin session bearer not rejected (http=$G_OLD_HTTP)"
+    fi
+  fi
+
+  # G6: no Launcher credential fabricated for the migrated default Launcher.
+  G_CRED_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H "Authorization: Bearer $G_ADMIN_TOKEN" \
+    "http://localhost/launchers/$G_DEFAULT_ID/credential" 2>/dev/null || true)"
+  if [ "$G_CRED_HTTP" = 404 ]; then
+    acc_ok "no Launcher credential fabricated for the migrated default Launcher (404)"
+  else
+    acc_fail "migrated default Launcher credential check failed (http=$G_CRED_HTTP)"
+  fi
+
+  # G7: restart idempotency + final schema never re-gains principal_id.
+  systemctl restart docker-helper.service >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet docker-helper.service && break
+    sleep 1
+  done
+  if wait_health "$SOCK"; then
+    G_LIST3="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+    if printf '%s\n' "$G_LIST3" | grep -q "$G_SESSION_ID" \
+        && printf '%s\n' "$G_LIST3" | grep -q '"launcher": "default"'; then
+      acc_ok "migrated ownership stable across restart (idempotent migration)"
+    else
+      acc_fail "migrated ownership changed after restart"
+    fi
+    G_AUTH_HTTP2="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $G_TOK" http://localhost/auth 2>/dev/null || true)"
+    if [ "$G_AUTH_HTTP2" = 200 ]; then
+      acc_ok "pre-upgrade credential still authenticates after restart"
+    else
+      acc_fail "pre-upgrade credential broken after restart (http=$G_AUTH_HTTP2)"
+    fi
+    if python3 -c '
+import sqlite3, sys
+db = sqlite3.connect("/var/lib/docker-helper/docker-helper.db")
+cols = [r[1] for r in db.execute("PRAGMA table_info(sessions)")]
+sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
+' 2>/dev/null; then
+      acc_ok "final sessions schema after restart: launcher_id present, principal_id absent"
+    else
+      acc_fail "final sessions schema wrong after restart (principal_id must never return)"
+    fi
+  else
+    acc_fail "daemon not healthy after migration restart (idempotency not exercised)"
+  fi
+
+  # G8: migrated default Launcher is fully functional.
+  G_ISSUE_OUT="$(dh launcher credential issue --system "$G_DEFAULT_ID" 2>/dev/null || true)"
+  G_LC_TOKEN="$(printf '%s' "$G_ISSUE_OUT" | json_field token || true)"
+  G_LC_ID="$(printf '%s' "$G_ISSUE_OUT" | json_field id || true)"
+  if [ -n "$G_LC_TOKEN" ] && [ -n "$G_LC_ID" ]; then
+    printf '%s\n' "$G_LC_TOKEN" > "$CRED_DIR/upg-lc.tok"; chmod 600 "$CRED_DIR/upg-lc.tok"
+    G_LC_JSON="$(dh session create --system --token-file "$CRED_DIR/upg-lc.tok" --workspace "$G_HOME/ws" --json 2>/dev/null || true)"
+    if printf '%s' "$G_LC_JSON" | grep -q '"launcher": "default"'; then
+      acc_ok "migrated default Launcher issues a working credential"
+    else
+      acc_fail "launcher credential on migrated default Launcher cannot create sessions"
+    fi
+    G_ROT_OUT="$(dh launcher credential rotate --system "$G_DEFAULT_ID" 2>/dev/null || true)"
+    G_ROT_TOKEN="$(printf '%s' "$G_ROT_OUT" | json_field token || true)"
+    G_ROT_ID="$(printf '%s' "$G_ROT_OUT" | json_field id || true)"
+    if [ "$G_ROT_ID" = "$G_LC_ID" ] && [ -n "$G_ROT_TOKEN" ] && [ "$G_ROT_TOKEN" != "$G_LC_TOKEN" ]; then
+      acc_ok "rotation keeps the same credential ID with a new bearer"
+      printf '%s\n' "$G_ROT_TOKEN" > "$CRED_DIR/upg-lc2.tok"; chmod 600 "$CRED_DIR/upg-lc2.tok"
+    else
+      acc_fail "rotation on migrated Launcher misbehaved (id=$G_ROT_ID)"
+    fi
+    if dh session create --system --token-file "$CRED_DIR/upg-lc.tok" --workspace "$G_HOME/ws" --json >/dev/null 2>&1; then
+      acc_fail "old launcher bearer still accepted after rotation"
+    else
+      acc_ok "old launcher bearer rejected after rotation"
+    fi
+    G_LC_JSON2="$(dh session create --system --token-file "$CRED_DIR/upg-lc2.tok" --workspace "$G_HOME/ws" --json 2>/dev/null || true)"
+    if printf '%s' "$G_LC_JSON2" | grep -q '"launcher": "default"'; then
+      acc_ok "rotated launcher credential creates sessions"
+    else
+      acc_fail "rotated launcher credential cannot create sessions"
+    fi
+  else
+    acc_fail "credential issuance on migrated default Launcher failed"
+  fi
+fi
+
+# ==============================================================================
+# scenario H: launcher hierarchy, isolation, rotation, and lifecycle (candidate)
+#
+# Exercised end-to-end against the installed candidate with two launchers on
+# one principal:
+#   H1  two launchers hold separate Session namespaces; each launcher
+#       credential sees only its own sessions
+#   H2  cross-launcher non-disclosure: foreign session delete is the same 404
+#       outcome as a missing session
+#   H3  credential rotation: old bearer rejected, replacement authorized, same
+#       launcher identity, no second credential (409 launcher_credential_exists)
+#   H4  restricted scope narrows the principal ceiling for new sessions
+#   H5  stale out-of-ceiling launcher roots are rejected fail-closed
+#       (launcher_unavailable) after the principal root is removed
+#   H6  disabling a launcher deletes its sessions and rejects its bearer; an
+#       individually disabled launcher stays disabled through a principal
+#       disable/enable cycle
+#   H7  checked delete: launcher delete fails with 409 launcher_runtime_active
+#       while a session operation is running, succeeds after cleanup
+#   H8  no credential bearer leaks into journal/audit; rotation provenance
+#       (launcher.credential_rotate with launcher_id) is visible in audit
+# ==============================================================================
+scenario "H: launcher hierarchy, isolation, rotation, lifecycle"
+
+H_USER="uatr2lnc"
+H_CRED="$CRED_DIR/lnc.tok"
+if set_up_principal "$H_USER" "$H_CRED"; then
+  acc_ok "hierarchy principal + default Launcher provisioned ($H_USER)"
+else
+  acc_fail "hierarchy principal setup failed"
+fi
+H_HOME="$(getent passwd "$H_USER" | cut -d: -f6)"
+H_WS="$H_HOME/ws"
+H_SUB="$H_HOME/sub"
+mkdir -p "$H_SUB"; chown -R "$H_USER:$H_USER" "$H_SUB"
+H_ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
+
+# H1: two launchers with separate namespaces.
+H_ALPHA_OUT="$(dh launcher create --system --principal "$H_USER" --name alpha --no-credential 2>/dev/null || true)"
+H_ALPHA_ID="$(printf '%s' "$H_ALPHA_OUT" | json_field id || true)"
+H_BETA_OUT="$(dh launcher create --system --principal "$H_USER" --name beta --allowed-root "$H_SUB" --no-credential 2>/dev/null || true)"
+H_BETA_ID="$(printf '%s' "$H_BETA_OUT" | json_field id || true)"
+if [ -n "$H_ALPHA_ID" ] && [ -n "$H_BETA_ID" ] && [ "$H_ALPHA_ID" != "$H_BETA_ID" ]; then
+  acc_ok "two distinct launchers created (alpha=$H_ALPHA_ID, beta=$H_BETA_ID)"
+else
+  acc_fail "launcher creation failed (alpha=$H_ALPHA_ID beta=$H_BETA_ID)"
+fi
+
+H_ALPHA_TOK="$(dh launcher credential issue --system "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
+H_BETA_TOK="$(dh launcher credential issue --system "$H_BETA_ID" 2>/dev/null | json_field token || true)"
+[ -n "$H_ALPHA_TOK" ] && [ -n "$H_BETA_TOK" ] \
+  && acc_ok "credentials issued for both launchers" \
+  || acc_fail "launcher credential issuance failed"
+printf '%s\n' "$H_ALPHA_TOK" > "$CRED_DIR/lnc-alpha.tok"; chmod 600 "$CRED_DIR/lnc-alpha.tok"
+printf '%s\n' "$H_BETA_TOK" > "$CRED_DIR/lnc-beta.tok"; chmod 600 "$CRED_DIR/lnc-beta.tok"
+
+H_ALPHA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
+H_ALPHA_SESS="$(printf '%s' "$H_ALPHA_SESS_JSON" | json_field id || true)"
+H_BETA_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-beta.tok" --workspace "$H_SUB" --json 2>/dev/null || true)"
+H_BETA_SESS="$(printf '%s' "$H_BETA_SESS_JSON" | json_field id || true)"
+if [ -n "$H_ALPHA_SESS" ] && [ -n "$H_BETA_SESS" ]; then
+  acc_ok "each launcher created its own session (alpha=$H_ALPHA_SESS, beta=$H_BETA_SESS)"
+else
+  acc_fail "launcher-credential session creation failed (alpha=$H_ALPHA_SESS beta=$H_BETA_SESS)"
+fi
+
+if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
+  # H1 (namespace separation) and H2 (non-disclosure) need both sessions.
+  ALPHA_LIST="$(dh session list --system --token-file "$CRED_DIR/lnc-alpha.tok" --json 2>/dev/null)"
+  BETA_LIST="$(dh session list --system --token-file "$CRED_DIR/lnc-beta.tok" --json 2>/dev/null)"
+  if printf '%s\n' "$ALPHA_LIST" | grep -q "$H_ALPHA_SESS" \
+      && ! printf '%s\n' "$ALPHA_LIST" | grep -q "$H_BETA_SESS" \
+      && printf '%s\n' "$BETA_LIST" | grep -q "$H_BETA_SESS" \
+      && ! printf '%s\n' "$BETA_LIST" | grep -q "$H_ALPHA_SESS"; then
+    acc_ok "each launcher sees only its own session namespace"
+  else
+    acc_fail "launcher session namespaces are not isolated"
+  fi
+  H_DEL_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
+    -X DELETE "http://localhost/sessions/$H_ALPHA_SESS" 2>/dev/null || true)"
+  H_DEL_MISS_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
+    -X DELETE "http://localhost/sessions/dhs_00000000000000000000000000000000" 2>/dev/null || true)"
+  if [ "$H_DEL_HTTP" = 404 ] && [ "$H_DEL_HTTP" = "$H_DEL_MISS_HTTP" ]; then
+    acc_ok "cross-launcher session delete is the same 404 as a missing session (non-disclosure)"
+  else
+    acc_fail "cross-launcher non-disclosure broken (foreign=$H_DEL_HTTP missing=$H_DEL_MISS_HTTP)"
+  fi
+
+  # H3: rotation continuity.
+  H_ROT_OUT="$(dh launcher credential rotate --system "$H_ALPHA_ID" 2>/dev/null || true)"
+  H_ALPHA_TOK2="$(printf '%s' "$H_ROT_OUT" | json_field token || true)"
+  if [ -n "$H_ALPHA_TOK2" ] && [ "$H_ALPHA_TOK2" != "$H_ALPHA_TOK" ]; then
+    printf '%s\n' "$H_ALPHA_TOK2" > "$CRED_DIR/lnc-alpha2.tok"; chmod 600 "$CRED_DIR/lnc-alpha2.tok"
+    H_OLD_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $H_ALPHA_TOK" http://localhost/auth 2>/dev/null || true)"
+    H_NEW_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
+    H_NEW_SESS="$(printf '%s' "$H_NEW_JSON" | json_field id || true)"
+    H_SHOW="$(dh launcher show --system "$H_ALPHA_ID" 2>/dev/null || true)"
+    if [ "$H_OLD_HTTP" = 401 ] \
+        && [ -n "$H_NEW_SESS" ] \
+        && printf '%s\n' "$H_SHOW" | grep -q "\"id\": \"$H_ALPHA_ID\"" \
+        && printf '%s\n' "$H_SHOW" | grep -q '"name": "alpha"'; then
+      acc_ok "rotation: old bearer rejected, replacement works, launcher identity unchanged"
+    else
+      acc_fail "rotation continuity broken (old=$H_OLD_HTTP new=$H_NEW_SESS)"
+    fi
+    H_DUP_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
+      -X PUT "http://localhost/launchers/$H_ALPHA_ID/credential" 2>/dev/null || true)"
+    if [ "$H_DUP_HTTP" = 409 ]; then
+      acc_ok "no second launcher credential (issue after rotate -> 409 launcher_credential_exists)"
+    else
+      acc_fail "duplicate launcher credential not rejected (http=$H_DUP_HTTP)"
+    fi
+  else
+    acc_fail "launcher credential rotate failed"
+  fi
+
+  # H4: restricted scope narrows new sessions.
+  H_NARROW_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
+    -H 'Content-Type: application/json' \
+    -d "{\"workspace\":\"$H_WS\"}" http://localhost/sessions 2>/dev/null || true)"
+  case "$H_NARROW_HTTP" in
+    201|""|*[!0-9]*)
+      acc_fail "restricted launcher scope narrowing failed (http=$H_NARROW_HTTP)"
+      ;;
+    *)
+      acc_ok "restricted launcher rejects workspace outside its scope (http=$H_NARROW_HTTP)"
+      ;;
+  esac
+
+  # H5: stale out-of-ceiling launcher roots fail closed.
+  if dh principal allowed-root remove --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
+    H_STALE_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
+      -H 'Content-Type: application/json' \
+      -d "{\"workspace\":\"$H_SUB\"}" http://localhost/sessions 2>/dev/null || true)"
+    if [ "$H_STALE_HTTP" = 422 ]; then
+      acc_ok "stale out-of-ceiling launcher root rejected fail-closed (422 launcher_unavailable)"
+    else
+      acc_fail "stale launcher root not rejected as expected (http=$H_STALE_HTTP)"
+    fi
+    dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1 || true
+  else
+    acc_fail "could not remove principal root for the stale-root check"
+  fi
+
+  # H6: disable propagation + persistence of individual disablement.
+  H_BETA_DIS_OUT="$(dh launcher set --system --enabled false "$H_BETA_ID" 2>/dev/null || true)"
+  if printf '%s\n' "$H_BETA_DIS_OUT" | grep -q '"enabled": false'; then
+    acc_ok "launcher disabled"
+  else
+    acc_fail "launcher disable failed"
+  fi
+  H_DIS_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null)"
+  H_DIS_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+    --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" http://localhost/auth 2>/dev/null || true)"
+  if ! printf '%s\n' "$H_DIS_LIST" | grep -q "$H_BETA_SESS" && [ "$H_DIS_HTTP" = 401 ]; then
+    acc_ok "disabling the launcher deleted its session and rejected its bearer"
+  else
+    acc_fail "disable propagation failed (session present or bearer alive)"
+  fi
+  dh principal set --system "$H_USER" enabled false >/dev/null 2>&1 || true
+  dh principal set --system "$H_USER" enabled true >/dev/null 2>&1 || true
+  H_BETA_SHOW="$(dh launcher show --system "$H_BETA_ID" 2>/dev/null || true)"
+  H_ALPHA_SHOW="$(dh launcher show --system "$H_ALPHA_ID" 2>/dev/null || true)"
+  if printf '%s\n' "$H_BETA_SHOW" | grep -q '"enabled": false' \
+      && printf '%s\n' "$H_ALPHA_SHOW" | grep -q '"enabled": true'; then
+    acc_ok "individually disabled launcher stays disabled through a principal enable cycle"
+  else
+    acc_fail "individual launcher disablement not preserved (beta=$(printf '%s' "$H_BETA_SHOW" | grep -o '"enabled": [a-z]*' | head -1))"
+  fi
+  dh launcher set --system --enabled true "$H_BETA_ID" >/dev/null 2>&1 || true
+
+  # H7: checked delete with active runtime.
+  H_BEFORE_CID="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
+  H_RT_SESS_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
+  H_RT_SESS="$(printf '%s' "$H_RT_SESS_JSON" | json_field id || true)"
+  H_RT_TOKEN="$(printf '%s' "$H_RT_SESS_JSON" | json_field token || true)"
+  H_RT_CID=""
+  if [ -n "$H_RT_TOKEN" ]; then
+    DOCKER_HELPER_SESSION_TOKEN="$H_RT_TOKEN" \
+      dh run --image alpine:3.24 -- sh -ec 'while true; do sleep 1; done' \
+      >/tmp/r2ac-h-op.out 2>&1 &
+    H_OP_PID=$!
+    for _ in $(seq 1 100); do
+      H_RT_CIDFILE="$(ls -t /run/docker-helper/*.cid 2>/dev/null | head -1)"
+      H_RT_CID="$(cat "$H_RT_CIDFILE" 2>/dev/null || true)"
+      if [ -n "$H_RT_CID" ] && [ "$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)" -gt "$H_BEFORE_CID" ] \
+          && docker inspect -f '{{.State.Running}}' "$H_RT_CID" 2>/dev/null | grep -q true; then
+        break
+      fi
+      H_RT_CID=""
+      sleep 0.2
+    done
+  fi
+  if [ -n "$H_RT_CID" ] && [ -n "$H_RT_SESS" ]; then
+    H_DEL_ACT_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
+      -X DELETE "http://localhost/launchers/$H_ALPHA_ID" 2>/dev/null || true)"
+    H_ALPHA_SHOW2="$(dh launcher show --system "$H_ALPHA_ID" 2>/dev/null || true)"
+    if [ "$H_DEL_ACT_HTTP" = 409 ] \
+        && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": true'; then
+      acc_ok "launcher delete refused while runtime is active (409 launcher_runtime_active)"
+    else
+      acc_fail "checked delete did not protect active runtime (http=$H_DEL_ACT_HTTP)"
+    fi
+    dh session delete --system --id "$H_RT_SESS" >/dev/null 2>&1 || true
+    for _ in $(seq 1 100); do
+      docker inspect -f '{{.State.Running}}' "$H_RT_CID" 2>/dev/null | grep -q true || break
+      sleep 0.2
+    done
+    if dh launcher delete --system "$H_ALPHA_ID" >/dev/null 2>&1; then
+      acc_ok "launcher delete succeeds after its sessions are cleaned up"
+    else
+      acc_fail "launcher delete failed after cleanup"
+    fi
+  else
+    acc_fail "checked-delete precondition failed (no active runtime container)"
+  fi
+  kill "${H_OP_PID:-}" 2>/dev/null || true
+
+  # H8: no bearer in audit; rotation provenance visible.
+  H_JOURNAL="$(journalctl --utc -u docker-helper.service --since '-15 min' --no-pager 2>/dev/null)"
+  if printf '%s\n' "$H_JOURNAL" | grep -q 'dhc_'; then
+    acc_fail "journal audit leaked a launcher credential bearer"
+  else
+    acc_ok "journal audit contains no launcher credential bearer"
+  fi
+  if printf '%s\n' "$H_JOURNAL" | grep -q '"event":"launcher.credential_rotate"' \
+      && printf '%s\n' "$H_JOURNAL" | grep -q "\"launcher_id\":\"$H_ALPHA_ID\""; then
+    acc_ok "rotation provenance visible in audit (launcher.credential_rotate with launcher_id)"
+  else
+    acc_fail "rotation provenance missing from audit"
+  fi
+fi
 
 # ==============================================================================
 # scenario F: DEB lifecycle install(upgrade baseline v2.0.0) -> upgrade
