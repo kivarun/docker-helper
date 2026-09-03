@@ -8340,6 +8340,97 @@ func TestReleaseReadmeIncludesCurlSnippet(t *testing.T) {
 	}
 }
 
+// TestRelease2AcceptanceStrictProofContracts pins the fail-closed proof
+// contracts of the Release-2 acceptance scenarios that run only on the
+// privileged release-gate runners: the H4 exact out-of-scope workspace
+// contract (400 invalid_workspace), the H5 stale-Launcher-root fixture
+// (narrow Principal ceiling, positive precondition, exact 422
+// launcher_unavailable, restored Principal root state), the G5 bearer
+// invalidation proof on the session data plane (never via /auth), and the
+// migration cleanup proof for the invalidated session's runtime artifact.
+func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
+	data, err := os.ReadFile("scripts/uat-release2-acceptance.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+
+	// H4: the narrowing check must demand the exact API contract for a
+	// workspace outside the restricted Launcher scope but otherwise valid:
+	// HTTP 400 with structured code invalid_workspace. The previous loose
+	// "anything except 201" case is not a contract proof and must not return.
+	if strings.Contains(content, `201|""|*[!0-9]*`) {
+		t.Error("H4 must not use the loose \"anything except 201\" narrowing case")
+	}
+	for _, must := range []string{
+		`[ "$H_NARROW_HTTP" = 400 ]`,
+		`grep -q '"code":"invalid_workspace"' /tmp/r2ac-h-narrow.json`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("H4 must require the exact 400 invalid_workspace contract (%s)", must)
+		}
+	}
+
+	// H5: the stale-root proof must first install the Launcher root as the
+	// Principal's exact narrow ceiling, prove session creation succeeds
+	// inside it, then remove that exact Principal root and demand HTTP 422
+	// with structured code launcher_unavailable, and finally restore the
+	// Principal root state.
+	for _, must := range []string{
+		`principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT"`,
+		`principal allowed-root add --system "$H_USER" "$H_SUB"`,
+		`[ "$H_POS_HTTP" = 201 ]`,
+		`grep -q '"id":"dhs_' /tmp/r2ac-h-pos.json`,
+		`principal allowed-root remove --system "$H_USER" "$H_SUB"`,
+		`[ "$H_STALE_HTTP" = 422 ]`,
+		`grep -q '"code":"launcher_unavailable"' /tmp/r2ac-h-stale.json`,
+		`principal allowed-root add --system "$H_USER" "$ALLOWED_ROOT"`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("H5 stale-root proof is missing a required step (%s)", must)
+		}
+	}
+
+	// G5: bearer invalidation must be proven on a session-authenticated
+	// data-plane endpoint (GET /operations/{id} with an unknown id: 404
+	// operation_not_found pre-upgrade proves the bearer authenticates; 401
+	// unauthorized post-upgrade proves invalidation). /auth rejects Session
+	// tokens by design, valid ones included, so it is never evidence for
+	// this invariant.
+	for _, must := range []string{
+		`[ "$G_OP_PRE_HTTP" = 404 ]`,
+		`grep -q '"code":"operation_not_found"' /tmp/r2ac-g-op-pre.json`,
+		`[ "$G_OP_HTTP" = 401 ]`,
+		`grep -q '"code":"unauthorized"' /tmp/r2ac-g-op-post.json`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("G5 bearer invalidation proof is missing a required step (%s)", must)
+		}
+	}
+	if n := strings.Count(content, "http://localhost/operations/uat-r2ac-nonexistent-operation"); n != 2 {
+		t.Errorf("G5 must repeat the same data-plane request pre- and post-upgrade exactly twice, got %d", n)
+	}
+	if strings.Contains(content, `Bearer $G_ADMIN_SESS_TOKEN" http://localhost/auth`) {
+		t.Error("G5 must not use /auth for the Session-bearer invalidation invariant")
+	}
+
+	// Migration cleanup proof: the invalidated session's runtime artifact
+	// must be materialized before the upgrade through the canonical
+	// production path and must be gone after the candidate startup (no
+	// stale helper-owned session runtime state).
+	for _, must := range []string{
+		`DOCKER_HELPER_SESSION_TOKEN="$G_ADMIN_SESS_TOKEN"`,
+		`G_ADMIN_RT_DIR="/run/docker-helper/sessions/$G_ADMIN_SESS_ID"`,
+		`[ -d "$G_ADMIN_RT_DIR/docker" ]`,
+		`[ -e "$G_ADMIN_RT_DIR" ]`,
+		`acc_fail "invalidated admin session left stale session runtime state`,
+	} {
+		if !strings.Contains(content, must) {
+			t.Errorf("migration cleanup proof is missing a required step (%s)", must)
+		}
+	}
+}
+
 // =============================================================================
 // Upgrade-baseline fixture invariants (Stage 0.1)
 // =============================================================================
