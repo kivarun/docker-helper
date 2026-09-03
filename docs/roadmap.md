@@ -513,6 +513,7 @@ Release 3 foundation documents:
 - [`release-3-managed-container-lifecycle.md`](release-3-managed-container-lifecycle.md) — lifecycle, scoped listing, divergence, repair, removal, and troubleshooting;
 - [`release-3-session-networking.md`](release-3-session-networking.md) — Session network ownership, lazy provisioning, isolation, explicit repair, and cleanup;
 - [`release-3-resource-constraints.md`](release-3-resource-constraints.md) — resource hierarchy, safe defaults, workload limits, and enforcement;
+- [`release-3-port-publishing.md`](release-3-port-publishing.md) — hierarchical grants, loopback TCP allocation, durable leases, and collision handling;
 - [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.
 
 ## Possible 4.0 / use-case driven

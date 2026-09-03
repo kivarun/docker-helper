@@ -282,7 +282,7 @@ The canonical contract is `release-3-resource-constraints.md`.
 
 Completion criterion: a Session can start a Managed Container or execute `run` only within its authorized resource envelope, and the effective limits remain inspectable without exposing the full Docker resource surface.
 
-### D8. External port publishing
+### D8. Host port publishing
 
 This package provides narrow, explicit exposure of selected container TCP ports from the Session network to host IPv4 loopback.
 
@@ -301,11 +301,13 @@ Publishing authority originates outside the untrusted Session through the Releas
 
 The Session may request an allowed host port or omit it for automatic allocation. The effective mapping is returned by create and shown with Session grants; no separate range-discovery endpoint is required.
 
-Publishing grants narrow through root, Principal, Launcher, and Session. An omitted child range inherits the full effective parent range and may later be narrowed but never widened. The root default is `20000-29999`; adding a second full-inheriting Principal or Launcher emits an operator warning rather than silently splitting the range. A range cannot be narrowed while an active publication lies outside it.
+Publishing grants narrow through root, Principal, Launcher, and Session. An omitted child range inherits the full effective parent range. A parent authority may replace a child grant only within its own current effective range; a subject cannot widen its own grant. The root default is `20000-29999`; adding a second full-inheriting Principal or Launcher emits an operator warning rather than silently splitting the range. A range cannot be narrowed while an existing descendant lease lies outside it, including a lease held by a stopped container.
 
 Each Managed Container may have at most 16 publications. A publication maps one concrete container TCP port to either one explicitly requested allowed host port or one automatically allocated port. The lease is assigned during create, survives stop/start/restart, and is released by remove or Session cleanup. docker-helper prevents collisions among its own Managed Containers but does not reserve a socket or promise that an unrelated host process cannot occupy a port while its container is stopped.
 
-This package does not expose UDP, external host binding, arbitrary Docker networks, network modes, aliases, or routing configuration.
+This package does not expose UDP, external host binding, arbitrary Docker networks, network modes, aliases, or routing configuration. Because Docker Engine releases older than 28.0.0 do not provide the required localhost isolation, publishing fails closed on those daemons without disabling unrelated docker-helper capabilities.
+
+The canonical contract is `release-3-port-publishing.md`.
 
 Completion criterion: an authorized service can be exposed through a narrowly defined mapping, while an untrusted agent cannot freely claim host addresses or ports outside its grant.
 
@@ -385,18 +387,19 @@ The decomposition produces the following detailed design documents:
 5. `release-3-logs-and-exec.md` — log retrieval and common exec semantics;
 6. `release-3-interactive-streaming.md` — WebSocket and terminal protocol;
 7. `release-3-resource-constraints.md` — supported limits, hierarchy, defaults, enforcement, and authorization ceilings;
-8. `release-3-port-publishing.md` — grants, allocation, binding, and collision behavior;
+8. `release-3-port-publishing.md` — grants, allocation, durable leases, binding, collision behavior, and cleanup;
 9. `release-3-api-cli.md` — public surface and compatibility;
 10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
 
 The Operation model, Managed Container domain, Managed Container lifecycle,
-Session networking, and resource-constraint contracts are accepted foundation
-designs.
+Session networking, resource-constraint, and port-publishing contracts are
+accepted foundation designs.
 `release-3-vocabulary-and-implementation-map.md` is their implementation bridge
 to the Release 2 codebase and the Release 2.1 Launcher design.
 `release-3-d0-execution-plan.md` turns the common Operation foundation into
 ordered executor tasks and test gates. Each remaining owner document must be
 contract-ready before its package is assigned, but need not prescribe
-code-ready mechanics that belong to the operational architect. The next
-next blocking design is the publishing input that completes the immutable
-container creation contract.
+code-ready mechanics that belong to the operational architect. The immutable
+container creation inputs are now fixed. The remaining owner
+documents close logs and exec, interactive transport, the integrated public
+surface, and release-wide security verification.

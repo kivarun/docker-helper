@@ -431,5 +431,6 @@ The following decisions are owned outside this document:
 
 The accepted networking and resource contracts are
 `release-3-session-networking.md` and
-`release-3-resource-constraints.md`. Their values remain part of the immutable
+`release-3-resource-constraints.md`. The accepted publishing contract is
+`release-3-port-publishing.md`. Their values remain part of the immutable
 Managed Container create specification defined here.

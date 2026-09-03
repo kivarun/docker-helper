@@ -118,6 +118,10 @@ A Managed Container may request at most 16 publications. A chosen port is leased
 
 Release 3 does not publish UDP ports or bind to external host interfaces. Port publishing is deliberately narrower than general Docker networking configuration.
 
+Port publishing requires Docker Engine 28.0.0 or newer because older releases do not guarantee localhost confinement against peers on the same L2 segment. An older or unidentifiable backend rejects only publication-bearing create requests; docker-helper does not add a firewall substitute.
+
+The complete contract is `release-3-port-publishing.md`.
+
 ### Resource limits
 
 Release 3 adds a bounded set of resource limits for managed containers and one-shot `run`.

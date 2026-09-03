@@ -6,7 +6,7 @@ This document is the canonical Release 3 design for Session-owned networking.
 
 It fixes network ownership, lazy provisioning, workload attachment, name
 resolution, integrity observation, explicit recovery, and Session-cleanup
-behavior. Port publishing is defined separately in
+behavior. Port publishing is defined canonically in
 `release-3-port-publishing.md`; container identity and lifecycle remain
 canonical in `release-3-managed-container-domain.md` and
 `release-3-managed-container-lifecycle.md`.
@@ -39,8 +39,12 @@ Release 3 does not provide:
 - automatic background repair or reconciliation;
 - a public network list, show, create, remove, connect, or disconnect surface.
 
-The Docker Engine API is the backend mechanism. Docker network identifiers and
-endpoint identifiers never become public authority.
+The Docker Engine API is the backend mechanism. The Session Network uses the
+ordinary IPv4 `nat` gateway mode and does not enable direct routing, trusted
+host interfaces, or an unprotected gateway mode. This fixed backend policy is
+required by the loopback publishing boundary defined in
+`release-3-port-publishing.md`. Docker network identifiers and endpoint
+identifiers never become public authority.
 
 ## Ownership and identity
 
