@@ -8372,19 +8372,21 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	}
 
 	// H5: the stale-root proof must first install the Launcher root as the
-	// Principal's exact narrow ceiling, prove session creation succeeds
-	// inside it, then remove that exact Principal root and demand HTTP 422
-	// with structured code launcher_unavailable, and finally restore the
-	// Principal root state.
+	// Principal's exact narrow ceiling (principal create auto-installs the OS
+	// user's home directory as the default allowed root, so $ALLOWED_ROOT
+	// itself is never a stored root and the home root is what gets removed),
+	// prove session creation succeeds inside it, then remove that exact
+	// Principal root and demand HTTP 422 with structured code
+	// launcher_unavailable, and finally restore the Principal root state.
 	for _, must := range []string{
-		`principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT"`,
+		`principal allowed-root remove --system "$H_USER" "$H_HOME"`,
 		`principal allowed-root add --system "$H_USER" "$H_SUB"`,
 		`[ "$H_POS_HTTP" = 201 ]`,
 		`grep -q '"id":"dhs_' /tmp/r2ac-h-pos.json`,
 		`principal allowed-root remove --system "$H_USER" "$H_SUB"`,
 		`[ "$H_STALE_HTTP" = 422 ]`,
 		`grep -q '"code":"launcher_unavailable"' /tmp/r2ac-h-stale.json`,
-		`principal allowed-root add --system "$H_USER" "$ALLOWED_ROOT"`,
+		`principal allowed-root add --system "$H_USER" "$H_HOME"`,
 	} {
 		if !strings.Contains(content, must) {
 			t.Errorf("H5 stale-root proof is missing a required step (%s)", must)

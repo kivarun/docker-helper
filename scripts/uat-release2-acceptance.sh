@@ -1323,7 +1323,9 @@ fi
 #       individually disabled launcher stays disabled through a principal
 #       disable/enable cycle
 #   H7  checked delete: launcher delete fails with 409 launcher_runtime_active
-#       while a session operation is running, succeeds after cleanup
+#       while a session operation is running, leaving the launcher disabled
+#       and its sessions invalidated; the delete succeeds once the operator
+#       removes the runtime and retries
 #   H8  no credential bearer leaks into journal/audit; rotation provenance
 #       (launcher.credential_rotate with launcher_id) is visible in audit
 # ==============================================================================
@@ -1443,18 +1445,21 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
 
   # H5: an already-stored Launcher root becomes stale fail-closed when the
-  # exact narrow Principal root containing it is removed. The Launcher root
-  # ($H_SUB) is first installed as the Principal's only root, so the effective
-  # Principal ceiling is exactly {H_SUB} and the stored Launcher root is
-  # demonstrably inside it; a positive precondition proves session creation
-  # through the Launcher succeeds. Removing that exact Principal root empties
-  # the ceiling, the stored Launcher root becomes stale, and the same
-  # creation must fail with HTTP 422 and structured code
-  # launcher_unavailable. The original Principal root state is restored
-  # afterwards (later H checks reuse this Principal).
+  # exact narrow Principal root containing it is removed. principal create
+  # auto-installs the OS user's home directory as the Principal's default
+  # allowed root ($ALLOWED_ROOT itself is never a stored root), so narrowing to
+  # exactly {H_SUB} means removing that home root first. The Launcher root
+  # ($H_SUB) is then the Principal's only root, the effective Principal
+  # ceiling is exactly {H_SUB} and the stored Launcher root is demonstrably
+  # inside it; a positive precondition proves session creation through the
+  # Launcher succeeds. Removing that exact Principal root empties the ceiling,
+  # the stored Launcher root becomes stale, and the same creation must fail
+  # with HTTP 422 and structured code launcher_unavailable. The original
+  # Principal root state is restored afterwards (later H checks reuse this
+  # Principal).
   H5_REMOVED=false
   H5_NARROWED=false
-  if dh principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1; then
+  if dh principal allowed-root remove --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
     H5_REMOVED=true
     if dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
       H5_NARROWED=true
@@ -1491,7 +1496,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     fi
   fi
   if [ "$H5_REMOVED" = true ]; then
-    if dh principal allowed-root add --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1; then
+    if dh principal allowed-root add --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
       acc_ok "principal root state restored after the stale-root check"
     else
       acc_fail "could not restore the principal root after the stale-root check"
@@ -1552,21 +1557,27 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
       -X DELETE "http://localhost/launchers/$H_ALPHA_ID" 2>/dev/null || true)"
     H_ALPHA_SHOW2="$(dh launcher show --system "$H_ALPHA_ID" 2>/dev/null || true)"
+    H_ADMIN_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
     if [ "$H_DEL_ACT_HTTP" = 409 ] \
-        && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": true'; then
-      acc_ok "launcher delete refused while runtime is active (409 launcher_runtime_active)"
+        && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": false' \
+        && [ -n "$H_ADMIN_LIST" ] \
+        && ! printf '%s\n' "$H_ADMIN_LIST" | grep -q "$H_RT_SESS"; then
+      acc_ok "launcher delete refused while runtime is active (409, launcher disabled, sessions invalidated)"
     else
-      acc_fail "checked delete did not protect active runtime (http=$H_DEL_ACT_HTTP)"
+      acc_fail "checked delete did not enforce the sanctioned 409 semantics (http=$H_DEL_ACT_HTTP)"
     fi
-    dh session delete --system --id "$H_RT_SESS" >/dev/null 2>&1 || true
-    for _ in $(seq 1 100); do
-      docker inspect -f '{{.State.Running}}' "$H_RT_CID" 2>/dev/null | grep -q true || break
-      sleep 0.2
-    done
-    if dh launcher delete --system "$H_ALPHA_ID" >/dev/null 2>&1; then
-      acc_ok "launcher delete succeeds after its sessions are cleaned up"
+    # The daemon does not terminate running operations, and the refused delete
+    # already invalidated the Launcher's Sessions; the operator stops the
+    # container and retries the delete ("retries after the runtime exits").
+    docker stop -t 5 "$H_RT_CID" >/dev/null 2>&1 || true
+    if wait_no_container "$H_RT_CID"; then
+      if dh launcher delete --system "$H_ALPHA_ID" >/dev/null 2>&1; then
+        acc_ok "launcher delete succeeds after its sessions are cleaned up"
+      else
+        acc_fail "launcher delete failed after cleanup"
+      fi
     else
-      acc_fail "launcher delete failed after cleanup"
+      acc_fail "launcher runtime container did not stop for the checked-delete cleanup"
     fi
   else
     acc_fail "checked-delete precondition failed (no active runtime container)"
