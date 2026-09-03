@@ -241,18 +241,15 @@ set_up_principal() {
   # enabled inherit-scope 'default' Launcher, and a selector-less
   # principal-credential Session resolves to that Launcher (deriving the
   # Principal through it). Without it the session create fails closed with
-  # launcher_not_found. There is no Launcher CLI command, so the admin creates
-  # the default Launcher over the raw control-plane API using the system admin
-  # token (never printed; sent only as an Authorization header).
-  #
-  # The Launcher control-plane API exists only in the release in which Sessions
-  # became Launcher-owned. Scenario F seeds Principal/credential/session state
-  # under the v2.0.0 upgrade baseline, which predates the Launcher API (route
-  # absent -> HTTP 404, a plain text 404 page, no JSON body). Under that
-  # baseline a principal Session must still be creatable WITHOUT a Launcher, so
-  # a 404 (route not implemented) is tolerated and the Session create below
-  # exercises that version's own ownership semantics. Any other status demands
-  # a live default Launcher.
+  # launcher_not_found. The admin creates the default Launcher over the raw
+  # control-plane API using the system admin token (never printed; sent only
+  # as an Authorization header): raw HTTP is used because scenario F seeds
+  # state under the v2.0.0 upgrade baseline, which predates the Launcher
+  # control plane (route absent -> HTTP 404, a plain text 404 page, no JSON
+  # body). Under that baseline a principal Session must still be creatable
+  # WITHOUT a Launcher, so a 404 (route not implemented) is tolerated and the
+  # Session create below exercises that version's own ownership semantics. Any
+  # other status demands a live default Launcher.
   ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
   [ -n "$ADMIN_TOKEN" ] || { echo "error: could not read the admin token from /etc/docker-helper/admin.token" >&2; return 1; }
   LAUNCHER_HTTP="$(curl --silent --output /tmp/r2ac-launcher.json --write-out '%{http_code}' --max-time 5 \
@@ -1221,7 +1218,7 @@ if [ -n "$G_BASELINE_DEB" ]; then
   # G6: no Launcher credential fabricated for the migrated default Launcher.
   G_CRED_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
     --unix-socket "$SOCK" -H "Authorization: Bearer $G_ADMIN_TOKEN" \
-    "http://localhost/launchers/$G_DEFAULT_ID/credential" 2>/dev/null || true)"
+    "http://localhost/principals/$G_USER/launchers/$G_DEFAULT_ID/credential" 2>/dev/null || true)"
   if [ "$G_CRED_HTTP" = 404 ]; then
     acc_ok "no Launcher credential fabricated for the migrated default Launcher (404)"
   else
@@ -1264,7 +1261,7 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
   fi
 
   # G8: migrated default Launcher is fully functional.
-  G_ISSUE_OUT="$(dh launcher credential issue --system "$G_DEFAULT_ID" 2>/dev/null || true)"
+  G_ISSUE_OUT="$(dh launcher credential issue --system --principal "$G_USER" "$G_DEFAULT_ID" 2>/dev/null || true)"
   G_LC_TOKEN="$(printf '%s' "$G_ISSUE_OUT" | json_field token || true)"
   G_LC_ID="$(printf '%s' "$G_ISSUE_OUT" | json_field id || true)"
   if [ -n "$G_LC_TOKEN" ] && [ -n "$G_LC_ID" ]; then
@@ -1275,7 +1272,7 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
     else
       acc_fail "launcher credential on migrated default Launcher cannot create sessions"
     fi
-    G_ROT_OUT="$(dh launcher credential rotate --system "$G_DEFAULT_ID" 2>/dev/null || true)"
+    G_ROT_OUT="$(dh launcher credential rotate --system --principal "$G_USER" "$G_DEFAULT_ID" 2>/dev/null || true)"
     G_ROT_TOKEN="$(printf '%s' "$G_ROT_OUT" | json_field token || true)"
     G_ROT_ID="$(printf '%s' "$G_ROT_OUT" | json_field id || true)"
     if [ "$G_ROT_ID" = "$G_LC_ID" ] && [ -n "$G_ROT_TOKEN" ] && [ "$G_ROT_TOKEN" != "$G_LC_TOKEN" ]; then
@@ -1355,8 +1352,37 @@ else
   acc_fail "launcher creation failed (alpha=$H_ALPHA_ID beta=$H_BETA_ID)"
 fi
 
-H_ALPHA_TOK="$(dh launcher credential issue --system "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
-H_BETA_TOK="$(dh launcher credential issue --system "$H_BETA_ID" 2>/dev/null | json_field token || true)"
+# H1a: Principal-scoped launcher selectors. The omitted selector means the
+# Principal's 'default' Launcher (created by the setup), the name and the ID
+# of the same Launcher resolve identically, the same 'default' name under two
+# Principals resolves independently (the migration scenario's principal still
+# exists), and a name that exists only under another Principal is the same
+# non-disclosing 404 as a missing selector.
+H_SEL_DEF_JSON="$(dh launcher show --system --principal "$H_USER" 2>/dev/null || true)"
+H_SEL_DEF_ID="$(printf '%s' "$H_SEL_DEF_JSON" | json_field id || true)"
+H_SEL_DEF_NAME_ID="$(dh launcher show --system --principal "$H_USER" default 2>/dev/null | json_field id || true)"
+H_SEL_ALPHA_NAME_ID="$(dh launcher show --system --principal "$H_USER" alpha 2>/dev/null | json_field id || true)"
+H_SEL_UPG_DEF_ID="$(dh launcher show --system --principal "$G_USER" 2>/dev/null | json_field id || true)"
+H_SEL_FOREIGN_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+  --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
+  "http://localhost/principals/$G_USER/launchers/alpha" 2>/dev/null || true)"
+H_SEL_MALFORMED_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+  --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
+  "http://localhost/principals/$H_USER/launchers/Foo" 2>/dev/null || true)"
+if [ -n "$H_SEL_DEF_ID" ] \
+    && printf '%s' "$H_SEL_DEF_JSON" | grep -q '"name": "default"' \
+    && [ "$H_SEL_DEF_NAME_ID" = "$H_SEL_DEF_ID" ] \
+    && [ "$H_SEL_ALPHA_NAME_ID" = "$H_ALPHA_ID" ] \
+    && [ -n "$H_SEL_UPG_DEF_ID" ] && [ "$H_SEL_UPG_DEF_ID" != "$H_SEL_DEF_ID" ] \
+    && [ "$H_SEL_FOREIGN_HTTP" = 404 ] \
+    && [ "$H_SEL_MALFORMED_HTTP" = 404 ]; then
+  acc_ok "launcher selectors: omitted means default, name and ID resolve the same launcher, same name under two principals resolves independently ($H_SEL_DEF_ID != $H_SEL_UPG_DEF_ID)"
+else
+  acc_fail "launcher selector resolution broken (default=$H_SEL_DEF_ID by-name=$H_SEL_DEF_NAME_ID alpha-by-name=$H_SEL_ALPHA_NAME_ID/$H_ALPHA_ID upgrade-default=$H_SEL_UPG_DEF_ID foreign=$H_SEL_FOREIGN_HTTP malformed=$H_SEL_MALFORMED_HTTP)"
+fi
+
+H_ALPHA_TOK="$(dh launcher credential issue --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
+H_BETA_TOK="$(dh launcher credential issue --system --principal "$H_USER" "$H_BETA_ID" 2>/dev/null | json_field token || true)"
 [ -n "$H_ALPHA_TOK" ] && [ -n "$H_BETA_TOK" ] \
   && acc_ok "credentials issued for both launchers" \
   || acc_fail "launcher credential issuance failed"
@@ -1400,7 +1426,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
 
   # H3: rotation continuity.
-  H_ROT_OUT="$(dh launcher credential rotate --system "$H_ALPHA_ID" 2>/dev/null || true)"
+  H_ROT_OUT="$(dh launcher credential rotate --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
   H_ALPHA_TOK2="$(printf '%s' "$H_ROT_OUT" | json_field token || true)"
   if [ -n "$H_ALPHA_TOK2" ] && [ "$H_ALPHA_TOK2" != "$H_ALPHA_TOK" ]; then
     printf '%s\n' "$H_ALPHA_TOK2" > "$CRED_DIR/lnc-alpha2.tok"; chmod 600 "$CRED_DIR/lnc-alpha2.tok"
@@ -1408,7 +1434,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ALPHA_TOK" http://localhost/auth 2>/dev/null || true)"
     H_NEW_JSON="$(dh session create --system --token-file "$CRED_DIR/lnc-alpha2.tok" --workspace "$H_WS" --json 2>/dev/null || true)"
     H_NEW_SESS="$(printf '%s' "$H_NEW_JSON" | json_field id || true)"
-    H_SHOW="$(dh launcher show --system "$H_ALPHA_ID" 2>/dev/null || true)"
+    H_SHOW="$(dh launcher show --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
     if [ "$H_OLD_HTTP" = 401 ] \
         && [ -n "$H_NEW_SESS" ] \
         && printf '%s\n' "$H_SHOW" | grep -q "\"id\": \"$H_ALPHA_ID\"" \
@@ -1419,7 +1445,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     fi
     H_DUP_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
-      -X PUT "http://localhost/launchers/$H_ALPHA_ID/credential" 2>/dev/null || true)"
+      -X PUT "http://localhost/principals/$H_USER/launchers/$H_ALPHA_ID/credential" 2>/dev/null || true)"
     if [ "$H_DUP_HTTP" = 409 ]; then
       acc_ok "no second launcher credential (issue after rotate -> 409 launcher_credential_exists)"
     else
@@ -1506,7 +1532,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
 
   # H6: disable propagation + persistence of individual disablement.
-  H_BETA_DIS_OUT="$(dh launcher set --system --enabled false "$H_BETA_ID" 2>/dev/null || true)"
+  H_BETA_DIS_OUT="$(dh launcher set --system --principal "$H_USER" --enabled false "$H_BETA_ID" 2>/dev/null || true)"
   if printf '%s\n' "$H_BETA_DIS_OUT" | grep -q '"enabled": false'; then
     acc_ok "launcher disabled"
   else
@@ -1522,15 +1548,15 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
   dh principal set --system "$H_USER" enabled false >/dev/null 2>&1 || true
   dh principal set --system "$H_USER" enabled true >/dev/null 2>&1 || true
-  H_BETA_SHOW="$(dh launcher show --system "$H_BETA_ID" 2>/dev/null || true)"
-  H_ALPHA_SHOW="$(dh launcher show --system "$H_ALPHA_ID" 2>/dev/null || true)"
+  H_BETA_SHOW="$(dh launcher show --system --principal "$H_USER" "$H_BETA_ID" 2>/dev/null || true)"
+  H_ALPHA_SHOW="$(dh launcher show --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
   if printf '%s\n' "$H_BETA_SHOW" | grep -q '"enabled": false' \
       && printf '%s\n' "$H_ALPHA_SHOW" | grep -q '"enabled": true'; then
     acc_ok "individually disabled launcher stays disabled through a principal enable cycle"
   else
     acc_fail "individual launcher disablement not preserved (beta=$(printf '%s' "$H_BETA_SHOW" | grep -o '"enabled": [a-z]*' | head -1))"
   fi
-  dh launcher set --system --enabled true "$H_BETA_ID" >/dev/null 2>&1 || true
+  dh launcher set --system --principal "$H_USER" --enabled true "$H_BETA_ID" >/dev/null 2>&1 || true
 
   # H7: checked delete with active runtime.
   H_BEFORE_CID="$(ls /run/docker-helper/*.cid 2>/dev/null | wc -l)"
@@ -1557,8 +1583,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   if [ -n "$H_RT_CID" ] && [ -n "$H_RT_SESS" ]; then
     H_DEL_ACT_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_ADMIN_TOKEN" \
-      -X DELETE "http://localhost/launchers/$H_ALPHA_ID" 2>/dev/null || true)"
-    H_ALPHA_SHOW2="$(dh launcher show --system "$H_ALPHA_ID" 2>/dev/null || true)"
+      -X DELETE "http://localhost/principals/$H_USER/launchers/$H_ALPHA_ID" 2>/dev/null || true)"
+    H_ALPHA_SHOW2="$(dh launcher show --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
     H_ADMIN_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
     if [ "$H_DEL_ACT_HTTP" = 409 ] \
         && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": false' \
@@ -1579,7 +1605,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     if wait_no_container "$H_RT_CID"; then
       H_DELETED=false
       for _ in $(seq 1 25); do
-        if dh launcher delete --system "$H_ALPHA_ID" >/dev/null 2>&1; then
+        if dh launcher delete --system --principal "$H_USER" "$H_ALPHA_ID" >/dev/null 2>&1; then
           H_DELETED=true
           break
         fi
@@ -1588,7 +1614,7 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       if [ "$H_DELETED" = true ]; then
         acc_ok "launcher delete succeeds after its sessions are cleaned up"
       else
-        H_DEL_RETRY_OUT="$(dh launcher delete --system "$H_ALPHA_ID" 2>&1 || true)"
+        H_DEL_RETRY_OUT="$(dh launcher delete --system --principal "$H_USER" "$H_ALPHA_ID" 2>&1 || true)"
         acc_fail "launcher delete failed after cleanup (cli: ${H_DEL_RETRY_OUT:-<no output>})"
         # Evidence for diagnosis: the delete/run audit trail and any
         # operational error line. Audit lines carry no bearer material.
@@ -1596,21 +1622,14 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
           | grep -E '"stream":"audit"|"level":"ERROR"' \
           | tail -40 >&2 || true
         # Reproduce the daemon's exact runtime-inspection command (schema +
-        # launcher-id label filters, {{.ID}} {{.State.Running}} format) and a
-        # corrected-format listing, to distinguish a template error from a
-        # confined-daemon environment failure.
+        # launcher-id label filters, {{.ID}} {{.State}} format) to distinguish
+        # a template error from a confined-daemon environment failure.
         H_PS_RC=0
         H_PS_OUT="$(docker ps -a \
           --filter 'label=com.dockerhelper.schema=1' \
           --filter "label=com.dockerhelper.launcher.id=$H_ALPHA_ID" \
-          --format '{{.ID}} {{.State.Running}}' 2>&1)" || H_PS_RC=$?
+          --format '{{.ID}} {{.State}}' 2>&1)" || H_PS_RC=$?
         printf 'ps-exact rc=%s out: %s\n' "$H_PS_RC" "${H_PS_OUT:-<empty>}" >&2
-        H_PS2_RC=0
-        H_PS2_OUT="$(docker ps -a \
-          --filter 'label=com.dockerhelper.schema=1' \
-          --filter "label=com.dockerhelper.launcher.id=$H_ALPHA_ID" \
-          --format '{{.ID}} {{.State}} {{.Status}}' 2>&1)" || H_PS2_RC=$?
-        printf 'ps-fixed rc=%s out: %s\n' "$H_PS2_RC" "${H_PS2_OUT:-<empty>}" >&2
       fi
     else
       acc_fail "launcher runtime container did not stop for the checked-delete cleanup"
