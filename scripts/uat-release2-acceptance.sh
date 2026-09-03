@@ -1006,7 +1006,15 @@ systemctl stop docker-helper.service >/dev/null 2>&1 || true
 #   G3  the pre-upgrade credential still creates sessions (auth semantics kept)
 #   G4  exactly one 'default' inherit Launcher exists for the principal
 #   G5  the non-attributable admin session was invalidated: absent from the
-#       session list and its bearer rejected (401), never left ownerless
+#       session list; its bearer is first proven to authenticate on the
+#       session data plane before the upgrade (GET /operations/{id} with an
+#       unknown id -> 404 operation_not_found), then rejected by the same
+#       data plane after the upgrade (401 unauthorized); /auth is not used
+#       for this invariant (it rejects Session tokens by design); the
+#       invalidated session leaves no stale helper-owned session runtime
+#       state (its runtime artifact, materialized before the upgrade through
+#       a session-scoped Docker operation, is removed by the candidate
+#       startup cleanup)
 #   G6  no Launcher credential was fabricated for the migrated default
 #       Launcher (GET credential -> 404 launcher_credential_not_found)
 #   G7  restart idempotency: after a daemon restart the migrated ownership is
@@ -1071,10 +1079,45 @@ if [ -n "$G_BASELINE_DEB" ]; then
     G_ADMIN_SESS_JSON="$(dh session create --system --token-file /etc/docker-helper/admin.token --workspace "$G_HOME/ws-admin" --json 2>/dev/null || true)"
     G_ADMIN_SESS_ID="$(printf '%s' "$G_ADMIN_SESS_JSON" | json_field id || true)"
     G_ADMIN_SESS_TOKEN="$(printf '%s' "$G_ADMIN_SESS_JSON" | json_field token || true)"
-    if [ -n "$G_ADMIN_SESS_ID" ]; then
+    if [ -n "$G_ADMIN_SESS_ID" ] && [ -n "$G_ADMIN_SESS_TOKEN" ]; then
       acc_ok "v2.0.0 non-attributable admin session seeded ($G_ADMIN_SESS_ID)"
     else
       acc_fail "v2.0.0 admin session seeding failed (migration scenario)"
+    fi
+  fi
+
+  # G5 precondition (before upgrade): the admin session bearer authenticates
+  # on a session-authenticated data-plane endpoint. GET /operations/{id} with
+  # an unknown id reaches the operation lookup only after session
+  # authentication, so 404 operation_not_found proves the bearer works;
+  # 401 here would mean it does not. /auth is not used for this invariant:
+  # it rejects Session tokens by design, valid ones included.
+  if [ -n "${G_ADMIN_SESS_TOKEN:-}" ]; then
+    G_OP_PRE_HTTP="$(curl --silent --output /tmp/r2ac-g-op-pre.json --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $G_ADMIN_SESS_TOKEN" \
+      "http://localhost/operations/uat-r2ac-nonexistent-operation" 2>/dev/null || true)"
+    if [ "$G_OP_PRE_HTTP" = 404 ] \
+        && grep -q '"code":"operation_not_found"' /tmp/r2ac-g-op-pre.json; then
+      acc_ok "pre-upgrade admin session bearer authenticates on the session data plane (404 unknown operation)"
+    else
+      acc_fail "pre-upgrade admin session data-plane precondition failed (http=$G_OP_PRE_HTTP)"
+    fi
+
+    # Materialize the invalidated session's helper-owned session runtime
+    # artifact through the canonical production path: a session-scoped
+    # Docker operation creates /run/docker-helper/sessions/<id>/docker
+    # (ensureSessionDockerDir).
+    if DOCKER_HELPER_SESSION_TOKEN="$G_ADMIN_SESS_TOKEN" \
+        dh run --image alpine:3.24 -- true >/tmp/r2ac-g-admin-run.log 2>&1; then
+      acc_ok "session-scoped Docker operation ran for the admin session before upgrade"
+    else
+      acc_fail "session-scoped Docker operation failed before upgrade (see /tmp/r2ac-g-admin-run.log)"
+    fi
+    G_ADMIN_RT_DIR="/run/docker-helper/sessions/$G_ADMIN_SESS_ID"
+    if [ -d "$G_ADMIN_RT_DIR/docker" ]; then
+      acc_ok "session runtime artifact exists before upgrade ($G_ADMIN_RT_DIR/docker)"
+    else
+      acc_fail "session runtime artifact missing before upgrade"
     fi
   fi
 
@@ -1092,6 +1135,18 @@ if [ -n "$G_BASELINE_DEB" ]; then
     sleep 1
   done
   wait_health "$SOCK" || acc_fail "daemon not healthy after migration upgrade"
+
+  # The invalidated session must leave no stale helper-owned session runtime
+  # state: the candidate startup pass removes session runtime directories
+  # that no longer correspond to an active session
+  # (cleanupStaleSessionRuntimeDirs).
+  if [ -n "${G_ADMIN_SESS_ID:-}" ] && [ -n "${G_ADMIN_RT_DIR:-}" ]; then
+    if [ -e "$G_ADMIN_RT_DIR" ]; then
+      acc_fail "invalidated admin session left stale session runtime state ($G_ADMIN_RT_DIR)"
+    else
+      acc_ok "invalidated admin session left no stale session runtime state"
+    fi
+  fi
 
   # G1: pre-upgrade credential still authenticates with retained identity.
   G_TOK="$(cat "$G_CRED" 2>/dev/null || true)"
@@ -1146,12 +1201,16 @@ if [ -n "$G_BASELINE_DEB" ]; then
     else
       acc_ok "non-attributable admin session invalidated by migration"
     fi
-    G_OLD_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
-      --unix-socket "$SOCK" -H "Authorization: Bearer $G_ADMIN_SESS_TOKEN" http://localhost/auth 2>/dev/null || true)"
-    if [ "$G_OLD_HTTP" = 401 ]; then
-      acc_ok "invalidated admin session bearer is rejected (401)"
+    # The bearer must be rejected by the session data plane, not by /auth
+    # (which rejects Session tokens by design): repeat the pre-upgrade
+    # operation-status request; authentication now fails with 401.
+    G_OP_HTTP="$(curl --silent --output /tmp/r2ac-g-op-post.json --write-out '%{http_code}' --max-time 5 \
+      --unix-socket "$SOCK" -H "Authorization: Bearer $G_ADMIN_SESS_TOKEN" \
+      "http://localhost/operations/uat-r2ac-nonexistent-operation" 2>/dev/null || true)"
+    if [ "$G_OP_HTTP" = 401 ] && grep -q '"code":"unauthorized"' /tmp/r2ac-g-op-post.json; then
+      acc_ok "invalidated admin session bearer rejected by the session data plane (401)"
     else
-      acc_fail "invalidated admin session bearer not rejected (http=$G_OLD_HTTP)"
+      acc_fail "invalidated admin session bearer not rejected by the data plane (http=$G_OP_HTTP)"
     fi
   fi
 
