@@ -270,7 +270,9 @@ func (a *App) inspectHelperContainersForLauncher(ctx context.Context, launcherID
 	cmd := a.newDockerCommand(ctx, "docker", "ps", "-a",
 		"--filter", "label="+runtimeLabelSchema+"="+runtimeLabelSchemaValue,
 		"--filter", "label="+runtimeLabelLauncherID+"="+launcherID,
-		"--format", "{{.ID}} {{.State.Running}}")
+		// docker ps renders .State as a plain string ("running", "exited",
+		// ...) — unlike docker inspect, where .State.Running is a boolean.
+		"--format", "{{.ID}} {{.State}}")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("cannot inspect helper containers: %w", err)
@@ -288,7 +290,7 @@ func (a *App) inspectHelperContainersForLauncher(ctx context.Context, launcherID
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("unexpected docker ps output: %q", line)
 		}
-		containers = append(containers, helperContainer{ID: parts[0], Running: parts[1] == "true"})
+		containers = append(containers, helperContainer{ID: parts[0], Running: parts[1] == "running"})
 	}
 	return containers, nil
 }

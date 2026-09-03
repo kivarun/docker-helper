@@ -512,16 +512,18 @@ func TestInspectHelperContainersParsesAndFailsClosed(t *testing.T) {
 	app := deleteLifecycleApp(t, openFreshTestDB(t))
 
 	cases := []struct {
-		name    string
-		output  string
-		wantIDs []string
-		wantErr bool
+		name        string
+		output      string
+		wantIDs     []string
+		wantRunning []bool
+		wantErr     bool
 	}{
-		{name: "empty", output: "", wantIDs: nil},
-		{name: "one running", output: "abc123 true\n", wantIDs: []string{"abc123"}},
-		{name: "one exited", output: "def456 false", wantIDs: []string{"def456"}},
-		{name: "blank lines ignored", output: "\nabc123 true\n\n", wantIDs: []string{"abc123"}},
-		{name: "malformed fails closed", output: "abc123 true extra\n", wantErr: true},
+		{name: "empty", output: "", wantIDs: nil, wantRunning: nil},
+		{name: "one running", output: "abc123 running\n", wantIDs: []string{"abc123"}, wantRunning: []bool{true}},
+		{name: "one exited", output: "def456 exited", wantIDs: []string{"def456"}, wantRunning: []bool{false}},
+		{name: "one created", output: "ghi789 created", wantIDs: []string{"ghi789"}, wantRunning: []bool{false}},
+		{name: "blank lines ignored", output: "\nabc123 running\n\n", wantIDs: []string{"abc123"}, wantRunning: []bool{true}},
+		{name: "malformed fails closed", output: "abc123 running extra\n", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -546,6 +548,9 @@ func TestInspectHelperContainersParsesAndFailsClosed(t *testing.T) {
 			for i := range got {
 				if got[i].ID != tc.wantIDs[i] {
 					t.Errorf("container[%d] id: expected %q, got %q", i, tc.wantIDs[i], got[i].ID)
+				}
+				if got[i].Running != tc.wantRunning[i] {
+					t.Errorf("container[%d] running: expected %v, got %v", i, tc.wantRunning[i], got[i].Running)
 				}
 			}
 		})
