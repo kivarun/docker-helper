@@ -54,8 +54,10 @@ type createSelector struct {
 // sessionOwnershipSnapshot is a consistent single-transaction projection of a
 // Launcher and its owning Principal (roots and scope) used for Session-creation
 // admission. It is deliberately a snapshot, not a live query: the admission
-// policy must observe one consistent Principal/Launcher state, and the final
-// persistence step re-validates enabled state under the same critical section.
+// policy must observe one consistent Principal/Launcher state, read in its own
+// transaction. Persistence later conditionally re-validates (via a
+// conditional INSERT/SELECT) that the Launcher and Principal still exist and
+// remain enabled before inserting the Session.
 type sessionOwnershipSnapshot struct {
 	launcherID       string
 	launcherName     string

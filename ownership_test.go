@@ -612,3 +612,47 @@ func TestMigrateSessionOwnershipIntegrityCheckRollback(t *testing.T) {
 		t.Errorf("after rollback session count = %d, want 1", count)
 	}
 }
+
+// TestMigrateSessionOwnershipIgnoresUnrelatedFKViolation proves the Session
+// migration integrity check is scoped to the rebuilt sessions table: a
+// foreign-key violation in an unrelated table (here a dangling launchers row
+// whose principal no longer exists) must NOT fail migrateSessionOwnership.
+// Enforcement is off in the fixture so the dangling launcher can be inserted;
+// PRAGMA foreign_key_check('sessions') does not report it.
+func TestMigrateSessionOwnershipIgnoresUnrelatedFKViolation(t *testing.T) {
+	db := buildLegacyPrincipalDB(t)
+	pid := insertLegacyPrincipalRaw(t, db, "alice")
+	insertLegacySession(t, db, "dhs_alice", "h_alice", pid)
+
+	// Introduce a dangling launchers row (unrelated to sessions) while FK
+	// enforcement is off.
+	if _, err := db.Exec(
+		`INSERT INTO launchers (id, principal_id, name, enabled, scope_mode, created_at)
+		 VALUES (?, ?, 'default', 1, 'inherit', 1000)`,
+		"dhl_phantom", 99999,
+	); err != nil {
+		t.Fatalf("cannot insert dangling launcher: %v", err)
+	}
+
+	res, err := migrateSessionOwnership(db, ModeSystem, nil)
+	if err != nil {
+		t.Fatalf("migration failed due to unrelated launchers FK violation: %v", err)
+	}
+	if res.attributedPrincipal != 1 {
+		t.Errorf("attributedPrincipal = %d, want 1", res.attributedPrincipal)
+	}
+
+	// The migration committed: final schema is Launcher-owned and the session
+	// was attributed to alice's default launcher despite the unrelated violation.
+	var hasPrincipal, hasLauncher int
+	if err := db.QueryRow(
+		`SELECT
+			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='principal_id'),
+			(SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='launcher_id')`,
+	).Scan(&hasPrincipal, &hasLauncher); err != nil {
+		t.Fatal(err)
+	}
+	if hasPrincipal != 0 || hasLauncher != 1 {
+		t.Errorf("final schema: principal_id=%d launcher_id=%d, want 0/1", hasPrincipal, hasLauncher)
+	}
+}

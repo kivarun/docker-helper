@@ -457,14 +457,17 @@ func migrateSessionOwnership(db *sql.DB, mode DeploymentMode, userModeDefault *u
 }
 
 // checkSessionsForeignKeys fails the migration if any foreign-key violation
-// exists in the rebuilt database. PRAGMA foreign_key_check returns one row per
-// violation regardless of whether FK enforcement is enabled on this
-// connection; no rows means integrity holds.
+// exists in the rebuilt sessions table. PRAGMA foreign_key_check('sessions')
+// returns one row per violation in that table regardless of whether FK
+// enforcement is enabled on this connection; no rows means the rebuilt
+// sessions table's foreign keys hold. Scoping to sessions keeps the check
+// specific to this migration: an unrelated FK violation in another table must
+// not fail migrateSessionOwnership.
 func checkSessionsForeignKeys(tx *sql.Tx) error {
 	var table, parent string
 	var rowid int64
 	var fkid int
-	err := tx.QueryRow(`PRAGMA foreign_key_check`).Scan(&table, &rowid, &parent, &fkid)
+	err := tx.QueryRow(`PRAGMA foreign_key_check('sessions')`).Scan(&table, &rowid, &parent, &fkid)
 	if err == nil {
 		return fmt.Errorf("session ownership migration integrity check failed: foreign key violation in %s (rowid %d, parent %s, fkid %d)", table, rowid, parent, fkid)
 	}
