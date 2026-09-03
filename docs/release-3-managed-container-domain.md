@@ -420,11 +420,16 @@ capability is implemented.
 
 ## Deferred to subsequent designs
 
-The following decisions are intentionally outside this document:
+The following decisions are owned outside this document:
 
 - Session-network provisioning and cleanup mechanics;
-- supported resource constraints;
+- supported resource constraints and hierarchy;
 - port-publication grants and allocation;
 - logs and exec request contracts;
 - WebSocket framing and terminal behavior;
 - exact create, networking, resource-limit, publishing, logs, exec, and streaming request fields owned by their later designs.
+
+The accepted networking and resource contracts are
+`release-3-session-networking.md` and
+`release-3-resource-constraints.md`. Their values remain part of the immutable
+Managed Container create specification defined here.

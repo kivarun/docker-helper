@@ -270,13 +270,15 @@ The design distinguishes:
 - the Session's authorized ceiling;
 - the effective backend value.
 
-Every Managed Container and one-shot `run` receives explicit CPU, memory, PIDs, and shared-memory limits. An omitted workload value means the effective Session ceiling, not unbounded Docker behavior or a calculation of remaining quota. A caller may narrow inherited values but never widen them.
+Every Managed Container and one-shot `run` receives explicit CPU, memory, PIDs, and shared-memory limits. Omitted CPU, memory, and PIDs values select the effective Session ceiling, not unbounded Docker behavior or a calculation of remaining quota. Shared memory has its own bounded default below. A caller may narrow inherited values but never widen them.
 
-At initialization, the root workload memory pool defaults to 75% of Docker Engine-reported `MemTotal`, rounded down to 256 MiB. The CPU pool defaults from Engine-reported `NCPU`: logical CPUs minus the larger of 0.5 CPU or 10%, rounded down to 0.1 CPU. These defaults are materialized as explicit configuration and do not derive from the docker-helper process cgroup. The default per-workload PIDs ceiling is 512 and is clamped by inherited and system ceilings. Swap is disabled. Shared memory defaults to the smaller of 256 MiB and the workload memory limit, may be narrowed explicitly, and never exceeds memory. Disk quotas are outside Release 3.
+At initialization, the root workload memory pool defaults to 75% of Docker Engine-reported `MemTotal`, rounded down to 256 MiB. The CPU pool defaults from Engine-reported `NCPU`: logical CPUs minus the larger of 0.5 CPU or 10%, rounded down to 0.1 CPU. The Root PIDs ceiling defaults to 512 and is clamped by the enforceable system boundary. These defaults are materialized as explicit configuration and do not derive from the docker-helper process cgroup. Swap is disabled. Shared memory defaults to the smaller of 256 MiB and the workload memory limit, may be narrowed explicitly, and never exceeds memory. Disk quotas are outside Release 3.
 
 An omitted Principal, Launcher, or Session ceiling inherits its effective parent ceiling. A second Principal or Launcher that still inherits the full parent produces an operator warning rather than an automatic fractional split. The hierarchy is an aggregate runtime security boundary enforced by parent cgroups: multiple containers may each receive the full Session ceiling as their individual limit, while their combined actual usage remains bounded by the Session cgroup and its ancestors. docker-helper performs no resource reservation, remaining-capacity calculation, or scheduling admission. Memory ceilings are decreased only when the subtree has no active workloads; CPU and PIDs decreases apply live; exec-concurrency decreases do not kill existing execs. A cgroup-hierarchy spike must prove aggregate enforcement for both system and rootless deployments before implementation is frozen.
 
 Build resource control is outside this package.
+
+The canonical contract is `release-3-resource-constraints.md`.
 
 Completion criterion: a Session can start a Managed Container or execute `run` only within its authorized resource envelope, and the effective limits remain inspectable without exposing the full Docker resource surface.
 
@@ -382,18 +384,19 @@ The decomposition produces the following detailed design documents:
 4. `release-3-session-networking.md` — isolation, naming, attachment, explicit repair, and cleanup;
 5. `release-3-logs-and-exec.md` — log retrieval and common exec semantics;
 6. `release-3-interactive-streaming.md` — WebSocket and terminal protocol;
-7. `release-3-resource-constraints.md` — supported limits and authorization ceilings;
+7. `release-3-resource-constraints.md` — supported limits, hierarchy, defaults, enforcement, and authorization ceilings;
 8. `release-3-port-publishing.md` — grants, allocation, binding, and collision behavior;
 9. `release-3-api-cli.md` — public surface and compatibility;
 10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
 
-The Operation model, Managed Container domain, Managed Container lifecycle, and
-Session networking contracts are accepted foundation designs.
+The Operation model, Managed Container domain, Managed Container lifecycle,
+Session networking, and resource-constraint contracts are accepted foundation
+designs.
 `release-3-vocabulary-and-implementation-map.md` is their implementation bridge
 to the Release 2 codebase and the Release 2.1 Launcher design.
 `release-3-d0-execution-plan.md` turns the common Operation foundation into
 ordered executor tasks and test gates. Each remaining owner document must be
 contract-ready before its package is assigned, but need not prescribe
 code-ready mechanics that belong to the operational architect. The next
-blocking designs are the resource and publishing inputs that complete the
-immutable container creation contract.
+next blocking design is the publishing input that completes the immutable
+container creation contract.

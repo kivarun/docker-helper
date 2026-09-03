@@ -124,7 +124,12 @@ Release 3 adds a bounded set of resource limits for managed containers and one-s
 
 The purpose is to constrain agent-controlled workloads, not to expose the complete Docker resource-management surface.
 
-Build resource control is outside this model. The exact supported limits, hierarchical aggregate ceilings, per-workload limits, and safe defaults are defined separately by the Release 3 resource-limits design. Root defaults are derived at initialization from Docker Engine-reported capacity. The hierarchy is enforced through workload cgroups; docker-helper does not reserve capacity for future containers or calculate a remaining allocation before admission. Ordinary quick-start workflows must remain valid without requiring explicit resource-policy flags.
+Build resource control is outside this model. The exact supported limits, hierarchical aggregate ceilings, per-workload limits, and safe defaults are defined by `release-3-resource-constraints.md`. Root defaults are derived at initialization from Docker Engine-reported capacity. The hierarchy is enforced through workload cgroups; docker-helper does not reserve capacity for future containers or calculate a remaining allocation before admission. Ordinary quick-start workflows must remain valid without requiring explicit resource-policy flags.
+
+Every workload receives concrete CPU, memory, PIDs, shared-memory, and
+disabled-swap settings. CPU, memory, and PIDs are additionally constrained by
+aggregate Root, Principal, Launcher, and Session cgroups. Disk quotas and build
+resource control remain outside Release 3.
 
 ## Architectural invariants
 
