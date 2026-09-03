@@ -694,8 +694,9 @@ Three authentication classes provide different levels of access:
 ### Launcher credential
 
 - at most one credential exists per launcher; issued with
-  `PUT /launchers/{id}/credential` (admin or owning-principal token required)
-  and replaced by `POST /launchers/{id}/credential/rotate`;
+  `PUT /principals/{username}/launchers/{launcher}/credential` (admin or
+  owning-principal token required)
+  and replaced by `POST /principals/{username}/launchers/{launcher}/credential/rotate`;
 - same token format as Principal credentials (`dhc_` + 64 hex characters);
   the token itself carries no owner type — the owner is resolved from
   persistent state at authentication time;
@@ -795,6 +796,26 @@ Principal (OS identity, authorization ceiling)
 (`inherit` or `restricted`), `created_at`. Launcher-scoped roots live in
 `launcher_allowed_roots` (only meaningful in `restricted` scope).
 
+A Launcher name is a Principal-scoped, path-safe identifier with the
+canonical grammar `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`: 1..63
+characters of lowercase ASCII letters, digits, and hyphens, with
+alphanumeric first and last characters. Names are identifiers: the exact
+supplied value is accepted or rejected, never trimmed or case-folded into
+validity. The grammar is enforced by the centralized Launcher write path
+(create, rename, and the migration/bootstrap insertion of `default`) and
+by a CHECK constraint on the `launchers` table; a database created by an
+intermediate unreleased 2.1 build that predates the invariant fails
+closed at startup instead of being silently rewritten. Because `_` is
+outside the alphabet, Launcher names and Launcher IDs (`dhl_<32 hex>`)
+occupy disjoint lexical spaces.
+
+A Launcher name is unique within one Principal and may repeat under
+different Principals; there is never a global lookup by Launcher name
+(`alice/default` and `bob/default` are different Launchers). `default` is
+only the conventional default name — the name used when creation omits
+`--name` and when an individual Launcher command omits the selector —
+not a subtype or a global singleton.
+
 Every principal has an implicit default Launcher named `default`:
 
 - provisioning is idempotent (`ensureDefaultLauncher`): the first need
@@ -821,7 +842,8 @@ launcher root that is no longer under the principal ceiling is rejected
 then (never silently truncated), so stale out-of-ceiling roots cannot
 produce a session outside the principal's allowed roots.
 
-Scope is replaced atomically: `PUT /launchers/{id}/allowed-roots` accepts
+Scope is replaced atomically:
+`PUT /principals/{username}/launchers/{launcher}/allowed-roots` accepts
 the complete scope (`{"scope": "inherit", "allowed_roots": []}` or
 `{"scope": "restricted", "allowed_roots": [...]}`); there is no
 read-modify-write policy mutation through the CLI.
@@ -835,14 +857,26 @@ credential cannot manage launchers):
 |---|---|
 | `POST /principals/{username}/launchers` | create launcher (optional one-time credential issuance) |
 | `GET /principals/{username}/launchers` | list that principal's launchers |
-| `GET /launchers/{id}` | show launcher |
-| `PATCH /launchers/{id}` | rename / enable / disable |
-| `PUT /launchers/{id}/allowed-roots` | atomic scope replacement |
-| `DELETE /launchers/{id}` | delete launcher (checked delete) |
-| `PUT /launchers/{id}/credential` | issue the launcher's single credential |
-| `GET /launchers/{id}/credential` | show credential metadata |
-| `POST /launchers/{id}/credential/rotate` | rotate the credential |
-| `DELETE /launchers/{id}/credential` | delete the credential |
+| `GET /principals/{username}/launchers/{launcher}` | show launcher |
+| `PATCH /principals/{username}/launchers/{launcher}` | rename / enable / disable |
+| `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic scope replacement |
+| `DELETE /principals/{username}/launchers/{launcher}` | delete launcher (checked delete) |
+| `PUT /principals/{username}/launchers/{launcher}/credential` | issue the launcher's single credential |
+| `GET /principals/{username}/launchers/{launcher}/credential` | show credential metadata |
+| `POST /principals/{username}/launchers/{launcher}/credential/rotate` | rotate the credential |
+| `DELETE /principals/{username}/launchers/{launcher}/credential` | delete the credential |
+
+Individual Launcher control uses the Principal-scoped locator
+`/principals/{username}/launchers/{launcher}`: `{launcher}` accepts a
+Launcher ID or a grammar-valid Launcher name, resolved under the
+already-resolved Principal — an exact `dhl_<32 hex>` selector looks up
+that ID under this Principal, a name looks up `(principal_id, name)`,
+and a malformed, missing, or foreign selector is the same non-disclosing
+`404 launcher_not_found` (never a fallback from an ID-shaped selector to
+a name lookup, never a global name scan). A Principal credential reaches
+only its own Principal (any other username is `404 principal_not_found`);
+an admin token targets the explicitly selected Principal; a Launcher
+credential cannot manage launchers.
 
 Launcher projection: `{"id", "principal", "name", "enabled", "scope",
 "allowed_roots", "created_at"}`. Create response carries the one-time
@@ -856,19 +890,27 @@ CLI surface:
 docker-helper launcher create [--principal USER] [--name NAME]
     [--allowed-root PATH]... [--issue-credential | --no-credential]
 docker-helper launcher list [--principal USER]
-docker-helper launcher show LAUNCHER_ID
-docker-helper launcher set [--name NAME] [--enabled true|false] LAUNCHER_ID
-docker-helper launcher delete LAUNCHER_ID
-docker-helper launcher scope set [--inherit | --allowed-root PATH]... LAUNCHER_ID
-docker-helper launcher credential issue LAUNCHER_ID
-docker-helper launcher credential rotate LAUNCHER_ID
-docker-helper launcher credential delete LAUNCHER_ID
+docker-helper launcher show [--principal USER] [LAUNCHER]
+docker-helper launcher set [--principal USER] [--name NAME]
+    [--enabled true|false] [LAUNCHER]
+docker-helper launcher delete [--principal USER] [LAUNCHER]
+docker-helper launcher scope set [--principal USER]
+    [--inherit | --allowed-root PATH]... [LAUNCHER]
+docker-helper launcher credential issue [--principal USER] [LAUNCHER]
+docker-helper launcher credential rotate [--principal USER] [LAUNCHER]
+docker-helper launcher credential delete [--principal USER] [LAUNCHER]
 ```
 
-`create` infers the principal from the authenticated credential when
-`--principal` is omitted and prompts for the credential choice on a TTY;
-non-interactive use must pass `--issue-credential` or `--no-credential`
-explicitly.
+`LAUNCHER` is a Launcher name or ID, and omitting it selects the
+Principal's `default` Launcher. `create`/`list` and every individual
+Launcher command resolve the target Principal the same way: a Principal
+credential infers its Principal from `GET /auth`; an admin token must
+name the Principal explicitly with `--principal` (omission fails; the
+CLI never searches for a `default` Launcher globally). Principal
+inference is target construction only — the daemon remains the
+authorization authority. `create` prompts for the credential choice on a
+TTY; non-interactive use must pass `--issue-credential` or
+`--no-credential` explicitly.
 
 ### Session selectors and default resolution
 

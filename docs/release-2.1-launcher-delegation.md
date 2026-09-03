@@ -245,9 +245,18 @@ For `launcher create`, defaults are:
 An admin caller names the target explicitly with `--principal USER`, because
 the global admin token does not itself encode a Principal.
 
-Supplying `--name` selects another stable Launcher name. Supplying one or more
-`--allowed-root` values selects `restricted` scope. Both flags remain optional
-for the ordinary flow.
+Supplying `--name` selects another stable Launcher name. A Launcher name
+is a Principal-scoped, path-safe identifier with the canonical grammar
+`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$` (1..63 lowercase ASCII letters,
+digits, and internal hyphens; alphanumeric first and last characters);
+the exact supplied value is accepted or rejected, never trimmed or
+case-folded into validity. Names are unique within one Principal and may
+repeat under different Principals — `alice/default` and `bob/default`
+are different Launchers — and there is never a global lookup by Launcher
+name. Because `_` is outside the alphabet, Launcher names and Launcher
+IDs occupy disjoint lexical spaces. Supplying one or more
+`--allowed-root` values selects `restricted` scope. Both flags remain
+optional for the ordinary flow.
 
 Interactive `principal create` and `launcher create` ask whether to issue the
 initial credential. Non-interactive and JSON invocations must make the choice
@@ -259,8 +268,8 @@ are advanced workflows rather than quick-start steps:
 
 ```text
 docker-helper principal credential create USER
-docker-helper launcher credential issue LAUNCHER_ID
-docker-helper launcher credential rotate LAUNCHER_ID
+docker-helper launcher credential issue [LAUNCHER]
+docker-helper launcher credential rotate [LAUNCHER]
 docker-helper credential install
 ```
 
@@ -283,16 +292,19 @@ GET    /principals/{username}/credentials
 
 POST   /principals/{username}/launchers
 GET    /principals/{username}/launchers
-GET    /launchers/{id}
-PATCH  /launchers/{id}
-PUT    /launchers/{id}/allowed-roots
-DELETE /launchers/{id}
+GET    /principals/{username}/launchers/{launcher}
+PATCH  /principals/{username}/launchers/{launcher}
+PUT    /principals/{username}/launchers/{launcher}/allowed-roots
+DELETE /principals/{username}/launchers/{launcher}
 
-PUT    /launchers/{id}/credential
-GET    /launchers/{id}/credential
-POST   /launchers/{id}/credential/rotate
-DELETE /launchers/{id}/credential
+PUT    /principals/{username}/launchers/{launcher}/credential
+GET    /principals/{username}/launchers/{launcher}/credential
+POST   /principals/{username}/launchers/{launcher}/credential/rotate
+DELETE /principals/{username}/launchers/{launcher}/credential
 ```
+
+`{launcher}` is a Launcher name or ID, resolved under the
+already-resolved Principal; omitted selectors address `default`.
 
 Principal and Launcher creation accept `issue_credential`. A successful
 issuance response returns the secret exactly once.

@@ -91,7 +91,15 @@ state**, never from a bearer-token prefix.
 Logical fields: `id`, `principal_id`, `name`, `enabled`, `scope_mode`,
 `created_at`. `scope_mode` ∈ {`inherit`, `restricted`}.
 
-- Launcher name is unique within one Principal.
+- Launcher name is a Principal-scoped, path-safe identifier with the
+  canonical grammar `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$` (1..63
+  lowercase ASCII letters, digits, and internal hyphens; alphanumeric
+  first and last characters). Names are identifiers: the exact supplied
+  value is accepted or rejected, never trimmed or case-folded into
+  validity. Names are unique within one Principal and may repeat under
+  different Principals; there is never a global lookup by Launcher name.
+  Because `_` is outside the alphabet, Launcher names and Launcher IDs
+  occupy disjoint lexical spaces.
 - `default` is the conventional default name, not a separate type.
 - Launcher allowed roots are stored only for `restricted` Launchers.
 - Effective Session-creation policy is current-state evaluation:
@@ -748,18 +756,25 @@ later create/list/revoke operations.
 
 ### Launcher endpoints
 
+Individual Launcher control uses the Principal-scoped locator
+`/principals/{username}/launchers/{launcher}`; `{launcher}` accepts a
+Launcher ID or a grammar-valid Launcher name and resolves under the
+already-resolved Principal (malformed/missing/foreign selectors are the
+same non-disclosing `404 launcher_not_found`; never a fallback from an
+ID-shaped selector to a name lookup; never a global name scan).
+
 ```text
 POST   /principals/{username}/launchers
 GET    /principals/{username}/launchers
-GET    /launchers/{id}
-PATCH  /launchers/{id}
-PUT    /launchers/{id}/allowed-roots
-DELETE /launchers/{id}
+GET    /principals/{username}/launchers/{launcher}
+PATCH  /principals/{username}/launchers/{launcher}
+PUT    /principals/{username}/launchers/{launcher}/allowed-roots
+DELETE /principals/{username}/launchers/{launcher}
 
-PUT    /launchers/{id}/credential
-GET    /launchers/{id}/credential
-POST   /launchers/{id}/credential/rotate
-DELETE /launchers/{id}/credential
+PUT    /principals/{username}/launchers/{launcher}/credential
+GET    /principals/{username}/launchers/{launcher}/credential
+POST   /principals/{username}/launchers/{launcher}/credential/rotate
+DELETE /principals/{username}/launchers/{launcher}/credential
 ```
 
 ### Operator auth introspection (`GET /auth`)
@@ -802,7 +817,7 @@ Principal-credential Launcher management under its own Principal). Request:
 
 ### Allowed-root replacement
 
-`PUT /launchers/{id}/allowed-roots` is the **single atomic Launcher scope
+`PUT /principals/{username}/launchers/{launcher}/allowed-roots` is the **single atomic Launcher scope
 mutation**. Do not implement a separate add/remove HTTP mutation and do not
 make the CLI perform GET → local edit → PUT read-modify-write.
 
@@ -820,22 +835,22 @@ or
 
 `restricted` with an empty/omitted `allowed_roots` is rejected
 (`400`, `invalid_allowed_roots`). Setting `inherit` clears stored roots.
-`PATCH /launchers/{id}` changes only Launcher scalar identity/state such as
+`PATCH /principals/{username}/launchers/{launcher}` changes only Launcher scalar identity/state such as
 `name` and `enabled`; it does **not** provide a second `scope_mode` mutation
 path.
 
 ### Credential endpoints (singular Launcher resource)
 
-- `PUT /launchers/{id}/credential` — issue the singular Launcher credential;
+- `PUT /principals/{username}/launchers/{launcher}/credential` — issue the singular Launcher credential;
   valid only when the Launcher has none (`409` `launcher_credential_exists`
   otherwise). Returns the secret once.
-- `GET /launchers/{id}/credential` — read-only metadata (ID, created, revoked);
+- `GET /principals/{username}/launchers/{launcher}/credential` — read-only metadata (ID, created, revoked);
   never returns a secret.
-- `POST /launchers/{id}/credential/rotate` — replaces the bearer secret of the
+- `POST /principals/{username}/launchers/{launcher}/credential/rotate` — replaces the bearer secret of the
   same logical credential (ID and owner unchanged, old token immediately
   invalid, new secret returned once). Errors if no credential exists
   (`404`).
-- `DELETE /launchers/{id}/credential` — deletes the singular credential so a
+- `DELETE /principals/{username}/launchers/{launcher}/credential` — deletes the singular credential so a
   new one may later be issued.
 
 Error codes follow the existing `writeError` style (`error_code` +
@@ -853,16 +868,24 @@ Subcommands mirror the HTTP ownership model:
 docker-helper launcher create [--principal USER] [--name NAME]
     [--allowed-root PATH]... [--issue-credential | --no-credential]
 docker-helper launcher list [--principal USER]
-docker-helper launcher show LAUNCHER_ID
-docker-helper launcher set [--name NAME] [--enabled true|false] LAUNCHER_ID
-docker-helper launcher delete LAUNCHER_ID
-docker-helper launcher scope set [--inherit | --allowed-root PATH [--allowed-root PATH]...] LAUNCHER_ID
-docker-helper launcher credential issue LAUNCHER_ID
-docker-helper launcher credential rotate LAUNCHER_ID
-docker-helper launcher credential delete LAUNCHER_ID
+docker-helper launcher show [--principal USER] [LAUNCHER]
+docker-helper launcher set [--principal USER] [--name NAME] [--enabled true|false] [LAUNCHER]
+docker-helper launcher delete [--principal USER] [LAUNCHER]
+docker-helper launcher scope set [--principal USER] [--inherit | --allowed-root PATH [--allowed-root PATH]...] [LAUNCHER]
+docker-helper launcher credential issue [--principal USER] [LAUNCHER]
+docker-helper launcher credential rotate [--principal USER] [LAUNCHER]
+docker-helper launcher credential delete [--principal USER] [LAUNCHER]
 ```
 
-`launcher scope set` sends one complete `PUT /launchers/{id}/allowed-roots`
+`LAUNCHER` is a Launcher name or ID and may be omitted to address the
+Principal's `default` Launcher. Every individual Launcher command uses
+the create/list Principal resolution: a Principal credential infers its
+Principal via `GET /auth`; an admin token must pass `--principal`
+explicitly and is never globally searched; a Launcher credential cannot
+manage launchers.
+
+`launcher scope set` sends one complete
+`PUT /principals/{username}/launchers/{launcher}/allowed-roots`
 replacement. It never fetches the current list and performs local
 read-modify-write. `--inherit` and one-or-more `--allowed-root` are mutually
 exclusive; the latter selects `restricted` scope.
