@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"net/url"
 	"regexp"
 	"strings"
@@ -80,6 +81,63 @@ func TestFreshDBLaunchersTable(t *testing.T) {
 	}
 	if name != "launchers" {
 		t.Errorf("expected table launchers, got %q", name)
+	}
+}
+
+// TestValidateLauncherNameGrammar pins the canonical Launcher-name grammar
+// ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$: 1..63 characters of lowercase ASCII
+// letters, digits, and internal hyphens, with alphanumeric first and last
+// characters. The exact supplied value is accepted or rejected; the old
+// trim-into-validity behavior is gone.
+func TestValidateLauncherNameGrammar(t *testing.T) {
+	long63 := strings.Repeat("a", launcherNameMaxLength)
+	long64 := strings.Repeat("a", launcherNameMaxLength+1)
+	idShaped := launcherIDPrefix + strings.Repeat("ab", launcherIDEntropyBytes)
+
+	cases := []struct {
+		name    string
+		wantErr bool
+	}{
+		{"default", false},
+		{"build-agent", false},
+		{"agent2", false},
+		{"2nd-agent", false},
+		{"a", false},
+		{"0123456789", false},
+		{"a-b", false},
+		{long63, false},
+		{"", true},
+		{long64, true},
+		{"-agent", true},
+		{"agent-", true},
+		{"-", true},
+		{"Foo", true},
+		{" agent ", true},
+		{"agent ", true},
+		{" agent", true},
+		{"a b", true},
+		{"/", true},
+		{"foo/bar", true},
+		{"foo?bar", true},
+		{"foo%bar", true},
+		{"foo_bar", true},
+		{idShaped, true},
+	}
+	for _, tc := range cases {
+		got, err := validateLauncherName(tc.name)
+		if tc.wantErr {
+			if !errors.Is(err, ErrInvalidLauncherName) {
+				t.Errorf("validateLauncherName(%q): expected ErrInvalidLauncherName, got %v", tc.name, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("validateLauncherName(%q): unexpected error %v", tc.name, err)
+			continue
+		}
+		if got != tc.name {
+			t.Errorf("validateLauncherName(%q): the exact value must be kept, got %q", tc.name, got)
+		}
 	}
 }
 
@@ -186,6 +244,33 @@ func TestLauncherScopeModeCheck(t *testing.T) {
 	}
 	if err := insert("bogus-launcher", "bogus"); err == nil {
 		t.Error("unknown scope_mode should be rejected by CHECK")
+	}
+}
+
+func TestLauncherNameCheck(t *testing.T) {
+	db := openFreshTestDB(t)
+	pid := insertTestPrincipal(t, db, "alice", 2001)
+
+	insert := func(name string) error {
+		id, err := generateLauncherID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.Exec(
+			`INSERT INTO launchers (id, principal_id, name, enabled, scope_mode, created_at)
+			 VALUES (?, ?, ?, 1, 'inherit', 1000)`,
+			id, pid, name,
+		)
+		return err
+	}
+
+	if err := insert("build-agent"); err != nil {
+		t.Errorf("grammar-valid name should be accepted, got: %v", err)
+	}
+	for _, bad := range []string{"", "Foo", "foo_bar", "-agent", "agent-", "a b", "foo/bar"} {
+		if err := insert(bad); err == nil {
+			t.Errorf("expected the launcher-name CHECK to reject %q", bad)
+		}
 	}
 }
 

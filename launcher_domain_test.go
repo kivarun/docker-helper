@@ -255,6 +255,39 @@ func TestLauncherDuplicateNameWithinPrincipal(t *testing.T) {
 	}
 }
 
+// TestLauncherNameValidatorSharedByCreateAndRename proves create and rename
+// reject exactly the same invalid names through the single centralized
+// validator: no trimming or case folding on either path.
+func TestLauncherNameValidatorSharedByCreateAndRename(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "frida")
+
+	for _, bad := range []string{"Foo", " agent1 ", "agent1 ", "foo_bar", "-agent", "agent-"} {
+		if _, _, _, err := createLauncher(db, pid, bad, LauncherScopeInherit, nil, globalRoots, false); !errors.Is(err, ErrInvalidLauncherName) {
+			t.Fatalf("create(%q): expected ErrInvalidLauncherName, got %v", bad, err)
+		}
+	}
+
+	l, _, _, err := createLauncher(db, pid, "agent1", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("create(agent1): %v", err)
+	}
+	for _, bad := range []string{"Foo", " agent2 ", "foo_bar"} {
+		if _, err := updateLauncher(db, l.ID, &bad, nil); !errors.Is(err, ErrInvalidLauncherName) {
+			t.Fatalf("rename(%q): expected ErrInvalidLauncherName, got %v", bad, err)
+		}
+	}
+	renamed := "build-agent-2"
+	updated, err := updateLauncher(db, l.ID, &renamed, nil)
+	if err != nil {
+		t.Fatalf("rename(agent1 -> %s): %v", renamed, err)
+	}
+	if updated.Name != renamed {
+		t.Errorf("renamed name = %q, want %q", updated.Name, renamed)
+	}
+}
+
 func TestLauncherFindListScoped(t *testing.T) {
 	db := openFreshTestDB(t)
 	globalRoots := []string{testAllowedRootDir(t)}

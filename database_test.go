@@ -81,6 +81,53 @@ func TestInitializeDatabaseIdempotent(t *testing.T) {
 	}
 }
 
+// TestInitializeDatabaseRejectsLaunchersTableWithoutNameInvariant fails the
+// startup initialization when the launchers table predates the Release 2.1
+// launcher-name invariant (the shape written by intermediate unreleased 2.1
+// development commits). The intermediate shape must really be unconstrained,
+// so the fixture proves an invalid name inserts successfully there before the
+// invariant check rejects the schema; no released version ever created
+// launchers, so failing closed loses no released data.
+func TestInitializeDatabaseRejectsLaunchersTableWithoutNameInvariant(t *testing.T) {
+	db := openFreshTestDB(t)
+
+	insertTestPrincipal(t, db, "alice", 2001)
+	if _, err := db.Exec(`DROP TABLE launchers`); err != nil {
+		t.Fatalf("drop launchers: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE launchers (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			scope_mode TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name),
+			CHECK (scope_mode IN ('inherit', 'restricted'))
+		)`); err != nil {
+		t.Fatalf("create pre-invariant launchers shape: %v", err)
+	}
+
+	// The pre-invariant shape does not enforce the grammar: prove it accepts
+	// a name the invariant rejects, so the failure below is attributable to
+	// the schema verification and not to the database.
+	if _, err := db.Exec(
+		`INSERT INTO launchers (id, principal_id, name, enabled, scope_mode, created_at)
+		 VALUES ('dhl_' || printf('%032d', 0), (SELECT id FROM principals WHERE username = 'alice'), 'Foo', 1, 'inherit', 1000)`); err != nil {
+		t.Fatalf("pre-invariant shape must accept grammar-invalid names: %v", err)
+	}
+
+	err := initializeDatabase(db)
+	if err == nil {
+		t.Fatal("initializeDatabase must fail closed on the pre-invariant launchers shape")
+	}
+	if !strings.Contains(err.Error(), "launcher-name invariant") {
+		t.Errorf("actionable error expected, got: %v", err)
+	}
+}
+
 func TestJournalModeWAL(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.db"

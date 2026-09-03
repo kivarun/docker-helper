@@ -73,6 +73,12 @@ func ensureDefaultLauncher(q sqlExecutor, principalID int64) (string, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
+	// The migration/bootstrap insertion uses the centralized Launcher write
+	// path's name validator, so a grammar that would make 'default' invalid
+	// fails closed here instead of silently inserting an invalid name.
+	if _, err := validateLauncherName(defaultLauncherName); err != nil {
+		return "", fmt.Errorf("default Launcher name rejected by the launcher-name grammar: %w", err)
+	}
 	newID, err := generateLauncherID()
 	if err != nil {
 		return "", err

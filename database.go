@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -68,7 +69,13 @@ func initializeDatabase(db *sql.DB) error {
 			created_at INTEGER NOT NULL,
 			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
 			UNIQUE (principal_id, name),
-			CHECK (scope_mode IN ('inherit', 'restricted'))
+			CHECK (scope_mode IN ('inherit', 'restricted')),
+			CHECK (
+				length(name) BETWEEN 1 AND 63
+				AND name NOT GLOB '*[^a-z0-9-]*'
+				AND name NOT GLOB '-*'
+				AND name NOT GLOB '*-'
+			)
 		);
 
 		CREATE TABLE IF NOT EXISTS launcher_allowed_roots (
@@ -98,6 +105,10 @@ func initializeDatabase(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("cannot create tables: %w", err)
+	}
+
+	if err := verifyLaunchersNameInvariant(db); err != nil {
+		return err
 	}
 
 	// Classify the sessions schema and bring pre-cutover tables forward.
@@ -213,6 +224,43 @@ func initializeDatabase(db *sql.DB) error {
 		}
 	}
 
+	return nil
+}
+
+// launchersNameInvariantFragments are the CHECK fragments that enforce the
+// Launcher-name grammar in the launchers table schema. Only this binary's
+// initializeDatabase writes that CREATE TABLE statement, so the fragments
+// must appear verbatim in the declared schema.
+var launchersNameInvariantFragments = []string{
+	"length(name) BETWEEN 1 AND 63",
+	`name NOT GLOB '*[^a-z0-9-]*'`,
+	`name NOT GLOB '-*'`,
+	`name NOT GLOB '*-'`,
+}
+
+// verifyLaunchersNameInvariant fails closed when the launchers table does not
+// enforce the Launcher-name grammar. Released v2.0.0 databases contain no
+// launchers table, and fresh databases are created with the CHECK constraint;
+// only a database produced by an intermediate unreleased 2.1 development
+// commit can carry the pre-invariant shape. Such state is unsupported: startup
+// fails with an actionable error instead of silently continuing with weaker
+// enforcement, and invalid rows are never rewritten.
+func verifyLaunchersNameInvariant(db *sql.DB) error {
+	var ddl string
+	err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'launchers'`,
+	).Scan(&ddl)
+	if err != nil {
+		return fmt.Errorf("cannot read launchers table schema: %w", err)
+	}
+	for _, fragment := range launchersNameInvariantFragments {
+		if !strings.Contains(ddl, fragment) {
+			return errors.New("launchers table does not enforce the launcher-name invariant; " +
+				"this database was created by an intermediate pre-release 2.1 build and cannot " +
+				"be upgraded in place: recreate the database (no released version ever created " +
+				"launchers, so no upgrade data is lost)")
+		}
+	}
 	return nil
 }
 

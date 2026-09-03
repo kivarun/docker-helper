@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -246,11 +245,34 @@ func validateLauncherAllowedRoots(roots []string, effectivePrincipalRoots []stri
 	return canonical, nil
 }
 
-// normalizeLauncherName trims and validates a Launcher name.
-func normalizeLauncherName(name string) (string, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
+// defaultLauncherName is the conventional Launcher name used when a caller
+// omits the name on create or the selector on individual Launcher commands.
+// It is a normal Launcher name, not a subtype or a global singleton.
+const defaultLauncherName = "default"
+
+// launcherNameMaxLength is the maximum Launcher-name length.
+const launcherNameMaxLength = 63
+
+// validateLauncherName enforces the canonical Launcher-name grammar
+// ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$: 1..63 characters of lowercase ASCII
+// letters, digits, and hyphens, with alphanumeric first and last characters.
+// Names are identifiers: the exact supplied value is accepted or rejected,
+// never trimmed or case-folded into validity.
+func validateLauncherName(name string) (string, error) {
+	if len(name) == 0 || len(name) > launcherNameMaxLength {
 		return "", ErrInvalidLauncherName
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-':
+			if i == 0 || i == len(name)-1 {
+				return "", ErrInvalidLauncherName
+			}
+		default:
+			return "", ErrInvalidLauncherName
+		}
 	}
 	return name, nil
 }
@@ -262,7 +284,7 @@ func normalizeLauncherName(name string) (string, error) {
 // issueCredential is true, the issued credential metadata and its bearer secret
 // exactly once.
 func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherScopeMode, allowedRoots []string, globalAllowedRoots []string, issueCredential bool) (*LauncherWithPrincipal, *launcherCredential, string, error) {
-	name, err := normalizeLauncherName(name)
+	name, err := validateLauncherName(name)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -378,7 +400,7 @@ func updateLauncher(db *sql.DB, launcherID string, name *string, enabled *bool) 
 	defer tx.Rollback()
 
 	if name != nil {
-		nm, err := normalizeLauncherName(*name)
+		nm, err := validateLauncherName(*name)
 		if err != nil {
 			return nil, err
 		}
