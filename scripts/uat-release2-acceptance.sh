@@ -1571,25 +1571,24 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     # The daemon does not terminate running operations, and the refused delete
     # already invalidated the Launcher's Sessions; the operator stops the
     # container and retries the delete ("retries after the runtime exits").
-    # The retry must wait for the operation to actually finalize: the daemon
-    # removes the cid file when the run process completes, and the background
-    # CLI exits once the operation is no longer running.
+    # The runtime-active refusal is retryable: the run operation finalizes
+    # shortly after the container exits (its own completion path also releases
+    # the MAC bindings), so poll the delete until the daemon itself reports the
+    # runtime inactive instead of inferring finalization from side signals.
     docker stop -t 5 "$H_RT_CID" >/dev/null 2>&1 || true
-    H_RUN_FINALIZED=false
     if wait_no_container "$H_RT_CID"; then
-      for _ in $(seq 1 100); do
-        if [ ! -e "$H_RT_CIDFILE" ] && ! kill -0 "$H_OP_PID" 2>/dev/null; then
-          H_RUN_FINALIZED=true
+      H_DELETED=false
+      for _ in $(seq 1 25); do
+        if dh launcher delete --system "$H_ALPHA_ID" >/dev/null 2>&1; then
+          H_DELETED=true
           break
         fi
-        sleep 0.2
+        sleep 0.4
       done
-    fi
-    if [ "$H_RUN_FINALIZED" = true ]; then
-      H_DEL_RETRY_OUT="$(dh launcher delete --system "$H_ALPHA_ID" 2>&1 || true)"
-      if printf '%s\n' "$H_DEL_RETRY_OUT" | grep -q "deleted launcher"; then
+      if [ "$H_DELETED" = true ]; then
         acc_ok "launcher delete succeeds after its sessions are cleaned up"
       else
+        H_DEL_RETRY_OUT="$(dh launcher delete --system "$H_ALPHA_ID" 2>&1 || true)"
         acc_fail "launcher delete failed after cleanup (cli: ${H_DEL_RETRY_OUT:-<no output>})"
         # Evidence for diagnosis: the delete/run audit trail and any
         # operational error line. Audit lines carry no bearer material.
