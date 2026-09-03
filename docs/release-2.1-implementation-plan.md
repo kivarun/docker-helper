@@ -17,7 +17,8 @@ packaging, README, or man pages are changed by this stage.
 **Implementation status: complete.** All six stages (1.1 persistence
 foundation through 1.5 CLI/simple defaults) are implemented on `main`, with
 the final implementation state at `ed5c7963a055ab15696b68d7cbecc70ec5b79611`.
-Stage 1.6 (release integration) completes the release with the
+Stage 1.6 (release integration) completes the implementation work for the
+release with the
 documentation/public-contract reconciliation, the Release 3 vocabulary map
 update to the actual 2.1 symbols, the v2.0.0 → 2.1 upgrade-migration and
 launcher-hierarchy acceptance scenarios
@@ -26,6 +27,12 @@ provenance/bearer-leak coverage (`launcher_audit_test.go`). The canonical
 current-behavior reference is [`architecture.md`](architecture.md)
 ("Launcher ownership"); the Release 3 vocabulary map is pinned to the final
 2.1 implementation commit.
+
+Implementation completion is distinct from release acceptance: the Release
+2.1 promotion claim requires the artifact gate to pass, including a
+privileged run of the acceptance scenarios
+(`scripts/uat-release2-acceptance.sh`). This plan does not claim release
+acceptance or promotion.
 
 This plan is the binding contract. The concept document remains the rationale
 and is not duplicated here; readers needing the *why* should start there.

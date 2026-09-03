@@ -384,11 +384,14 @@ work are recorded in
 the binding implementation contract is
 [`docs/release-2.1-implementation-plan.md`](release-2.1-implementation-plan.md).
 
-Release 2.1 is implemented on `main`: the Launcher ownership model, the
-Launcher/credential control plane, the Session ownership cutover with the
-idempotent v2.0.0 → 2.1 ownership migration, launcher lifecycle propagation,
-helper-owned runtime correlation labels, and the `launcher` CLI are all
-shipped. The current behavior contract lives in
+Release 2.1 implementation is complete on `main`: the Launcher ownership
+model, the Launcher/credential control plane, the Session ownership cutover
+with the idempotent v2.0.0 → 2.1 ownership migration, launcher lifecycle
+propagation, helper-owned runtime correlation labels, and the `launcher` CLI
+are all implemented. This is an implementation statement, not release
+acceptance: promotion still requires the artifact gate to pass, including a
+privileged run of the acceptance scenarios
+(`scripts/uat-release2-acceptance.sh`). The current behavior contract lives in
 [`docs/architecture.md`](architecture.md) ("Launcher ownership"); the Release 3
 vocabulary map has been updated to the final 2.1 symbols
 ([`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md)).
