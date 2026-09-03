@@ -1586,10 +1586,17 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
       done
     fi
     if [ "$H_RUN_FINALIZED" = true ]; then
-      if dh launcher delete --system "$H_ALPHA_ID" >/dev/null 2>&1; then
+      H_DEL_RETRY_OUT="$(dh launcher delete --system "$H_ALPHA_ID" 2>&1 || true)"
+      if printf '%s\n' "$H_DEL_RETRY_OUT" | grep -q "deleted launcher"; then
         acc_ok "launcher delete succeeds after its sessions are cleaned up"
       else
-        acc_fail "launcher delete failed after cleanup"
+        acc_fail "launcher delete failed after cleanup (cli: ${H_DEL_RETRY_OUT:-<no output>})"
+        # Evidence for diagnosis: the delete audit result and any operational
+        # error line. Audit lines carry no bearer material.
+        journalctl --utc -u docker-helper.service --since '-3 min' --no-pager 2>/dev/null \
+          | grep -E '"event":"launcher\.delete"|launcher delete failed|cannot inspect launcher runtime' \
+          | tail -5 >&2 || true
+        docker ps -a --filter "label=com.dockerhelper.launcher.id=$H_ALPHA_ID" --format '{{.ID}} {{.State.Running}} {{.Status}}' >&2 2>/dev/null || true
       fi
     else
       acc_fail "launcher runtime container did not stop for the checked-delete cleanup"
