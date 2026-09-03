@@ -10,10 +10,15 @@ This map is based on:
 
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
-- commit: [`c840d4e197e86e1b7a190d4dcea7dd795975d8a5`](https://github.com/kivarun/docker-helper/commit/c840d4e197e86e1b7a190d4dcea7dd795975d8a5);
-- Release 2.1 input: `docs/release-2.1-launcher-delegation.md` at the same commit.
+- commit: [`ed5c7963a055ab15696b68d7cbecc70ec5b79611`](https://github.com/kivarun/docker-helper/commit/ed5c7963a055ab15696b68d7cbecc70ec5b79611);
+- Release 2.1 input: the implemented Release 2.1 Launcher Delegation contract
+  (`docs/release-2.1-implementation-plan.md` at the same commit).
 
-Release 2.1 is not implemented at this baseline. Before Release 3 production code begins, this map must be checked against the final Release 2.1 commit. Release 3 must consume the resulting Launcher and Session ownership model rather than implement a second version of it.
+Release 2.1 is implemented at this baseline. This commit is the final Release
+2.1 implementation state: commits after it on `main` are Release 2.1 Stage 1.6
+documentation, UAT, and plan-status work only, with no production Go changes.
+If further production changes land before Release 3 starts, re-verify the
+symbols below against the new final commit.
 
 ## Reading the map
 
@@ -21,7 +26,7 @@ The document distinguishes three categories:
 
 - **existing fact** — directly present at the baseline commit;
 - **accepted target** — already fixed by the Release 3 scope and domain designs;
-- **implementation gate** — accepted architecture that still requires evidence from the final Release 2.1 code or a bounded backend spike before executor work begins.
+- **implementation gate** — accepted architecture that still requires a bounded backend spike before executor work begins (the Release 2.1 evidence gate is resolved; see Confirmed implementation blockers).
 
 Target names describe one logical responsibility. Exact Go visibility follows the final package boundary. Capitalization of a domain term in documentation does not require an exported Go type in the current single-package implementation.
 
@@ -42,12 +47,12 @@ Target names describe one logical responsibility. Exact Go visibility follows th
 | Managed Container name | Immutable Session-local user-facing name and DNS alias. | Does not exist; one-shot `run` has no retained name. | Public field `name`; unique within one Session and DNS-label-compatible. Use an explicit caller value unchanged after validation, or default to an already-valid unused image repository basename. Invalid or conflicting defaults require an explicit name. |
 | Docker backend name | Diagnostic host-visible Docker object name. | Docker CLI chooses or receives transient names. | Generate `dhmc-<name>-<full-session-id>`. Every named Docker resource owned directly by a Session uses a stable type prefix and the full Session ID; names are not authority or public identity. |
 | BackendContainerID | Docker Engine container identifier. | Transient value read through a `--cidfile` for `run` shutdown cleanup. | Persistent internal correlation, never normal public authority. Only the admin orphan surface may accept it directly; ownership-mismatch force removal targets ManagedContainerID and resolves the exact recorded backend internally. |
-| Session | Authorization, ownership, isolation, and lifetime boundary. | `Session`; SQLite `sessions` row. | Retained and extended with Release 2.1 Launcher ownership and Release 3 teardown state. |
+| Session | Authorization, ownership, isolation, and lifetime boundary. | `Session`; SQLite `sessions` row with `launcher_id TEXT NOT NULL REFERENCES launchers(id)` and no `principal_id` column. | Retained and extended with Release 2.1 Launcher ownership and Release 3 teardown state. |
 | Principal | OS identity and maximum delegated policy. | `principals` table and Principal code. | Retained. It is not the direct owner of Release 3 containers or Operations. |
-| Launcher | Stable delegated Session owner. | Design-only in Release 2.1; no Go type or table at this baseline. | Inherited from Release 2.1. Release 3 must not recreate it. |
-| Credential | Rotatable bearer key owned by one Principal or Launcher. | Principal-only `credentials` model. | Inherited from Release 2.1. Credentials initiate work but do not own it. |
-| Owner | Domain object that controls resource lifetime and authorization. | Sessions currently carry nullable `principal_id`. | Always concrete: Launcher owns Session; Session owns Operation and Managed Container. Do not add a generic Owner hierarchy. |
-| Initiator | Subject that started an Operation. | Not stored in `operation`; only `auditPrincipalName` is retained for finish audit. | Internal Operation provenance: type plus authorized identifier. It is not ownership and is never part of the public Operation projection. |
+| Launcher | Stable delegated Session owner. | `Launcher` (package-private `launcher` row type); `launchers` table (`id` with prefix `dhl_`, `principal_id`, `name`, `enabled`, `scope_mode`, `created_at`); `launcher_allowed_roots` for `restricted` scope; default Launcher per principal (`ensureDefaultLauncher`/`findDefaultLauncher`); CLI `docker-helper launcher`. | Inherited from Release 2.1. Release 3 must not recreate it. |
+| Credential | Rotatable bearer key owned by one Principal or Launcher. | Single `credentials` table with a concrete owner: Principal credentials (`principal_id NOT NULL`, `launcher_id NULL`, named) and Launcher credentials (`launcher_id NOT NULL`, `principal_id NULL`, unnamed; at most one per launcher). Bearer tokens are `dhc_`-prefixed; credential IDs are `dhcr_`-prefixed. | Inherited from Release 2.1. Credentials initiate work but do not own it. |
+| Owner | Domain object that controls resource lifetime and authorization. | Launcher owns Session (`sessions.launcher_id` non-null); principal identity is derived through the ownership JOIN. | Always concrete: Launcher owns Session; Session owns Operation and Managed Container. Do not add a generic Owner hierarchy. |
+| Initiator | Subject that started an Operation. | Not stored in `operation`; `operation` carries an in-memory `LauncherID` for shutdown quiescing, and finish audit retains `auditPrincipalName` (principal projection of the owning Session). | Internal Operation provenance: type plus authorized identifier. It is not ownership and is never part of the public Operation projection. |
 | Actor | Subject recorded by an audit event. | No generic `actor` field; current audit has fields such as `principal_name` and `credential_id`. | Audit vocabulary only. Do not rename Operation `initiator` to `actor`. |
 | Target | Public resource affected by an Operation. | No common target field. Build/run metadata is embedded directly in `operation`. | Type-specific public target identity; never a Docker backend ID. |
 | Management state | Persistent helper-owned lifecycle state. | Session existence is mostly represented by row presence; Managed Container does not exist. | Session and Managed Container state needed for ownership and recovery. It remains internal and is not a second public state machine. |
@@ -66,7 +71,7 @@ Target names describe one logical responsibility. Exact Go visibility follows th
 The following rules are binding for Release 3 design and code review:
 
 1. Use `type` for the Operation discriminator. The current `Kind` field and `kind` JSON name do not survive the migration.
-2. Retain the established `op_` Operation ID prefix. It is already public and does not collide with `dhs_` Session IDs, `dhcr_` credential IDs, or bearer-token prefixes.
+2. Retain the established `op_` Operation ID prefix. It is already public and does not collide with `dhs_` Session IDs, `dhl_` Launcher IDs, `dhcr_` credential IDs, or bearer-token prefixes (`dht_` session/admin tokens, `dhc_` credentials).
 3. Do not use Operation identity as ManagedContainerID or Session identity.
 4. Use `initiator` in the Operation model and `actor` only if the audit model adopts that umbrella term.
 5. Do not introduce a generic `Owner`, `Resource`, `Job`, or `Task` abstraction where concrete Session ownership and Operation types are sufficient.
@@ -151,40 +156,60 @@ The current CLI polls status, fetches Operation logs, and can cancel both `run` 
 
 ## Session and ownership migration
 
-### Existing Release 2 baseline
+### Implemented Release 2.1 baseline
 
-`Session` currently contains:
+`Session` now contains:
 
 - `ID`;
 - `Workspace`;
 - `CreatedAt`;
 - `ExpiresAt`;
-- nullable `PrincipalID`;
-- projected `PrincipalName`.
+- non-null `LauncherID` (`dhl_...`);
+- projected `LauncherName` and `PrincipalName` (read-time ownership JOIN
+  through `launchers` to `principals`).
 
-The SQLite `sessions` table contains `id`, `token_hash`, `workspace`, timestamps, and nullable `principal_id`. Authentication treats a row as active when `expires_at > now`. Session deletion immediately deletes the row and releases the MAC binding. Startup expiry cleanup directly deletes expired rows.
+The SQLite `sessions` table contains `id`, `token_hash`, `workspace`,
+timestamps, and `launcher_id TEXT NOT NULL REFERENCES launchers(id)`. The
+retired `principal_id` column no longer exists and startup never re-adds it.
+Authentication treats a row as active when `expires_at > now`. Session
+deletion immediately deletes the row and releases the MAC binding. Startup
+expiry cleanup directly deletes expired rows.
 
-### Release 2.1 dependency
+Session ownership and control authorities are implemented in
+`session_control.go` (`resolveCreateLauncher`, `resolveCreatePolicy`,
+`computeLauncherEffectiveRoots` — the single authoritative three-level
+root policy) and `session_control.go` scope filtering over the common
+ownership query in `session.go`.
 
-Release 2.1 is expected to add stable Launcher ownership:
+### Release 2.1 Launcher ownership (implemented)
 
-- every non-legacy Session has one non-null Launcher owner;
-- Principal identity is derived through Launcher;
-- creator provenance is separate from owner;
-- existing attributable Sessions migrate to a default Launcher;
-- invalid legacy admin Sessions are removed during the 2.1 migration.
+The Launcher ownership model Release 3 must consume:
 
-Release 3 must start from the final implementation of this model. It must not add an alternative `owner_type/owner_id` pair or preserve `principal_id` as a second authorization path.
+- every Session has exactly one non-null Launcher owner;
+- Principal identity is derived through the Launcher;
+- creator provenance is separate from owner (credential provenance is
+  audit-only: `credential_id`, `credential_name`);
+- every Principal has an implicit `default` Launcher
+  (`ensureDefaultLauncher`/`findDefaultLauncher`);
+- user mode transparently owns everything through the daemon-owner
+  Principal and its default Launcher;
+- the v2.0.0 → 2.1 migration attributed attributable principal-owned
+  Sessions to the default Launcher and removed non-attributable
+  system-mode admin Sessions.
+
+Release 3 must start from the final implementation of this model. It must not
+add an alternative `owner_type/owner_id` pair or re-add `principal_id` as a
+second authorization path.
 
 ### Release 3 extension
 
 | Existing symbol or behavior | Release 3 action |
 | --- | --- |
-| `Session.PrincipalID` as direct owner | Consume the final Release 2.1 `LauncherID`; Principal is derived. |
+| `Session.LauncherID` as owner | Retained; Principal stays derived. |
 | Row presence as lifecycle state | Add explicit teardown state required to distinguish active, closing, cleanup failure, and closed tombstone behavior. Exact schema belongs to the Session implementation design. |
 | `deleteSession` / `deleteSessionForPrincipal` immediate DELETE | Replace control flow with `session.cleanup` admission and deterministic cleanup. Physical deletion occurs after successful cleanup and a fixed internal ten-minute observation grace. |
 | `cleanupExpiredSessions` immediate DELETE at startup | Replace with durable cleanup admission/recovery. Expiry must not bypass container, network, publishing, Operation, or MAC cleanup. Each transiently failed attempt terminates its Operation; the Session remains `closing`, persists attempt count and retry time, and creates a new cleanup Operation when due. Ownership ambiguity remains `cleanup_failed` for Admin action. |
-| `findSessionByToken` checks only expiry and Principal enabled state | Also reject non-active lifecycle states and use final Release 2.1 ownership policy. |
+| `findSessionByToken` checks only expiry and owner enablement | Also reject non-active lifecycle states. The Release 2.1 ownership policy (launcher/principal enablement through the ownership JOIN) is retained. |
 | `cleanupStaleSessionRuntimeDirs` treats non-active row absence as cleanup authority | Run only after durable ownership cleanup can prove the directory is stale. It must not race a retained cleanup-failure Session. |
 | `sessionRuntimeDir` and Docker config directory | Retain as runtime infrastructure; they are not persistent ownership records. |
 
@@ -230,12 +255,22 @@ Removal or replacement of existing keys requires config migration, `config show/
 
 ## Audit migration
 
-Current `auditRecord` contains separate fields such as `principal_name`, `credential_id`, `session_id`, `request_id`, and `operation_id`; it has no generic actor or initiator structure.
+Current `auditRecord` contains separate fields such as `principal_name`,
+`principal_enabled`, `principal_path`, `credential_id`, `credential_name`,
+`credential_changed`, `launcher_id`, `launcher_name`, `launcher_scope`,
+`launcher_enabled`, `session_id`, `workspace`, `request_id`, and
+`operation_id`; it has no generic actor or initiator structure. Launcher
+control-plane events (`launcher.create`, `launcher.list`, `launcher.update`,
+`launcher.scope_replace`, `launcher.delete`, `launcher.credential_issue`,
+`launcher.credential_rotate`, `launcher.credential_delete`) carry the launcher
+projection; `session.create` carries launcher and principal provenance;
+Docker-operation events carry `principal_name` (launcher identity lives on
+the owning Session).
 
 Release 3 should extend the audit vocabulary without making it the Operation schema:
 
 - Operation stores `initiator_type` and the permitted identifier needed for internal control-plane attribution, but its public projection exposes neither;
-- audit records the actor representation defined by the final Release 2.1 authority model;
+- audit records the actor representation defined by the implemented Release 2.1 authority model (`principal_name`, `launcher_id`, `launcher_name`, credential provenance);
 - audit includes public Operation type and target;
 - public and audit fields never contain bearer secrets or BackendContainerID;
 - workload output is not audit data.
@@ -259,9 +294,28 @@ The exact audit-field migration belongs to D9 and the security/test design. Avoi
 
 The code comparison exposes the following decisions that must be settled before broad executor implementation begins.
 
-### 1. Release 2.1 implementation baseline
+### 1. Release 2.1 implementation baseline (resolved)
 
-Launcher and final Session ownership names are design-only at the inspected commit. D1 and D0 persistence migrations must be based on the final Release 2.1 schema, not written against nullable Release 2 `principal_id` ownership.
+Release 2.1 is implemented at the pinned baseline commit. The final
+Session/ownership schema for D1 and D0 persistence migrations is:
+
+```sql
+CREATE TABLE sessions (
+    id         TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    workspace  TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    launcher_id TEXT NOT NULL REFERENCES launchers(id)
+);
+```
+
+The concrete ownership symbols are `Session.LauncherID` (Go), `launcher_id`
+(SQLite), the `launchers`/`launcher_allowed_roots` tables, and the
+`LauncherScopeMode` values `inherit`/`restricted`. Principal identity is the
+read-time projection `PrincipalName`; there is no stored
+`sessions.principal_id`. D0/D1 must be written against this schema, not
+against nullable Release 2 `principal_id` ownership.
 
 ### 2. Engine adapter compatibility spike
 
@@ -273,7 +327,11 @@ The operational architect may issue code-reading and D1 interface-design tasks f
 
 Production implementation tasks that depend on the following must wait until the corresponding blocker is resolved:
 
-- D0 durable persistence and D1 ownership: final Release 2.1 Session/ownership schema;
+- D0 durable persistence and D1 ownership: resolved (final Release 2.1 Session/ownership schema is pinned above);
 - D0 synchronous migration: the official Moby client adapter, minimum Engine API version, and ImageBuild compatibility evidence.
 
-When the Release 2.1 commit is available, update the baseline commit and replace every design-only Launcher or Session mapping with the actual symbol, table, column, and migration names before implementation starts.
+The Release 2.1 baseline commit has been consumed: every design-only Launcher
+or Session mapping in this map has been replaced with the actual symbol, table,
+column, and migration names. If production code changes after the pinned
+commit, re-verify the affected mappings against the new final commit before
+Release 3 implementation starts.
