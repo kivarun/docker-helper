@@ -9,6 +9,31 @@ The integration belongs at the client edge of the project. Agent-specific
 behavior must not be added to the daemon core or change the daemon capability
 contract.
 
+## Delegated agent identity (Release 2.1)
+
+A sandboxed agent authenticates with one of two delegated keys; both are
+stored with `docker-helper credential install` and sent as a Bearer token
+by the CLI and HTTP clients:
+
+- **Launcher credential** (narrowest): bound to exactly one launcher. The
+  agent can create sessions owned by that launcher, and can list and
+  delete only that launcher's sessions. Sessions use the launcher's
+  effective allowed roots (inherit or restricted scope).
+- **Principal credential** (broader): bound to a principal. The agent can
+  create sessions for that principal's launchers and manage that
+  principal's launchers. Suitable when the agent is trusted with the
+  principal's full workspace policy.
+
+`GET /auth` reports which authority the installed credential carries
+(`{"authority": "launcher", "principal": ..., "launcher_id": ...}` or
+`{"authority": "principal", "principal": ...}`); a Session token does not
+authenticate this endpoint. Launcher credential rotation replaces the
+key immediately: the old bearer is rejected, the launcher's sessions are
+unaffected, and no second credential is created.
+
+Skill and adapter authors must treat the installed credential as a
+secret: never print it, never copy it into logs or archives.
+
 ## Workspace-parent write invariant for user mode
 
 In user mode, the security of the workspace-root bind mount relies on the

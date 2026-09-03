@@ -12,12 +12,55 @@ Never:
 - invoke `docker` directly;
 - access `docker.sock`;
 - start, stop, reload, or configure Docker Helper;
-- create, list, delete, or otherwise manage Docker Helper sessions;
+- create, list, delete, or otherwise manage Docker Helper sessions, unless
+  the environment explicitly provisions this agent with a Docker Helper
+  credential (see Delegated identity below);
 - look for or use the Docker Helper administrative token;
-- print, log, echo, or otherwise expose `DOCKER_HELPER_SESSION_TOKEN`;
+- print, log, echo, or otherwise expose `DOCKER_HELPER_SESSION_TOKEN` or a
+  Docker Helper credential token;
 - fall back to direct Docker access if a Docker Helper operation fails;
 - use operator commands: `serve`, `init`, `reload`, `session`, `config`,
-  `principal`, `credential`.
+  `principal`, `launcher`, `credential`.
+
+## Delegated identity
+
+Some environments provision the agent with a Docker Helper credential
+instead of a pre-created session token. The credential is a Bearer key
+(stored by the environment via `docker-helper credential install`; the
+agent never installs or rotates it):
+
+- **Launcher credential** (narrowest): session creation and session
+  management are automatically scoped to one launcher. No selector is
+  needed; do not pass one.
+- **Principal credential** (broader): session creation resolves the
+  principal's default launcher automatically. Do not pass a selector
+  unless explicitly instructed.
+
+With a credential, create sessions with:
+
+```bash
+docker-helper session create --workspace .
+```
+
+and use the returned session token for Docker operations exactly as
+described below.
+
+`GET /auth` (HTTP, with the installed credential as the Bearer token)
+reports the authority:
+
+```bash
+curl --silent --show-error \
+  --unix-socket "$SOCKET" \
+  -H "Authorization: Bearer $DOCKER_HELPER_CREDENTIAL" \
+  http://localhost/auth
+```
+
+The response is `{"authority":"launcher",...}` or
+`{"authority":"principal",...}`. Do not display any token value.
+
+If the environment provides only `DOCKER_HELPER_SESSION_TOKEN` and no
+credential, skip this section entirely: do not create, list, or delete
+sessions.
 
 ## Client interfaces
 

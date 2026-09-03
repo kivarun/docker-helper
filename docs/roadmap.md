@@ -336,7 +336,7 @@ Explicitly outside Release 2:
   deleted;
 - dedicated unprivileged service-account architecture.
 
-## 2.1
+## 2.1 (implemented)
 
 ### Main goal: delegated Launcher ownership and default-driven control-plane flows
 
@@ -380,7 +380,18 @@ semantics.
 
 The binding concept, migration direction, and expected CLI/HTTP/database/test
 work are recorded in
-[`docs/release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md).
+[`docs/release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md);
+the binding implementation contract is
+[`docs/release-2.1-implementation-plan.md`](release-2.1-implementation-plan.md).
+
+Release 2.1 is implemented on `main`: the Launcher ownership model, the
+Launcher/credential control plane, the Session ownership cutover with the
+idempotent v2.0.0 → 2.1 ownership migration, launcher lifecycle propagation,
+helper-owned runtime correlation labels, and the `launcher` CLI are all
+shipped. The current behavior contract lives in
+[`docs/architecture.md`](architecture.md) ("Launcher ownership"); the Release 3
+vocabulary map has been updated to the final 2.1 symbols
+([`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md)).
 
 ### Post-2.0 validation and hardening follow-ups
 

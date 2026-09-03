@@ -46,6 +46,7 @@ Full architecture and detailed API documentation: [docs/architecture.md](docs/ar
   - [SELinux](#selinux)
 - [Workspace root policy](#workspace-root-policy)
 - [System mode: provisioning a principal](#system-mode-provisioning-a-principal)
+- [Delegated ownership: launchers](#delegated-ownership-launchers)
 - [Documentation](#documentation)
 - [Release artifacts](#release-artifacts)
 - [License](#license)
@@ -79,19 +80,31 @@ exactly one supported MAC backend: AppArmor or enforcing SELinux.
 
 ## Authentication model
 
-Three authentication classes provide different levels of access:
+Four authentication classes provide different levels of access:
 
 1. **Admin token** — full administrative access: manage principals,
-   credentials, and all sessions.
+   launchers, credentials, and all sessions.
 2. **Principal credential** — bound to a principal: create sessions for
-   that principal, list and delete only that principal's sessions.
-   Cannot manage principals or credentials.
-3. **Session token** — narrow workspace capability for Docker operations
+   that principal (default or an explicitly selected launcher), list and
+   delete only that principal's sessions, and manage that principal's
+   launchers and their credentials. Cannot manage other principals or
+   global configuration.
+3. **Launcher credential** — bound to one launcher (at most one credential
+   per launcher): create sessions owned by that launcher, list and delete
+   only that launcher's sessions. Cannot manage launchers or principals.
+4. **Session token** — narrow workspace capability for Docker operations
    (pull, build, run, registry login).
 
+A credential is a rotatable authentication key, never an owner. Every
+session is owned by exactly one launcher; principal identity is derived
+through that launcher. See
+[Delegated ownership: launchers](#delegated-ownership-launchers) below.
+
 After a session token is issued:
-- revoking the Principal credential does not invalidate the session;
-- disabling the principal deletes its active sessions and blocks their tokens;
+- revoking the Principal or Launcher credential does not invalidate the
+  session;
+- disabling the principal or its launcher deletes the affected active
+  sessions and blocks their tokens;
 - removing an allowed root does not invalidate the session;
 - session expiry or deletion blocks future requests;
 - an already-started Docker operation continues its lifecycle.
@@ -169,8 +182,9 @@ docker-helper pull alpine:3.24
 docker-helper run --image alpine:3.24 -- echo hello-from-docker-helper
 ```
 
-User mode does not require principals or credentials. The current user
-creates sessions directly.
+User mode does not require principals or credentials. Ownership is
+transparently mapped to an internal daemon-owner principal and its
+default launcher, so the current user creates sessions directly.
 
 ### Quick start: system mode
 
@@ -191,6 +205,12 @@ docker-helper credential install
 mkdir -p ~/myproject
 docker-helper session create --workspace ~/myproject
 ```
+
+Sessions created with a Principal credential are owned by that principal's
+implicit `default` launcher. To delegate an agent with a narrower,
+revocable key, create a launcher and give the agent its credential
+instead — see
+[Delegated ownership: launchers](#delegated-ownership-launchers).
 
 Export the `TOKEN` printed by `session create` (starts with `dht_...`):
 
@@ -705,8 +725,8 @@ admin token is required.
 
 ## Operator CLI
 
-API-backed operator commands (principal, credential, session, reload, admin-token rotate)
-support explicit endpoint selection:
+API-backed operator commands (principal, launcher, credential, session,
+reload, admin-token rotate) support explicit endpoint selection:
 
 ```
 --system              connect to system daemon (Unix socket)
@@ -1264,15 +1284,19 @@ sudo docker-helper credential create \
     --system --name laptop alice
 ```
 
-The three-level authorization model:
+The allowed-root narrowing model (global → principal → launcher → session):
 
 - **Global allowed root** — system-wide ceiling managed by
   `config allowed-root add`; authorization-only, does NOT prepare MAC.
 - **Principal allowed root** — per-principal narrowing managed by
   `principal allowed-root add`; does not prepare MAC.
+- **Launcher allowed root** — per-launcher narrowing for launchers in
+  `restricted` scope (see
+  [Delegated ownership: launchers](#delegated-ownership-launchers));
+  does not prepare MAC.
 - **Project workspace** — selected only at session creation time via
-  `session create --workspace PATH`; must be under both a global and
-  a principal allowed root.
+  `session create --workspace PATH`; must be under the global and principal
+  allowed roots (and, for restricted launchers, the launcher's roots).
 
 Individual projects are not registered persistently. The operator adds
 global roots and principal roots, then creates sessions for specific
@@ -1339,6 +1363,80 @@ The write is atomic: a failure will not corrupt an existing credential.
 Once installed, operator commands automatically select the system socket and
 credential when no user socket exists. `--system`, `--endpoint`, and
 `--token-file` remain available for an explicit selection.
+
+## Delegated ownership: launchers
+
+A launcher is a stable, delegated session owner beneath one principal.
+Every session is owned by exactly one launcher; the principal identity is
+derived through it. This enables one of two delegation patterns:
+
+- **Principal credential delegation** — the agent receives a Principal
+  credential and can create sessions for any of that principal's
+  launchers (its `default` launcher when no explicit selection is made).
+  Broadest delegated capability.
+- **Launcher credential delegation** — the operator creates a dedicated
+  launcher (optionally with narrower `restricted` scope) and the agent
+  receives that launcher's credential. The agent can create sessions only
+  for that launcher and can only see and manage that launcher's sessions.
+  Narrowest delegated capability; rotation revokes the old key
+  immediately without touching the launcher's sessions.
+
+Both credentials install the same way (`docker-helper credential install`)
+and are rotatable authentication keys — never resource owners.
+
+### Creating a launcher and delegating an agent
+
+As the operator (or the principal, using their credential):
+
+```bash
+# Create a launcher for agent work; issue its credential.
+sudo docker-helper launcher create --principal alice \
+    --name build-agent --issue-credential
+```
+
+The command prints the launcher and shows the credential token once
+(`dhc_...`). On the agent's machine (not as root):
+
+```bash
+docker-helper credential install   # paste the launcher credential token
+mkdir -p ~/myproject
+docker-helper session create --workspace ~/myproject
+```
+
+The agent can verify its delegated identity through the HTTP API
+(`GET /auth` with the installed credential): the response reports
+`{"authority": "launcher", "principal": "alice", "launcher_id": "dhl_..."}`.
+
+Launcher-scoped sessions use the launcher's effective roots:
+
+- `inherit` scope (the default): the principal's allowed roots apply
+  unchanged;
+- `restricted` scope: sessions must be inside the launcher's own allowed
+  roots as well — set at creation with `--allowed-root` and replaced
+  atomically:
+
+```bash
+sudo docker-helper launcher scope set dhl_... \
+    --allowed-root /srv/workspaces/alice/agent
+```
+
+### Managing launchers
+
+```bash
+sudo docker-helper launcher list --principal alice
+sudo docker-helper launcher show dhl_...
+sudo docker-helper launcher set dhl_... --enabled false   # disable: deletes its sessions
+sudo docker-helper launcher credential rotate dhl_...     # new token shown once; old rejected
+sudo docker-helper launcher delete dhl_...                # fails with 409 while runtime is active
+```
+
+`launcher create` infers the principal from the authenticated credential
+when `--principal` is omitted. Upgrading from v2.0.0: existing principal
+credentials and attributable sessions migrate automatically at first
+2.1 daemon startup (credentials preserved byte-for-byte; sessions move to
+the principal's `default` launcher). See
+[docs/architecture.md](docs/architecture.md) for the full ownership,
+migration, and audit contract.
 
 ## Documentation
 

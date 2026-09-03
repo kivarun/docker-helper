@@ -144,7 +144,7 @@ every agent input before passing it to Docker.
 
 ## Session lifecycle
 
-### Legacy/admin sessions
+### Admin sessions
 
 ```
 docker-helper init
@@ -160,11 +160,14 @@ docker-helper serve
     ├── reads admin token, computes SHA-256 hash
     ├── opens SQLite database
     ├── deletes expired session rows (expires_at <= now)
+    ├── runs ownership migration (idempotent; see Launcher ownership)
     └── starts HTTP server on Unix socket
     │
 POST /sessions  (admin token)
     │
-    ├── validates workspace inside AllowedRoot
+    ├── resolves the target launcher (explicit selector required in
+    │   system mode; local daemon-owner default in user mode)
+    ├── validates workspace inside the launcher's effective allowed roots
     ├── generates session ID (dhs_<32 hex chars>)
     ├── generates session token (dht_<64 hex chars>)
     ├── stores SHA-256 hash of token in database
@@ -182,7 +185,7 @@ POST /build or POST /run  (session token)
     ├── captures stdout/stderr into bounded LogBuffer
     ├── completion goroutine owns cmd.Wait()
     ├── transitions operation to succeeded/failed
-    └── writes audit record (no principal_name for legacy sessions)
+    └── writes audit record (principal_name omitted for daemon-owner sessions)
 ```
 
 ### Principal-owned sessions
@@ -204,25 +207,26 @@ POST /principals/{username}/credentials  (admin token)
 DELETE /principals/{username}  (admin token)
     │
     ├── collects session IDs for runtime cleanup
-    ├── deletes sessions (no FK cascade on sessions.principal_id)
-    ├── deletes principal (credentials/roots via FK ON DELETE CASCADE)
+    ├── fails with 409 launcher_runtime_active if a launcher
+    │   still has active runtime, else deletes sessions and launchers
+    ├── deletes principal (credentials/roots/launchers via FK CASCADE)
     ├── commits transaction
     └── best-effort cleanup of session runtime directories
     │
 POST /sessions  (Principal credential)
     │
     ├── validates credential
-    ├── resolves principal_id
-    ├── validates workspace inside global allowed_roots intersected with principal allowed roots
+    ├── resolves principal -> default or explicit launcher
+    ├── validates workspace inside global ∩ principal ∩ launcher allowed roots
     ├── generates session ID + token
-    ├── stores session with principal_id
+    ├── stores session with launcher_id
     └── returns session + token
     │
 POST /build or POST /run  (session token)
     │
-    ├── resolves principal_id from session
+    ├── resolves launcher -> principal through the ownership JOIN
     ├── execution identity = principal.uid:principal.gid
-    └── audit record contains principal_name
+    └── audit record contains principal_name and launcher provenance
 ```
 
 ### Principal lifecycle
@@ -238,9 +242,9 @@ PATCH /principals/{username}  (admin token, body: {"enabled": false})
     │
     Subsequent session token lookup:
     │
-    ├── findSessionByToken checks AND (s.principal_id IS NULL OR p.enabled = 1)
+    ├── findSessionByToken rejects sessions whose launcher's principal is disabled
     ├── principal-owned sessions of disabled principal are rejected
-    └── legacy sessions (NULL principal_id) are unaffected
+    └── disabled launchers' credentials are rejected at authentication time
 ```
 
 ### Shared session capability lifecycle
@@ -248,7 +252,7 @@ PATCH /principals/{username}  (admin token, body: {"enabled": false})
 ```
 POST /build or POST /run  (session token)
     │
-    ├── resolves session (legacy or principal-owned)
+    ├── resolves session (launcher-owned)
     ├── execution identity = principal UID:GID or daemon UID:GID
     ├── registers operation (tryCreate — atomic with shutdown gate)
     ├── starts async process (cmd.Start under op.mu)
@@ -281,17 +285,24 @@ subsequent requests with deleted session token
 ```
 
 Session token semantics:
-- revoking the Principal credential does not invalidate issued sessions;
-- disabling the principal deletes its active sessions and blocks their tokens;
+- revoking a Principal or Launcher credential does not invalidate issued
+  sessions; deleting a Launcher credential leaves its launcher's sessions
+  owned and running but removes that authentication key;
+- disabling the principal or its launcher deletes the affected sessions and
+  blocks their tokens; disabled launchers also reject credential
+  authentication;
 - removing an allowed root does not invalidate issued sessions;
 - session expiry or deletion blocks future requests;
 - an already-started Docker operation continues its lifecycle.
 
-A Principal credential stays with the launcher. The coding agent never
-receives it. The agent only gets a session token, which grants access to
-a single workspace and expires after the configured TTL. This separation
-ensures the agent cannot create sessions for other workspaces or manage
-sessions it does not own.
+A Principal credential stays with the launcher (the human operator or
+provisioning tool that starts the agent); the coding agent never receives
+it. For delegated agents, the launcher issues a Launcher credential and
+gives that to the agent instead. The agent only gets a credential (which
+creates sessions) or a session token (which grants access to a single
+workspace and expires after the configured TTL). This separation ensures
+the agent cannot create sessions for other workspaces, reach other
+launchers' sessions, or manage sessions it does not own.
 
 Expired sessions are rejected immediately by the `expires_at` check in
 `findSessionByToken`. Their database rows are physically removed the next
@@ -303,10 +314,11 @@ docker-helper provides a CLI for session management.
 
 ### docker-helper session create
 
-Create a new session. Requires admin token or Principal credential.
+Create a new session. Requires admin token, Principal credential, or
+Launcher credential.
 
 ```
-docker-helper session create --workspace PATH [--json]
+docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--json]
 ```
 
 Flags:
@@ -319,16 +331,22 @@ Flags:
 Returns the session ID, token, workspace, creation time, and expiration
 time. The token is shown only once and cannot be retrieved later.
 
-With admin token: creates a session with global scope.
-With Principal credential: creates a session for the credential's principal;
-workspace must be inside the principal's allowed roots.
+The HTTP API additionally accepts explicit ownership selectors in the
+request body (`launcher_id` or `principal`, mutually exclusive; see
+Session selectors above). The CLI relies on default resolution: a
+Principal credential resolves its principal's default launcher, a
+Launcher credential is forced to its own launcher, and a user-mode admin
+token resolves the local daemon-owner default. A system-mode admin token
+requires an explicit selector (`400 missing_launcher_selector`), so
+system-mode admin session creation goes through the HTTP API.
 
 ### docker-helper session list
 
-List active sessions. Requires admin token or Principal credential.
+List active sessions. Requires admin token, Principal credential, or
+Launcher credential.
 
 ```
-docker-helper session list [--json]
+docker-helper session list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--json]
 ```
 
 Flags:
@@ -337,18 +355,20 @@ Flags:
 |------|-------------|
 | `--json` | Output in JSON format |
 
-Returns a table of active sessions with ID, workspace, creation time,
-and expiration time.
+Returns a table of active sessions with ID, workspace, launcher, creation
+time, and expiration time.
 
 With admin token: lists all sessions.
 With Principal credential: lists only sessions for the credential's principal.
+With Launcher credential: lists only sessions owned by the credential's launcher.
 
 ### docker-helper session delete
 
-Delete a session. Requires admin token or Principal credential.
+Delete a session. Requires admin token, Principal credential, or Launcher
+credential.
 
 ```
-docker-helper session delete --id SESSION_ID [--json]
+docker-helper session delete [--system] [--endpoint ENDPOINT] [--token-file PATH] --id SESSION_ID [--json]
 ```
 
 Flags:
@@ -363,6 +383,9 @@ token will receive 401 Unauthorized.
 
 With admin token: can delete any session.
 With Principal credential: can only delete sessions for its principal.
+With Launcher credential: can only delete sessions owned by its launcher;
+foreign sessions return the same `not_found` outcome (no existence
+disclosure).
 
 ### docker-helper session cleanup
 
@@ -412,9 +435,13 @@ for full syntax:
   `unset`.
 - `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
   `set`, `delete`, `allowed-root`.
+- `launcher` — Manage launchers. Subcommands: `create`, `list`, `show`,
+  `set`, `delete`, `scope` (`set`), `credential` (`issue`, `rotate`,
+  `delete`). See Launcher ownership above for the full contract.
 - `credential` — Manage Principal credentials. Subcommands: `create`, `list`,
   `revoke`, `install`. `credential create --name` is optional and uses the
-  literal name `default` when omitted.
+  literal name `default` when omitted. The same `credential install` command
+  stores a Launcher credential token for a delegated agent.
 - `admin-token` — Manage the admin token. Subcommand: `rotate` (rotate the
   admin token; requires the current token, new token shown once, old token
   invalid immediately, no restart).
@@ -658,15 +685,33 @@ Three authentication classes provide different levels of access:
 - credential token prefixed `dhc_`, credential ID prefixed `dhcr_`;
 - SHA-256 hash stored in SQLite;
 - grants access scoped to the principal: create sessions for that principal,
-  list and delete only that principal's sessions;
-- cannot manage principals or credentials;
+  list and delete only that principal's sessions, and manage that principal's
+  launchers and their credentials;
+- cannot manage other principals, their launchers, or global configuration;
 - sent as `Authorization: Bearer <credential-token>`;
 - resolved through database lookup by token hash.
 
+### Launcher credential
+
+- at most one credential exists per launcher; issued with
+  `PUT /launchers/{id}/credential` (admin or owning-principal token required)
+  and replaced by `POST /launchers/{id}/credential/rotate`;
+- same token format as Principal credentials (`dhc_` + 64 hex characters);
+  the token itself carries no owner type — the owner is resolved from
+  persistent state at authentication time;
+- SHA-256 hash stored in SQLite;
+- grants access scoped to one launcher: create sessions owned by that
+  launcher, list and delete only that launcher's sessions, and inspect the
+  launcher itself via `GET /auth`;
+- cannot manage launchers, principals, credentials, or other launchers'
+  sessions;
+- deleting the credential does not delete the launcher or its sessions; it
+  only removes that authentication key.
+
 #### Credential install
 
-The `credential install` command stores the Principal credential token for the principal
-user. It is not run as root.
+The `credential install` command stores a credential token (Principal or
+Launcher) for the principal user. It is not run as root.
 
 - Token format: `dhc_` + 64 lowercase hex characters (68 total).
 - Token stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`
@@ -702,10 +747,219 @@ Endpoint and token resolution for default (no `--system`) mode:
 - resolved through database lookup by token hash and checked for expiration;
 - deletion removes the session and invalidates subsequent requests.
 
-Session management is dual-authenticated:
-- admin token -> global session management (create, list all, delete any);
-- Principal credential -> principal-scoped session management (create for its
-  principal, list and delete only its principal's sessions).
+Session management is authenticated by authority:
+- admin token -> global session management (create with explicit selector,
+  list all, delete any);
+- Principal credential -> principal-scoped session management (create for
+  the principal's default or an explicit launcher, list and delete only that
+  principal's sessions, manage that principal's launchers);
+- Launcher credential -> launcher-scoped session management (create for its
+  own launcher, list and delete only its launcher's sessions).
+
+`GET /auth` reports the authenticated authority to the caller as
+`{"authority": "admin"}`, `{"authority": "principal", "principal": "..."}`
+or `{"authority": "launcher", "principal": "...", "launcher_id": "..."}`.
+It accepts an admin token, Principal credential, or Launcher credential; a
+Session token does not authenticate this endpoint. Invalid, revoked, or
+disabled credentials follow the existing non-disclosing authentication
+semantics and receive no identity information.
+
+## Launcher ownership
+
+Release 2.1 adds one stable ownership and delegation level between Principal
+and Session. The binding domain model is:
+
+```
+Principal (OS identity, authorization ceiling)
+    └── Launcher (stable delegated Session owner)
+            └── Session (ephemeral capability)
+```
+
+- The Launcher is the only Session owner. `sessions.launcher_id` is
+  `NOT NULL` and references `launchers(id)`; the retired
+  `sessions.principal_id` column no longer exists.
+- Principal identity is derived through the Launcher (`Session.LauncherID`
+  is stored; `PrincipalName` is a read-time projection via the ownership
+  JOIN through `launchers` to `principals`).
+- A credential is a rotatable authentication key, never an owner. Principal
+  credentials initiate and manage work for their principal; Launcher
+  credentials initiate and manage work for their launcher. Ownership is
+  derived from persistent state, never from the token.
+- The CLI is never an authorization authority; the daemon resolves and
+  enforces all policy.
+
+### Launcher model
+
+`launchers` table: `id` (`dhl_` + 32 hex characters), `principal_id`
+(REFERENCES `principals(id)`), `name`, `enabled`, `scope_mode`
+(`inherit` or `restricted`), `created_at`. Launcher-scoped roots live in
+`launcher_allowed_roots` (only meaningful in `restricted` scope).
+
+Every principal has an implicit default Launcher named `default`:
+
+- provisioning is idempotent (`ensureDefaultLauncher`): the first need
+  creates the row; later startups resolve it read-only
+  (`findDefaultLauncher`);
+- user mode transparently maps all ownership to one daemon-owner principal
+  and its default Launcher, so quick start requires no Principal, Launcher,
+  or credential and preserves the effective global-root semantics;
+- system mode requires explicit ownership: an authenticated Principal
+  resolves its own default Launcher when no explicit selector is supplied.
+
+### Launcher scope and effective roots
+
+Launcher scope narrows the Principal authorization ceiling for sessions
+created through that launcher; it never widens and never owns MAC state:
+
+| Launcher scope | Effective roots for new sessions |
+|---|---|
+| `inherit` | global allowed roots ∩ principal allowed roots |
+| `restricted` | global ∩ principal ∩ launcher allowed roots |
+
+Evaluation happens at session-creation time against current state; a
+launcher root that is no longer under the principal ceiling is rejected
+then (never silently truncated), so stale out-of-ceiling roots cannot
+produce a session outside the principal's allowed roots.
+
+Scope is replaced atomically: `PUT /launchers/{id}/allowed-roots` accepts
+the complete scope (`{"scope": "inherit", "allowed_roots": []}` or
+`{"scope": "restricted", "allowed_roots": [...]}`); there is no
+read-modify-write policy mutation through the CLI.
+
+### Launcher control plane
+
+HTTP surface (admin token or owning-principal credential; a Launcher
+credential cannot manage launchers):
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /principals/{username}/launchers` | create launcher (optional one-time credential issuance) |
+| `GET /principals/{username}/launchers` | list that principal's launchers |
+| `GET /launchers/{id}` | show launcher |
+| `PATCH /launchers/{id}` | rename / enable / disable |
+| `PUT /launchers/{id}/allowed-roots` | atomic scope replacement |
+| `DELETE /launchers/{id}` | delete launcher (checked delete) |
+| `PUT /launchers/{id}/credential` | issue the launcher's single credential |
+| `GET /launchers/{id}/credential` | show credential metadata |
+| `POST /launchers/{id}/credential/rotate` | rotate the credential |
+| `DELETE /launchers/{id}/credential` | delete the credential |
+
+Launcher projection: `{"id", "principal", "name", "enabled", "scope",
+"allowed_roots", "created_at"}`. Create response carries the one-time
+credential token only when issuance was requested. Exactly one credential
+may exist per launcher (`launcher_credential_exists` on a second issuance;
+rotation replaces the existing credential and its token).
+
+CLI surface:
+
+```
+docker-helper launcher create [--principal USER] [--name NAME]
+    [--allowed-root PATH]... [--issue-credential | --no-credential]
+docker-helper launcher list [--principal USER]
+docker-helper launcher show LAUNCHER_ID
+docker-helper launcher set [--name NAME] [--enabled true|false] LAUNCHER_ID
+docker-helper launcher delete LAUNCHER_ID
+docker-helper launcher scope set [--inherit | --allowed-root PATH]... LAUNCHER_ID
+docker-helper launcher credential issue LAUNCHER_ID
+docker-helper launcher credential rotate LAUNCHER_ID
+docker-helper launcher credential delete LAUNCHER_ID
+```
+
+`create` infers the principal from the authenticated credential when
+`--principal` is omitted and prompts for the credential choice on a TTY;
+non-interactive use must pass `--issue-credential` or `--no-credential`
+explicitly.
+
+### Session selectors and default resolution
+
+`POST /sessions` accepts `{"workspace", "launcher_id", "principal"}`:
+
+- `launcher_id` and `principal` are mutually exclusive; both present is
+  `400 conflicting_selectors`; an explicitly present but empty or malformed
+  selector is `400 invalid_selector`;
+- Launcher credential: the owning launcher is forced; a conflicting
+  explicit selector is rejected;
+- Principal credential with no selector: resolves that principal's default
+  launcher;
+- Principal credential with `principal` selector: must name the
+  authenticated principal (same non-disclosure rules as before);
+- admin token (system mode): exactly one selector is required; admin token
+  (user mode): omission resolves the local daemon-owner default launcher.
+
+### Launcher lifecycle and cleanup
+
+Launcher disable/delete propagation reuses the existing Session lifecycle
+and MAC/runtime cleanup owners:
+
+- disabling a launcher deletes its sessions and cleans their runtime state
+  through the existing per-session cleanup path; a disabled launcher
+  rejects new session creation and its credential authentication
+  (`launcher disabled`);
+- deleting a launcher performs a checked delete: if its sessions still
+  have active runtime state, the delete fails with
+  `409 launcher_runtime_active` and the launcher stays enabled so it can
+  be disabled explicitly first; otherwise sessions are deleted and the
+  launcher row is removed;
+- principal disable/delete propagates: disabling a principal deletes all
+  its sessions; deleting a principal deletes its launchers (FK cascade)
+  and fails with `409 launcher_runtime_active` if any launcher still has
+  active runtime;
+- an individually disabled launcher stays disabled through parent
+  enable/disable transitions; re-enabling the principal or parent does not
+  re-enable it;
+- credential rotation keeps the launcher identity and its sessions: the
+  old bearer is rejected immediately, the replacement is authorized, and
+  no second credential row is created.
+
+### Ownership migration (v2.0 -> 2.1)
+
+Startup migration is idempotent and restart-safe, guarded by the daemon
+instance lock:
+
+| Legacy state | Result |
+|---|---|
+| v2.0 principal credential rows | preserved byte-for-byte as Principal credentials (`launcher_id NULL`, no launcher credential fabricated) |
+| attributable principal-owned sessions | re-owned by that principal's `default` launcher |
+| user-mode NULL-owner sessions | attributed to the daemon-owner default launcher |
+| system-mode NULL-owner (admin) sessions | invalidated (removed; never left ownerless) |
+| dangling principal reference | migration fails closed, legacy table intact (transaction rollback) |
+
+A dangling reference, a schema-shape mismatch, or a foreign-key violation
+in the rebuilt sessions table aborts the migration before commit. Invalid
+sessions leave no permanent helper-owned MAC or runtime state: they are
+removed before the MAC coordinator is created, and the existing startup
+cleanup paths (`ReconcileLiveSessions`, stale-boundary release, and
+`cleanupStaleSessionRuntimeDirs`) release any directories or boundaries
+whose only consumer was an invalidated session. After migration the final
+schema is authoritative and startup never re-adds `principal_id`.
+
+### Runtime correlation labels
+
+Containers started by docker-helper carry helper-owned labels used only for
+correlation and checked cleanup; user input cannot set or override them:
+
+```
+com.dockerhelper.session.id      = <session id>
+com.dockerhelper.launcher.id     = <launcher id>
+com.dockerhelper.principal.name  = <principal username>
+com.dockerhelper.correlation.schema = 1
+```
+
+Labels are correlation/cleanup evidence, not authorization state. The
+namespace is deliberately neutral: only the Launcher is the Session owner;
+the Session and Principal labels are provenance.
+
+### Launcher audit provenance
+
+Launcher audit events carry the full launcher projection fields
+(`launcher_id`, `launcher_name`, `launcher_scope`, plus
+`launcher_enabled` on update events). `session.create` additionally
+carries `launcher_id`, `launcher_name`, and `principal_name`. Docker
+operation events (`build`/`run`/`pull`) continue to record
+`principal_name`; launcher identity lives on the session that owns the
+operation. Credential provenance (`credential_id`, and `credential_name`
+where the credential has a name) is recorded on session-control events
+performed with a credential.
 
 ## Workspace isolation
 
@@ -733,16 +987,21 @@ workspace file type.
 
 ### Three-level authorization model
 
-Authorization flows through three levels:
+Authorization flows through four narrowing steps (three allowed-root
+levels plus the delegated Launcher owner):
 
 1. **Global allowed_roots** (config.json) — the system-wide authorization
    ceiling, managed by `config allowed-root list/add/remove`. Changing
    allowed roots is a policy-only operation; it does NOT prepare MAC state.
 2. **Principal allowed roots** (database) — per-principal narrowing, managed
    by `principal allowed-root add/remove`. Does not prepare MAC.
-3. **Session workspace** (ephemeral) — selected only at session creation time
-   via `session create --workspace PATH`. Must be under both a global and a
-   principal allowed root.
+3. **Launcher allowed roots** (database, `restricted` scope only) —
+   per-launcher narrowing beneath one principal; `inherit` scope applies no
+   launcher-level narrowing. Evaluated at session-creation time against
+   current state. Does not prepare MAC.
+4. **Session workspace** (ephemeral) — selected only at session creation time
+   via `session create --workspace PATH`. Must be under a global, the
+   principal, and (when restricted) the launcher allowed root.
 
 MAC state is derived from the concrete live session/workspace lifecycle,
 not from the authorization ceiling. Only the session workspace participates
@@ -1475,6 +1734,7 @@ Implemented event families are:
 | Authentication | `auth.failure`, `auth.session` |
 | Sessions | `session.create`, `session.list`, `session.delete` |
 | Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_remove`, `principal.delete` |
+| Launchers | `launcher.create`, `launcher.list`, `launcher.update`, `launcher.scope_replace`, `launcher.delete`, `launcher.credential_issue`, `launcher.credential_rotate`, `launcher.credential_delete` |
 | Credentials/admin | `principal.credential_create`, `principal.credential_revoke`, `admin_token.rotate` |
 | Docker operations | `pull.start`, `pull.finish`, `pull.rejected`, `build.start`, `build.finish`, `build.rejected`, `run.start`, `run.finish`, `run.rejected`, `registry.login.start`, `registry.login.finish` |
 | Configuration | `config.reload` |
@@ -1525,6 +1785,10 @@ Emitted for every `POST /sessions` request after authentication.
 |-------|------|-------------|
 | `session_id` | string | session identifier (present on `success` only) |
 | `workspace` | string | workspace path from the request |
+| `launcher_id` | string | owning launcher (present on `success` only) |
+| `launcher_name` | string | owning launcher name (present on `success` only) |
+| `principal_name` | string | owning principal (present on `success` only) |
+| `credential_id` | string | credential used for the request (non-admin authorities) |
 | `result` | string | outcome code |
 | `duration` | string | request wall-clock time |
 
@@ -1534,7 +1798,9 @@ Result codes:
 |------|-----------|
 | `success` | session created |
 | `invalid_json` | request body is not valid JSON |
-| `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside `AllowedRoot` |
+| `conflicting_selectors` | both `launcher_id` and `principal` selectors present |
+| `invalid_selector` | an explicitly present selector is empty or malformed |
+| `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
 | `unknown_error` | unexpected error not classified above |
@@ -1601,6 +1867,22 @@ Result codes:
 | `invalid_json` | request body is not valid JSON |
 | `not_found` | no principal with the given username |
 | `error` | database failure during update |
+
+#### launcher events
+
+Launcher control-plane events share one schema. `launcher.credential_*`
+events additionally carry `credential_id` (and `credential_changed` on
+rotate when the credential was replaced).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `launcher_id` | string | launcher identifier |
+| `launcher_name` | string | launcher name (present where known) |
+| `launcher_scope` | string | `inherit` or `restricted` (create/scope_replace) |
+| `launcher_enabled` | boolean | requested enabled state (update) |
+| `principal_name` | string | owning principal |
+| `result` | string | outcome code |
+| `duration` | string | request wall-clock time |
 
 #### run.start
 
@@ -1836,8 +2118,8 @@ docker-helper applies a fixed security policy when running containers:
 - SELinux system mode uses
   `--security-opt label=type:docker_helper_container_t` and keeps MCS
   confinement;
-- `--user <uid>:<gid>` — run as the principal's UID and GID for
-  principal-owned sessions, or daemon UID:GID for legacy sessions.
+- `--user <uid>:<gid>` — run as the session owner principal's UID and GID,
+  or daemon UID:GID for daemon-owner (user-mode) sessions.
 
 ## Design principles
 
@@ -1871,9 +2153,6 @@ docker-helper applies a fixed security policy when running containers:
 Items discussed but not yet implemented:
 
 - OpenCode custom tool integration (client-side);
-- Release 2.1 delegated Launcher ownership and default-driven control-plane
-  flows as specified in
-  [`release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md);
 - Release 3 managed-container lifecycle, interactive exec, per-Session
   networking, narrow publishing, and resource limits;
 - remote transport and execution contract in Release 4 or later, driven by
