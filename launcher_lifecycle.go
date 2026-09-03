@@ -351,6 +351,68 @@ func (a *App) runtimeActiveForLauncher(ctx context.Context, launcherID string) (
 	return false, nil
 }
 
+// launcherPriorState captures a Launcher's enabled value before a checked-delete
+// prologue disables it, so an abortive delete whose runtime cannot be classified
+// can restore the authoritative state it had before it refused to proceed. It is
+// internal to the checked-delete failure path and is never introduced to the
+// existing disabled-state contract.
+type launcherPriorState struct {
+	id      string
+	enabled bool
+}
+
+// launcherEnabledState reports the Launcher's current enabled value, or an error
+// if it cannot be read.
+func launcherEnabledState(db *sql.DB, launcherID string) (bool, error) {
+	var v int
+	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id = ?`, launcherID).Scan(&v); err != nil {
+		return false, fmt.Errorf("cannot read launcher enabled state: %w", err)
+	}
+	return v != 0, nil
+}
+
+// launcherPriorStates captures the enabled state of every given Launcher before
+// a checked-delete disables them.
+func (a *App) launcherPriorStates(launchers []string) ([]launcherPriorState, error) {
+	states := make([]launcherPriorState, 0, len(launchers))
+	for _, id := range launchers {
+		enabled, err := launcherEnabledState(a.DB, id)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, launcherPriorState{id: id, enabled: enabled})
+	}
+	return states, nil
+}
+
+// restoreLauncherStateAfterFailedDelete re-applies the captured authoritative
+// enabled state of a Launcher whose checked delete was refused because its
+// runtime could not be classified (and therefore the delete left no durable
+// disabled authority behind), then re-syncs supervisor admission to the effective
+// hierarchical authorities. A previously-enabled Launcher is re-opened; a
+// previously-disabled one stays admission-closed. Sessions destroyed during the
+// abortive disable prologue are not recreated; the disable was a genuine
+// invalidation regardless of the delete's eventual outcome.
+func (a *App) restoreLauncherStateAfterFailedDelete(ctx context.Context, prior launcherPriorState) {
+	if prior.enabled {
+		if _, err := a.applyLauncherEnabledChange(prior.id, true); err != nil {
+			opLog(ctx).Error("restore launcher state after failed checked delete",
+				slog.String("operation", "checked_delete"),
+				slog.String("launcher_id", prior.id),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+	}
+	if err := a.syncLauncherAdmission(prior.id); err != nil {
+		opLog(ctx).Error("restore launcher admission after failed checked delete",
+			slog.String("operation", "checked_delete"),
+			slog.String("launcher_id", prior.id),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
 // disableLauncher transitions a Launcher to disabled, invalidating its Sessions
 // (closing Session admission at the DB level via the enabled-conditional INSERT)
 // and closing Operation admission on the supervisor. The quiesce is set BEFORE
@@ -395,7 +457,9 @@ func (a *App) enableLauncher(launcherID string) error {
 //     running, or an attributable running container, refuses deletion with
 //     ErrLauncherRuntimeActive (leaving the Launcher disabled, its Sessions
 //     invalidated, admission closed, and the row preserved). Inspection failure
-//     fails closed with the same durable state.
+//     (runtime cannot be classified — for example Docker CLI unavailable)
+//     also refuses deletion, but restores the Launcher to its prior enabled
+//     state and re-opens admission rather than leaving it durably disabled.
 //  3. If clean, remove stale/exited helper containers and delete the Launcher
 //     row. Sessions were already removed by step 1.
 //
@@ -404,6 +468,11 @@ func (a *App) enableLauncher(launcherID string) error {
 // admitted Operation is visible to the step-2 check, and on refusal the row is
 // preserved. It never kills a genuinely running Operation.
 func (a *App) deleteLauncherChecked(ctx context.Context, launcherID string) ([]string, error) {
+	prior, err := launcherEnabledState(a.DB, launcherID)
+	if err != nil {
+		return nil, err
+	}
+
 	revoked, err := a.disableLauncher(launcherID)
 	if err != nil {
 		return nil, err
@@ -411,10 +480,13 @@ func (a *App) deleteLauncherChecked(ctx context.Context, launcherID string) ([]s
 
 	active, err := a.runtimeActiveForLauncher(ctx, launcherID)
 	if err != nil {
-		// Keep the Launcher durably disabled and quiesced: it must not lose its
-		// persisted owner while its runtime is unclassifiable. The row is
-		// preserved and admission stays closed because the Launcher remains
-		// disabled; only a later enable reopens it.
+		// Runtime cannot be classified (for example the Docker CLI is
+		// unavailable): refuse the delete WITHOUT leaving the Launcher durably
+		// disabled. The disable above was only the deletion prologue, so the
+		// authoritative state is restored and admission re-synced to the
+		// effective hierarchical authorities. This keeps checked deletion from
+		// wedging a Launcher merely because its runtime cannot be inspected.
+		a.restoreLauncherStateAfterFailedDelete(ctx, launcherPriorState{id: launcherID, enabled: prior})
 		return nil, fmt.Errorf("cannot inspect launcher runtime: %w", err)
 	}
 	if active {
@@ -459,9 +531,11 @@ func principalLaunchers(db *sql.DB, principalID int64) ([]string, error) {
 // (closing Operation admission). Any running Operation admitted before the
 // quiesce refuses the delete with ErrLauncherRuntimeActive (409), leaving all
 // of the Principal's Launchers disabled, quiesced, and their Sessions
-// invalidated but preserving the rows. Inspection failure fails closed with the
-// same durable state. On a clean check it removes stale containers and delegates
-// the committed removal to the Principal delete owner.
+// invalidated but preserving the rows. Inspection failure (runtime cannot be
+// classified — for example Docker CLI unavailable) also refuses the delete, but
+// restores every Launcher to its prior enabled state and re-opens admission so
+// the Principal is not left half-torn-down. On a clean check it removes stale
+// containers and delegates the committed removal to the Principal delete owner.
 func (a *App) deletePrincipalChecked(ctx context.Context, username string) ([]string, error) {
 	principalID, err := findPrincipalIDByUsername(a.DB, username)
 	if err != nil {
@@ -469,6 +543,11 @@ func (a *App) deletePrincipalChecked(ctx context.Context, username string) ([]st
 	}
 
 	launchers, err := principalLaunchers(a.DB, int64(principalID))
+	if err != nil {
+		return nil, err
+	}
+
+	states, err := a.launcherPriorStates(launchers)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +567,14 @@ func (a *App) deletePrincipalChecked(ctx context.Context, username string) ([]st
 	for _, lid := range launchers {
 		active, err := a.runtimeActiveForLauncher(ctx, lid)
 		if err != nil {
-			// Keep all Launchers disabled + quiesced (durable state preserved).
+			// Runtime cannot be classified (for example the Docker CLI is
+			// unavailable): refuse the Principal delete WITHOUT leaving its
+			// Launchers durably disabled. Restore every Launcher to the state it
+			// had before this abortive delete prologue and re-sync admission to
+			// the effective hierarchical authorities.
+			for _, st := range states {
+				a.restoreLauncherStateAfterFailedDelete(ctx, st)
+			}
 			return nil, fmt.Errorf("cannot inspect principal runtime: %w", err)
 		}
 		if active {

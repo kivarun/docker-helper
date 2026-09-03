@@ -306,7 +306,11 @@ func TestDeleteLauncherCheckedStaleContainerRemoved(t *testing.T) {
 }
 
 // TestDeleteLauncherCheckedInspectErrorFailClosed proves an unclassifiable
-// inspection preserves the Launcher and surfaces the failure.
+// inspection preserves the Launcher, refuses the delete, and — because the
+// runtime could not be classified rather than being confirmed active — restores
+// the Launcher to its prior enabled state and re-opens its admission instead of
+// leaving it durably disabled. This is the UAT regression where a Docker
+// inspection failure must not wedge a Launcher.
 func TestDeleteLauncherCheckedInspectErrorFailClosed(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app := deleteLifecycleApp(t, db)
@@ -318,8 +322,55 @@ func TestDeleteLauncherCheckedInspectErrorFailClosed(t *testing.T) {
 	if _, err := app.deleteLauncherChecked(context.Background(), laID); !errors.Is(err, sentinel) {
 		t.Fatalf("expected inspect error propagated, got %v", err)
 	}
+	// The Launcher row is preserved.
 	if _, err := findLauncherByID(db, laID); err != nil {
 		t.Fatalf("launcher should be preserved on inspect failure: %v", err)
+	}
+	// The Launcher is restored to its prior enabled state (not wedged disabled).
+	var enabled int
+	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, laID).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 1 {
+		t.Errorf("expected inspect-failure delete to restore launcher enabled=1, got %d", enabled)
+	}
+	// Admission is re-opened: a fresh Operation for the Launcher can be admitted
+	// again, exactly as the post-UAT mount-pin/session flow requires.
+	if app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Error("expected launcher admission re-opened after inspect-failure delete (not quiesced)")
+	}
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); !admitted {
+		t.Error("expected operation admitted for launcher after inspect-failure delete restored it")
+	}
+}
+
+// TestDeleteLauncherCheckedInspectErrorPreservesDisabledLauncher proves that a
+// Launcher which was ALREADY individually disabled before a delete attempt stays
+// disabled and admission-closed when the delete then fails on inspection: the
+// restore must not reopen a launcher the operator had intentionally disabled.
+func TestDeleteLauncherCheckedInspectErrorPreservesDisabledLauncher(t *testing.T) {
+	db, laID, _ := launcherLifecycleDB(t)
+	app := deleteLifecycleApp(t, db)
+	if _, err := app.disableLauncher(laID); err != nil {
+		t.Fatalf("disable launcher: %v", err)
+	}
+	sentinel := errors.New("inspect failure")
+	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
+		return nil, sentinel
+	}
+
+	if _, err := app.deleteLauncherChecked(context.Background(), laID); !errors.Is(err, sentinel) {
+		t.Fatalf("expected inspect error propagated, got %v", err)
+	}
+	var enabled int
+	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, laID).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 0 {
+		t.Errorf("expected previously-disabled launcher to stay disabled, got %d", enabled)
+	}
+	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Error("expected previously-disabled launcher to stay admission-closed")
 	}
 }
 
@@ -405,6 +456,50 @@ func TestDeletePrincipalCheckedBlockedThenSucceeds(t *testing.T) {
 	}
 	if _, err := findLauncherByID(db, laID); !errors.Is(err, ErrLauncherNotFound) {
 		t.Fatalf("expected launcher gone with principal, got %v", err)
+	}
+}
+
+// TestDeletePrincipalCheckedInspectErrorRestoresLaunchers proves the UAT
+// scenario: when runtime inspection fails (e.g. Docker CLI unavailable on a
+// confined host), a Principal delete is refused AND its Launchers are restored
+// to their prior enabled state with admission re-opened. It must never leave the
+// Principal half-torn-down with all Launchers durably disabled, which would
+// wedge every subsequent session create for that Principal.
+func TestDeletePrincipalCheckedInspectErrorRestoresLaunchers(t *testing.T) {
+	db, laID, lbID := launcherLifecycleDB(t)
+	app := deleteLifecycleApp(t, db)
+	sentinel := errors.New("inspect failure")
+	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
+		return nil, sentinel
+	}
+
+	if _, err := app.deletePrincipalChecked(context.Background(), "owner"); !errors.Is(err, sentinel) {
+		t.Fatalf("expected inspect error propagated, got %v", err)
+	}
+	// Principal and Launcher rows preserved.
+	if _, err := findPrincipalByUsername(db, "owner"); err != nil {
+		t.Fatalf("principal should be preserved: %v", err)
+	}
+	if _, err := findLauncherByID(db, laID); err != nil {
+		t.Fatalf("launcher a should be preserved: %v", err)
+	}
+	if _, err := findLauncherByID(db, lbID); err != nil {
+		t.Fatalf("launcher b should be preserved: %v", err)
+	}
+	// Every Launcher is restored to enabled and admission re-opened so fresh
+	// Sessions and Operations can be created afterwards (the mount-pin/session
+	// flow that previously failed with "launcher is not available").
+	for _, id := range []string{laID, lbID} {
+		var enabled int
+		if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, id).Scan(&enabled); err != nil {
+			t.Fatal(err)
+		}
+		if enabled != 1 {
+			t.Errorf("expected launcher %s restored to enabled=1 after inspect-failure principal delete, got %d", id, enabled)
+		}
+		if app.OperationSupervisor.isLauncherQuiesced(id) {
+			t.Errorf("expected launcher %s admission re-opened after inspect-failure principal delete", id)
+		}
 	}
 }
 
