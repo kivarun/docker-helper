@@ -62,7 +62,7 @@ func (a *App) handleAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !errorsIsCredentialAuthError(err) {
+	if !isCredentialAuthError(err) {
 		writeAuthFailure(ctx, r, "auth.database_error")
 		opLog(ctx).Error("auth introspection database error",
 			slog.String("operation", "auth_introspect"),
@@ -76,11 +76,11 @@ func (a *App) handleAuth(w http.ResponseWriter, r *http.Request) {
 	writeUnauthorizedAuth(ctx, w)
 }
 
-// errorsIsCredentialAuthError reports whether err is one of the expected
+// isCredentialAuthError reports whether err is one of the expected
 // non-disclosing credential authentication outcomes (unknown, revoked, or
 // disabled owner) rather than a database failure. Any other error is treated
 // as an internal error so it is never disclosed to the caller.
-func errorsIsCredentialAuthError(err error) bool {
+func isCredentialAuthError(err error) bool {
 	return errors.Is(err, ErrCredentialNotFound) ||
 		errors.Is(err, ErrCredentialRevoked) ||
 		errors.Is(err, ErrPrincipalDisabled) ||

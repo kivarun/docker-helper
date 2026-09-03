@@ -61,9 +61,7 @@ var principalCreateCommand = &Command{
 					return 1
 				}
 
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(result); err != nil {
+				if err := encodeJSONOut(stdout, result); err != nil {
 					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
 					return 1
 				}

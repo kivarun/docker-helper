@@ -145,16 +145,16 @@ var launcherCreateCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				username, err := resolveLauncherPrincipalForCLI(client, *principal)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
 				issue, err := resolveIssueCredential(*issueCredential, *noCredential,
 					"Create launcher credential now? [Y/n]", os.Stdin, stderr, term.IsTerminal(int(os.Stdin.Fd())))
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 2
+				}
+				username, err := resolveLauncherPrincipalForCLI(client, *principal)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
 				}
 
 				req := createLauncherClientRequest{Name: *name, IssueCredential: issue}
@@ -187,7 +187,7 @@ var launcherCreateCommand = &Command{
 var launcherListCommand = &Command{
 	Name:       "list",
 	Summary:    "List launchers",
-	Usage:      "docker-helper launcher list [--principal USER]",
+	Usage:      "docker-helper launcher list [--principal USER] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
