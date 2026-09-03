@@ -175,21 +175,6 @@ func (s *operationSupervisor) quiesceLauncher(launcherID string) {
 	s.quiesced[launcherID] = true
 }
 
-// unquiesceLauncher re-opens operation admission for launcherID. It is the
-// companion of the durable enabled authorities: a Launcher's admission is open
-// iff both its Principal and the Launcher itself are enabled. unquiesce is only
-// called when a transition committed to an enabled-authority state; individual
-// call sites derive the effective hierarchical state via
-// syncLauncherAdmission rather than re-opening unconditionally.
-func (s *operationSupervisor) unquiesceLauncher(launcherID string) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.quiesced, launcherID)
-}
-
 // setQuiesced sets the supervisor admission state for launcherID to the given
 // value in one atomic step. closed=true refuses new Operations for it;
 // closed=false reopens admission. It is the primitive used by
@@ -244,6 +229,24 @@ func (a *App) syncLauncherAdmission(launcherID string) error {
 	}
 	a.OperationSupervisor.setQuiesced(launcherID, closed)
 	return nil
+}
+
+// logLifecycleAdmissionSyncError reports a failure to re-sync a Launcher's
+// operation admission from its durable hierarchical authorities during an
+// error-path recovery. Fail-closed behavior keeps the Launcher quiesced in this
+// case; the log surfaces that the re-read (and therefore any re-open) did not
+// happen, for operator visibility. It is independent of any request context,
+// so it logs without request-scoped attributes.
+func logLifecycleAdmissionSyncError(launcherID string, err error) {
+	logger := logging.snapshotLogger()
+	if logger == nil {
+		return
+	}
+	logger.Error("sync launcher admission from authorities failed",
+		slog.String("operation", "lifecycle_admission_sync"),
+		slog.String("launcher_id", launcherID),
+		slog.String("error", err.Error()),
+	)
 }
 
 // isLauncherQuiesced reports whether operation admission is currently refused
@@ -438,7 +441,16 @@ func (a *App) disableLauncherLocked(launcherID string) ([]string, error) {
 	a.OperationSupervisor.quiesceLauncher(launcherID)
 	result, err := a.applyLauncherEnabledChange(launcherID, false)
 	if err != nil {
-		a.OperationSupervisor.unquiesceLauncher(launcherID)
+		// Restore admission from the durable hierarchical authorities instead
+		// of re-opening it unconditionally. The disable may have failed before
+		// committing, so admission must mirror exactly what Principal.enabled
+		// and Launcher.enabled now say: admission == !(Principal.enabled &&
+		// Launcher.enabled). If that authoritative re-read itself fails,
+		// admission stays quiesced — never fail open. The original DB error is
+		// preserved as the returned operation error.
+		if syncErr := a.syncLauncherAdmission(launcherID); syncErr != nil {
+			logLifecycleAdmissionSyncError(launcherID, syncErr)
+		}
 		return nil, err
 	}
 	return result.RevokedSessionIDs, nil
@@ -685,8 +697,18 @@ func (a *App) disablePrincipalLaunchersLocked(username string) (principalEnabled
 	}
 	result, err := a.applyPrincipalEnabledChange(username, false)
 	if err != nil {
+		// Restore each child Launcher's admission from the durable hierarchical
+		// authorities instead of re-opening all of them unconditionally. The
+		// Principal disable may have failed before committing, so a child is
+		// admission-open only where Principal.enabled && its own Launcher.enabled
+		// hold; a previously individually-disabled Launcher therefore stays
+		// quiesced. If the authoritative re-read fails for a child, that child
+		// stays quiesced — never fail open. The original Principal DB error is
+		// preserved as the returned operation error.
 		for _, lid := range launchers {
-			a.OperationSupervisor.unquiesceLauncher(lid)
+			if syncErr := a.syncLauncherAdmission(lid); syncErr != nil {
+				logLifecycleAdmissionSyncError(lid, syncErr)
+			}
 		}
 		return principalEnabledChangeResult{}, err
 	}

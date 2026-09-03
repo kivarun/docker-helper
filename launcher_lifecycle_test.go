@@ -1304,3 +1304,164 @@ func TestRaceInspectionErrorRestoreExcludesConcurrentEnable(t *testing.T) {
 		t.Fatalf("admission disagrees with authorities after restore+enable: quiesced=%v effectiveClosed=%v", got, closed)
 	}
 }
+
+// freshFileTestDB opens and initializes a fresh SQLite database at a known path
+// under t's temp dir, returning the live *sql.DB and the path. The path is
+// exposed so a test can reopen the same committed file through a failing
+// driver (newFailExecDB / newFailQueryAfterDB) to exercise error paths
+// deterministically against a real, already-populated schema.
+func freshFileTestDB(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("openDatabase: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := initializeDatabase(db); err != nil {
+		t.Fatalf("initializeDatabase: %v", err)
+	}
+	return db, dbPath
+}
+
+// TestDisableFailedRepeatedDisableKeepsSupervisorQuiesced (A): a repeated disable
+// of an ALREADY-disabled Launcher whose DB transition fails must NOT re-open
+// admission. The durable authority (launcher.enabled=false) keeps the supervisor
+// quiesced. This is the fail-closed error-path restoration that replaced the old
+// unconditional re-open.
+func TestDisableFailedRepeatedDisableKeepsSupervisorQuiesced(t *testing.T) {
+	db, dbPath := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	la, _, _, err := createLauncher(db, pid, "default", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+	laID := la.ID
+
+	// Disable the launcher for real first, so it is already disabled before the
+	// failing repeated disable, and its Sessions are gone.
+	if _, err := persistLauncherEnabledChange(db, laID, false); err != nil {
+		t.Fatalf("initial disable: %v", err)
+	}
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
+		t.Fatal(err)
+	} else if enabled {
+		t.Fatal("expected launcher already disabled before failing repeated disable")
+	}
+
+	// Reopen the same committed file with a driver that fails every Exec, so the
+	// repeated disable's DB transition fails deterministically while reads (the
+	// post-failure authority re-read) still work.
+	failDB := newFailExecDB(t, dbPath, errMockCreateDB)
+	app := deleteLifecycleApp(t, failDB)
+
+	if _, err := app.disableLauncher(laID); err == nil {
+		t.Fatal("expected repeated disable to fail, got nil")
+	} else if !errors.Is(err, errMockCreateDB) {
+		t.Fatalf("expected the original DB error to be preserved, got %v", err)
+	}
+
+	// Durable authority still says disabled...
+	if enabled, err := launcherEnabledState(failDB, laID); err != nil {
+		t.Fatal(err)
+	} else if enabled {
+		t.Fatal("expected enabled=false after failed repeated disable")
+	}
+	// ...and admission must remain quiesced (fail closed, not re-opened).
+	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Fatal("supervisor must remain quiesced after failed repeated disable of an already-disabled launcher")
+	}
+}
+
+// TestPrincipalDisableFailureRestoresAdmissionPerChildAuthorities (B): when a
+// Principal disable's DB transition fails, with Launcher A enabled and Launcher
+// B individually disabled, A must be restored admission-open while B remains
+// admission-closed, and neither child's launcher.enabled flag may change. The
+// old unconditional re-open of every child would have wrongly opened B.
+func TestPrincipalDisableFailureRestoresAdmissionPerChildAuthorities(t *testing.T) {
+	db, dbPath := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	la, _, _, err := createLauncher(db, pid, "a", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher(a): %v", err)
+	}
+	lb, _, _, err := createLauncher(db, pid, "b", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher(b): %v", err)
+	}
+	laID, lbID := la.ID, lb.ID
+
+	// B is individually disabled; A stays enabled.
+	if _, err := persistLauncherEnabledChange(db, lbID, false); err != nil {
+		t.Fatalf("disable launcher B: %v", err)
+	}
+
+	// Reopen the same committed file with a driver that fails every Exec, so the
+	// Principal disable transition fails deterministically while reads (the
+	// per-child authority re-reads) still work.
+	failDB := newFailExecDB(t, dbPath, errMockDeleteDB)
+	app := deleteLifecycleApp(t, failDB)
+
+	if _, err := app.disablePrincipalLaunchers("owner"); err == nil {
+		t.Fatal("expected principal disable to fail, got nil")
+	} else if !errors.Is(err, errMockDeleteDB) {
+		t.Fatalf("expected the original principal DB error preserved, got %v", err)
+	}
+
+	// A is restored admission-open (Principal still enabled && A enabled).
+	if app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Fatal("expected launcher A admission open after failed principal disable")
+	}
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); !admitted {
+		t.Fatal("expected operation admitted for enabled launcher A after failed principal disable")
+	}
+	// B remains admission-closed (individually disabled).
+	if !app.OperationSupervisor.isLauncherQuiesced(lbID) {
+		t.Fatal("expected individually-disabled launcher B to remain quiesced after failed principal disable")
+	}
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted {
+		t.Fatal("expected operation refused for individually-disabled launcher B after failed principal disable")
+	}
+	// Child enabled flags unchanged: A still enabled, B still disabled.
+	if enabled, err := launcherEnabledState(failDB, laID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Fatal("expected launcher A still enabled")
+	}
+	if enabled, err := launcherEnabledState(failDB, lbID); err != nil {
+		t.Fatal(err)
+	} else if enabled {
+		t.Fatal("expected launcher B still disabled")
+	}
+}
+
+// TestDisableAuthorityReReadFailureKeepsAdmissionQuiesced (C): when the disable's
+// DB transition fails AND the subsequent durable-authority re-read also fails,
+// admission must remain quiesced (fail closed) — never re-opened. The launchers
+// table is dropped so both the disable's own read and the recovery re-read fail
+// with a real SQL error.
+func TestDisableAuthorityReReadFailureKeepsAdmissionQuiesced(t *testing.T) {
+	db, _ := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	la, _, _, err := createLauncher(db, pid, "default", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+	laID := la.ID
+
+	// Drop the launchers table so every launcher read — including the disable's
+	// own authority read and the post-failure recovery re-read — fails with a
+	// real SQL error. Admission must stay quiesced (fail closed).
+	dropTableBreakFK(t, db, "launchers")
+	app := deleteLifecycleApp(t, db)
+
+	if _, err := app.disableLauncher(laID); err == nil {
+		t.Fatal("expected disable to fail when the launchers table is broken, got nil")
+	}
+	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Fatal("admission must remain quiesced when the authoritative re-read itself fails (fail closed)")
+	}
+}
