@@ -41,11 +41,18 @@ fi
 # Remove the SELinux policy module ONLY if it is actually installed. Absence is
 # a normal idempotent success: an AppArmor-only host never installed our module
 # and must not emit a bogus "failed to remove" warning. Only a real failure
-# removing an installed module warns.
+# removing an installed module warns. A removal attempt is retried once after a
+# bounded pause: commit-time failures (semanage store locks, transient policy
+# reload problems under a busy systemd) can be transient; a persistent failure
+# keeps the warning and appends semodule's own stderr for diagnosability.
 if semodule -l 2>/dev/null | grep -qw docker_helper; then
-  semodule -r docker_helper 2>/dev/null || {
-    echo "warning: failed to remove SELinux module docker_helper" >&2
-  }
+  remove_err=""
+  if ! remove_err="$(semodule -r docker_helper 2>&1 >/dev/null)"; then
+    sleep 2
+    if ! remove_err="$(semodule -r docker_helper 2>&1 >/dev/null)"; then
+      echo "warning: failed to remove SELinux module docker_helper: $remove_err" >&2
+    fi
+  fi
 fi
 
 exit 0

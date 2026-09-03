@@ -188,7 +188,11 @@ verify_confined && acc_ok "v2.0.0 daemon confined by package-owned MAC artifact"
 # Seed operator/principal state BEFORE the upgrade to prove persistence.
 F_USER="$PRINCIPAL"
 F_CRED="/tmp/rpm-life.cred"
-if dh principal create --system "$F_USER" >/dev/null 2>&1; then
+# The seeding runs against the v2.0.0 baseline binary, whose CLI predates the
+# --issue-credential/--no-credential flags; the candidate requires one of them
+# on non-interactive stdin. Try the candidate form first, then the baseline.
+if dh principal create --system --no-credential "$F_USER" >/dev/null 2>&1 \
+  || dh principal create --system "$F_USER" >/dev/null 2>&1; then
   dh principal set --system "$F_USER" enabled true >/dev/null 2>&1 || true
   dh principal allowed-root add --system "$F_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
   CRED_OUT="$(dh credential create --system --name rpmlife "$F_USER" 2>/dev/null)"

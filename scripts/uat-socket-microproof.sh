@@ -69,7 +69,7 @@ for _ in $(seq 1 60); do
 done
 systemctl is-active --quiet docker-helper.service || { echo "error: service not active" >&2; exit 1; }
 
-docker-helper principal create --system opc >/dev/null 2>&1 || true
+docker-helper principal create --system --no-credential opc >/dev/null 2>&1 || true
 docker-helper principal allowed-root add --system opc /home/opc >/dev/null 2>&1 || true
 mkdir -p /home/opc/uat-workspace
 SESSION_JSON="$(docker-helper session create --system --workspace /home/opc/uat-workspace --json 2>&1 || true)"

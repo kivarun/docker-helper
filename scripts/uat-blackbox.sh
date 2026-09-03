@@ -446,7 +446,7 @@ printf 'ro-content\n' > "$WS/ro/readme.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$WS/rw"
 chmod 0755 "$WS" "$WS/rw" "$WS/ro" "$WS/buildctx"
 
-docker-helper principal create --system "$PRINCIPAL" >/dev/null \
+docker-helper principal create --system --no-credential "$PRINCIPAL" >/dev/null \
   || fail_uat "principal create failed"
 docker-helper principal allowed-root add --system "$PRINCIPAL" "$ALLOWED_ROOT" \
   || fail_uat "principal allowed-root add failed"

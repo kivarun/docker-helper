@@ -173,7 +173,7 @@ reg_setup_principal() {
     useradd -m -d "$home_base/$user" -s /bin/bash "$user" || return 1
   fi
   home="$(getent passwd "$user" | cut -d: -f6)"
-  dh principal create --system "$user" >/dev/null 2>&1 || true
+  dh principal create --system --no-credential "$user" >/dev/null 2>&1 || true
   dh principal set --system "$user" enabled true >/dev/null 2>&1 || true
   # Final ownership model: a selector-less principal Session resolves to the
   # principal's inherit-scope 'default' Launcher, so that Launcher must exist

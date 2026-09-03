@@ -224,7 +224,7 @@ set_up_principal() {
   fi
   home="$(getent passwd "$user" | cut -d: -f6)"
   mkdir -p "$home/ws"; chown -R "$user:$user" "$home/ws"
-  dh principal create --system "$user" >/dev/null 2>&1 || true
+  dh principal create --system --no-credential "$user" >/dev/null 2>&1 || true
   dh principal set --system "$user" enabled true >/dev/null 2>&1 || true
   dh principal allowed-root add --system "$user" "$ALLOWED_ROOT" >/dev/null 2>&1 || true
   rm -f "$credfile"

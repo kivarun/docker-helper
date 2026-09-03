@@ -133,7 +133,7 @@ printf 'pin-probe-content\n' > "$WS/rw/probe.txt"
 chown -R "$PRINCIPAL:$PRINCIPAL" "$WS"
 chmod 0755 "$WS" "$WS/rw"
 
-docker-helper principal create --system "$PRINCIPAL" >/dev/null 2>&1 || true
+docker-helper principal create --system --no-credential "$PRINCIPAL" >/dev/null 2>&1 || true
 docker-helper principal allowed-root add --system "$PRINCIPAL" /home/opc >/dev/null 2>&1 || true
 
 # Final ownership model: a selector-less principal Session resolves to the
