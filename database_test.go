@@ -86,8 +86,9 @@ func TestInitializeDatabaseIdempotent(t *testing.T) {
 // launcher-name invariant (the shape written by intermediate unreleased 2.1
 // development commits). The intermediate shape must really be unconstrained,
 // so the fixture proves an invalid name inserts successfully there before the
-// invariant check rejects the schema; no released version ever created
-// launchers, so failing closed loses no released data.
+// invariant check rejects the schema. Such a database is unsupported: the
+// operator must restore a pre-2.1 backup or discard the state (see
+// verifyLaunchersNameInvariant).
 func TestInitializeDatabaseRejectsLaunchersTableWithoutNameInvariant(t *testing.T) {
 	db := openFreshTestDB(t)
 

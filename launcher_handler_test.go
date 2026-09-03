@@ -224,6 +224,67 @@ func TestLauncherHandlerCreateValidation(t *testing.T) {
 	}
 }
 
+// TestLauncherHandlerCreateNamePresence proves the frozen Launcher-create name
+// contract: an omitted "name" field selects defaultLauncherName, while an
+// explicitly supplied value — the empty string, JSON null, or any
+// grammar-invalid value — is validated exactly as supplied and rejected
+// instead of being reinterpreted as omission.
+func TestLauncherHandlerCreateNamePresence(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+
+	// Each case gets its own principal so successes and rejections are
+	// independent (no cross-case launcher_exists interference).
+	cases := []struct {
+		username string
+		body     string
+		wantCode int
+		wantName string
+	}{
+		{"presence1", `{"scope":"inherit"}`, http.StatusCreated, "default"},
+		{"presence2", `{"name":"default","scope":"inherit"}`, http.StatusCreated, "default"},
+		{"presence3", `{"name":"","scope":"inherit"}`, http.StatusBadRequest, ""},
+		{"presence4", `{"name":" Foo ","scope":"inherit"}`, http.StatusBadRequest, ""},
+		{"presence5", `{"name":null,"scope":"inherit"}`, http.StatusBadRequest, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.body, func(t *testing.T) {
+			setupLauncherHandlerPrincipal(t, app, tc.username)
+
+			w := launcherRequest(t, app, http.MethodPost,
+				"/principals/"+tc.username+"/launchers", testAdminToken, tc.body)
+			if w.Code != tc.wantCode {
+				t.Fatalf("create %s: expected %d, got %d body=%s", tc.body, tc.wantCode, w.Code, w.Body.String())
+			}
+			if tc.wantCode == http.StatusCreated {
+				var created createLauncherResponse
+				if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+					t.Fatal(err)
+				}
+				if got := created.Launcher.Name; got != tc.wantName {
+					t.Fatalf("create %s: expected launcher name %q, got %q", tc.body, tc.wantName, got)
+				}
+				return
+			}
+			if !strings.Contains(w.Body.String(), "invalid_launcher_name") {
+				t.Fatalf("create %s: expected invalid_launcher_name, got %s", tc.body, w.Body.String())
+			}
+			// Rejection must not have created anything.
+			w = launcherRequest(t, app, http.MethodGet,
+				"/principals/"+tc.username+"/launchers", testAdminToken, "")
+			if w.Code != http.StatusOK {
+				t.Fatalf("list after rejected create: expected 200, got %d", w.Code)
+			}
+			var list listLaunchersResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+				t.Fatal(err)
+			}
+			if len(list.Launchers) != 0 {
+				t.Fatalf("rejected create %s must not create a launcher, got %d", tc.body, len(list.Launchers))
+			}
+		})
+	}
+}
+
 func TestLauncherHandlerRestrictedRootOutsidePrincipal(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")

@@ -361,6 +361,92 @@ func TestLauncherCreateCLILauncherCredentialErrors(t *testing.T) {
 	}
 }
 
+// TestLauncherCreateCLINamePresence proves the CLI --name presence contract
+// for launcher create: an omitted flag selects the default name on the wire,
+// an explicit value is transmitted exactly as supplied, and an explicitly
+// supplied empty value is never silently replaced by the default — it reaches
+// the daemon as "name":"" and the rejection is surfaced.
+func TestLauncherCreateCLINamePresence(t *testing.T) {
+	t.Run("explicit --name default", func(t *testing.T) {
+		endpoint, tokenPath := startLauncherCLITestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/auth" {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(authResponse{Authority: "admin"})
+				return
+			}
+			if r.URL.Path == "/principals/alice/launchers" && r.Method == http.MethodPost {
+				var req createLauncherClientRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				if req.Name != "default" {
+					t.Errorf("request name = %q, want default", req.Name)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(createLauncherResponse{
+					OK:       true,
+					Launcher: launcherJSON{ID: "dhl_1", Principal: "alice", Name: "default", Scope: "inherit"},
+				})
+				return
+			}
+			http.NotFound(w, r)
+		})
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{
+			"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+			"--no-credential", "--principal", "alice", "--name", "default",
+		}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+		}
+	})
+
+	t.Run("explicit empty --name is transmitted and rejected", func(t *testing.T) {
+		endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/auth" {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(authResponse{Authority: "admin"})
+				return
+			}
+			if r.URL.Path == "/principals/alice/launchers" && r.Method == http.MethodPost {
+				writeJSONResponse(w, http.StatusBadRequest, struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				}{Code: "invalid_launcher_name", Message: "invalid launcher name"})
+				return
+			}
+			http.NotFound(w, r)
+		})
+
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters([]string{
+			"launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+			"--no-credential", "--principal", "alice", "--name", "",
+		}, &stdout, &stderr)
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "invalid_launcher_name") {
+			t.Errorf("stderr = %q, want containing invalid_launcher_name", stderr.String())
+		}
+		// The CLI must transmit the empty name as supplied: the "name" key is
+		// present with an empty value, never replaced by the default.
+		if len(*requests) != 1 {
+			t.Fatalf("recorded %d requests, want 1 (explicit --principal targets the endpoint directly)", len(*requests))
+		}
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal([]byte((*requests)[0].body), &wire); err != nil {
+			t.Fatalf("decode request body %s: %v", (*requests)[0].body, err)
+		}
+		raw, ok := wire["name"]
+		if !ok {
+			t.Fatalf("request body has no name key: %s", (*requests)[0].body)
+		}
+		if string(raw) != `""` {
+			t.Fatalf("wire name = %s, want present empty string (body: %s)", raw, (*requests)[0].body)
+		}
+	})
+}
+
 // ---- scope set / set validation ----
 
 func TestLauncherScopeSetValidation(t *testing.T) {

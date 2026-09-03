@@ -256,9 +256,9 @@ func verifyLaunchersNameInvariant(db *sql.DB) error {
 	for _, fragment := range launchersNameInvariantFragments {
 		if !strings.Contains(ddl, fragment) {
 			return errors.New("launchers table does not enforce the launcher-name invariant; " +
-				"this database was created by an intermediate pre-release 2.1 build and cannot " +
-				"be upgraded in place: recreate the database (no released version ever created " +
-				"launchers, so no upgrade data is lost)")
+				"this database has an unsupported intermediate pre-release 2.1 Launcher schema " +
+				"and cannot be opened by this build: restore a pre-2.1 backup, or recreate the " +
+				"database only if its current state is disposable")
 		}
 	}
 	return nil

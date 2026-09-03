@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -20,11 +21,28 @@ type launcherJSON struct {
 	CreatedAt    string   `json:"created_at"`
 }
 
+// launcherCreateName is the presence-aware "name" field of the Launcher-create
+// request. A field absent from the JSON object selects defaultLauncherName.
+// An explicitly supplied value — including the empty string and JSON null — is
+// the exact name to validate; it is never reinterpreted as omission.
+type launcherCreateName struct {
+	present bool
+	value   string
+}
+
+// UnmarshalJSON marks the field present on any occurrence, including JSON
+// null, which decodes as an explicitly supplied empty value and therefore
+// fails the Launcher-name grammar instead of defaulting.
+func (n *launcherCreateName) UnmarshalJSON(data []byte) error {
+	n.present = true
+	return json.Unmarshal(data, &n.value)
+}
+
 type createLauncherRequest struct {
-	Name            string   `json:"name"`
-	Scope           string   `json:"scope"`
-	AllowedRoots    []string `json:"allowed_roots"`
-	IssueCredential bool     `json:"issue_credential"`
+	Name            launcherCreateName `json:"name"`
+	Scope           string             `json:"scope"`
+	AllowedRoots    []string           `json:"allowed_roots"`
+	IssueCredential bool               `json:"issue_credential"`
 }
 
 type patchLauncherRequest struct {
@@ -199,9 +217,9 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := req.Name
-	if name == "" {
-		name = "default"
+	name := defaultLauncherName
+	if req.Name.present {
+		name = req.Name.value
 	}
 	scopeMode := LauncherScopeMode(req.Scope)
 	if scopeMode == "" {

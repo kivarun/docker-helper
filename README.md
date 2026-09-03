@@ -1416,19 +1416,19 @@ Launcher-scoped sessions use the launcher's effective roots:
   atomically:
 
 ```bash
-sudo docker-helper launcher scope set build-agent \
-    --allowed-root /srv/workspaces/alice/agent
+sudo docker-helper launcher scope set --principal alice \
+    --allowed-root /srv/workspaces/alice/agent build-agent
 ```
 
 ### Managing launchers
 
 ```bash
 sudo docker-helper launcher list --principal alice
-sudo docker-helper launcher show                # the principal's `default` launcher
-sudo docker-helper launcher show build-agent    # by name (or by dhl_... ID)
-sudo docker-helper launcher set build-agent --enabled false   # disable: deletes its sessions
-sudo docker-helper launcher credential rotate build-agent     # new token shown once; old rejected
-sudo docker-helper launcher delete build-agent                # fails with 409 while runtime is active
+sudo docker-helper launcher show --principal alice                # the principal's `default` launcher
+sudo docker-helper launcher show --principal alice build-agent    # by name (or by dhl_... ID)
+sudo docker-helper launcher set --principal alice --enabled false build-agent   # disable: deletes its sessions
+sudo docker-helper launcher credential rotate --principal alice build-agent     # new token shown once; old rejected
+sudo docker-helper launcher delete --principal alice build-agent                # fails with 409 while runtime is active
 ```
 
 A launcher is addressed by name or `dhl_...` ID, always under one

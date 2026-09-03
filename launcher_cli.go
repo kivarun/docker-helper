@@ -27,6 +27,23 @@ func (f *stringListFlag) Set(v string) error {
 	return nil
 }
 
+// launcherCreateNameFlag collects the optional --name value of launcher create
+// with explicit flag presence: an explicitly supplied empty value is an
+// invalid Launcher name submitted as-is, not omission, and is never silently
+// defaulted. The daemon remains the name-grammar authority.
+type launcherCreateNameFlag struct {
+	set   bool
+	value string
+}
+
+func (f *launcherCreateNameFlag) String() string { return f.value }
+
+func (f *launcherCreateNameFlag) Set(v string) error {
+	f.set = true
+	f.value = v
+	return nil
+}
+
 // resolveIssueCredential resolves whether a creation operation should issue a
 // credential. The mutually exclusive --issue-credential/--no-credential flags
 // suppress the prompt; with neither supplied it prompts when stdin is a
@@ -151,7 +168,8 @@ var launcherCreateCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		name := fs.String("name", "", "Launcher name (default: \"default\")")
+		name := &launcherCreateNameFlag{}
+		fs.Var(name, "name", "Launcher name (default: \"default\")")
 		allowedRoots := &stringListFlag{}
 		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
 		issueCredential := fs.Bool("issue-credential", false, "Issue a launcher credential")
@@ -175,9 +193,10 @@ var launcherCreateCommand = &Command{
 					return 1
 				}
 
-				req := createLauncherClientRequest{Name: *name, IssueCredential: issue}
-				if *name == "" {
-					req.Name = "default"
+				req := createLauncherClientRequest{IssueCredential: issue}
+				req.Name = defaultLauncherName
+				if name.set {
+					req.Name = name.value
 				}
 				if len(allowedRoots.values) == 0 {
 					req.Scope = "inherit"
