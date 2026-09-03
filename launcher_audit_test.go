@@ -113,7 +113,7 @@ func TestLauncherCredentialRotateAuditNoBearerLeak(t *testing.T) {
 	app, credToken, _, l := launcherAuditApp(t, "lncaudit2")
 
 	// The rotation precondition must hold: the launcher has a credential.
-	w := launcherAuditRequest(t, app, http.MethodPost, "/launchers/"+l.ID+"/credential/rotate", credToken, "")
+	w := launcherAuditRequest(t, app, http.MethodPost, "/principals/lncaudit2/launchers/"+l.ID+"/credential/rotate", credToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate launcher credential: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
@@ -219,11 +219,11 @@ func TestLauncherCredentialIssueAuditNoBearerLeak(t *testing.T) {
 
 	// The precondition must hold: the launcher has no credential yet.
 	// First delete the provisioning-time credential via the production path.
-	if del := launcherAuditRequest(t, app, http.MethodDelete, "/launchers/"+l.ID+"/credential", credToken, ""); del.Code != http.StatusNoContent {
+	if del := launcherAuditRequest(t, app, http.MethodDelete, "/principals/lncaudit4/launchers/"+l.ID+"/credential", credToken, ""); del.Code != http.StatusNoContent {
 		t.Fatalf("delete provisioning credential: expected 204, got %d", del.Code)
 	}
 
-	w := launcherAuditRequest(t, app, http.MethodPut, "/launchers/"+l.ID+"/credential", credToken, "")
+	w := launcherAuditRequest(t, app, http.MethodPut, "/principals/lncaudit4/launchers/"+l.ID+"/credential", credToken, "")
 	if w.Code != http.StatusCreated {
 		t.Fatalf("issue launcher credential: expected 201, got %d (body=%s)", w.Code, w.Body.String())
 	}

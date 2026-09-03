@@ -96,6 +96,24 @@ func resolveLauncherPrincipalForCLI(client *apiClient, explicitPrincipal string)
 	}
 }
 
+// launcherSelectorTarget resolves the CLI target for an individual Launcher
+// command: the Principal from --principal or auth introspection (target
+// construction only — the daemon remains the authorization authority) and the
+// Launcher selector (name or ID), 'default' when the positional selector is
+// omitted. Admin authentication must name the Principal explicitly; it is
+// never inferred and never searched globally.
+func launcherSelectorTarget(client *apiClient, explicitPrincipal string, fs *flag.FlagSet) (username, selector string, err error) {
+	username, err = resolveLauncherPrincipalForCLI(client, explicitPrincipal)
+	if err != nil {
+		return "", "", err
+	}
+	selector = defaultLauncherName
+	if fs.NArg() > 0 {
+		selector = fs.Arg(0)
+	}
+	return username, selector, nil
+}
+
 func encodeJSONOut(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -235,20 +253,25 @@ var launcherListCommand = &Command{
 var launcherShowCommand = &Command{
 	Name:       "show",
 	Summary:    "Show launcher details",
-	Usage:      "docker-helper launcher show LAUNCHER_ID",
-	MinPosArgs: 1,
+	Usage:      "docker-helper launcher show [--principal USER] [LAUNCHER]",
+	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				id := fs.Arg(0)
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				l, err := client.showLauncher(id)
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				l, err := client.showLauncher(username, selector)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -266,11 +289,12 @@ var launcherShowCommand = &Command{
 var launcherSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Modify a launcher name or enabled state",
-	Usage:      "docker-helper launcher set [--name NAME] [--enabled true|false] LAUNCHER_ID",
-	MinPosArgs: 1,
+	Usage:      "docker-helper launcher set [--principal USER] [--name NAME] [--enabled true|false] [LAUNCHER]",
+	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		name := fs.String("name", "", "New launcher name")
 		enabled := fs.String("enabled", "", "Enable or disable the launcher (true|false)")
 		return Invocation{
@@ -284,8 +308,12 @@ var launcherSetCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				id := fs.Arg(0)
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -299,7 +327,7 @@ var launcherSetCommand = &Command{
 					e := *enabled == "true"
 					req.Enabled = &e
 				}
-				l, err := client.patchLauncher(id, req)
+				l, err := client.patchLauncher(username, selector, req)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -317,24 +345,29 @@ var launcherSetCommand = &Command{
 var launcherDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a launcher",
-	Usage:      "docker-helper launcher delete LAUNCHER_ID",
-	MinPosArgs: 1,
+	Usage:      "docker-helper launcher delete [--principal USER] [LAUNCHER]",
+	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				id := fs.Arg(0)
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := client.deleteLauncher(id); err != nil {
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				fmt.Fprintf(stdout, "deleted launcher %s\n", id)
+				if err := client.deleteLauncher(username, selector); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				fmt.Fprintf(stdout, "deleted launcher %s\n", selector)
 				return 0
 			},
 		}
@@ -352,11 +385,12 @@ var launcherScopeCommand = &Command{
 var launcherScopeSetCommand = &Command{
 	Name:       "set",
 	Summary:    "Replace launcher scope",
-	Usage:      "docker-helper launcher scope set [--inherit | --allowed-root PATH [--allowed-root PATH]...] LAUNCHER_ID",
-	MinPosArgs: 1,
+	Usage:      "docker-helper launcher scope set [--principal USER] [--inherit | --allowed-root PATH [--allowed-root PATH]...] [LAUNCHER]",
+	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		inherit := fs.Bool("inherit", false, "Inherit the principal's scope")
 		allowedRoots := &stringListFlag{}
 		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
@@ -371,8 +405,12 @@ var launcherScopeSetCommand = &Command{
 				return nil
 			},
 			Run: func(stdout, stderr io.Writer) int {
-				id := fs.Arg(0)
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -385,7 +423,7 @@ var launcherScopeSetCommand = &Command{
 					req.Scope = "restricted"
 					req.AllowedRoots = append([]string{}, allowedRoots.values...)
 				}
-				l, err := client.replaceLauncherScope(id, req)
+				l, err := client.replaceLauncherScope(username, selector, req)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -413,20 +451,25 @@ var launcherCredentialCommand = &Command{
 var launcherCredentialIssueCommand = &Command{
 	Name:       "issue",
 	Summary:    "Issue a launcher credential",
-	Usage:      "docker-helper launcher credential issue LAUNCHER_ID",
-	MinPosArgs: 1,
+	Usage:      "docker-helper launcher credential issue [--principal USER] [LAUNCHER]",
+	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				id := fs.Arg(0)
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				result, err := client.issueLauncherCredential(id)
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.issueLauncherCredential(username, selector)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -444,20 +487,25 @@ var launcherCredentialIssueCommand = &Command{
 var launcherCredentialRotateCommand = &Command{
 	Name:       "rotate",
 	Summary:    "Rotate a launcher credential",
-	Usage:      "docker-helper launcher credential rotate LAUNCHER_ID",
-	MinPosArgs: 1,
+	Usage:      "docker-helper launcher credential rotate [--principal USER] [LAUNCHER]",
+	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				id := fs.Arg(0)
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				result, err := client.rotateLauncherCredential(id)
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.rotateLauncherCredential(username, selector)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
@@ -475,24 +523,29 @@ var launcherCredentialRotateCommand = &Command{
 var launcherCredentialDeleteCommand = &Command{
 	Name:       "delete",
 	Summary:    "Delete a launcher credential",
-	Usage:      "docker-helper launcher credential delete LAUNCHER_ID",
-	MinPosArgs: 1,
+	Usage:      "docker-helper launcher credential delete [--principal USER] [LAUNCHER]",
+	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
-				id := fs.Arg(0)
 				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				if err := client.deleteLauncherCredential(id); err != nil {
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				fmt.Fprintf(stdout, "deleted launcher credential for %s\n", id)
+				if err := client.deleteLauncherCredential(username, selector); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				fmt.Fprintf(stdout, "deleted launcher credential for %s\n", selector)
 				return 0
 			},
 		}

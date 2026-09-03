@@ -111,13 +111,13 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 	}
 
 	// Show.
-	w = launcherRequest(t, app, http.MethodGet, "/launchers/"+l.ID, testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+l.ID, testAdminToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("show: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
 
 	// Patch name + enabled.
-	w = launcherRequest(t, app, http.MethodPatch, "/launchers/"+l.ID, testAdminToken,
+	w = launcherRequest(t, app, http.MethodPatch, "/principals/alice/launchers/"+l.ID, testAdminToken,
 		`{"name":"renamed","enabled":false}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("patch: expected 200, got %d body=%s", w.Code, w.Body.String())
@@ -133,7 +133,7 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 	if err := os.MkdirAll(proj, 0755); err != nil {
 		t.Fatal(err)
 	}
-	w = launcherRequest(t, app, http.MethodPut, "/launchers/"+l.ID+"/allowed-roots", testAdminToken,
+	w = launcherRequest(t, app, http.MethodPut, "/principals/alice/launchers/"+l.ID+"/allowed-roots", testAdminToken,
 		fmt.Sprintf(`{"scope":"restricted","allowed_roots":[%q]}`, proj))
 	if w.Code != http.StatusOK {
 		t.Fatalf("scope: expected 200, got %d body=%s", w.Code, w.Body.String())
@@ -144,7 +144,7 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 	}
 
 	// Get credential metadata.
-	w = launcherRequest(t, app, http.MethodGet, "/launchers/"+l.ID+"/credential", testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+l.ID+"/credential", testAdminToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("get credential: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -153,7 +153,7 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 	}
 
 	// Rotate.
-	w = launcherRequest(t, app, http.MethodPost, "/launchers/"+l.ID+"/credential/rotate", testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers/"+l.ID+"/credential/rotate", testAdminToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate: expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -166,21 +166,21 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 	}
 
 	// Delete credential.
-	w = launcherRequest(t, app, http.MethodDelete, "/launchers/"+l.ID+"/credential", testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodDelete, "/principals/alice/launchers/"+l.ID+"/credential", testAdminToken, "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("delete credential: expected 204, got %d", w.Code)
 	}
-	w = launcherRequest(t, app, http.MethodGet, "/launchers/"+l.ID+"/credential", testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+l.ID+"/credential", testAdminToken, "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("get credential after delete: expected 404, got %d", w.Code)
 	}
 
 	// Delete launcher.
-	w = launcherRequest(t, app, http.MethodDelete, "/launchers/"+l.ID, testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodDelete, "/principals/alice/launchers/"+l.ID, testAdminToken, "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("delete: expected 204, got %d", w.Code)
 	}
-	w = launcherRequest(t, app, http.MethodGet, "/launchers/"+l.ID, testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+l.ID, testAdminToken, "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("show after delete: expected 404, got %d", w.Code)
 	}
@@ -261,32 +261,32 @@ func TestLauncherHandlerPrincipalCredentialManagesOwn(t *testing.T) {
 		t.Fatalf("list: expected 200, got %d", w.Code)
 	}
 	// Show own.
-	w = launcherRequest(t, app, http.MethodGet, "/launchers/"+l.ID, credToken, "")
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+l.ID, credToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("show own: expected 200, got %d", w.Code)
 	}
 	// Patch own.
-	w = launcherRequest(t, app, http.MethodPatch, "/launchers/"+l.ID, credToken, `{"enabled":false}`)
+	w = launcherRequest(t, app, http.MethodPatch, "/principals/alice/launchers/"+l.ID, credToken, `{"enabled":false}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("patch own: expected 200, got %d", w.Code)
 	}
 	// Scope own.
-	w = launcherRequest(t, app, http.MethodPut, "/launchers/"+l.ID+"/allowed-roots", credToken, `{"scope":"inherit"}`)
+	w = launcherRequest(t, app, http.MethodPut, "/principals/alice/launchers/"+l.ID+"/allowed-roots", credToken, `{"scope":"inherit"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("scope own: expected 200, got %d", w.Code)
 	}
 	// Rotate own credential.
-	w = launcherRequest(t, app, http.MethodPost, "/launchers/"+l.ID+"/credential/rotate", credToken, "")
+	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers/"+l.ID+"/credential/rotate", credToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate own credential: expected 200, got %d", w.Code)
 	}
 	// Delete own credential.
-	w = launcherRequest(t, app, http.MethodDelete, "/launchers/"+l.ID+"/credential", credToken, "")
+	w = launcherRequest(t, app, http.MethodDelete, "/principals/alice/launchers/"+l.ID+"/credential", credToken, "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("delete own credential: expected 204, got %d", w.Code)
 	}
 	// Delete own.
-	w = launcherRequest(t, app, http.MethodDelete, "/launchers/"+l.ID, credToken, "")
+	w = launcherRequest(t, app, http.MethodDelete, "/principals/alice/launchers/"+l.ID, credToken, "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("delete own: expected 204, got %d", w.Code)
 	}
@@ -331,9 +331,134 @@ func TestLauncherHandlerPrincipalCredentialForeignLauncher(t *testing.T) {
 	}
 
 	// alice's credential cannot see bob's launcher: non-disclosing 404.
-	w := launcherRequest(t, app, http.MethodGet, "/launchers/"+bobsLauncher.ID, credToken, "")
+	w := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+bobsLauncher.ID, credToken, "")
 	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "launcher_not_found") {
 		t.Fatalf("expected 404 launcher_not_found, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestLauncherHandlerScopedSelectorResolution proves the Principal-scoped
+// Launcher selector contract: a name and an ID of the same Launcher resolve to
+// the same row, the same name under two Principals resolves independently, a
+// foreign same-name Launcher is never found through the wrong Principal, and
+// malformed or ID-shaped-missing selectors are the same non-disclosing 404
+// with no fallback lookup.
+func TestLauncherHandlerScopedSelectorResolution(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")
+
+	homeBob := filepath.Join(app.Config.AllowedRoots[0], "home", "bob")
+	if err := os.MkdirAll(homeBob, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"bob": homeBob})
+	if _, err := createPrincipal(app.DB, "bob", app.Config.AllowedRoots); err != nil {
+		t.Fatal(err)
+	}
+	pa, err := findPrincipalByUsername(app.DB, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := findPrincipalByUsername(app.DB, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceAlpha, _, _, err := createLauncher(app.DB, int64(pa.ID), "alpha", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceDefault, _, _, err := createLauncher(app.DB, int64(pa.ID), "default", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobDefault, _, _, err := createLauncher(app.DB, int64(pb.ID), "default", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Name and ID resolve the same Launcher.
+	byName := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/alpha", testAdminToken, "")
+	if byName.Code != http.StatusOK {
+		t.Fatalf("show by name: expected 200, got %d body=%s", byName.Code, byName.Body.String())
+	}
+	byID := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+aliceAlpha.ID, testAdminToken, "")
+	if byID.Code != http.StatusOK {
+		t.Fatalf("show by ID: expected 200, got %d body=%s", byID.Code, byID.Body.String())
+	}
+	if got := decodeLauncher(t, byName); got.ID != aliceAlpha.ID {
+		t.Errorf("show by name resolved %q, want %q", got.ID, aliceAlpha.ID)
+	}
+	if got := decodeLauncher(t, byID); got.ID != aliceAlpha.ID {
+		t.Errorf("show by ID resolved %q, want %q", got.ID, aliceAlpha.ID)
+	}
+
+	// The same name under two Principals resolves independently.
+	aliceDef := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/default", testAdminToken, "")
+	if got := decodeLauncher(t, aliceDef); aliceDef.Code != http.StatusOK || got.ID != aliceDefault.ID {
+		t.Errorf("alice/default: expected %q, got %q (http=%d)", aliceDefault.ID, got.ID, aliceDef.Code)
+	}
+	bobDef := launcherRequest(t, app, http.MethodGet, "/principals/bob/launchers/default", testAdminToken, "")
+	if got := decodeLauncher(t, bobDef); bobDef.Code != http.StatusOK || got.ID != bobDefault.ID {
+		t.Errorf("bob/default: expected %q, got %q (http=%d)", bobDefault.ID, got.ID, bobDef.Code)
+	}
+
+	// A name that exists only under another Principal is not found through the
+	// wrong Principal: same non-disclosing 404 as a missing Launcher.
+	w := launcherRequest(t, app, http.MethodGet, "/principals/bob/launchers/alpha", testAdminToken, "")
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "launcher_not_found") {
+		t.Fatalf("foreign name through wrong principal: expected 404 launcher_not_found, got %d %s", w.Code, w.Body.String())
+	}
+
+	// A malformed selector never triggers a global or fallback lookup.
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/Foo", testAdminToken, "")
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "launcher_not_found") {
+		t.Fatalf("malformed selector: expected 404 launcher_not_found, got %d %s", w.Code, w.Body.String())
+	}
+
+	// An ID-shaped selector never falls back to name lookup: a well-formed but
+	// nonexistent ID is the same 404.
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/dhl_00000000000000000000000000000000", testAdminToken, "")
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "launcher_not_found") {
+		t.Fatalf("nonexistent ID selector: expected 404 launcher_not_found, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestLauncherHandlerScopedNameSelectorEveryRoute proves every individual
+// Launcher control-plane route resolves through the canonical Principal-scoped
+// resolver using the Launcher NAME (a global ID-only lookup could not resolve
+// it): set/patch, scope replacement, credential rotation, and checked delete.
+func TestLauncherHandlerScopedNameSelectorEveryRoute(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")
+
+	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
+		`{"name":"alpha","scope":"inherit","issue_credential":true}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	w = launcherRequest(t, app, http.MethodPatch, "/principals/alice/launchers/alpha", testAdminToken, `{"enabled":false}`)
+	if w.Code != http.StatusOK || decodeLauncher(t, w).Enabled {
+		t.Fatalf("patch by name: expected 200 enabled=false, got %d %s", w.Code, w.Body.String())
+	}
+	w = launcherRequest(t, app, http.MethodPatch, "/principals/alice/launchers/alpha", testAdminToken, `{"enabled":true}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("re-enable by name: expected 200, got %d %s", w.Code, w.Body.String())
+	}
+
+	w = launcherRequest(t, app, http.MethodPut, "/principals/alice/launchers/alpha/allowed-roots", testAdminToken, `{"scope":"inherit"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("scope replace by name: expected 200, got %d %s", w.Code, w.Body.String())
+	}
+
+	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers/alpha/credential/rotate", testAdminToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("credential rotate by name: expected 200, got %d %s", w.Code, w.Body.String())
+	}
+
+	w = launcherRequest(t, app, http.MethodDelete, "/principals/alice/launchers/alpha", testAdminToken, "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete by name: expected 204, got %d", w.Code)
 	}
 }
 
@@ -362,7 +487,7 @@ func TestLauncherHandlerLauncherCredentialUnauthorizedControl(t *testing.T) {
 	}
 
 	// The Launcher credential cannot manage the Launcher control plane.
-	w := launcherRequest(t, app, http.MethodGet, "/launchers/self", launcherToken, "")
+	w := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/self", launcherToken, "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("launcher credential on control plane: expected 401, got %d", w.Code)
 	}
@@ -388,7 +513,7 @@ func TestLauncherHandlerUnknownBearerUnauthorized(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")
 
-	w := launcherRequest(t, app, http.MethodGet, "/launchers/dhl_missing", "dhc_unknown", "")
+	w := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/dhl_missing", "dhc_unknown", "")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown bearer: expected 401, got %d %s", w.Code, w.Body.String())
 	}
@@ -413,7 +538,7 @@ func TestLauncherHandlerCredentialRotateNotFound(t *testing.T) {
 	l := created.Launcher
 
 	// No credential issued, so rotate -> 404 launcher_credential_not_found.
-	w = launcherRequest(t, app, http.MethodPost, "/launchers/"+l.ID+"/credential/rotate", testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers/"+l.ID+"/credential/rotate", testAdminToken, "")
 	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "launcher_credential_not_found") {
 		t.Fatalf("expected 404 launcher_credential_not_found, got %d %s", w.Code, w.Body.String())
 	}
@@ -434,11 +559,11 @@ func TestLauncherHandlerCredentialSecondIssueConflict(t *testing.T) {
 	}
 	l := created.Launcher
 
-	w = launcherRequest(t, app, http.MethodPut, "/launchers/"+l.ID+"/credential", testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodPut, "/principals/alice/launchers/"+l.ID+"/credential", testAdminToken, "")
 	if w.Code != http.StatusCreated {
 		t.Fatalf("first issue: expected 201, got %d", w.Code)
 	}
-	w = launcherRequest(t, app, http.MethodPut, "/launchers/"+l.ID+"/credential", testAdminToken, "")
+	w = launcherRequest(t, app, http.MethodPut, "/principals/alice/launchers/"+l.ID+"/credential", testAdminToken, "")
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "launcher_credential_exists") {
 		t.Fatalf("second issue: expected 409 launcher_credential_exists, got %d %s", w.Code, w.Body.String())
 	}

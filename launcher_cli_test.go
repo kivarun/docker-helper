@@ -461,7 +461,7 @@ func TestPrincipalCreateCLINoCredential(t *testing.T) {
 func TestLauncherCredentialSecretPrintedOnce(t *testing.T) {
 	endpoint, tokenPath := startLauncherCLITestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/launchers/dhl_1/credential" && r.Method == http.MethodPut {
+		if r.URL.Path == "/principals/alice/launchers/dhl_1/credential" && r.Method == http.MethodPut {
 			json.NewEncoder(w).Encode(launcherCredentialResponse{
 				OK:         true,
 				Credential: &launcherCredentialJSON{ID: "dhc_1"},
@@ -473,7 +473,7 @@ func TestLauncherCredentialSecretPrintedOnce(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"launcher", "credential", "issue", "--endpoint", endpoint, "--token-file", tokenPath, "dhl_1"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"launcher", "credential", "issue", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "dhl_1"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
@@ -484,7 +484,7 @@ func TestLauncherCredentialSecretPrintedOnce(t *testing.T) {
 
 func TestLauncherCredentialDeletePrintsNoSecret(t *testing.T) {
 	endpoint, tokenPath := startLauncherCLITestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/launchers/dhl_1/credential" && r.Method == http.MethodDelete {
+		if r.URL.Path == "/principals/alice/launchers/dhl_1/credential" && r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -492,7 +492,7 @@ func TestLauncherCredentialDeletePrintsNoSecret(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"launcher", "credential", "delete", "--endpoint", endpoint, "--token-file", tokenPath, "dhl_1"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"launcher", "credential", "delete", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "dhl_1"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
@@ -783,14 +783,14 @@ func TestLauncherScopeSetCLIAtomicReplace(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/launchers/dhl_1/allowed-roots" && r.Method == http.MethodPut {
+				if r.URL.Path == "/principals/alice/launchers/dhl_1/allowed-roots" && r.Method == http.MethodPut {
 					writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true})
 					return
 				}
 				http.NotFound(w, r)
 			})
 
-			args := append([]string{"launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath}, tc.args...)
+			args := append([]string{"launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice"}, tc.args...)
 			args = append(args, "dhl_1")
 			var stdout, stderr bytes.Buffer
 			code := runCommandWithWriters(args, &stdout, &stderr)
@@ -800,8 +800,8 @@ func TestLauncherScopeSetCLIAtomicReplace(t *testing.T) {
 			if len(*requests) != 1 {
 				t.Fatalf("requests = %+v, want exactly one PUT (no read-modify-write)", *requests)
 			}
-			if (*requests)[0].method != http.MethodPut || (*requests)[0].path != "/launchers/dhl_1/allowed-roots" {
-				t.Fatalf("request = %s %s, want PUT /launchers/dhl_1/allowed-roots", (*requests)[0].method, (*requests)[0].path)
+			if (*requests)[0].method != http.MethodPut || (*requests)[0].path != "/principals/alice/launchers/dhl_1/allowed-roots" {
+				t.Fatalf("request = %s %s, want PUT /principals/alice/launchers/dhl_1/allowed-roots", (*requests)[0].method, (*requests)[0].path)
 			}
 			if strings.TrimSpace((*requests)[0].body) != tc.wantBody {
 				t.Errorf("body = %q, want %q", (*requests)[0].body, tc.wantBody)
@@ -812,11 +812,197 @@ func TestLauncherScopeSetCLIAtomicReplace(t *testing.T) {
 
 // ---- set / delete representative success ----
 
+// TestLauncherIndividualCLISelectorAndPrincipalTargeting proves the individual
+// Launcher commands build exact Principal-scoped paths: the omitted selector
+// means 'default'; an explicit name and an explicit ID are passed through as
+// the {launcher} segment; a Principal credential infers its Principal via
+// /auth; and an admin credential without --principal fails without issuing any
+// target request (never a global 'default' search).
+func TestLauncherIndividualCLISelectorAndPrincipalTargeting(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		selector   string
+		authBody   string
+		wantPath   string
+		wantMethod string
+		wantErr    string
+		wantReqs   int
+	}{
+		{
+			name:       "show omitted selector means default",
+			args:       []string{"launcher", "show"},
+			authBody:   `{"authority":"principal","principal":"alice"}`,
+			wantPath:   "/principals/alice/launchers/default",
+			wantMethod: http.MethodGet,
+			wantReqs:   2,
+		},
+		{
+			name:       "show explicit name",
+			args:       []string{"launcher", "show"},
+			selector:   "build-agent",
+			authBody:   `{"authority":"principal","principal":"alice"}`,
+			wantPath:   "/principals/alice/launchers/build-agent",
+			wantMethod: http.MethodGet,
+			wantReqs:   2,
+		},
+		{
+			name:       "show explicit ID",
+			args:       []string{"launcher", "show"},
+			selector:   "dhl_ab12",
+			authBody:   `{"authority":"principal","principal":"alice"}`,
+			wantPath:   "/principals/alice/launchers/dhl_ab12",
+			wantMethod: http.MethodGet,
+			wantReqs:   2,
+		},
+		{
+			name:       "show explicit principal with omitted selector",
+			args:       []string{"launcher", "show", "--principal", "bob"},
+			authBody:   `{"authority":"admin"}`,
+			wantPath:   "/principals/bob/launchers/default",
+			wantMethod: http.MethodGet,
+			wantReqs:   1,
+		},
+		{
+			name:     "admin without principal never searches for default",
+			args:     []string{"launcher", "show"},
+			authBody: `{"authority":"admin"}`,
+			wantErr:  "--principal is required for admin authentication",
+			wantReqs: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+					var auth authResponse
+					_ = json.Unmarshal([]byte(tc.authBody), &auth)
+					writeJSONResponse(w, http.StatusOK, auth)
+				case strings.HasPrefix(r.URL.Path, "/principals/"):
+					writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true})
+				default:
+					http.NotFound(w, r)
+				}
+			})
+
+			args := append(append([]string{}, tc.args...), "--endpoint", endpoint, "--token-file", tokenPath)
+			if tc.selector != "" {
+				args = append(args, tc.selector)
+			}
+			var stdout, stderr bytes.Buffer
+			exit := runCommandWithWriters(args, &stdout, &stderr)
+			if tc.wantErr != "" {
+				if exit != 1 {
+					t.Fatalf("exit = %d, want 1 (stderr=%s)", exit, stderr.String())
+				}
+				if !strings.Contains(stderr.String(), tc.wantErr) {
+					t.Errorf("stderr = %q, want containing %q", stderr.String(), tc.wantErr)
+				}
+			} else if exit != 0 {
+				t.Fatalf("exit = %d, stderr=%s", exit, stderr.String())
+			}
+			if len(*requests) != tc.wantReqs {
+				t.Fatalf("requests = %+v, want %d", *requests, tc.wantReqs)
+			}
+			if tc.wantPath == "" {
+				return
+			}
+			last := (*requests)[len(*requests)-1]
+			if last.path != tc.wantPath || last.method != tc.wantMethod {
+				t.Errorf("target request = %s %s, want %s %s", last.method, last.path, tc.wantMethod, tc.wantPath)
+			}
+		})
+	}
+}
+
+// TestLauncherIndividualCLIAllTargetScopedPath proves every individual
+// Launcher command issues its request on the Principal-scoped path
+// /principals/{username}/launchers/{launcher}... with the omitted selector
+// resolved to 'default' — no client-side authorization model, no global
+// Launcher routes.
+func TestLauncherIndividualCLIAllTargetScopedPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantPath   string
+		wantMethod string
+	}{
+		{
+			name:       "set",
+			args:       []string{"launcher", "set", "--enabled", "false"},
+			wantPath:   "/principals/alice/launchers/default",
+			wantMethod: http.MethodPatch,
+		},
+		{
+			name:       "delete",
+			args:       []string{"launcher", "delete"},
+			wantPath:   "/principals/alice/launchers/default",
+			wantMethod: http.MethodDelete,
+		},
+		{
+			name:       "scope set",
+			args:       []string{"launcher", "scope", "set", "--inherit"},
+			wantPath:   "/principals/alice/launchers/default/allowed-roots",
+			wantMethod: http.MethodPut,
+		},
+		{
+			name:       "credential issue",
+			args:       []string{"launcher", "credential", "issue"},
+			wantPath:   "/principals/alice/launchers/default/credential",
+			wantMethod: http.MethodPut,
+		},
+		{
+			name:       "credential rotate",
+			args:       []string{"launcher", "credential", "rotate"},
+			wantPath:   "/principals/alice/launchers/default/credential/rotate",
+			wantMethod: http.MethodPost,
+		},
+		{
+			name:       "credential delete",
+			args:       []string{"launcher", "credential", "delete"},
+			wantPath:   "/principals/alice/launchers/default/credential",
+			wantMethod: http.MethodDelete,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+					writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
+				case strings.HasPrefix(r.URL.Path, "/principals/"):
+					if r.Method == http.MethodDelete {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true})
+				default:
+					http.NotFound(w, r)
+				}
+			})
+
+			args := append(append([]string{}, tc.args...), "--endpoint", endpoint, "--token-file", tokenPath)
+			var stdout, stderr bytes.Buffer
+			exit := runCommandWithWriters(args, &stdout, &stderr)
+			if exit != 0 {
+				t.Fatalf("exit = %d, stderr=%s", exit, stderr.String())
+			}
+			if len(*requests) != 2 || (*requests)[0].path != "/auth" {
+				t.Fatalf("requests = %+v, want /auth then the target request", *requests)
+			}
+			if (*requests)[1].path != tc.wantPath || (*requests)[1].method != tc.wantMethod {
+				t.Errorf("target request = %s %s, want %s %s", (*requests)[1].method, (*requests)[1].path, tc.wantMethod, tc.wantPath)
+			}
+		})
+	}
+}
+
 // TestLauncherSetCLIRepresentativeSuccess proves launcher set issues one PATCH
 // carrying exactly the requested name/enabled change.
 func TestLauncherSetCLIRepresentativeSuccess(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/launchers/dhl_1" && r.Method == http.MethodPatch {
+		if r.URL.Path == "/principals/alice/launchers/dhl_1" && r.Method == http.MethodPatch {
 			writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "alice", Name: "ops", Enabled: false, Scope: "inherit"})
 			return
 		}
@@ -826,7 +1012,7 @@ func TestLauncherSetCLIRepresentativeSuccess(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
 		"launcher", "set", "--endpoint", endpoint, "--token-file", tokenPath,
-		"--name", "ops", "--enabled", "false", "dhl_1",
+		"--principal", "alice", "--name", "ops", "--enabled", "false", "dhl_1",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
@@ -847,7 +1033,7 @@ func TestLauncherSetCLIRepresentativeSuccess(t *testing.T) {
 // DELETE and succeeds on 204 without printing secret-like data.
 func TestLauncherDeleteCLIRepresentativeSuccess(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/launchers/dhl_1" && r.Method == http.MethodDelete {
+		if r.URL.Path == "/principals/alice/launchers/dhl_1" && r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -856,13 +1042,14 @@ func TestLauncherDeleteCLIRepresentativeSuccess(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"launcher", "delete", "--endpoint", endpoint, "--token-file", tokenPath, "dhl_1",
+		"launcher", "delete", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "dhl_1",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if len(*requests) != 1 || (*requests)[0].method != http.MethodDelete || (*requests)[0].path != "/launchers/dhl_1" {
-		t.Fatalf("requests = %+v, want one DELETE /launchers/dhl_1", *requests)
+	if len(*requests) != 1 || (*requests)[0].method != http.MethodDelete || (*requests)[0].path != "/principals/alice/launchers/dhl_1" {
+		t.Fatalf("requests = %+v, want one DELETE /principals/alice/launchers/dhl_1", *requests)
 	}
 }
 
@@ -899,14 +1086,18 @@ func TestLauncherCLIStructuredErrorPropagation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			endpoint, tokenPath := startLauncherCLITestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/auth" {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(authResponse{Authority: "principal", Principal: "alice"})
+					return
+				}
 				writeJSONResponse(w, tc.status, struct {
 					Code    string `json:"code"`
 					Message string `json:"message"`
 				}{Code: tc.code, Message: "conflict"})
 			})
 
-			id := "dhl_1"
-			args := append(append([]string{}, tc.args...), "--endpoint", endpoint, "--token-file", tokenPath, id)
+			args := append(append([]string{}, tc.args...), "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "dhl_1")
 			var stdout, stderr bytes.Buffer
 			exit := runCommandWithWriters(args, &stdout, &stderr)
 			if exit != 1 {
@@ -926,7 +1117,7 @@ func TestLauncherCLIStructuredErrorPropagation(t *testing.T) {
 // printed exactly once.
 func TestLauncherCredentialRotateCLIPreservesIdentity(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/launchers/dhl_1/credential/rotate" && r.Method == http.MethodPost {
+		if r.URL.Path == "/principals/alice/launchers/dhl_1/credential/rotate" && r.Method == http.MethodPost {
 			writeJSONResponse(w, http.StatusOK, launcherCredentialResponse{
 				OK:         true,
 				Credential: &launcherCredentialJSON{ID: "dhc_1"},
@@ -939,12 +1130,13 @@ func TestLauncherCredentialRotateCLIPreservesIdentity(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"launcher", "credential", "rotate", "--endpoint", endpoint, "--token-file", tokenPath, "dhl_1",
+		"launcher", "credential", "rotate", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "dhl_1",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if len(*requests) != 1 || (*requests)[0].method != http.MethodPost || (*requests)[0].path != "/launchers/dhl_1/credential/rotate" {
+	if len(*requests) != 1 || (*requests)[0].method != http.MethodPost || (*requests)[0].path != "/principals/alice/launchers/dhl_1/credential/rotate" {
 		t.Fatalf("requests = %+v, want one POST rotate", *requests)
 	}
 	if !strings.Contains(stdout.String(), "dhc_1") {

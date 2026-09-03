@@ -137,23 +137,18 @@ func (a *App) resolveLauncherPrincipal(w http.ResponseWriter, r *http.Request, a
 	return p, true
 }
 
-// authorizeLauncher checks that the authority may manage the given Launcher.
-// A Principal credential may manage only its own Principal's Launchers; a
-// foreign Launcher returns a non-disclosing 404.
-func (a *App) authorizeLauncher(w http.ResponseWriter, r *http.Request, auth *launcherControlAuthority, l *LauncherWithPrincipal) bool {
-	if auth.isAdmin || l.PrincipalID == auth.principalCredential.PrincipalID {
-		return true
-	}
-	writeError(r.Context(), w, http.StatusNotFound, "launcher_not_found", "launcher not found")
-	return false
-}
-
-// requireAuthorizedLauncher fetches a Launcher by ID and checks the authority
-// can manage it, writing the appropriate response and returning nil when not
-// authorized.
-func (a *App) requireAuthorizedLauncher(w http.ResponseWriter, r *http.Request, auth *launcherControlAuthority, id string) *LauncherWithPrincipal {
+// requireScopedLauncher resolves the target Launcher for a Principal-scoped
+// Launcher route (/principals/{username}/launchers/{launcher}): the Principal
+// is resolved under the request authority, then the Launcher selector (name or
+// ID) is resolved under that Principal. Malformed, missing, foreign, and
+// nonexistent selectors are the same non-disclosing 404 launcher_not_found.
+func (a *App) requireScopedLauncher(w http.ResponseWriter, r *http.Request, auth *launcherControlAuthority) (*LauncherWithPrincipal, bool) {
 	ctx := r.Context()
-	l, err := findLauncherByID(a.DB, id)
+	p, ok := a.resolveLauncherPrincipal(w, r, auth, r.PathValue("username"))
+	if !ok {
+		return nil, false
+	}
+	l, err := findLauncherForPrincipal(a.DB, int64(p.ID), r.PathValue("launcher"))
 	if err != nil {
 		if isErrLauncherNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -164,12 +159,9 @@ func (a *App) requireAuthorizedLauncher(w http.ResponseWriter, r *http.Request, 
 			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
-		return nil
+		return nil, false
 	}
-	if !a.authorizeLauncher(w, r, auth, l) {
-		return nil
-	}
-	return l
+	return l, true
 }
 
 func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
@@ -349,13 +341,8 @@ func (a *App) handleShowLauncher(w http.ResponseWriter, r *http.Request) {
 	if err != nil || auth == nil {
 		return
 	}
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(r.Context(), w, http.StatusBadRequest, "missing_id", "launcher id is required")
-		return
-	}
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 	writeJSONRaw(r.Context(), w, http.StatusOK, launcherToJSON(*l))
@@ -369,14 +356,8 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_id", "launcher id is required")
-		return
-	}
-
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 
@@ -419,7 +400,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 	if isDisable {
 		var disableErr error
 		if req.Name != nil {
-			if _, err := updateLauncher(a.DB, id, req.Name, nil); err != nil {
+			if _, err := updateLauncher(a.DB, l.ID, req.Name, nil); err != nil {
 				disableErr = err
 			}
 		}
@@ -428,7 +409,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 		// companion of durable disabled state).
 		var revoked []string
 		if disableErr == nil {
-			if rev, err := a.disableLauncherLocked(id); err != nil {
+			if rev, err := a.disableLauncherLocked(l.ID); err != nil {
 				disableErr = err
 			} else {
 				revoked = rev
@@ -465,14 +446,14 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 			if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, sessionID); err != nil {
 				opLog(ctx).Warn("failed to clean up session runtime directory",
 					slog.String("operation", "launcher_disable"),
-					slog.String("launcher_id", id),
+					slog.String("launcher_id", l.ID),
 					slog.String("session_id", sessionID),
 					slog.String("error", err.Error()),
 				)
 			}
 		}
 
-		updated, err := findLauncherByID(a.DB, id)
+		updated, err := findLauncherByID(a.DB, l.ID)
 		if err != nil {
 			opLog(ctx).Error("launcher lookup after disable failed",
 				slog.String("operation", "launcher_update"),
@@ -493,7 +474,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := updateLauncher(a.DB, id, req.Name, req.Enabled)
+	updated, err := updateLauncher(a.DB, l.ID, req.Name, req.Enabled)
 	if err != nil {
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:      "launcher.update",
@@ -523,7 +504,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 	// (Principal.enabled && Launcher.enabled). A Launcher enabled while its
 	// Principal is disabled stays quiesced.
 	if req.Enabled != nil && *req.Enabled {
-		if err := a.syncLauncherAdmission(id); err != nil {
+		if err := a.syncLauncherAdmission(l.ID); err != nil {
 			writeRequestContextAudit(ctx, auditRecord{
 				Event:      "launcher.update",
 				LauncherID: l.ID,
@@ -559,14 +540,8 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	}
 	ctx := r.Context()
 
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_id", "launcher id is required")
-		return
-	}
-
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 
@@ -614,7 +589,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	updated, err := replaceLauncherScope(a.DB, id, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots)
+	updated, err := replaceLauncherScope(a.DB, l.ID, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		writeRequestContextAudit(ctx, auditRecord{
@@ -662,18 +637,12 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_id", "launcher id is required")
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
-		return
-	}
-
-	sessionIDs, err := a.deleteLauncherChecked(ctx, id)
+	sessionIDs, err := a.deleteLauncherChecked(ctx, l.ID)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		writeRequestContextAudit(ctx, auditRecord{
@@ -728,18 +697,12 @@ func (a *App) handleIssueLauncherCredential(w http.ResponseWriter, r *http.Reque
 	}
 	ctx := r.Context()
 
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_id", "launcher id is required")
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
-		return
-	}
-
-	cred, token, err := issueLauncherCredential(a.DB, id)
+	cred, token, err := issueLauncherCredential(a.DB, l.ID)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		writeRequestContextAudit(ctx, auditRecord{
@@ -787,18 +750,12 @@ func (a *App) handleGetLauncherCredential(w http.ResponseWriter, r *http.Request
 	}
 	ctx := r.Context()
 
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_id", "launcher id is required")
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
-		return
-	}
-
-	cred, err := findLauncherCredential(a.DB, id)
+	cred, err := findLauncherCredential(a.DB, l.ID)
 	if err != nil {
 		if isErrLauncherCredentialNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_credential_not_found", "launcher credential not found")
@@ -824,18 +781,12 @@ func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Requ
 	}
 	ctx := r.Context()
 
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_id", "launcher id is required")
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
-		return
-	}
-
-	cred, token, err := rotateLauncherCredential(a.DB, id)
+	cred, token, err := rotateLauncherCredential(a.DB, l.ID)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		writeRequestContextAudit(ctx, auditRecord{
@@ -881,18 +832,12 @@ func (a *App) handleDeleteLauncherCredential(w http.ResponseWriter, r *http.Requ
 	}
 	ctx := r.Context()
 
-	id := r.PathValue("id")
-	if id == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_id", "launcher id is required")
+	l, ok := a.requireScopedLauncher(w, r, auth)
+	if !ok {
 		return
 	}
 
-	l := a.requireAuthorizedLauncher(w, r, auth, id)
-	if l == nil {
-		return
-	}
-
-	if err := deleteLauncherCredential(a.DB, id); err != nil {
+	if err := deleteLauncherCredential(a.DB, l.ID); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeRequestContextAudit(ctx, auditRecord{
 			Event:      "launcher.credential_delete",

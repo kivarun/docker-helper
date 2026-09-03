@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -125,30 +126,88 @@ func scanLauncherBase(s sqlScanner) (LauncherWithPrincipal, error) {
 	return l, nil
 }
 
-// findLauncherByID looks up a Launcher by ID, joined with its Principal name
-// and its canonical allowed roots.
-func findLauncherByID(db *sql.DB, id string) (*LauncherWithPrincipal, error) {
-	if id == "" {
-		return nil, ErrLauncherNotFound
-	}
-	l, err := scanLauncherBase(db.QueryRow(
-		`SELECT l.id, l.principal_id, p.username, l.name, l.enabled, l.scope_mode, l.created_at
-		 FROM launchers l JOIN principals p ON p.id = l.principal_id
-		 WHERE l.id = ?`,
-		id,
-	))
+// launcherSelect is the launcher projection SELECT shared by the Launcher
+// lookups: base columns joined with the owning Principal username.
+const launcherSelect = `SELECT l.id, l.principal_id, p.username, l.name, l.enabled, l.scope_mode, l.created_at
+	FROM launchers l JOIN principals p ON p.id = l.principal_id`
+
+// launcherFromRow scans one launcher projection row and loads its canonical
+// allowed roots; a missing row is ErrLauncherNotFound.
+func launcherFromRow(db *sql.DB, row sqlScanner) (*LauncherWithPrincipal, error) {
+	l, err := scanLauncherBase(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrLauncherNotFound
 		}
 		return nil, fmt.Errorf("cannot find launcher: %w", err)
 	}
-	roots, err := readLauncherAllowedRoots(db, id)
+	roots, err := readLauncherAllowedRoots(db, l.ID)
 	if err != nil {
 		return nil, err
 	}
 	l.AllowedRoots = roots
 	return &l, nil
+}
+
+// findLauncherByID looks up a Launcher by ID, joined with its Principal name
+// and its canonical allowed roots.
+func findLauncherByID(db *sql.DB, id string) (*LauncherWithPrincipal, error) {
+	if id == "" {
+		return nil, ErrLauncherNotFound
+	}
+	return launcherFromRow(db, db.QueryRow(launcherSelect+` WHERE l.id = ?`, id))
+}
+
+// isLauncherIDSelector reports whether a Launcher selector is an exact
+// well-formed Launcher ID: dhl_ followed by 32 lowercase hex characters.
+// ID-shaped selectors resolve by ID only and never fall back to name lookup;
+// the Launcher-name grammar already makes ID-shaped names impossible.
+func isLauncherIDSelector(selector string) bool {
+	rest, ok := strings.CutPrefix(selector, launcherIDPrefix)
+	if !ok || len(rest) != launcherIDEntropyBytes*2 {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// findLauncherByIDUnderPrincipal looks up a Launcher by ID constrained to the
+// given owning Principal: a foreign ID is indistinguishable from a missing one.
+func findLauncherByIDUnderPrincipal(db *sql.DB, principalID int64, id string) (*LauncherWithPrincipal, error) {
+	return launcherFromRow(db, db.QueryRow(
+		launcherSelect+` WHERE l.id = ? AND l.principal_id = ?`, id, principalID,
+	))
+}
+
+// findLauncherByNameUnderPrincipal looks up a Launcher by
+// UNIQUE(principal_id, name); names are never resolved globally.
+func findLauncherByNameUnderPrincipal(db *sql.DB, principalID int64, name string) (*LauncherWithPrincipal, error) {
+	return launcherFromRow(db, db.QueryRow(
+		launcherSelect+` WHERE l.principal_id = ? AND l.name = ?`, principalID, name,
+	))
+}
+
+// findLauncherForPrincipal resolves a Principal-scoped Launcher selector under
+// the already-resolved Principal: (principal, launcher-selector) -> Launcher.
+// An exact dhl_<32hex> selector looks up that ID under this Principal; a
+// grammar-valid Launcher name looks up (principal_id, name). Malformed,
+// foreign, and missing selectors all return ErrLauncherNotFound without any
+// fallback or global scan. Principal credentials resolve their own Principal's
+// Launchers; admins target the explicitly selected Principal; a foreign
+// resource stays non-disclosing.
+func findLauncherForPrincipal(db *sql.DB, principalID int64, selector string) (*LauncherWithPrincipal, error) {
+	if isLauncherIDSelector(selector) {
+		return findLauncherByIDUnderPrincipal(db, principalID, selector)
+	}
+	if _, err := validateLauncherName(selector); err != nil {
+		return nil, ErrLauncherNotFound
+	}
+	return findLauncherByNameUnderPrincipal(db, principalID, selector)
 }
 
 // listLaunchersForPrincipal returns the Launchers of a Principal ordered by name.

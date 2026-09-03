@@ -684,8 +684,15 @@ func (c *apiClient) listLaunchers(username string) (*listLaunchersResponse, erro
 	return &result, nil
 }
 
-func (c *apiClient) showLauncher(id string) (*launcherJSON, error) {
-	resp, err := c.doAuthenticatedRequest("GET", "/launchers/"+url.PathEscape(id), nil)
+// launcherControlPath builds the Principal-scoped control-plane path for an
+// individual Launcher resource: /principals/{username}/launchers/{launcher}
+// plus any subresource suffix. The launcher selector is a Launcher name or ID.
+func launcherControlPath(username, launcher, suffix string) string {
+	return "/principals/" + url.PathEscape(username) + "/launchers/" + url.PathEscape(launcher) + suffix
+}
+
+func (c *apiClient) showLauncher(username, selector string) (*launcherJSON, error) {
+	resp, err := c.doAuthenticatedRequest("GET", launcherControlPath(username, selector, ""), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -696,20 +703,20 @@ func (c *apiClient) showLauncher(id string) (*launcherJSON, error) {
 		return nil, err
 	}
 
-	var launcher launcherJSON
-	if err := json.Unmarshal(respBody, &launcher); err != nil {
+	var out launcherJSON
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
-	return &launcher, nil
+	return &out, nil
 }
 
-func (c *apiClient) patchLauncher(id string, req patchLauncherRequest) (*launcherJSON, error) {
+func (c *apiClient) patchLauncher(username, selector string, req patchLauncherRequest) (*launcherJSON, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
 
-	resp, err := c.doAuthenticatedRequest("PATCH", "/launchers/"+url.PathEscape(id), bytes.NewReader(body))
+	resp, err := c.doAuthenticatedRequest("PATCH", launcherControlPath(username, selector, ""), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -727,13 +734,13 @@ func (c *apiClient) patchLauncher(id string, req patchLauncherRequest) (*launche
 	return &launcher, nil
 }
 
-func (c *apiClient) replaceLauncherScope(id string, req allowedRootsReplaceRequest) (*launcherJSON, error) {
+func (c *apiClient) replaceLauncherScope(username, selector string, req allowedRootsReplaceRequest) (*launcherJSON, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
 
-	resp, err := c.doAuthenticatedRequest("PUT", "/launchers/"+url.PathEscape(id)+"/allowed-roots", bytes.NewReader(body))
+	resp, err := c.doAuthenticatedRequest("PUT", launcherControlPath(username, selector, "/allowed-roots"), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -751,8 +758,8 @@ func (c *apiClient) replaceLauncherScope(id string, req allowedRootsReplaceReque
 	return &launcher, nil
 }
 
-func (c *apiClient) deleteLauncher(id string) error {
-	resp, err := c.doAuthenticatedRequest("DELETE", "/launchers/"+url.PathEscape(id), nil)
+func (c *apiClient) deleteLauncher(username, selector string) error {
+	resp, err := c.doAuthenticatedRequest("DELETE", launcherControlPath(username, selector, ""), nil)
 	if err != nil {
 		return err
 	}
@@ -762,8 +769,8 @@ func (c *apiClient) deleteLauncher(id string) error {
 	return err
 }
 
-func (c *apiClient) issueLauncherCredential(id string) (*launcherCredentialResponse, error) {
-	resp, err := c.doAuthenticatedRequest("PUT", "/launchers/"+url.PathEscape(id)+"/credential", nil)
+func (c *apiClient) issueLauncherCredential(username, selector string) (*launcherCredentialResponse, error) {
+	resp, err := c.doAuthenticatedRequest("PUT", launcherControlPath(username, selector, "/credential"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -781,8 +788,8 @@ func (c *apiClient) issueLauncherCredential(id string) (*launcherCredentialRespo
 	return &result, nil
 }
 
-func (c *apiClient) rotateLauncherCredential(id string) (*launcherCredentialResponse, error) {
-	resp, err := c.doAuthenticatedRequest("POST", "/launchers/"+url.PathEscape(id)+"/credential/rotate", nil)
+func (c *apiClient) rotateLauncherCredential(username, selector string) (*launcherCredentialResponse, error) {
+	resp, err := c.doAuthenticatedRequest("POST", launcherControlPath(username, selector, "/credential/rotate"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -800,8 +807,8 @@ func (c *apiClient) rotateLauncherCredential(id string) (*launcherCredentialResp
 	return &result, nil
 }
 
-func (c *apiClient) deleteLauncherCredential(id string) error {
-	resp, err := c.doAuthenticatedRequest("DELETE", "/launchers/"+url.PathEscape(id)+"/credential", nil)
+func (c *apiClient) deleteLauncherCredential(username, selector string) error {
+	resp, err := c.doAuthenticatedRequest("DELETE", launcherControlPath(username, selector, "/credential"), nil)
 	if err != nil {
 		return err
 	}

@@ -322,6 +322,91 @@ func TestLauncherFindListScoped(t *testing.T) {
 	}
 }
 
+// TestLauncherScopedSelectorResolution proves the (Principal, selector) ->
+// Launcher resolution rules at the domain level: 'default' under two
+// Principals resolves independently, the name and the ID of the same Launcher
+// resolve to the same row, a foreign ID and a foreign same-name Launcher are
+// indistinguishable from a missing one through the wrong Principal, and
+// malformed or ID-shaped selectors never fall back to any other lookup.
+func TestLauncherScopedSelectorResolution(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pidA, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "hal")
+	pidB, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "ivan")
+
+	aliceDefault, _, _, err := createLauncher(db, pidA, "default", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobDefault, _, _, err := createLauncher(db, pidB, "default", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, _, _, err := createLauncher(db, pidA, "build-agent", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 'default' under two Principals resolves independently.
+	got, err := findLauncherForPrincipal(db, pidA, "default")
+	if err != nil || got.ID != aliceDefault.ID {
+		t.Errorf("alice/default: got (%v, %v), want %q", got, err, aliceDefault.ID)
+	}
+	got, err = findLauncherForPrincipal(db, pidB, "default")
+	if err != nil || got.ID != bobDefault.ID {
+		t.Errorf("bob/default: got (%v, %v), want %q", got, err, bobDefault.ID)
+	}
+
+	// Name and ID resolve the same Launcher.
+	byName, err := findLauncherForPrincipal(db, pidA, "build-agent")
+	if err != nil {
+		t.Fatalf("resolve by name: %v", err)
+	}
+	byID, err := findLauncherForPrincipal(db, pidA, agent.ID)
+	if err != nil {
+		t.Fatalf("resolve by ID: %v", err)
+	}
+	if byName.ID != agent.ID || byID.ID != agent.ID {
+		t.Errorf("name/ID resolution disagree: %q vs %q, want %q", byName.ID, byID.ID, agent.ID)
+	}
+
+	// A foreign ID under another Principal is the same not-found as a missing
+	// Launcher, and a foreign same-name Launcher is never found through the
+	// wrong Principal.
+	for _, tc := range []struct {
+		name     string
+		pid      int64
+		selector string
+	}{
+		{"foreign ID under wrong principal", pidB, agent.ID},
+		{"malformed selector", pidA, "Foo"},
+		{"malformed selector with space", pidA, "agent one"},
+		{"ID-shaped nonexistent ID", pidA, "dhl_00000000000000000000000000000000"},
+		{"uppercase ID prefix", pidA, "DHL_0000000000000000000000000000000a"},
+	} {
+		if _, err := findLauncherForPrincipal(db, tc.pid, tc.selector); !errors.Is(err, ErrLauncherNotFound) {
+			t.Errorf("%s (%q): expected ErrLauncherNotFound, got %v", tc.name, tc.selector, err)
+		}
+	}
+
+	// A foreign same-name Launcher is never found through the wrong Principal,
+	// proven against a real launcher: the name resolves for bob (its owner)
+	// but never for alice.
+	if _, _, _, err := createLauncher(db, pidB, "foreign-name", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+		t.Fatalf("create bob/foreign-name: %v", err)
+	}
+	if _, err := findLauncherForPrincipal(db, pidA, "foreign-name"); !errors.Is(err, ErrLauncherNotFound) {
+		t.Errorf("foreign same-name through wrong principal: expected ErrLauncherNotFound, got %v", err)
+	}
+	got, err = findLauncherForPrincipal(db, pidB, "foreign-name")
+	if err != nil {
+		t.Fatalf("same name under the owning principal must resolve: %v", err)
+	}
+	if got.PrincipalID != pidB {
+		t.Errorf("resolved wrong owner: %d, want %d", got.PrincipalID, pidB)
+	}
+}
+
 func TestLauncherUpdateName(t *testing.T) {
 	db := openFreshTestDB(t)
 	globalRoots := []string{testAllowedRootDir(t)}
