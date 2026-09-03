@@ -1445,11 +1445,11 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   fi
 
   # H5: an already-stored Launcher root becomes stale fail-closed when the
-  # exact narrow Principal root containing it is removed. principal create
-  # auto-installs the OS user's home directory as the Principal's default
-  # allowed root ($ALLOWED_ROOT itself is never a stored root), so narrowing to
-  # exactly {H_SUB} means removing that home root first. The Launcher root
-  # ($H_SUB) is then the Principal's only root, the effective Principal
+  # exact narrow Principal root containing it is removed. The Principal holds
+  # two roots at this point: $ALLOWED_ROOT (added by set_up_principal) and the
+  # OS user's home directory (auto-installed as the default allowed root by
+  # principal create). Narrowing to exactly {H_SUB} removes both; the Launcher
+  # root ($H_SUB) is then the Principal's only root, the effective Principal
   # ceiling is exactly {H_SUB} and the stored Launcher root is demonstrably
   # inside it; a positive precondition proves session creation through the
   # Launcher succeeds. Removing that exact Principal root empties the ceiling,
@@ -1459,7 +1459,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
   # Principal).
   H5_REMOVED=false
   H5_NARROWED=false
-  if dh principal allowed-root remove --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
+  if dh principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+      && dh principal allowed-root remove --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
     H5_REMOVED=true
     if dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
       H5_NARROWED=true
@@ -1496,7 +1497,8 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     fi
   fi
   if [ "$H5_REMOVED" = true ]; then
-    if dh principal allowed-root add --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
+    if dh principal allowed-root add --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1 \
+        && dh principal allowed-root add --system "$H_USER" "$H_HOME" >/dev/null 2>&1; then
       acc_ok "principal root state restored after the stale-root check"
     else
       acc_fail "could not restore the principal root after the stale-root check"
@@ -1569,8 +1571,21 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     # The daemon does not terminate running operations, and the refused delete
     # already invalidated the Launcher's Sessions; the operator stops the
     # container and retries the delete ("retries after the runtime exits").
+    # The retry must wait for the operation to actually finalize: the daemon
+    # removes the cid file when the run process completes, and the background
+    # CLI exits once the operation is no longer running.
     docker stop -t 5 "$H_RT_CID" >/dev/null 2>&1 || true
+    H_RUN_FINALIZED=false
     if wait_no_container "$H_RT_CID"; then
+      for _ in $(seq 1 100); do
+        if [ ! -e "$H_RT_CIDFILE" ] && ! kill -0 "$H_OP_PID" 2>/dev/null; then
+          H_RUN_FINALIZED=true
+          break
+        fi
+        sleep 0.2
+      done
+    fi
+    if [ "$H_RUN_FINALIZED" = true ]; then
       if dh launcher delete --system "$H_ALPHA_ID" >/dev/null 2>&1; then
         acc_ok "launcher delete succeeds after its sessions are cleaned up"
       else

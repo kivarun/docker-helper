@@ -8372,12 +8372,12 @@ func TestRelease2AcceptanceStrictProofContracts(t *testing.T) {
 	}
 
 	// H5: the stale-root proof must first install the Launcher root as the
-	// Principal's exact narrow ceiling (principal create auto-installs the OS
-	// user's home directory as the default allowed root, so $ALLOWED_ROOT
-	// itself is never a stored root and the home root is what gets removed),
-	// prove session creation succeeds inside it, then remove that exact
-	// Principal root and demand HTTP 422 with structured code
-	// launcher_unavailable, and finally restore the Principal root state.
+	// Principal's exact narrow ceiling (the Principal holds the setup-added
+	// $ALLOWED_ROOT root and the principal-create-auto-installed home root;
+	// both must be removed), prove session creation succeeds inside it, then
+	// remove that exact Principal root and demand HTTP 422 with structured
+	// code launcher_unavailable, and finally restore the Principal root
+	// state.
 	for _, must := range []string{
 		`principal allowed-root remove --system "$H_USER" "$H_HOME"`,
 		`principal allowed-root add --system "$H_USER" "$H_SUB"`,
