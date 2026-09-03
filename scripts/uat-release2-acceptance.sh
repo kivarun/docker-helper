@@ -1248,9 +1248,14 @@ fi
 #       outcome as a missing session
 #   H3  credential rotation: old bearer rejected, replacement authorized, same
 #       launcher identity, no second credential (409 launcher_credential_exists)
-#   H4  restricted scope narrows the principal ceiling for new sessions
-#   H5  stale out-of-ceiling launcher roots are rejected fail-closed
-#       (launcher_unavailable) after the principal root is removed
+#   H4  restricted scope narrows the principal ceiling for new sessions; a
+#       workspace outside the restricted Launcher scope but otherwise valid
+#       gets the exact contract: HTTP 400 invalid_workspace
+#   H5  an already-stored Launcher root becomes stale fail-closed when the
+#       exact narrow Principal root containing it is removed: creation is
+#       first proven to succeed inside the narrow ceiling (positive
+#       precondition), then fails with 422 launcher_unavailable; the original
+#       Principal root state is restored
 #   H6  disabling a launcher deletes its sessions and rejects its bearer; an
 #       individually disabled launcher stays disabled through a principal
 #       disable/enable cycle
@@ -1357,34 +1362,75 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     acc_fail "launcher credential rotate failed"
   fi
 
-  # H4: restricted scope narrows new sessions.
-  H_NARROW_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+  # H4: restricted scope narrows new sessions; the exact current API contract
+  # for a workspace outside the restricted Launcher scope but otherwise valid
+  # (existing directory, inside the global root and the Principal ceiling) is
+  # HTTP 400 with structured code invalid_workspace.
+  H_NARROW_HTTP="$(curl --silent --output /tmp/r2ac-h-narrow.json --write-out '%{http_code}' --max-time 5 \
     --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
     -H 'Content-Type: application/json' \
     -d "{\"workspace\":\"$H_WS\"}" http://localhost/sessions 2>/dev/null || true)"
-  case "$H_NARROW_HTTP" in
-    201|""|*[!0-9]*)
-      acc_fail "restricted launcher scope narrowing failed (http=$H_NARROW_HTTP)"
-      ;;
-    *)
-      acc_ok "restricted launcher rejects workspace outside its scope (http=$H_NARROW_HTTP)"
-      ;;
-  esac
+  if [ "$H_NARROW_HTTP" = 400 ] \
+      && grep -q '"code":"invalid_workspace"' /tmp/r2ac-h-narrow.json; then
+    acc_ok "restricted launcher rejects out-of-scope workspace (400 invalid_workspace)"
+  else
+    acc_fail "restricted launcher out-of-scope workspace contract wrong (http=$H_NARROW_HTTP)"
+  fi
 
-  # H5: stale out-of-ceiling launcher roots fail closed.
-  if dh principal allowed-root remove --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
-    H_STALE_HTTP="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+  # H5: an already-stored Launcher root becomes stale fail-closed when the
+  # exact narrow Principal root containing it is removed. The Launcher root
+  # ($H_SUB) is first installed as the Principal's only root, so the effective
+  # Principal ceiling is exactly {H_SUB} and the stored Launcher root is
+  # demonstrably inside it; a positive precondition proves session creation
+  # through the Launcher succeeds. Removing that exact Principal root empties
+  # the ceiling, the stored Launcher root becomes stale, and the same
+  # creation must fail with HTTP 422 and structured code
+  # launcher_unavailable. The original Principal root state is restored
+  # afterwards (later H checks reuse this Principal).
+  H5_REMOVED=false
+  H5_NARROWED=false
+  if dh principal allowed-root remove --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1; then
+    H5_REMOVED=true
+    if dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
+      H5_NARROWED=true
+    else
+      acc_fail "could not install the narrow principal ceiling for the stale-root check"
+    fi
+  else
+    acc_fail "could not narrow the principal ceiling for the stale-root check"
+  fi
+  if [ "$H5_NARROWED" = true ]; then
+    mkdir -p "$H_SUB/ws5"; chown -R "$H_USER:$H_USER" "$H_SUB/ws5"
+    H_POS_HTTP="$(curl --silent --output /tmp/r2ac-h-pos.json --write-out '%{http_code}' --max-time 5 \
       --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
       -H 'Content-Type: application/json' \
-      -d "{\"workspace\":\"$H_SUB\"}" http://localhost/sessions 2>/dev/null || true)"
-    if [ "$H_STALE_HTTP" = 422 ]; then
-      acc_ok "stale out-of-ceiling launcher root rejected fail-closed (422 launcher_unavailable)"
+      -d "{\"workspace\":\"$H_SUB/ws5\"}" http://localhost/sessions 2>/dev/null || true)"
+    if [ "$H_POS_HTTP" = 201 ] && grep -q '"id":"dhs_' /tmp/r2ac-h-pos.json; then
+      acc_ok "stale-root precondition: session creation through the Launcher succeeds inside the narrow ceiling"
     else
-      acc_fail "stale launcher root not rejected as expected (http=$H_STALE_HTTP)"
+      acc_fail "stale-root precondition failed: Launcher unusable inside the narrow ceiling (http=$H_POS_HTTP)"
     fi
-    dh principal allowed-root add --system "$H_USER" "$H_SUB" >/dev/null 2>&1 || true
-  else
-    acc_fail "could not remove principal root for the stale-root check"
+    if dh principal allowed-root remove --system "$H_USER" "$H_SUB" >/dev/null 2>&1; then
+      H_STALE_HTTP="$(curl --silent --output /tmp/r2ac-h-stale.json --write-out '%{http_code}' --max-time 5 \
+        --unix-socket "$SOCK" -H "Authorization: Bearer $H_BETA_TOK" \
+        -H 'Content-Type: application/json' \
+        -d "{\"workspace\":\"$H_SUB/ws5\"}" http://localhost/sessions 2>/dev/null || true)"
+      if [ "$H_STALE_HTTP" = 422 ] \
+          && grep -q '"code":"launcher_unavailable"' /tmp/r2ac-h-stale.json; then
+        acc_ok "stale out-of-ceiling launcher root rejected fail-closed (422 launcher_unavailable)"
+      else
+        acc_fail "stale launcher root contract wrong (http=$H_STALE_HTTP)"
+      fi
+    else
+      acc_fail "could not remove the narrow principal root for the stale-root check"
+    fi
+  fi
+  if [ "$H5_REMOVED" = true ]; then
+    if dh principal allowed-root add --system "$H_USER" "$ALLOWED_ROOT" >/dev/null 2>&1; then
+      acc_ok "principal root state restored after the stale-root check"
+    else
+      acc_fail "could not restore the principal root after the stale-root check"
+    fi
   fi
 
   # H6: disable propagation + persistence of individual disablement.
