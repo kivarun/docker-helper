@@ -1591,11 +1591,11 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
         acc_ok "launcher delete succeeds after its sessions are cleaned up"
       else
         acc_fail "launcher delete failed after cleanup (cli: ${H_DEL_RETRY_OUT:-<no output>})"
-        # Evidence for diagnosis: the delete audit result and any operational
-        # error line. Audit lines carry no bearer material.
+        # Evidence for diagnosis: the delete/run audit trail and any
+        # operational error line. Audit lines carry no bearer material.
         journalctl --utc -u docker-helper.service --since '-3 min' --no-pager 2>/dev/null \
-          | grep -E '"event":"launcher\.delete"|launcher delete failed|cannot inspect launcher runtime' \
-          | tail -5 >&2 || true
+          | grep -E '"stream":"audit"|"level":"ERROR"' \
+          | tail -40 >&2 || true
         docker ps -a --filter "label=com.dockerhelper.launcher.id=$H_ALPHA_ID" --format '{{.ID}} {{.State.Running}} {{.Status}}' >&2 2>/dev/null || true
       fi
     else
