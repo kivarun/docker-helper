@@ -1595,7 +1595,22 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
         journalctl --utc -u docker-helper.service --since '-3 min' --no-pager 2>/dev/null \
           | grep -E '"stream":"audit"|"level":"ERROR"' \
           | tail -40 >&2 || true
-        docker ps -a --filter "label=com.dockerhelper.launcher.id=$H_ALPHA_ID" --format '{{.ID}} {{.State.Running}} {{.Status}}' >&2 2>/dev/null || true
+        # Reproduce the daemon's exact runtime-inspection command (schema +
+        # launcher-id label filters, {{.ID}} {{.State.Running}} format) and a
+        # corrected-format listing, to distinguish a template error from a
+        # confined-daemon environment failure.
+        H_PS_RC=0
+        H_PS_OUT="$(docker ps -a \
+          --filter 'label=com.dockerhelper.schema=1' \
+          --filter "label=com.dockerhelper.launcher.id=$H_ALPHA_ID" \
+          --format '{{.ID}} {{.State.Running}}' 2>&1)" || H_PS_RC=$?
+        printf 'ps-exact rc=%s out: %s\n' "$H_PS_RC" "${H_PS_OUT:-<empty>}" >&2
+        H_PS2_RC=0
+        H_PS2_OUT="$(docker ps -a \
+          --filter 'label=com.dockerhelper.schema=1' \
+          --filter "label=com.dockerhelper.launcher.id=$H_ALPHA_ID" \
+          --format '{{.ID}} {{.State}} {{.Status}}' 2>&1)" || H_PS2_RC=$?
+        printf 'ps-fixed rc=%s out: %s\n' "$H_PS2_RC" "${H_PS2_OUT:-<empty>}" >&2
       fi
     else
       acc_fail "launcher runtime container did not stop for the checked-delete cleanup"
