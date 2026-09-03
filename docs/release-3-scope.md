@@ -59,10 +59,10 @@ Release 3 supports execution of commands inside managed containers.
 
 Two execution modes are provided:
 
-- **non-interactive exec** — a synchronous Command with the same combined, bounded output and exit-code model as the existing one-shot `run`;
-- **interactive exec** — streamed over WebSocket.
+- **non-interactive exec** — a synchronous Command with closed stdin and the same combined, bounded output and exit-code model as the existing one-shot `run`;
+- **interactive exec** — an explicit argv command in a mandatory TTY, streamed over the versioned docker-helper WebSocket protocol.
 
-Neither mode creates a durable Operation. Interactive streaming is a transport mechanism for an authorized exec Command and does not create an independent authorization model. An open interactive stream never renews its Session; expiration closes the stream and Session cleanup removes the owning container.
+Neither mode creates a durable Operation. Interactive streaming is a transport mechanism for an authorized exec Command and does not create an independent authorization model. It has no public exec ID, detach, reconnect, or replay contract. An open interactive stream never renews its Session; expiration closes the stream and Session cleanup removes the owning container.
 
 Release 3 does not emit workload output to the daemon logger or journald. Audit and operational records contain command metadata and normalized outcomes, never captured command output.
 

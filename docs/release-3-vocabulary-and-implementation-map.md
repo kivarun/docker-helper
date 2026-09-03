@@ -59,7 +59,7 @@ Target names describe one logical responsibility. Exact Go visibility follows th
 | Publishing grant | Inclusive contiguous host-port range a Root, Principal, Launcher, or Session subtree may use. | No publishing authorization model. | Inherits or narrows through the ownership hierarchy; it authorizes allocation but does not reserve every port in the range. |
 | Port lease | One `127.0.0.1` TCP host port assigned to a Managed Container publication. | No persistent allocation. | Persists for the Managed Container lifetime and prevents collisions only with leases in the same docker-helper state store. |
 | Condition | Stable reason why normal management and runtime observations cannot be combined. | No common type. | Bounded public vocabulary: `backend_missing`, `backend_unavailable`, `ownership_mismatch`, `policy_mismatch`, and `cleanup_failed`. Conditions never trigger autonomous mutation. |
-| Interactive Stream | Transport for one authorized interactive exec. | Does not exist. | Versioned docker-helper WebSocket protocol; not an Operation or owner. |
+| Interactive Stream | Transport for one authorized interactive exec. | Does not exist. | Versioned docker-helper TTY WebSocket protocol implemented with `github.com/coder/websocket` behind `internal/wstransport`; not an Operation or owner. |
 
 ## Naming rules
 

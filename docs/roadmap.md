@@ -512,6 +512,8 @@ Release 3 foundation documents:
 - [`release-3-managed-container-domain.md`](release-3-managed-container-domain.md) — identity, ownership, and lifetime;
 - [`release-3-managed-container-lifecycle.md`](release-3-managed-container-lifecycle.md) — lifecycle, scoped listing, divergence, repair, removal, and troubleshooting;
 - [`release-3-session-networking.md`](release-3-session-networking.md) — Session network ownership, lazy provisioning, isolation, explicit repair, and cleanup;
+- [`release-3-logs-and-exec.md`](release-3-logs-and-exec.md) — bounded log snapshots and common exec semantics;
+- [`release-3-interactive-streaming.md`](release-3-interactive-streaming.md) — versioned, bounded TTY transport over WebSocket;
 - [`release-3-resource-constraints.md`](release-3-resource-constraints.md) — resource hierarchy, safe defaults, workload limits, and enforcement;
 - [`release-3-port-publishing.md`](release-3-port-publishing.md) — hierarchical grants, loopback TCP allocation, durable leases, and collision handling;
 - [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.

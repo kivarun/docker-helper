@@ -209,13 +209,19 @@ This package defines command execution inside a Managed Container independently 
 Responsibilities:
 
 - target resolution and ownership verification;
-- argv command, optional container-local environment and working-directory, timeout, and cancellation contracts;
+- argv command and optional container-local environment and working-directory;
+- explicit absence of non-interactive stdin, detach, timeout, and cancellation contracts;
 - container-state preconditions;
 - exit status and failure taxonomy;
 - audit attribution;
 - shared execution semantics for non-interactive and interactive modes.
 
 Non-interactive exec reuses the existing synchronous `run` request/response model. It returns combined bounded output and exit status directly and creates no Operation.
+
+Docker-provided terminal exit codes, including `126` and `127`, remain workload
+results. If the Engine rejects start before a trustworthy terminal exec result
+exists, the Command fails with HTTP `422` and `exec_start_failed`; docker-helper
+never infers an exit code by matching backend error text.
 
 Exec inherits the container's configured user. Release 3 exposes no user override, privileged mode, or additional Linux capabilities. All active exec instances are limited to 16 per container, 32 per Session, 32 per owning Principal, and 64 per daemon. Interactive exec is additionally limited to 4 per container, 16 per Session, 16 per Principal, and 64 per daemon; administrators may tune these defaults.
 
@@ -235,16 +241,38 @@ Responsibilities:
 
 - WebSocket upgrade and attachment to one exec instance;
 - binary stdin and combined output framing;
-- TTY and non-TTY behavior;
-- terminal resize when TTY mode is supported;
-- stream close, process exit, cancellation, and disconnect semantics;
+- mandatory TTY allocation and terminal resize;
+- stream close, process exit, lifecycle interruption, and disconnect cleanup;
 - bounded buffering and backpressure;
-- authorization behavior when a token or Session expires during a stream;
+- authorization behavior when an initiating credential changes or the Session
+  expires during a stream;
 - audit linkage between the stream and the exec action.
 
 The WebSocket protocol must be docker-helper-owned and versionable. Raw Docker attach framing must not become the public contract.
 
-One JSON start frame establishes the exec and the negotiated subprotocol version. Binary frames carry stdin and combined output; text frames carry controls such as terminal resize and completion. Each connection has a 1 MiB outbound queue. On ordinary disconnect docker-helper makes a best-effort Ctrl-C, waits about one second, closes stdin with Ctrl-D semantics, and then detaches if the process remains alive. Reconnect and an `exec kill` endpoint are outside Release 3; a detached process continues to count until it exits or its container is torn down. An open stream never renews Session TTL; Session expiration closes the stream and teardown removes the owning container without a separate exec grace period.
+Interactive exec always allocates a TTY. It has one combined terminal stream,
+supports resize, and requires an explicit argv executable without inserting a
+shell. Release 3 exposes no non-TTY WebSocket exec mode.
+
+The HTTP upgrade authenticates the bearer, checks target visibility, and
+negotiates `docker-helper.exec.v1` through `Sec-WebSocket-Protocol`. The first
+client text frame carries argv, environment, workdir, and initial terminal
+size. The exec is accepted only after common admission succeeds, the Engine
+exec is created and attached, and the server sends a `started` control frame.
+
+Daemon and CLI use `github.com/coder/websocket` behind one narrow
+`internal/wstransport` compile-time adapter. Third-party types do not enter the
+exec core or public frame model. Release 3 ships no runtime-selectable provider
+or speculative second implementation.
+
+The adapter clears inherited HTTP connection deadlines after successful
+hijack and then installs the D6 liveness and per-write bounds. Ordinary HTTP
+request and response-delivery timeouts remain enabled for every non-WebSocket
+route.
+
+No preliminary HTTP request, attachment ticket, or public exec ID exists.
+
+Binary frames carry stdin and combined output; text frames carry controls such as terminal resize and completion. Each connection has a 1 MiB outbound queue. On ordinary disconnect docker-helper makes a best-effort Ctrl-C, waits about one second, closes stdin with Ctrl-D semantics, and then detaches if the process remains alive. Reconnect and an `exec kill` endpoint are outside Release 3; a detached process continues to count until it exits or its container is torn down. An open stream never renews Session TTL; Session expiration closes the stream and teardown removes the owning container without a separate exec grace period.
 
 Completion criterion: interactive exec can be used without exposing a second authorization model, an unbounded relay, or Docker-specific stream framing.
 
@@ -392,8 +420,9 @@ The decomposition produces the following detailed design documents:
 10. `release-3-security-and-test-plan.md` — threat boundaries and release verification.
 
 The Operation model, Managed Container domain, Managed Container lifecycle,
-Session networking, resource-constraint, and port-publishing contracts are
-accepted foundation designs.
+Session networking, bounded logs, common exec semantics, interactive
+streaming, resource-constraint, and port-publishing contracts are accepted
+foundation designs.
 `release-3-vocabulary-and-implementation-map.md` is their implementation bridge
 to the Release 2 codebase and the Release 2.1 Launcher design.
 `release-3-d0-execution-plan.md` turns the common Operation foundation into
@@ -401,5 +430,5 @@ ordered executor tasks and test gates. Each remaining owner document must be
 contract-ready before its package is assigned, but need not prescribe
 code-ready mechanics that belong to the operational architect. The immutable
 container creation inputs are now fixed. The remaining owner
-documents close logs and exec, interactive transport, the integrated public
-surface, and release-wide security verification.
+documents close the integrated public surface and release-wide security
+verification.
