@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -532,6 +534,24 @@ func cleanupSessionRuntimeDir(runtimeDir, sessionID string) error {
 		return fmt.Errorf("cannot remove session runtime directory: %w", err)
 	}
 	return nil
+}
+
+// cleanupSessionRuntimeDirsBestEffort removes the runtime directory of every
+// invalidated session. Best-effort: a failure on one directory is logged with
+// the given operation name and does not stop the remaining cleanups. Callers
+// must invoke it regardless of their overall outcome whenever a durable
+// session invalidation may already have committed, so a later teardown failure
+// cannot lose the cleanup until daemon restart.
+func cleanupSessionRuntimeDirsBestEffort(ctx context.Context, operation, runtimeDir string, sessionIDs []string) {
+	for _, sessionID := range sessionIDs {
+		if err := cleanupSessionRuntimeDir(runtimeDir, sessionID); err != nil {
+			opLog(ctx).Warn("failed to clean up session runtime directory",
+				slog.String("operation", operation),
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // cleanupStaleSessionRuntimeDirs removes session runtime directories that no

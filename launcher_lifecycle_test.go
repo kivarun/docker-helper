@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -272,6 +275,105 @@ func TestLauncherPatchCollidingRenameAbortsDisable(t *testing.T) {
 	}
 	if app.OperationSupervisor.isLauncherQuiesced(lID) {
 		t.Fatal("supervisor must not stay quiesced after an aborted PATCH disable")
+	}
+}
+
+// TestLauncherCheckedDeleteCleansRuntimeDirsWhenRowRemovalFails proves a
+// checked delete whose owner removal fails after the durable disable
+// committed still runs the runtime-directory cleanup for the invalidated
+// Sessions: the delete handler returns an error, but the revoked Session IDs
+// are preserved through the failure instead of being dropped until daemon
+// restart. Enters through the real DELETE handler.
+func TestLauncherCheckedDeleteCleansRuntimeDirsWhenRowRemovalFails(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	globalRoots := app.Config.AllowedRoots
+	home := filepath.Join(globalRoots[0], "home", "lnccleanrow")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(string) (string, string, string, error) {
+		return "2001", "2001", home, nil
+	}
+	p, err := createPrincipal(app.DB, "lnccleanrow", globalRoots)
+	if err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+	l, _, credToken, err := createLauncher(app.DB, int64(p.ID), "agent", LauncherScopeInherit, nil, globalRoots, true)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+
+	workspace := filepath.Join(home, "proj")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sessMux := http.NewServeMux()
+	sessMux.HandleFunc("POST /sessions", app.handleCreateSession)
+	sessReq := httptest.NewRequest(http.MethodPost, "/sessions",
+		strings.NewReader(`{"workspace":"`+workspace+`"}`))
+	sessReq.Header.Set("Authorization", "Bearer "+credToken)
+	sessW := httptest.NewRecorder()
+	sessMux.ServeHTTP(sessW, sessReq)
+	if sessW.Code != http.StatusCreated {
+		t.Fatalf("session create: expected 201, got %d (body=%s)", sessW.Code, sessW.Body.String())
+	}
+	var sessResp createSessionResponse
+	if err := json.Unmarshal(sessW.Body.Bytes(), &sessResp); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := sessResp.Session.ID
+
+	// Give cleanup something observable to remove.
+	sessRTDir := sessionRuntimeDir(app.Config.RuntimeDir, sessionID)
+	if err := os.MkdirAll(sessRTDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessRTDir, "sentinel"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fail exactly the owner-removal exec: the durable disable's statements
+	// (session deletion, enabled update) do not match, so the disable commits
+	// and only DELETE FROM launchers fails.
+	failDB := newFailExecMatchDB(t, app.Config.DatabasePath, "DELETE FROM launchers", errMockDeleteDB)
+	app.DB = failDB
+
+	delMux := http.NewServeMux()
+	registerRoutes(delMux, app)
+	delReq := httptest.NewRequest(http.MethodDelete, "/principals/lnccleanrow/launchers/"+l.ID, nil)
+	withAdminToken(delReq)
+	delW := httptest.NewRecorder()
+	delMux.ServeHTTP(delW, delReq)
+	if delW.Code != http.StatusInternalServerError {
+		t.Fatalf("delete: expected 500, got %d (body=%s)", delW.Code, delW.Body.String())
+	}
+
+	// The invalidated session's runtime directory is cleaned even though the
+	// delete failed.
+	if _, err := os.Stat(sessRTDir); !os.IsNotExist(err) {
+		t.Fatalf("session runtime dir survived the failed delete: %v", err)
+	}
+	// The durable disable committed; the launcher row remains.
+	if enabled, err := launcherEnabledState(failDB, l.ID); err != nil {
+		t.Fatal(err)
+	} else if enabled {
+		t.Fatal("expected launcher durably disabled after committed disable")
+	}
+	var sessions int
+	if err := failDB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id = ?`, l.ID).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 {
+		t.Fatalf("expected sessions invalidated, got %d", sessions)
+	}
+	var rows int
+	if err := failDB.QueryRow(`SELECT COUNT(*) FROM launchers WHERE id = ?`, l.ID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected the launcher row to survive the failed owner removal, got %d rows", rows)
 	}
 }
 

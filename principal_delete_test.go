@@ -411,6 +411,106 @@ func TestPrincipalDeleteAPI204(t *testing.T) {
 	}
 }
 
+// TestPrincipalCheckedDeleteCleansRuntimeDirsWhenOwnerRemovalFails proves a
+// Principal checked delete whose owner removal fails after the child durable
+// disable committed still runs the runtime-directory cleanup for the
+// invalidated Sessions: the handler returns an error, but the accumulated
+// revoked Session IDs are preserved through the failure instead of being
+// dropped until daemon restart. Enters through the real DELETE handler.
+func TestPrincipalCheckedDeleteCleansRuntimeDirsWhenOwnerRemovalFails(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+
+	home := filepath.Join(app.Config.AllowedRoots[0], "home", "prdelclean")
+	if err := os.MkdirAll(filepath.Join(home, "proj"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := OSUserLookup
+	defer func() { OSUserLookup = orig }()
+	OSUserLookup = func(string) (string, string, string, error) {
+		return "1062", "1062", home, nil
+	}
+
+	username := "prdelclean"
+	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal: %v", err)
+	}
+	// Principal creation provisions the default Launcher (eager provisioning).
+	_, credToken, err := createCredential(app.DB, username, "laptop")
+	if err != nil {
+		t.Fatalf("createCredential: %v", err)
+	}
+
+	sessMux := http.NewServeMux()
+	sessMux.HandleFunc("POST /sessions", app.handleCreateSession)
+	sessReq := httptest.NewRequest(http.MethodPost, "/sessions",
+		strings.NewReader(`{"workspace":"`+filepath.Join(home, "proj")+`"}`))
+	sessReq.Header.Set("Authorization", "Bearer "+credToken)
+	sessW := httptest.NewRecorder()
+	sessMux.ServeHTTP(sessW, sessReq)
+	if sessW.Code != http.StatusCreated {
+		t.Fatalf("session create: expected 201, got %d (body=%s)", sessW.Code, sessW.Body.String())
+	}
+	var sessResp createSessionResponse
+	if err := json.Unmarshal(sessW.Body.Bytes(), &sessResp); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := sessResp.Session.ID
+
+	// Give cleanup something observable to remove.
+	sessRTDir := sessionRuntimeDir(app.Config.RuntimeDir, sessionID)
+	if err := os.MkdirAll(sessRTDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessRTDir, "sentinel"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fail exactly the owner-removal exec: the child durable disable's
+	// statements (session deletion, enabled update) do not match, so the
+	// disable commits and only DELETE FROM principals fails.
+	failDB := newFailExecMatchDB(t, app.Config.DatabasePath, "DELETE FROM principals", errMockDeleteDB)
+	app.DB = failDB
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /principals/{username}", app.handleDeletePrincipal)
+	req := httptest.NewRequest(http.MethodDelete, "/principals/"+username, nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (body=%s)", w.Code, w.Body.String())
+	}
+
+	// The invalidated session's runtime directory is cleaned even though the
+	// delete failed.
+	if _, err := os.Stat(sessRTDir); !os.IsNotExist(err) {
+		t.Fatalf("session runtime dir survived the failed delete: %v", err)
+	}
+	// The durable child disable committed; the principal row remains.
+	var sessions int
+	if err := failDB.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 {
+		t.Fatalf("expected sessions invalidated, got %d", sessions)
+	}
+	var enabled int
+	if err := failDB.QueryRow(`SELECT enabled FROM launchers WHERE principal_id = (SELECT id FROM principals WHERE username = ?)`, username).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 0 {
+		t.Fatal("expected the child launcher durably disabled after committed disable")
+	}
+	var rows int
+	if err := failDB.QueryRow(`SELECT COUNT(*) FROM principals WHERE username = ?`, username).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected the principal row to survive the failed owner removal, got %d rows", rows)
+	}
+}
+
 func TestPrincipalDeleteAPI404(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 

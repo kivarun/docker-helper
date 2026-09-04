@@ -537,6 +537,14 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 	sessionIDs, err := a.deletePrincipalChecked(ctx, username)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
+	// Best-effort cleanup of runtime directories for invalidated sessions. It
+	// runs regardless of the outcome: a durable child disable that committed
+	// before a later teardown failure has already invalidated those sessions,
+	// and their IDs are returned with the error so the cleanup is not lost
+	// until daemon restart.
+	cfg := a.getConfig()
+	cleanupSessionRuntimeDirsBestEffort(ctx, "principal_delete", cfg.RuntimeDir, sessionIDs)
+
 	if err != nil {
 		if isErrPrincipalNotFound(err) {
 			writeRequestContextAudit(ctx, auditRecord{
@@ -568,18 +576,6 @@ func (a *App) handleDeletePrincipal(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
-	}
-
-	// Best-effort cleanup of runtime directories for deleted sessions.
-	cfg := a.getConfig()
-	for _, sessionID := range sessionIDs {
-		if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, sessionID); err != nil {
-			opLog(ctx).Warn("failed to clean up session runtime directory",
-				slog.String("operation", "principal_delete"),
-				slog.String("session_id", sessionID),
-				slog.String("error", err.Error()),
-			)
-		}
 	}
 
 	writeRequestContextAudit(ctx, auditRecord{

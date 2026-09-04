@@ -227,6 +227,102 @@ func initializeDatabase(db *sql.DB) error {
 	return nil
 }
 
+// stripSQLiteComments removes SQL line and block comments from a stored
+// schema definition without touching string literals or quoted identifiers,
+// so canonical CHECK text that appears only inside a comment cannot satisfy
+// schema-invariant matching. SQLite comments are `--` to end of line and
+// `/* ... */` (not nested); doubled single quotes (”) and bracketed/backtick
+// identifiers are honored while scanning.
+func stripSQLiteComments(sqlText string) string {
+	var b strings.Builder
+	b.Grow(len(sqlText))
+	const (
+		outside = iota
+		inSingle
+		inDouble
+		inBacktick
+		inBracket
+	)
+	state := outside
+	for i := 0; i < len(sqlText); i++ {
+		c := sqlText[i]
+		switch state {
+		case inSingle:
+			b.WriteByte(c)
+			if c == '\'' {
+				if i+1 < len(sqlText) && sqlText[i+1] == '\'' {
+					b.WriteByte('\'')
+					i++
+				} else {
+					state = outside
+				}
+			}
+		case inDouble:
+			b.WriteByte(c)
+			if c == '"' {
+				if i+1 < len(sqlText) && sqlText[i+1] == '"' {
+					b.WriteByte('"')
+					i++
+				} else {
+					state = outside
+				}
+			}
+		case inBacktick:
+			b.WriteByte(c)
+			if c == '`' {
+				if i+1 < len(sqlText) && sqlText[i+1] == '`' {
+					b.WriteByte('`')
+					i++
+				} else {
+					state = outside
+				}
+			}
+		case inBracket:
+			b.WriteByte(c)
+			if c == ']' {
+				state = outside
+			}
+		default:
+			switch {
+			case c == '\'':
+				state = inSingle
+				b.WriteByte(c)
+			case c == '"':
+				state = inDouble
+				b.WriteByte(c)
+			case c == '`':
+				state = inBacktick
+				b.WriteByte(c)
+			case c == '[':
+				state = inBracket
+				b.WriteByte(c)
+			case c == '-' && i+1 < len(sqlText) && sqlText[i+1] == '-':
+				for i < len(sqlText) && sqlText[i] != '\n' {
+					i++
+				}
+				// keep the newline: the next iteration writes it
+			case c == '/' && i+1 < len(sqlText) && sqlText[i+1] == '*':
+				i += 2
+				for i+1 < len(sqlText) && !(sqlText[i] == '*' && sqlText[i+1] == '/') {
+					i++
+				}
+				i++ // land on the closing '/'
+			default:
+				b.WriteByte(c)
+			}
+		}
+	}
+	return b.String()
+}
+
+// normalizeSchemaSQL is the canonical comparable form of a stored schema
+// definition: comments stripped, lowercase, whitespace collapsed. Every
+// sqlite_master DDL match in the schema invariant verifiers goes through it,
+// so verbatim text inside a comment can never satisfy a match.
+func normalizeSchemaSQL(ddl string) string {
+	return strings.ToLower(strings.Join(strings.Fields(stripSQLiteComments(ddl)), ""))
+}
+
 // launchersNameCheck is the canonical Launcher-name grammar CHECK expression,
 // normalized (lowercase, whitespace-stripped) for comparison against the
 // declared schema in sqlite_master. Only this binary's initializeDatabase
@@ -252,8 +348,9 @@ func verifyLaunchersNameInvariant(db *sql.DB) error {
 		return fmt.Errorf("cannot read launchers table schema: %w", err)
 	}
 	// Do not accept merely because the grammar fragments occur somewhere in
-	// the DDL: require the exact canonical CHECK expression.
-	normalized := strings.ToLower(strings.Join(strings.Fields(ddl), ""))
+	// the DDL: require the exact canonical CHECK expression, compared after
+	// comment stripping so comment text can never satisfy the match.
+	normalized := normalizeSchemaSQL(ddl)
 	if !strings.Contains(normalized, launchersNameCheck) {
 		return errors.New("launchers table does not enforce the launcher-name invariant; " +
 			"this database has an unsupported intermediate pre-release 2.1 Launcher schema " +
@@ -836,7 +933,7 @@ func verifyCredentialsOwnerCheck(db *sql.DB) error {
 	if !ddl.Valid || ddl.String == "" {
 		return unsupportedCredentialsSchema("credentials table definition unavailable")
 	}
-	normalized := strings.ToLower(strings.Join(strings.Fields(ddl.String), ""))
+	normalized := normalizeSchemaSQL(ddl.String)
 	if !strings.Contains(normalized, "check(") {
 		return unsupportedCredentialsSchema("missing concrete-owner check")
 	}

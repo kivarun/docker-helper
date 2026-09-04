@@ -208,10 +208,12 @@ DELETE /principals/{username}  (admin token)
     │
     ├── collects session IDs for runtime cleanup
     ├── fails with 409 launcher_runtime_active if a launcher
-    │   still has active runtime, else deletes sessions and launchers
-    ├── deletes principal (credentials/roots/launchers via FK CASCADE)
-    ├── commits transaction
-    └── best-effort cleanup of session runtime directories
+    │   still has active runtime (durable state unchanged), else
+    │   disables each launcher (deleting its sessions) and deletes
+    │   the principal (credentials/roots/launchers via FK CASCADE)
+    ├── commits the teardown steps
+    └── best-effort cleanup of session runtime directories, also for
+        sessions invalidated before a later teardown failure
     │
 POST /sessions  (Principal credential)
     │
@@ -941,9 +943,13 @@ and MAC/runtime cleanup owners:
   (`launcher disabled`);
 - deleting a launcher performs a checked delete: if its sessions still
   have active runtime state, the delete fails with
-  `409 launcher_runtime_active` and the launcher stays enabled so it can
-  be disabled explicitly first; otherwise sessions are deleted and the
-  launcher row is removed;
+  `409 launcher_runtime_active` and the launcher's durable state —
+  including its enabled flag and Sessions — is unchanged; a still-enabled
+  launcher can be disabled explicitly first. Once the check passes,
+  sessions are deleted and the launcher row is removed. If owner removal
+  fails after the durable disable committed, the invalidated sessions
+  still receive their runtime-directory cleanup (best-effort) instead of
+  waiting for daemon restart;
 - principal disable/delete propagates: disabling a principal deletes all
   its sessions; deleting a principal deletes its launchers (FK cascade)
   and fails with `409 launcher_runtime_active` if any launcher still has
@@ -1003,10 +1009,14 @@ operation events (`build`/`run`/`pull`, including `registry.login`)
 record `principal_name`, `launcher_id`, and `launcher_name` from the
 session's ownership. `session.delete` records the deleted session's
 ownership (`launcher_id`, `launcher_name`, `principal_name`). Launcher
-control events carry the caller's provenance
-(`credential_id`, and `credential_name` where the credential has a
-name), except for credential issue/rotate events, which record the newly
-issued credential.
+control events keep initiating and target credential provenance
+distinguishable. `initiator_credential_id` names the Principal credential
+that performed the request on every launcher-control event (absent for the
+admin token; Launcher credentials cannot manage launchers). `credential_id`
+carries target-resource semantics: the issued or rotated Launcher credential
+on issue/rotate events, and the initiating credential on other
+launcher-control events. `credential_name` is recorded where the credential
+has a name.
 
 ## Workspace isolation
 

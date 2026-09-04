@@ -363,6 +363,117 @@ func TestLauncherControlAuditCreatorProvenance(t *testing.T) {
 	assertNoSecrets(t, raw, m, credToken, "")
 }
 
+// TestLauncherControlAuditInitiatorCredentialProvenance proves the initiating
+// Principal credential stays distinguishable from the credential resource an
+// issue/rotate event concerns: initiator_credential_id always names the
+// credential that performed the request (verified against two different
+// Principal credentials), while credential_id keeps its target-resource
+// semantics (the issued or rotated Launcher credential). Admin-token events
+// carry no initiator credential, and no bearer secret appears anywhere.
+func TestLauncherControlAuditInitiatorCredentialProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, credAToken, _, l := launcherAuditApp(t, "lncinitiator")
+	_, credBToken, err := createCredential(app.DB, "lncinitiator", "second")
+	if err != nil {
+		t.Fatalf("create second principal credential: %v", err)
+	}
+
+	var credAID, credBID string
+	for _, tc := range []struct {
+		name   string
+		credID *string
+	}{
+		{"audit", &credAID},
+		{"second", &credBID},
+	} {
+		if err := app.DB.QueryRow(
+			`SELECT id FROM credentials WHERE principal_id = (SELECT id FROM principals WHERE username = 'lncinitiator') AND name = ?`,
+			tc.name,
+		).Scan(tc.credID); err != nil {
+			t.Fatalf("resolve %s credential id: %v", tc.name, err)
+		}
+	}
+
+	// Drop the provisioning credential so the launcher's credential can be
+	// issued fresh, initiated by credential A.
+	if del := launcherAuditRequest(t, app, http.MethodDelete, "/principals/lncinitiator/launchers/"+l.ID+"/credential", credAToken, ""); del.Code != http.StatusNoContent {
+		t.Fatalf("delete provisioning credential: expected 204, got %d", del.Code)
+	}
+	w := launcherAuditRequest(t, app, http.MethodPut, "/principals/lncinitiator/launchers/"+l.ID+"/credential", credAToken, "")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("issue launcher credential: expected 201, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var issued launcherCredentialResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := findAuditLine(auditBuf, "launcher.credential_issue")
+	if raw == "" {
+		t.Fatalf("expected launcher.credential_issue audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["credential_id"] != issued.Credential.ID {
+		t.Errorf("issue credential_id = %v, want issued %s", m["credential_id"], issued.Credential.ID)
+	}
+	if m["initiator_credential_id"] != credAID {
+		t.Errorf("issue initiator_credential_id = %v, want initiating principal credential %s", m["initiator_credential_id"], credAID)
+	}
+	if m["credential_id"] == m["initiator_credential_id"] {
+		t.Error("issue event must keep target (credential_id) and initiator distinguishable")
+	}
+	assertNoSecrets(t, raw, m, issued.Token, testAdminToken)
+	if strings.Contains(auditBuf.String(), credAToken) || strings.Contains(auditBuf.String(), issued.Token) {
+		t.Error("audit stream contains a bearer secret")
+	}
+
+	// Rotate initiated by the second Principal credential: the initiator
+	// switches to credential B while the target is the rotated credential.
+	if w := launcherAuditRequest(t, app, http.MethodPost, "/principals/lncinitiator/launchers/"+l.ID+"/credential/rotate", credBToken, ""); w.Code != http.StatusOK {
+		t.Fatalf("rotate launcher credential: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	rotateRaw := findAuditLine(auditBuf, "launcher.credential_rotate")
+	if rotateRaw == "" {
+		t.Fatalf("expected launcher.credential_rotate audit line\n%s", auditBuf.String())
+	}
+	// Recover the rotated credential ID from the DB (the audit assertion must
+	// hold regardless of response parsing order).
+	var rotatedCredID string
+	if err := app.DB.QueryRow(
+		`SELECT id FROM credentials WHERE launcher_id = ? AND revoked_at IS NULL`, l.ID,
+	).Scan(&rotatedCredID); err != nil {
+		t.Fatalf("resolve rotated launcher credential: %v", err)
+	}
+	m = parseAuditMap(t, rotateRaw)
+	if m["credential_id"] != rotatedCredID {
+		t.Errorf("rotate credential_id = %v, want rotated %s", m["credential_id"], rotatedCredID)
+	}
+	if m["initiator_credential_id"] != credBID {
+		t.Errorf("rotate initiator_credential_id = %v, want initiating principal credential %s", m["initiator_credential_id"], credBID)
+	}
+	if m["credential_id"] == m["initiator_credential_id"] {
+		t.Error("rotate event must keep target (credential_id) and initiator distinguishable")
+	}
+	assertNoSecrets(t, rotateRaw, m, credBToken, testAdminToken)
+	if strings.Contains(auditBuf.String(), credBToken) {
+		t.Error("audit stream contains the rotating principal credential bearer")
+	}
+
+	// An admin-token launcher-control event carries no initiator credential.
+	if w := launcherAuditRequest(t, app, http.MethodPatch, "/principals/lncinitiator/launchers/"+l.ID, testAdminToken, `{"name":"renamed"}`); w.Code != http.StatusOK {
+		t.Fatalf("admin patch: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	updateRaw := findAuditLine(auditBuf, "launcher.update")
+	if updateRaw == "" {
+		t.Fatalf("expected launcher.update audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, updateRaw)
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.update must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, updateRaw, m, "", testAdminToken)
+}
+
 // TestRunAuditLauncherProvenance proves run.start and run.finish carry the
 // owning session's launcher identity (launcher_id, launcher_name), so a
 // Docker operation's audit trail names its Launcher owner directly.

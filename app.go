@@ -24,11 +24,12 @@ type App struct {
 	// lifecycleMu serializes ownership-lifecycle control-plane mutations that
 	// share admission authority (Launcher create / PATCH rename+enable+disable /
 	// scope replace / delete, Principal allowed-root add+remove / enabled
-	// transition / delete, config reload). It excludes Session and data-plane
-	// (admit / pull / build / run) requests and read-only ownership queries, so
-	// only lifecycle mutations contend. It is never acquired recursively; the
-	// lifecycle mutators split into lock-owning and *Locked-variant
-	// (lock-already-held) helpers.
+	// transition / delete, config reload) together with Session creation
+	// (createSessionAuthorized). Ordinary Session reads/deletion, data-plane
+	// (admit / pull / build / run) requests, and read-only ownership queries
+	// are excluded, so only lifecycle mutations and session creation contend.
+	// It is never acquired recursively; the lifecycle mutators split into
+	// lock-owning and *Locked-variant (lock-already-held) helpers.
 	lifecycleMu         sync.Mutex
 	DB                  *sql.DB
 	AdminTokenHash      [sha256.Size]byte

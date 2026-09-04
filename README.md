@@ -1333,10 +1333,12 @@ roots:
 sudo docker-helper principal delete --system alice
 ```
 
-The delete operation is transactional: sessions are deleted first (not relying
-on FK cascade), then the principal record is removed (credentials and allowed
-roots are cleaned up via FK cascade). Session runtime directories are cleaned
-up best-effort after the transaction commits.
+The delete is a checked, retryable teardown: while any launcher still has
+active runtime, the delete is refused (409) and nothing is changed; once the
+check passes, each launcher's sessions are invalidated, then the principal
+record is removed (credentials and allowed roots are cleaned up via FK
+cascade). Session runtime directories are cleaned up best-effort even when a
+later teardown step fails, and a failed delete can simply be retried.
 
 Disabling a principal (`principal set alice enabled false`) has a narrower
 effect: it deletes all active sessions and rejects future authentication for

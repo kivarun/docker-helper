@@ -196,6 +196,22 @@ func TestVerifyLaunchersNameInvariantRequiresCanonicalCheck(t *testing.T) {
 		)`,
 		},
 		{
+			name: "canonical check only inside a comment",
+			ddl: `
+		CREATE TABLE launchers (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			scope_mode TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name),
+			CHECK (scope_mode IN ('inherit', 'restricted'))
+			-- CHECK (length(name) BETWEEN 1 AND 63 AND name NOT GLOB '*[^a-z0-9-]*' AND name NOT GLOB '-*' AND name NOT GLOB '*-')
+		)`,
+		},
+		{
 			name: "partial grammar",
 			ddl: `
 		CREATE TABLE launchers (

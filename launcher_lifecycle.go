@@ -588,6 +588,9 @@ func (a *App) enableLauncherLocked(launcherID string) error {
 //  5. Launcher row removal. A row-removal failure leaves the Launcher durably
 //     disabled, its Sessions invalidated, and admission closed; a retry is
 //     safe because the disable is idempotent and re-runs the whole check.
+//     The already-invalidated Session IDs are returned together with the
+//     error so their runtime-directory cleanup still runs — invalidated
+//     Sessions are never rolled back or recreated.
 //
 // A running Operation can never lose its persisted Launcher owner: the quiesce
 // closes admission (post-quiesce admits are refused), while every Operation
@@ -644,12 +647,13 @@ func (a *App) deleteLauncherCheckedLocked(ctx context.Context, launcherID string
 		return nil, err
 	}
 
-	// Step 5: owner removal. On failure the Launcher stays disabled +
-	// quiesced with its Sessions invalidated (the disable was a genuine
-	// invalidation); a retry re-runs the whole check against the disabled
-	// Launcher.
+	// Step 5: owner removal. On failure the Launcher stays durably disabled,
+	// its Sessions invalidated, and admission closed; a retry re-runs the
+	// whole check against the disabled Launcher. The invalidated Session IDs
+	// are returned with the error so the caller still runs their
+	// runtime-directory cleanup.
 	if err := deleteLauncherRow(a.DB, launcherID); err != nil {
-		return nil, err
+		return revoked, err
 	}
 	return revoked, nil
 }
@@ -747,6 +751,10 @@ func (a *App) deletePrincipalCheckedLocked(ctx context.Context, username string)
 
 	// Durable disable across every Launcher. Sessions are invalidated here —
 	// and only here — after every Launcher passed the check and stale cleanup.
+	// A failure partway through leaves the already-disabled Launchers durably
+	// disabled with their Sessions invalidated; the accumulated revoked IDs
+	// are returned with the error so their runtime-directory cleanup still
+	// runs — invalidated Sessions are never rolled back or recreated.
 	var revokedAll []string
 	for i, lid := range launchers {
 		revoked, err := a.disableLauncherLocked(lid)
@@ -758,7 +766,7 @@ func (a *App) deletePrincipalCheckedLocked(ctx context.Context, username string)
 			// admission from the authorities so the failure does not leave
 			// enabled Launchers admission-closed.
 			a.restoreLauncherAdmissionAfterPrincipalRefusal(launchers[i+1:])
-			return nil, err
+			return revokedAll, err
 		}
 		revokedAll = append(revokedAll, revoked...)
 	}
@@ -767,9 +775,12 @@ func (a *App) deletePrincipalCheckedLocked(ctx context.Context, username string)
 	// Principal delete owner. This preserves a single production owner for the
 	// DB commit. The Session IDs for runtime-dir cleanup were collected by the
 	// disable step (revokedAll); the owner's own discovery returns none because
-	// the disable removed the Sessions.
+	// the disable removed the Sessions. On owner-removal failure the children
+	// already durably disabled in this attempt stay disabled with their
+	// Sessions invalidated, and revokedAll is returned with the error so
+	// their runtime-directory cleanup still runs.
 	if _, err := a.deletePrincipalWithMAC(username); err != nil {
-		return nil, err
+		return revokedAll, err
 	}
 	return revokedAll, nil
 }

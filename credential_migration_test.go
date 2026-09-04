@@ -654,6 +654,28 @@ func TestCredentialsSchemaOwnerCheckOrOneFailsClosed(t *testing.T) {
 	`)
 }
 
+// TestCredentialsSchemaOwnerCheckOnlyInCommentFailsClosed: the complete
+// canonical concrete-owner CHECK written only inside a legal SQL comment,
+// with no enforcing CHECK anywhere, must fail closed — comment text is not
+// schema enforcement.
+func TestCredentialsSchemaOwnerCheckOnlyInCommentFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			UNIQUE (launcher_id)
+			-- CHECK ((principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL) OR (principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL))
+		);
+	`)
+}
+
 // TestCredentialsSchemaExtraCheckFailsClosed: the final schema with an
 // additional contradictory CHECK that changes credential cardinality/validity
 // must fail closed.

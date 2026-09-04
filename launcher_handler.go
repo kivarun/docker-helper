@@ -9,18 +9,23 @@ import (
 	"time"
 )
 
-// applyLauncherControlAuditProvenance records the creator provenance of a
+// applyLauncherControlAuditProvenance records the initiating provenance of a
 // launcher-control event performed with a Principal credential: the acting
-// principal and its credential ID. Fields already present on the record (for
-// example the issued or rotated launcher credential's ID on credential events)
-// are preserved. Admin callers carry no credential provenance, and Launcher
-// credentials cannot perform launcher control.
+// principal and the initiating credential's ID (initiator_credential_id).
+// credential_id keeps target-resource semantics where the event already
+// carries it — the issued or rotated Launcher credential on issue/rotate
+// events — and otherwise carries the initiating credential's ID. Admin
+// callers carry no credential provenance, and Launcher credentials cannot
+// perform launcher control.
 func applyLauncherControlAuditProvenance(rec *auditRecord, auth *launcherControlAuthority) {
 	if auth == nil || auth.principalCredential == nil {
 		return
 	}
 	if rec.PrincipalName == "" {
 		rec.PrincipalName = auth.principalCredential.PrincipalName
+	}
+	if rec.InitiatorCredentialID == "" {
+		rec.InitiatorCredentialID = auth.principalCredential.CredentialID
 	}
 	if rec.CredentialID == "" {
 		rec.CredentialID = auth.principalCredential.CredentialID
@@ -602,6 +607,15 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 
 	sessionIDs, err := a.deleteLauncherChecked(ctx, l.ID)
 	duration := time.Since(started).Round(time.Millisecond).String()
+
+	// Best-effort cleanup of runtime directories for invalidated sessions. It
+	// runs regardless of the outcome: a durable disable that committed before
+	// a later owner-removal failure has already invalidated those sessions,
+	// and their IDs are returned with the error so the cleanup is not lost
+	// until daemon restart.
+	cfg := a.getConfig()
+	cleanupSessionRuntimeDirsBestEffort(ctx, "launcher_delete", cfg.RuntimeDir, sessionIDs)
+
 	if err != nil {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.delete",
@@ -622,18 +636,6 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
 		return
-	}
-
-	// Best-effort cleanup of runtime directories for deleted sessions.
-	cfg := a.getConfig()
-	for _, sessionID := range sessionIDs {
-		if err := cleanupSessionRuntimeDir(cfg.RuntimeDir, sessionID); err != nil {
-			opLog(ctx).Warn("failed to clean up session runtime directory",
-				slog.String("operation", "launcher_delete"),
-				slog.String("session_id", sessionID),
-				slog.String("error", err.Error()),
-			)
-		}
 	}
 
 	writeLauncherControlAudit(ctx, auditRecord{
