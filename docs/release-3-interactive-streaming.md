@@ -33,8 +33,10 @@ The public endpoint is:
 GET /containers/{container}/exec/interactive
 ```
 
-The HTTP upgrade authenticates the bearer, applies the ordinary non-disclosing
-target-visibility rule, and negotiates the versioned
+The HTTP upgrade authenticates the Session bearer — interactive exec is a
+Session data-plane capability and admits no Principal or Launcher credential
+— applies the ordinary non-disclosing target-visibility rule, and negotiates
+the versioned
 `docker-helper.exec.v1` WebSocket subprotocol through
 `Sec-WebSocket-Protocol`. Authentication material, argv, environment values,
 and working directory never appear in the URL.

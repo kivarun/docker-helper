@@ -70,7 +70,10 @@ The common Session-selection algorithm is defined in
 `release-3-api-cli.md`. It allows a Launcher or Principal credential to omit
 the Session when its permitted default scope identifies exactly one usable
 Session; an administrator must select a Session explicitly when using a local
-name. The CLI form for an explicit selection is:
+name. This is a control-plane management rule: the Session data-plane
+capabilities (`pull`, `build`, `run`, `registry login`, and both exec modes)
+require a Session bearer and never infer a Session from a Principal or
+Launcher credential. The CLI form for an explicit selection is:
 
 ```text
 docker-helper container show --session dhs_... postgres

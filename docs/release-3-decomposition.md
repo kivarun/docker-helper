@@ -37,13 +37,17 @@ The canonical common contract is `release-3-operation-model.md`. The current-to-
 
 `build`, the existing one-shot `run`, `container.create`, and non-interactive exec are synchronous Commands. Process-like Commands return one combined bounded `output`; create returns the stopped Managed Container only after persistent ownership and backend correlation are complete. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
 
-Every Session-bound public Command uses one common Session-selection contract.
-`pull`, `build`, `run`, `registry login`, and `container.create` accept an
-optional Session selector; Managed Container Queries and Commands use it when
-resolving a Session-local name. Session tokens imply their Session,
-Launcher and Principal credentials may omit the selector only when the
-documented default scope yields one usable Session, and administrators must
-select explicitly. Ambiguity is never resolved by ordering candidates.
+The Release 2.1 authority boundary is frozen: credential scope can authorize
+control-plane management, and the Session token authorizes Session workload
+execution. Management Queries and Commands on Session-owned resources
+(`container.create` and the Managed Container Queries and Commands) use one
+common Session-selection contract, including resolving a Session-local name:
+Session tokens imply their Session, Launcher and Principal credentials may
+omit the selector only when the documented default scope yields one usable
+Session, and administrators must select explicitly. Ambiguity is never
+resolved by ordering candidates. The Session data-plane Commands (`pull`,
+`build`, `run`, `registry login`, and both exec modes) require a Session
+bearer and never infer a Session from a Principal or Launcher credential.
 
 ## Work packages
 

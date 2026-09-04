@@ -88,6 +88,9 @@ protocol defined by `release-3-interactive-streaming.md`:
 GET /containers/{container}/exec/interactive
 ```
 
+Both modes are Session data-plane capabilities and admit only a Session
+bearer (see `Session-bound command scope`).
+
 Both modes are exposed through one CLI command:
 
 ```text
@@ -108,8 +111,12 @@ executable and never chooses or inserts a shell.
 
 ## Session selection and local-name resolution
 
-One Session-selection algorithm is used wherever a public Command needs a
-Session context:
+One Session-selection algorithm is used wherever an authorized management
+Command or Query on Session-owned resources needs a Session context it does
+not otherwise name: resolving a Session-local Managed Container name and
+`POST /containers`. It is a control-plane rule: credential scope can
+authorize Session management, never Session workload execution (the
+Session-bound data-plane capabilities below require a Session bearer).
 
 - a Session token selects its own Session;
 - a Launcher credential may omit `session_id` only when exactly one active,
@@ -129,14 +136,12 @@ It succeeds only when token scope and the default-Launcher rule produce one
 unambiguous usable Session. An explicit selector remains valid for every
 authority but can only narrow its token scope.
 
-Session-bound `pull`, `build`, `run`, and `registry login` use this algorithm
-with an optional JSON `session_id` request field and CLI `--session` flag.
-`POST /containers` uses it to select the owning Session in the same way.
-
 Commands and Queries that target a Managed Container by its Session-local
 `name` use the algorithm with an optional HTTP `session_id` query parameter
 and CLI `--session` flag. This applies to `show`, `start`, `stop`, `restart`,
-`remove`, `repair`, `logs`, and both exec modes.
+`remove`, `repair`, and `logs`; both exec modes are Session data-plane
+capabilities that resolve their container only inside the Session bearer's
+own Session.
 
 A globally unique ManagedContainerID needs no Session selection. If an
 explicit Session selector is nevertheless supplied with an ID, it only
@@ -196,20 +201,31 @@ POST /run
 POST /registry/login
 ```
 
-In Release 2.1 these routes require a Session token: a Principal or Launcher
-credential holds control-plane authority only. Release 3 adds one admission
-form — optional JSON `session_id` — and applies the common selection rule
-above before reading a workspace, registry credentials, Session network, or
-resource ceiling. Their CLI commands accept optional `--session`. This is not
-a delegation shortcut and not a credential-to-data-plane grant: the chosen
-Session must remain inside the authenticated authority's scope, execution
-authority remains the resolved Session's, and an administrator must always
-select it explicitly.
+Release 3 freezes the Release 2.1 capability boundary:
 
-A Session bearer may continue using every command without an added field or
-flag. Launcher and Principal credentials may omit it only when the shared
-algorithm produces exactly one usable Session. These Commands never search
-all Sessions and choose one by order or recency.
+```text
+admin token            -> administrative/control plane
+Principal credential   -> Principal control plane
+Launcher credential    -> Launcher control plane
+Session token          -> Session data plane
+```
+
+Credential scope can authorize control-plane management; the Session token
+authorizes Session workload execution. These routes are Session data-plane
+capabilities and require a Session bearer; a higher-level credential never
+becomes a substitute bearer for workload execution, and no inference path
+resolves a Session for a Principal or Launcher credential here. The Session
+token already identifies its Session, so an optional JSON `session_id`
+request field (CLI `--session` flag) is only a narrowing assertion: a value
+that does not match the token's Session is the same non-disclosing
+`404 session_not_found` as any foreign selector. A Session bearer may
+continue using every command without an added field or flag.
+
+Both exec modes are Session data-plane capabilities under the same rule:
+non-interactive exec and interactive exec admit only a Session bearer for
+the owning Session. A valid Principal or Launcher credential presented
+directly to a Session data-plane endpoint is rejected and is never converted
+into Session execution authority by inference.
 
 ## Managed Container creation scope
 
@@ -543,9 +559,11 @@ Its complete Release 3 request is:
 }
 ```
 
-Only `image` is required. `session_id` follows the common selection rule.
-Omitted `entrypoint` and `command` preserve the image values; explicitly empty
-values are rejected rather than interpreted as clearing an image default.
+Only `image` is required. The request requires a Session bearer; the
+optional `session_id` field only narrows or validates the token's own
+Session. Omitted `entrypoint` and `command` preserve the image values;
+explicitly empty values are rejected rather than interpreted as clearing
+an image default.
 `env`, `mounts`, and `limits` use exactly the same normalization, workspace,
 policy, and default rules as Managed Container create.
 
@@ -582,7 +600,8 @@ Its complete Release 3 request is:
 }
 ```
 
-`image` is required and `session_id` follows the common selection rule. No
+`image` is required. The request requires a Session bearer; the optional
+`session_id` field only narrows or validates the token's own Session. No
 platform, pull-policy, registry, credential, or arbitrary Engine option is
 accepted by this request. Unknown fields are rejected.
 
@@ -649,9 +668,10 @@ Its complete Release 3 request is:
 }
 ```
 
-`context`, `dockerfile`, and `image` are required. `session_id` follows the
-common selection rule; `build_args` is optional and remains a string-to-string
-map with the existing validated key syntax. Build arguments are not a secrets
+`context`, `dockerfile`, and `image` are required. The request requires a
+Session bearer and the optional `session_id` field only narrows or
+validates the token's own Session; `build_args` is optional and remains a
+string-to-string map with the existing validated key syntax. Build arguments are not a secrets
 transport and their values may appear in workload build output.
 
 Unknown fields are rejected. Release 3 adds no platform, target, no-cache,
@@ -686,8 +706,9 @@ Its complete Release 3 request is:
 }
 ```
 
-`registry`, `username`, and `password` are required non-empty strings;
-`session_id` follows the common selection rule. Unknown fields are rejected.
+`registry`, `username`, and `password` are required non-empty strings. The
+request requires a Session bearer; the optional `session_id` field only
+narrows or validates the token's own Session. Unknown fields are rejected.
 A successful login returns HTTP `200` with only:
 
 ```json
@@ -1392,6 +1413,13 @@ Administrator authority may perform every Release 3 management capability.
 Administrator-only capabilities return `403 forbidden` to another otherwise
 valid authority; they do not reinterpret a valid Principal credential,
 Launcher credential, or Session token as unauthenticated.
+
+Session data-plane capabilities (`pull`, `build`, `run`, `registry login`,
+and both exec modes) are the complement: they admit only a Session bearer.
+A valid Principal or Launcher credential presented directly to a Session
+data-plane endpoint is rejected with the endpoint's non-disclosing
+unauthorized response and is never converted into Session execution
+authority by inference; the bearer's own validity is never disclosed there.
 
 ### Active Operation conflict reference
 

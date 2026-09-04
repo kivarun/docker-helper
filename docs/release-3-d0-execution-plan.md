@@ -105,13 +105,15 @@ Historical roadmap sections may describe the old Release 1/2 implementation, but
 The build and run services remain the owners of their domain validation, typed failure classification, audit metadata, and resource cleanup.
 
 The public build capability remains deliberately narrow: `context`,
-`dockerfile`, and `image` are required; optional `session_id` uses the common
-Session-selection contract; and optional `build_args` preserves the existing
-validated string map. D0 does not add platform, target, no-cache, BuildKit
-secret, SSH-forwarding, network, or generic Engine request fields while
-migrating the transport.
+`dockerfile`, and `image` are required; the request requires a Session bearer
+and the optional `session_id` field only narrows or validates the token's own
+Session; and optional `build_args` preserves the existing validated string
+map. D0 does not add platform, target, no-cache, BuildKit secret,
+SSH-forwarding, network, or generic Engine request fields while migrating the
+transport.
 
-Pull accepts only required `image` and optional Session-selected `session_id`.
+Pull accepts only required `image` plus a Session bearer; the optional
+`session_id` field only narrows or validates the token's own Session.
 Its successful direct result contains `ok`, combined bounded `output`,
 `truncated`, and `duration`, with no redundant success message or repeated
 image field. The Engine API migration adds no platform, pull-policy, registry,
@@ -128,12 +130,14 @@ remain the sole meanings of `401 unauthorized` and `403 forbidden`; the old
 One-shot run reuses the Managed Container create vocabulary for `image`,
 `entrypoint`, `command`, `workdir`, `env`, `mounts`, and `limits`, but creates
 no persistent resource and accepts no name, publication, stdin, or detach
-option. Only `image` is required; optional `session_id` uses the common
-selection contract. Omitted entrypoint and command preserve the image values,
+option. Only `image` is required; the request requires a Session bearer and
+the optional `session_id` field only narrows or validates the token's own
+Session. Omitted entrypoint and command preserve the image values,
 while explicit empty values are rejected.
 
 Registry login accepts required `registry`, `username`, and `password` plus
-optional Session-selected `session_id`, and returns only `{\"ok\":true}` on
+a Session bearer; the optional `session_id` field only narrows or validates
+the token's own Session, and it returns only `{\"ok\":true}` on
 success. Username and password remain protected Session runtime secrets and
 never enter SQLite, argv, environment, audit, operational logs, or public
 errors. The Engine adapter persists only the credential material needed for

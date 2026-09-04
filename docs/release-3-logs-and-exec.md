@@ -395,7 +395,10 @@ stronger guarantee.
 Exec is admitted only while all of the following remain true under the common
 per-container admission boundary:
 
-- the caller may use the owning Session and Managed Container;
+- the caller presents a Session bearer for the owning Session; exec is a
+  Session data-plane capability, so a Principal or Launcher credential is
+  rejected and is never converted into Session execution authority by
+  inference;
 - the Session remains `active`;
 - the persistent Managed Container is fully `managed`;
 - Docker Engine is reachable and the exact backend object's immutable

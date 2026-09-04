@@ -76,6 +76,12 @@ containers created outside docker-helper, or the Docker daemon itself.
 - Administrator tokens, Principal credentials, Launcher credentials, and
   Session tokens use the existing
   authentication owners and revocation semantics.
+- Credential scope can authorize control-plane management. The Session token
+  authorizes Session workload execution: `pull`, `build`, `run`,
+  `registry login`, and both exec modes require a Session bearer. A valid
+  Principal or Launcher credential presented directly to a Session
+  data-plane endpoint is rejected and is never converted into Session
+  execution authority by inference.
 - Authorization is evaluated against current durable ownership and policy at
   admission, not copied indefinitely from an earlier authentication result.
 - A Session-local name is resolved only inside an explicit or unambiguous
@@ -204,12 +210,12 @@ unless call ordering is itself the security property being protected.
 
 | Package | Security evidence required before acceptance |
 | --- | --- |
-| D0 | Moby compatibility evidence; credential translation canaries; bounded synchronous cancellation and cleanup; durable claim/idempotency/recovery races; no legacy async owner remains. |
+| D0 | Moby compatibility evidence; credential translation canaries; bounded synchronous cancellation and cleanup; durable claim/idempotency/recovery races; no legacy async owner remains; the Session data-plane negative case proves a valid Principal or Launcher credential presented directly to `POST /pull`, `POST /build`, `POST /run`, or `POST /registry/login` is rejected and never converted into Session execution authority. |
 | D1 | ownership-schema migration; public/backend identity separation; exact label verification; startup/read/preflight/scan classifier consistency; no secret create payload persists. |
 | D2 | complete lifecycle matrix; conflict and no-op ordering; restart-step recovery; force-removal authorization; Session-expiry cleanup and ambiguity behavior. |
 | D3 | lazy-create convergence; Session isolation and DNS; name conflict; repair recovery; missing-network observation; teardown with exact ownership proof. |
 | D4 | bounded newest-output behavior; TTY and non-TTY Engine decoding; logging-backend failures; workload-marker absence from every log and audit sink. |
-| D5 | shared exec authorization; inherited identity/policy; concurrency ceilings; request cancellation; lifecycle races; descendant-process observation and teardown. |
+| D5 | shared exec authorization; inherited identity/policy; concurrency ceilings; request cancellation; lifecycle races; descendant-process observation and teardown; the Session data-plane negative case proves a valid Principal or Launcher credential cannot start non-interactive or interactive exec. |
 | D6 | protocol validation; deadline clearing without weakening HTTP; bounded backpressure; one-reader/one-writer ownership; TTY resize; disconnect sequence; raw-mode restoration. |
 | D7 | hierarchy calculation and atomic Session quotas; explicit Docker limits; real aggregate cgroup enforcement; unsupported-controller failure; policy repair. |
 | D8 | grant narrowing; atomic leases; loopback-only reachability; Engine-version gate; host contention; lease retention/release; cleanup under partial failures. |
