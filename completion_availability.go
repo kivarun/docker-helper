@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -36,10 +37,6 @@ const (
 type completionAvailability struct {
 	Local       completionLocalPrivilege
 	Authorities completionAuthorityMask
-	// Hidden suppresses a machine-facing command from ordinary completion
-	// suggestions while keeping it in the parser/help tree and directly
-	// invokable. This is UI metadata, not authorization.
-	Hidden bool
 }
 
 // completionAvailabilityByCommand is keyed by command nodes, not command-name
@@ -47,48 +44,6 @@ type completionAvailability struct {
 var completionAvailabilityByCommand = map[*Command]completionAvailability{}
 
 const completionAuthorityQueryTimeout = 250 * time.Millisecond
-
-// completionAuthorityCommand is the narrow machine-facing helper used by the
-// generated shell completion to learn the current operator bearer authority.
-// GET /auth remains the single authority source; failures are silent to Bash,
-// which falls back to the unfiltered static command tree.
-var completionAuthorityCommand = &Command{
-	Name:       "authority",
-	Summary:    "Query operator authority for shell completion",
-	Usage:      "docker-helper completion authority [--system] [--endpoint ENDPOINT] [--token-file PATH]",
-	MinPosArgs: 0,
-	MaxPosArgs: 0,
-	NewInvocation: func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		return Invocation{
-			Run: func(stdout, stderr io.Writer) int {
-				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
-					Timeout:   completionAuthorityQueryTimeout,
-				})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				auth, err := client.auth()
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				switch auth.Authority {
-				case "admin", "principal", "launcher":
-					fmt.Fprintln(stdout, auth.Authority)
-					return 0
-				default:
-					fmt.Fprintf(stderr, "error: unknown authority %q\n", auth.Authority)
-					return 1
-				}
-			},
-		}
-	},
-}
 
 func setCompletionLocal(local completionLocalPrivilege, commands ...*Command) {
 	for _, cmd := range commands {
@@ -112,17 +67,6 @@ func setCompletionAuthorities(authorities completionAuthorityMask, commands ...*
 	}
 }
 
-func setCompletionHidden(hidden bool, commands ...*Command) {
-	for _, cmd := range commands {
-		if cmd == nil {
-			panic("completion availability: nil command")
-		}
-		v := completionAvailabilityByCommand[cmd]
-		v.Hidden = hidden
-		completionAvailabilityByCommand[cmd] = v
-	}
-}
-
 func mustCompletionSubcommand(parent *Command, name string) *Command {
 	cmd := parent.resolveSubcommand(name)
 	if cmd == nil {
@@ -132,8 +76,6 @@ func mustCompletionSubcommand(parent *Command, name string) *Command {
 }
 
 func configureCompletionAvailability() {
-	setCompletionHidden(true, completionAuthorityCommand)
-
 	setCompletionLocal(completionPrivilegeRoot,
 		appArmorRootListCommand,
 		appArmorRootAddCommand,
@@ -206,9 +148,6 @@ func completionAuthorityForName(name string) completionAuthorityMask {
 // descendant command is available in the supplied local/authority context.
 func completionCommandAvailable(cmd *Command, euid int, authority string) bool {
 	availability := completionAvailabilityByCommand[cmd]
-	if availability.Hidden {
-		return false
-	}
 	switch availability.Local {
 	case completionPrivilegeRoot:
 		if euid != 0 {
@@ -266,6 +205,69 @@ func completionAuthorityWords(mask completionAuthorityMask) string {
 	return strings.Join(words, " ")
 }
 
+// configureCompletionAuthorityQuery extends the existing machine-facing
+// `completion roots principal` query with an authority-only mode. Reusing the
+// existing leaf preserves the structural invariant that parser, help and
+// completion expose the same command tree: no hidden command is introduced
+// solely for Bash implementation plumbing.
+func configureCompletionAuthorityQuery() {
+	completionRootsPrincipalCommand.NewInvocation = func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		authorityOnly := fs.Bool("authority-only", false, "Print authenticated operator authority for shell completion")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				timeout := completionQueryTimeout
+				if *authorityOnly {
+					timeout = completionAuthorityQueryTimeout
+				}
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+					Timeout:   timeout,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				if *authorityOnly {
+					auth, err := client.auth()
+					if err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						return 1
+					}
+					switch auth.Authority {
+					case "admin", "principal", "launcher":
+						fmt.Fprintln(stdout, auth.Authority)
+						return 0
+					default:
+						fmt.Fprintf(stderr, "error: unknown authority %q\n", auth.Authority)
+						return 1
+					}
+				}
+
+				username, err := resolveTargetPrincipalForCLI(client, *principal,
+					errors.New("--principal is required for admin authentication"),
+					errors.New("Launcher credentials cannot query Principal policy"))
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.principalEffectiveRoots(username)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				for _, root := range result.AllowedRoots {
+					fmt.Fprintln(stdout, root)
+				}
+				return 0
+			},
+		}
+	}
+}
+
 func generateCapabilityAwareBashCompletion(w io.Writer) {
 	generateBashCompletion(w)
 	generateCompletionAvailabilityBash(w)
@@ -280,21 +282,8 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	sort.Strings(sortedPaths)
 
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "# Capability-aware availability overlay. Explicit command paths remain")
-	fmt.Fprintln(w, "# parseable; ordinary suggestions apply local, authority and hidden UI metadata.")
-
-	fmt.Fprintln(w, "_docker_helper_completion_hidden() {")
-	fmt.Fprintln(w, "    case \"$1\" in")
-	for _, path := range sortedPaths {
-		if paths[path].Hidden {
-			fmt.Fprintf(w, "        %q) return 0 ;;\n", path)
-		}
-	}
-	fmt.Fprintln(w, "        *) return 1 ;;")
-	fmt.Fprintln(w, "    esac")
-	fmt.Fprintln(w, "}")
-	fmt.Fprintln(w)
-
+	fmt.Fprintln(w, "# Capability-aware availability overlay. Explicit command paths and help")
+	fmt.Fprintln(w, "# keep the full parser tree; only ordinary subcommand suggestions are pruned.")
 	fmt.Fprintln(w, "_docker_helper_completion_local_requirement() {")
 	fmt.Fprintln(w, "    case \"$1\" in")
 	for _, path := range sortedPaths {
@@ -329,14 +318,13 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local -a opargs=()")
 	fmt.Fprintln(w, "    mapfile -d '' -t opargs < <(_docker_helper_operator_args \"$cmd_path\")")
-	fmt.Fprintln(w, "    \"${COMP_WORDS[0]}\" completion authority \"${opargs[@]}\" 2>/dev/null")
+	fmt.Fprintln(w, "    \"${COMP_WORDS[0]}\" completion roots principal --authority-only \"${opargs[@]}\" 2>/dev/null")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "_docker_helper_completion_path_available() {")
 	fmt.Fprintln(w, "    local path=\"$1\" euid=\"$2\" authority=\"$3\"")
 	fmt.Fprintln(w, "    local local_req auths child")
-	fmt.Fprintln(w, "    if _docker_helper_completion_hidden \"$path\"; then return 1; fi")
 	fmt.Fprintln(w, "    local_req=\"$(_docker_helper_completion_local_requirement \"$path\")\"")
 	fmt.Fprintln(w, "    case \"$local_req\" in")
 	fmt.Fprintln(w, "        root) [ \"$euid\" -eq 0 ] || return 1 ;;\n        non-root) [ \"$euid\" -ne 0 ] || return 1 ;;\n    esac")
@@ -362,21 +350,13 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w, "    local subcmds=($(_docker_helper_subcommands \"$cmd_path\"))")
 	fmt.Fprintln(w, "    local comp_cmds=() c child_path")
 	fmt.Fprintln(w, "    if [ \"${in_help:-0}\" -eq 1 ]; then")
-	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do")
-	fmt.Fprintln(w, "            child_path=\"$c\"; [ -n \"$cmd_path\" ] && child_path=\"$cmd_path $c\"")
-	fmt.Fprintln(w, "            _docker_helper_completion_hidden \"$child_path\" && continue")
-	fmt.Fprintln(w, "            case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac")
-	fmt.Fprintln(w, "        done")
+	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac; done")
 	fmt.Fprintln(w, "        COMPREPLY=(\"${comp_cmds[@]}\")")
 	fmt.Fprintln(w, "        return")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    local authority")
 	fmt.Fprintln(w, "    if ! authority=\"$(_docker_helper_completion_authority \"$cmd_path\")\"; then")
-	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do")
-	fmt.Fprintln(w, "            child_path=\"$c\"; [ -n \"$cmd_path\" ] && child_path=\"$cmd_path $c\"")
-	fmt.Fprintln(w, "            _docker_helper_completion_hidden \"$child_path\" && continue")
-	fmt.Fprintln(w, "            case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac")
-	fmt.Fprintln(w, "        done")
+	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac; done")
 	fmt.Fprintln(w, "        COMPREPLY=(\"${comp_cmds[@]}\")")
 	fmt.Fprintln(w, "        return")
 	fmt.Fprintln(w, "    fi")
@@ -422,8 +402,8 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 }
 
 func init() {
+	configureCompletionAuthorityQuery()
 	configureCompletionAvailability()
-	completionCommand.Subcommands = append(completionCommand.Subcommands, completionAuthorityCommand)
 	completionBashCommand.NewInvocation = func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
