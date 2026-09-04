@@ -32,7 +32,9 @@
 #
 # Diagnostic (non-verdict, never fails the regression): a second container
 # bind-mounting the socket FILE itself records what a stale file-bind consumer
-# observes across the replacement. Its observations are recorded as evidence.
+# observes across the replacement. It is best-effort: when it cannot be
+# started or is not running, the regression records "file-bind consumer
+# unavailable" and continues. Its unavailability never changes the verdict.
 #
 # The probe containers are plain Docker containers deliberately: the scenario
 # subject is the systemd RuntimeDirectory/package interaction, and the bind
@@ -56,8 +58,8 @@
 # Sequence (run as root; the script establishes its own v2.0.0 baseline):
 #   0. clean-slate reset; zypper install of the v2.0.0 baseline RPM; init;
 #      enable --now; baseline recorded (versions, inodes, MainPID,
-#      InvocationID); both consumers started (directory bind + file-bind
-#      diagnostic);
+#      InvocationID); the mandatory directory-bind consumer started, the
+#      file-bind diagnostic consumer started best-effort;
 #   1. `zypper install <candidate.rpm>`: MUST set above;
 #   2. `zypper install --force <candidate.rpm>`: same MUST set.
 #
@@ -155,9 +157,14 @@ ZYPPER() { timeout 600 zypper --non-interactive "$@" >"$ZYPPER_LOG" 2>&1; }
 zypper_tail() { head -8 "$ZYPPER_LOG" 2>/dev/null | redact | tr '\n' ' '; }
 
 installed_vr() { rpm -q --qf '%{VERSION}-%{RELEASE}' docker-helper 2>/dev/null; }
-binary_version() { /usr/bin/docker-helper version 2>/dev/null; }
+binary_version() { docker-helper version 2>/dev/null; }
 main_pid() { systemctl show -p MainPID --value "$SERVICE" 2>/dev/null; }
 invocation_id() { systemctl show -p InvocationID --value "$SERVICE" 2>/dev/null; }
+
+# socket_present: the host path exists and is a socket (stat-owned check).
+socket_present() {
+  [ "$(stat -c '%F' "$SOCK" 2>/dev/null)" = "socket" ]
+}
 
 # inode_where HOST_OR_CONTAINER PATH: dev:inode of PATH as seen from the host
 # or from inside the directory-bind consumer; "absent" when unavailable.
@@ -237,7 +244,7 @@ verify_phase() {
   fi
 
   sock="$(inode_where host "$SOCK")"
-  if [ "$sock" != absent ] && [ -S "$SOCK" ]; then
+  if [ "$sock" != absent ] && socket_present; then
     reg_ok "$label: host socket exists after the scriptlet-driven restart ($sock)"
   else
     reg_fail "$label: host socket missing after restart ($SOCK)"
@@ -270,13 +277,18 @@ verify_phase() {
   fi
   PID_PREV="$pid"; INV_PREV="$inv"; SOCK_INODE_PREV="$sock"
 
-  # Non-verdict diagnostic: what the stale file-bind consumer observes.
-  local diag_sock
-  diag_sock="$(docker exec "$FILE_CONTAINER" stat -c '%d:%i' "$SOCK" 2>/dev/null)" || diag_sock="absent"
-  if [ "$diag_sock" = "$sock" ]; then
-    reg_info "diagnostic [$label]: file-bind consumer sees the NEW socket ($diag_sock)"
+  # Non-verdict diagnostic: what the file-bind consumer observes (best-effort;
+  # only ever recorded, never verdict-bearing).
+  if [ "$FILE_DIAG_AVAILABLE" = 1 ]; then
+    local diag_sock
+    diag_sock="$(docker exec "$FILE_CONTAINER" stat -c '%d:%i' "$SOCK" 2>/dev/null)" || diag_sock="absent"
+    if [ "$diag_sock" = "$sock" ]; then
+      reg_info "diagnostic [$label]: file-bind consumer sees the NEW socket ($diag_sock)"
+    else
+      reg_info "diagnostic [$label]: file-bind consumer went stale (observed $diag_sock, live socket $sock) — expected for a file bind"
+    fi
   else
-    reg_info "diagnostic [$label]: file-bind consumer went stale (observed $diag_sock, live socket $sock) — expected for a file bind"
+    reg_info "diagnostic [$label]: file-bind consumer unavailable"
   fi
 }
 
@@ -308,7 +320,7 @@ else
   reg_fail "baseline binary version is not $BASELINE_VERSION: $(binary_version)"
 fi
 
-INIT_OUT="$(/usr/bin/docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)" || {
+INIT_OUT="$(docker-helper init --allowed-root "$ALLOWED_ROOT" 2>&1)" || {
   printf '%s\n' "$INIT_OUT" | redact >&2
   reg_fail "docker-helper init on baseline failed"
   reg_result
@@ -328,25 +340,30 @@ if ! docker run -d "${CONSUMER_OPTS[@]}" --name "$DIR_CONTAINER" \
     -v "$RUNTIME_DIR:$RUNTIME_DIR" "$IMAGE" sleep infinity >/dev/null 2>&1; then
   reg_blocked "cannot start the directory-bind consumer (image $IMAGE pull/run failed)"
 fi
-if ! docker run -d "${CONSUMER_OPTS[@]}" --name "$FILE_CONTAINER" \
-    -v "$SOCK:$SOCK" "$IMAGE" sleep infinity >/dev/null 2>&1; then
-  reg_blocked "cannot start the file-bind diagnostic consumer (image $IMAGE pull/run failed)"
-fi
+# The file-bind diagnostic is best-effort: a start failure or a container that
+# never reaches the running state is recorded and the regression continues
+# without it. Only the directory-bind consumer is mandatory.
+FILE_DIAG_AVAILABLE=0
+docker run -d "${CONSUMER_OPTS[@]}" --name "$FILE_CONTAINER" \
+  -v "$SOCK:$SOCK" "$IMAGE" sleep infinity >/dev/null 2>&1 || true
 for _ in $(seq 1 15); do
-  [ "$(docker inspect -f '{{.State.Running}}' "$DIR_CONTAINER" 2>/dev/null)" = "true" ] \
-    && [ "$(docker inspect -f '{{.State.Running}}' "$FILE_CONTAINER" 2>/dev/null)" = "true" ] && break
+  [ "$(docker inspect -f '{{.State.Running}}' "$DIR_CONTAINER" 2>/dev/null)" = "true" ] && break
   sleep 1
 done
-if [ "$(docker inspect -f '{{.State.Running}}' "$DIR_CONTAINER" 2>/dev/null)" = "true" ] \
-    && [ "$(docker inspect -f '{{.State.Running}}' "$FILE_CONTAINER" 2>/dev/null)" = "true" ]; then
-if [ "${#CONSUMER_OPTS[@]}" -gt 0 ]; then
-  reg_ok "long-lived consumers running (bind $RUNTIME_DIR:$RUNTIME_DIR; consumer opts: ${CONSUMER_OPTS[*]})"
-else
-  reg_ok "long-lived consumers running (bind $RUNTIME_DIR:$RUNTIME_DIR)"
-fi
-else
-  reg_fail "one or more consumers are not running"
+if [ "$(docker inspect -f '{{.State.Running}}' "$DIR_CONTAINER" 2>/dev/null)" != "true" ]; then
+  reg_fail "the mandatory directory-bind consumer is not running"
   reg_result
+fi
+if [ "$(docker inspect -f '{{.State.Running}}' "$FILE_CONTAINER" 2>/dev/null)" = "true" ]; then
+  FILE_DIAG_AVAILABLE=1
+  reg_info "diagnostic: file-bind consumer available"
+else
+  reg_info "diagnostic: file-bind consumer unavailable (start failed or not running)"
+fi
+if [ "${#CONSUMER_OPTS[@]}" -gt 0 ]; then
+  reg_ok "long-lived directory-bind consumer running (bind $RUNTIME_DIR:$RUNTIME_DIR; consumer opts: ${CONSUMER_OPTS[*]})"
+else
+  reg_ok "long-lived directory-bind consumer running (bind $RUNTIME_DIR:$RUNTIME_DIR)"
 fi
 
 # Baseline records (host + container views).
