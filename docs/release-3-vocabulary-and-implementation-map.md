@@ -10,9 +10,11 @@ This map is based on:
 
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
-- commit: [`694ca5944c87b17303b761c5f38e4afd390a7d89`](https://github.com/kivarun/docker-helper/commit/694ca5944c87b17303b761c5f38e4afd390a7d89);
+- commit: [`71e8ca61a7004925d3dbb95ea9cf58eca6a79e21`](https://github.com/kivarun/docker-helper/commit/71e8ca61a7004925d3dbb95ea9cf58eca6a79e21);
 - Release 2.1 input: the implemented Release 2.1 Launcher Delegation contract
-  (`docs/release-2.1-implementation-plan.md` at the same commit).
+  and the Release 2.1 CLI usability correction pass (canonical
+  `principal credential` / `launcher credential` command tree, compatibility
+  aliases, and atomic `principal credential rotate`) at the same commit.
 
 Release 2.1 is implemented at this baseline, including the canonical Launcher
 name grammar and Principal-scoped name-or-ID locator. If further production
@@ -47,7 +49,7 @@ Target names describe one logical responsibility. Exact Go visibility follows th
 | Docker backend name | Diagnostic host-visible Docker object name. | Docker CLI chooses or receives transient names. | Generate `dhmc-<name>-<full-session-id>`. Every named Docker resource owned directly by a Session uses a stable type prefix and the full Session ID; names are not authority or public identity. |
 | BackendContainerID | Docker Engine container identifier. | Transient value read through a `--cidfile` for `run` shutdown cleanup. | Persistent internal correlation, never normal public authority. Only the admin orphan surface may accept it directly; ownership-mismatch force removal targets ManagedContainerID and resolves the exact recorded backend internally. |
 | Session | Authorization, ownership, isolation, and lifetime boundary. | `Session`; SQLite `sessions` row with `launcher_id TEXT NOT NULL REFERENCES launchers(id)` and no `principal_id` column. | Retained and extended with Release 2.1 Launcher ownership and Release 3 teardown state. |
-| Session selection | Request-admission rule that resolves the one Session in which a Session-bound Command executes. | Agent Commands require a Session bearer and therefore take the Session directly from that token. | An optional `session_id` narrows token scope; omission succeeds only when the Session credential or documented Launcher/default-Launcher rule identifies exactly one usable Session. Administrator omission and every ambiguity fail. Selection never transfers ownership or expands authority. |
+| Session selection | Request-admission rule that resolves the one Session in which a Session-bound Command executes. | Agent Commands require a Session bearer and therefore take the Session directly from that token. | An optional `session_id` narrows token scope; omission succeeds only when the Session token or documented Launcher/default-Launcher rule identifies exactly one usable Session. Administrator omission and every ambiguity fail. Selection never transfers ownership or expands authority. |
 | Principal | OS identity and maximum delegated policy. | `principals` table and Principal code. | Retained. It is not the direct owner of Release 3 containers or Operations. |
 | Launcher | Stable delegated Session owner with a Principal-local path-safe name and global `dhl_...` identity. | `Launcher` (package-private `launcher` row type); `launchers` table (`id` with prefix `dhl_`, `principal_id`, `name` constrained to the launcher-name grammar `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$` and unique per principal, `enabled`, `scope_mode`, `created_at`); `launcher_allowed_roots` for `restricted` scope; default Launcher per principal (`ensureDefaultLauncher`/`findDefaultLauncher`); Principal-scoped control routes `/principals/{username}/launchers/{launcher}` (`{launcher}` = name or ID, no global name lookup); CLI `docker-helper launcher`. | Inherited from Release 2.1. Release 3 accepts either stable ID or scoped name as a Launcher selector and must not recreate the domain object. |
 | Credential | Rotatable bearer key owned by one Principal or Launcher. | Single `credentials` table with a concrete owner: Principal credentials (`principal_id NOT NULL`, `launcher_id NULL`, named) and Launcher credentials (`launcher_id NOT NULL`, `principal_id NULL`, unnamed; at most one per launcher). Bearer tokens are `dhc_`-prefixed; credential IDs are `dhcr_`-prefixed. | Inherited from Release 2.1. Credentials initiate work but do not own it. |
@@ -278,7 +280,11 @@ Current `auditRecord` contains separate fields such as `principal_name`,
 control-plane events (`launcher.create`, `launcher.list`, `launcher.update`,
 `launcher.scope_replace`, `launcher.delete`, `launcher.credential_issue`,
 `launcher.credential_rotate`, `launcher.credential_delete`) carry the launcher
-projection; `session.create` carries launcher and principal provenance;
+projection; Principal credential events (`principal.credential_create`,
+`principal.credential_list`, `principal.credential_rotate`,
+`principal.credential_revoke`) carry target-principal and
+target-credential provenance with the initiating credential distinguishable
+from the target; `session.create` carries launcher and principal provenance;
 Docker-operation events carry `principal_name` (launcher identity lives on
 the owning Session).
 

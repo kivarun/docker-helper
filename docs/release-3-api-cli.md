@@ -111,7 +111,7 @@ executable and never chooses or inserts a shell.
 One Session-selection algorithm is used wherever a public Command needs a
 Session context:
 
-- a Session credential selects its own Session;
+- a Session token selects its own Session;
 - a Launcher credential may omit `session_id` only when exactly one active,
   unexpired Session is available within that Launcher;
 - a Principal credential may omit `session_id` only when exactly one active,
@@ -146,19 +146,24 @@ the same `404 container_not_found` response.
 
 ### Launcher selection
 
-Release 3 extends the existing Launcher routes with one selector rule rather
-than adding parallel name-based routes. A `{launcher}` path value accepts:
+Release 3 keeps the existing Principal-scoped Launcher resource hierarchy:
+every Launcher route lives under
+`/principals/{username}/launchers/{launcher}`, and Release 3 policy
+subresources extend that same hierarchy rather than adding parallel
+top-level name-based routes. Within such a route, the `{launcher}` path
+value accepts:
 
-- a globally unique `dhl_...` Launcher ID; or
-- a Launcher name resolved only within one Principal scope.
+- a `dhl_...` Launcher ID resolved under the path Principal; or
+- a Launcher name resolved only within the path Principal's scope.
 
 Launcher names are the path-safe, Principal-local identifiers established by
-Release 2.1 and cannot match Launcher ID syntax. A Principal credential implies
-its own Principal. An administrator using a name must provide
-`?principal=USERNAME`; an administrator using an ID needs no Principal
-selector. Explicit Principal selection only narrows scope. Foreign,
-nonexistent, and mismatched selectors return the same
-`404 launcher_not_found`.
+Release 2.1 and cannot match Launcher ID syntax; there is no global Launcher
+name lookup and no second ownership model. The `{username}` path segment
+identifies the Principal: a Principal credential may target only its own
+Principal (a foreign username is the same non-disclosing `404
+principal_not_found` as the Release 2.1 control plane), and an administrator
+names the Principal explicitly in the path. Foreign, nonexistent, and
+mismatched selectors return the same `404 launcher_not_found`.
 
 Targeted Launcher CLI commands accept `NAME_OR_ID`. For the ordinary Principal
 workflow the argument may be omitted and means that Principal's `default`
@@ -191,11 +196,15 @@ POST /run
 POST /registry/login
 ```
 
-Each accepts optional JSON `session_id` and applies the common selection rule
+In Release 2.1 these routes require a Session token: a Principal or Launcher
+credential holds control-plane authority only. Release 3 adds one admission
+form — optional JSON `session_id` — and applies the common selection rule
 above before reading a workspace, registry credentials, Session network, or
 resource ceiling. Their CLI commands accept optional `--session`. This is not
-a delegation shortcut: the chosen Session must remain inside the authenticated
-authority's scope, and an administrator must always select it explicitly.
+a delegation shortcut and not a credential-to-data-plane grant: the chosen
+Session must remain inside the authenticated authority's scope, execution
+authority remains the resolved Session's, and an administrator must always
+select it explicitly.
 
 A Session bearer may continue using every command without an added field or
 flag. Launcher and Principal credentials may omit it only when the shared
@@ -1015,7 +1024,7 @@ subresource:
 
 ```text
 PUT /principals/{username}/resource-ceiling
-PUT /launchers/{launcher}/resource-ceiling
+PUT /principals/{username}/launchers/{launcher}/resource-ceiling
 PUT /sessions/{session_id}/resource-ceiling
 ```
 
@@ -1098,7 +1107,7 @@ Publishing grants are replaced atomically through:
 
 ```text
 PUT /principals/{username}/publishing-grant
-PUT /launchers/{launcher}/publishing-grant
+PUT /principals/{username}/launchers/{launcher}/publishing-grant
 PUT /sessions/{session_id}/publishing-grant
 ```
 
@@ -1381,8 +1390,8 @@ empty list rather than a lookup error.
 
 Administrator authority may perform every Release 3 management capability.
 Administrator-only capabilities return `403 forbidden` to another otherwise
-valid authority; they do not reinterpret a valid Principal, Launcher, or
-Session credential as unauthenticated.
+valid authority; they do not reinterpret a valid Principal credential,
+Launcher credential, or Session token as unauthenticated.
 
 ### Active Operation conflict reference
 

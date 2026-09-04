@@ -473,7 +473,8 @@ defined in `release-3-api-cli.md`. An orphan is not addressed under
 `orphan remove` accepts only an object with the complete valid docker-helper
 ownership-label set and no correlated persistent record. It deletes that exact
 backend object synchronously, using the common graceful stop timeout when
-needed. Principal, Launcher, and Session credentials cannot inspect or operate
+needed. Principal credentials, Launcher credentials, and Session tokens
+cannot inspect or operate
 on orphans.
 
 No orphan is adopted or removed automatically. `adopt` and `rebind` are outside

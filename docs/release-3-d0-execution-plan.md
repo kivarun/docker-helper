@@ -32,8 +32,8 @@ The following decisions are already binding:
 - durable Operation types are limited to `container.start`, `container.stop`,
   `container.restart`, `container.remove`, `container.repair`,
   `session.repair`, and `session.cleanup`; container policy repair is
-  administrator-only, while Session network repair follows Session credential
-  scope; a state-matching start or stop returns `200 OK` as a no-op and creates
+  administrator-only, while Session network repair follows the invoking
+  token's scope; a state-matching start or stop returns `200 OK` as a no-op and creates
   neither an Operation nor an idempotency record;
 - synchronous process execution does not survive request loss or daemon restart; after create's provisional database commit, only bounded registration or compensation continues under server ownership and restart recovery;
 - the normal CLI remains blocking and returns the workload exit result;
@@ -337,7 +337,7 @@ Completion evidence:
 - execute Docker build under the request context through the Engine API adapter and transient execution coordinator, with the Session-scoped authorization map required for private `FROM` images;
 - return flat bounded terminal responses;
 - remove `newBuildOperation`, build polling, build public cancellation, and `waitBuildCompletion`;
-- preserve validation, isolated staging, build-arg ordering, Session credential ownership, audit fields, cleanup order, and MAC lease retention on cleanup failure;
+- preserve validation, isolated staging, build-arg ordering, ownership of the Session's staged registry credentials, audit fields, cleanup order, and MAC lease retention on cleanup failure;
 - remove build Operation IDs from API responses and audit records.
 
 Completion evidence:

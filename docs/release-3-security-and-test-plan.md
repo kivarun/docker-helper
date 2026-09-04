@@ -73,7 +73,8 @@ containers created outside docker-helper, or the Docker daemon itself.
 
 ### Authentication, scope, and non-disclosure
 
-- Administrator, Principal, Launcher, and Session credentials use the existing
+- Administrator tokens, Principal credentials, Launcher credentials, and
+  Session tokens use the existing
   authentication owners and revocation semantics.
 - Authorization is evaluated against current durable ownership and policy at
   admission, not copied indefinitely from an earlier authentication result.

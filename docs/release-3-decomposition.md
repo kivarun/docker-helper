@@ -40,7 +40,7 @@ The canonical common contract is `release-3-operation-model.md`. The current-to-
 Every Session-bound public Command uses one common Session-selection contract.
 `pull`, `build`, `run`, `registry login`, and `container.create` accept an
 optional Session selector; Managed Container Queries and Commands use it when
-resolving a Session-local name. Session credentials imply their Session,
+resolving a Session-local name. Session tokens imply their Session,
 Launcher and Principal credentials may omit the selector only when the
 documented default scope yields one usable Session, and administrators must
 select explicitly. Ambiguity is never resolved by ordering candidates.

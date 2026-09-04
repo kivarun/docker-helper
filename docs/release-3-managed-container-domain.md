@@ -367,7 +367,7 @@ inspect data remain Docker diagnostics and are not copied into the helper API.
 
 `remove` is limited to a verified docker-helper-labelled orphan so that the command cannot become a general Docker container deletion interface.
 
-Session, Launcher, and Principal credentials cannot operate on orphaned objects. Their ownership is absent from persistent state, so only administrator authority may resolve them.
+Session tokens, Launcher credentials, and Principal credentials cannot operate on orphaned objects. Their ownership is absent from persistent state, so only administrator authority may resolve them.
 
 No orphan is adopted or removed automatically.
 

@@ -188,7 +188,7 @@ projection reports free, occupied, leased, or remaining ports.
 
 Principal, Launcher, and Session policies are replaced through atomic
 `PUT /principals/{username}/publishing-grant`,
-`PUT /launchers/{launcher}/publishing-grant`, and
+`PUT /principals/{username}/launchers/{launcher}/publishing-grant`, and
 `PUT /sessions/{session_id}/publishing-grant` subresources. A complete request
 selects exactly one of `inherit`, `disabled`, or an `explicit` nested
 `value.start`/`value.end` range. The response is the updated
