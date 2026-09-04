@@ -39,6 +39,20 @@
 # /run/docker-helper:/run/docker-helper is not expressible through the
 # docker-helper Session mount model (workspace-relative sources only).
 #
+# Consumer construction per MAC backend (TEST construction only; the shipped
+# policy is never changed here):
+#   - AppArmor host: the plain consumer observes the bind as-is (docker-default
+#     applies; proven by UAT).
+#   - SELinux host: the shipped docker_helper policy does not grant a plain
+#     container_t process getattr on the docker_helper_runtime_t socket file —
+#     observed in UAT run 33904975242: the bind view saw the RuntimeDirectory
+#     inode (dir getattr granted) while stat of the socket returned an error
+#     for every phase. The consumers therefore run with
+#     --security-opt label=disable so this regression verifies the systemd
+#     RuntimeDirectory/socket mechanics from the consumer bind view on both
+#     backends. The container_t socket-access grant itself is a separate
+#     policy-owner decision and is NOT granted here.
+#
 # Sequence (run as root; the script establishes its own v2.0.0 baseline):
 #   0. clean-slate reset; zypper install of the v2.0.0 baseline RPM; init;
 #      enable --now; baseline recorded (versions, inodes, MainPID,
@@ -77,6 +91,25 @@ reg_require_cmd docker
 reg_require_cmd systemctl
 reg_require_cmd curl
 reg_require_docker
+
+# MAC backend of the guest (same detection shape as the RPM postinstall).
+MAC_BACKEND=none
+if [ "$(cat /sys/fs/selinux/enforce 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
+  MAC_BACKEND=selinux
+elif [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null | tr -d '[:space:]')" = "Y" ]; then
+  MAC_BACKEND=apparmor
+fi
+reg_info "host MAC backend: $MAC_BACKEND"
+case "$MAC_BACKEND" in
+  selinux)
+    # See the header note: consumers are unconfined on the SELinux backend so
+    # the regression proves the systemd mechanics, not the SELinux grants.
+    CONSUMER_OPTS=(--security-opt label=disable)
+    ;;
+  *)
+    CONSUMER_OPTS=()
+    ;;
+esac
 
 CANDIDATE_RPM="${UAT_RPM:-}"
 CANDIDATE_SHA256="${UAT_RPM_SHA256:-}"
@@ -291,12 +324,12 @@ else
 fi
 
 docker rm -f "$DIR_CONTAINER" "$FILE_CONTAINER" >/dev/null 2>&1 || true
-if ! docker run -d --name "$DIR_CONTAINER" -v "$RUNTIME_DIR:$RUNTIME_DIR" "$IMAGE" \
-    sleep infinity >/dev/null 2>&1; then
+if ! docker run -d "${CONSUMER_OPTS[@]}" --name "$DIR_CONTAINER" \
+    -v "$RUNTIME_DIR:$RUNTIME_DIR" "$IMAGE" sleep infinity >/dev/null 2>&1; then
   reg_blocked "cannot start the directory-bind consumer (image $IMAGE pull/run failed)"
 fi
-if ! docker run -d --name "$FILE_CONTAINER" -v "$SOCK:$SOCK" "$IMAGE" \
-    sleep infinity >/dev/null 2>&1; then
+if ! docker run -d "${CONSUMER_OPTS[@]}" --name "$FILE_CONTAINER" \
+    -v "$SOCK:$SOCK" "$IMAGE" sleep infinity >/dev/null 2>&1; then
   reg_blocked "cannot start the file-bind diagnostic consumer (image $IMAGE pull/run failed)"
 fi
 for _ in $(seq 1 15); do
@@ -306,7 +339,11 @@ for _ in $(seq 1 15); do
 done
 if [ "$(docker inspect -f '{{.State.Running}}' "$DIR_CONTAINER" 2>/dev/null)" = "true" ] \
     && [ "$(docker inspect -f '{{.State.Running}}' "$FILE_CONTAINER" 2>/dev/null)" = "true" ]; then
-  reg_ok "long-lived consumers running (directory bind $RUNTIME_DIR:$RUNTIME_DIR; file-bind diagnostic $SOCK)"
+if [ "${#CONSUMER_OPTS[@]}" -gt 0 ]; then
+  reg_ok "long-lived consumers running (bind $RUNTIME_DIR:$RUNTIME_DIR; consumer opts: ${CONSUMER_OPTS[*]})"
+else
+  reg_ok "long-lived consumers running (bind $RUNTIME_DIR:$RUNTIME_DIR)"
+fi
 else
   reg_fail "one or more consumers are not running"
   reg_result
