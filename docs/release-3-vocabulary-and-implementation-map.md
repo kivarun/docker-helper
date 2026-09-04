@@ -10,11 +10,12 @@ This map is based on:
 
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
-- commit: [`71e8ca61a7004925d3dbb95ea9cf58eca6a79e21`](https://github.com/kivarun/docker-helper/commit/71e8ca61a7004925d3dbb95ea9cf58eca6a79e21);
-- Release 2.1 input: the implemented Release 2.1 Launcher Delegation contract
-  and the Release 2.1 CLI usability correction pass (canonical
-  `principal credential` / `launcher credential` command tree, compatibility
-  aliases, and atomic `principal credential rotate`) at the same commit.
+- commit: [`44281a84591cff6bb75cd069a5032ecdf947a282`](https://github.com/kivarun/docker-helper/commit/44281a84591cff6bb75cd069a5032ecdf947a282);
+- Release 2.1 input: the implemented final Release 2.1 contract — Launcher
+  Delegation, the canonical `principal credential` / `launcher credential`
+  command tree with compatibility aliases, atomic `principal credential
+  rotate` targeting the active credential row, and the scope-first list
+  endpoints (`GET /launchers`, `GET /credentials`) — at the same commit.
 
 Release 2.1 is implemented at this baseline, including the canonical Launcher
 name grammar and Principal-scoped name-or-ID locator. If further production
