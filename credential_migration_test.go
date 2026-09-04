@@ -676,6 +676,27 @@ func TestCredentialsSchemaOwnerCheckOnlyInCommentFailsClosed(t *testing.T) {
 	`)
 }
 
+// TestCredentialsSchemaOwnerCheckQuotedConstraintNameFailsClosed: the complete
+// canonical concrete-owner CHECK text used as a quoted constraint name, with
+// no enforcing CHECK anywhere, must fail closed — a quoted identifier is not
+// a CHECK constraint.
+func TestCredentialsSchemaOwnerCheckQuotedConstraintNameFailsClosed(t *testing.T) {
+	mustFailClosedOnCredentialsSchema(t, `
+		CREATE TABLE credentials (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER,
+			launcher_id TEXT,
+			name TEXT,
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at INTEGER NOT NULL,
+			revoked_at INTEGER,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			FOREIGN KEY (launcher_id) REFERENCES launchers(id) ON DELETE CASCADE,
+			CONSTRAINT "check((principal_idisnotnullandlauncher_idisnullandnameisnotnull)or(principal_idisnullandlauncher_idisnotnullandnameisnull))" UNIQUE (launcher_id)
+		);
+	`)
+}
+
 // TestCredentialsSchemaExtraCheckFailsClosed: the final schema with an
 // additional contradictory CHECK that changes credential cardinality/validity
 // must fail closed.

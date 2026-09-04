@@ -323,14 +323,194 @@ func normalizeSchemaSQL(ddl string) string {
 	return strings.ToLower(strings.Join(strings.Fields(stripSQLiteComments(ddl)), ""))
 }
 
+// skipSQLiteSpaceAndComments advances i past whitespace and SQL comments
+// (`--` to end of line, non-nested `/* ... */`).
+func skipSQLiteSpaceAndComments(s string, i int) int {
+	for i < len(s) {
+		switch c := s[i]; {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v':
+			i++
+		case c == '-' && i+1 < len(s) && s[i+1] == '-':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < len(s) && s[i+1] == '*':
+			i += 2
+			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(s) {
+				i += 2
+			} else {
+				return len(s)
+			}
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// sqliteCheckExpressions returns the normalized expression of every CHECK
+// constraint declared in a stored schema definition. CHECK is recognized as
+// an SQL keyword outside comments, string literals, and quoted identifiers,
+// and each CHECK's balanced parenthesized expression is captured while
+// scanning quoted literals verbatim and dropping comment bytes, then
+// normalized with normalizeSchemaSQL. Canonical text occurring merely inside
+// a comment, a string literal, or a quoted identifier (for example a
+// constraint named after the canonical expression) therefore never counts as
+// a CHECK constraint. Malformed input simply yields no matching expression:
+// verifiers compare against the canonical expression and fail closed.
+func sqliteCheckExpressions(schemaSQL string) []string {
+	var exprs []string
+	var buf []byte // current CHECK expression capture; nil when not capturing
+	depth := 0     // open parens within the current capture
+
+	const (
+		ctxCode = iota
+		ctxLineComment
+		ctxBlockComment
+		ctxSingle   // 'literal', '' escaped
+		ctxDouble   // "identifier", "" escaped
+		ctxBacktick // `identifier`, `` escaped
+		ctxBracket  // [identifier]
+	)
+	ctx := ctxCode
+
+	isIdentChar := func(c byte) bool {
+		return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+			c >= '0' && c <= '9' || c == '_' || c == '$'
+	}
+
+	for i := 0; i < len(schemaSQL); i++ {
+		c := schemaSQL[i]
+		switch ctx {
+		case ctxSingle:
+			if buf != nil {
+				buf = append(buf, c)
+			}
+			if c == '\'' {
+				if i+1 < len(schemaSQL) && schemaSQL[i+1] == '\'' {
+					if buf != nil {
+						buf = append(buf, '\'')
+					}
+					i++
+				} else {
+					ctx = ctxCode
+				}
+			}
+		case ctxDouble:
+			if buf != nil {
+				buf = append(buf, c)
+			}
+			if c == '"' {
+				if i+1 < len(schemaSQL) && schemaSQL[i+1] == '"' {
+					if buf != nil {
+						buf = append(buf, '"')
+					}
+					i++
+				} else {
+					ctx = ctxCode
+				}
+			}
+		case ctxBacktick:
+			if buf != nil {
+				buf = append(buf, c)
+			}
+			if c == '`' {
+				if i+1 < len(schemaSQL) && schemaSQL[i+1] == '`' {
+					if buf != nil {
+						buf = append(buf, '`')
+					}
+					i++
+				} else {
+					ctx = ctxCode
+				}
+			}
+		case ctxBracket:
+			if buf != nil {
+				buf = append(buf, c)
+			}
+			if c == ']' {
+				ctx = ctxCode
+			}
+		case ctxLineComment:
+			if c == '\n' {
+				ctx = ctxCode
+			}
+		case ctxBlockComment:
+			if c == '*' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '/' {
+				i++
+				ctx = ctxCode
+			}
+		default: // ctxCode
+			switch {
+			case c == '-' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '-':
+				ctx = ctxLineComment
+				i++
+			case c == '/' && i+1 < len(schemaSQL) && schemaSQL[i+1] == '*':
+				ctx = ctxBlockComment
+				i++
+			case c == '\'' || c == '"' || c == '`' || c == '[':
+				if buf != nil {
+					buf = append(buf, c)
+				}
+				switch c {
+				case '\'':
+					ctx = ctxSingle
+				case '"':
+					ctx = ctxDouble
+				case '`':
+					ctx = ctxBacktick
+				default:
+					ctx = ctxBracket
+				}
+			case c == '(' && buf != nil:
+				depth++
+				buf = append(buf, c)
+			case c == ')' && buf != nil:
+				depth--
+				if depth == 0 {
+					exprs = append(exprs, normalizeSchemaSQL(string(buf)))
+					buf = nil
+				} else {
+					buf = append(buf, c)
+				}
+			case (c == 'c' || c == 'C') && buf == nil &&
+				(i == 0 || !isIdentChar(schemaSQL[i-1])) &&
+				i+5 <= len(schemaSQL) &&
+				strings.EqualFold(schemaSQL[i:i+5], "check") &&
+				(i+5 == len(schemaSQL) || !isIdentChar(schemaSQL[i+5])):
+				// A real CHECK keyword: its parenthesized expression follows,
+				// possibly after whitespace or comments. Start the capture
+				// inside the parens: depth 1 accounts for the CHECK's own
+				// opening paren, which is not part of the expression.
+				j := skipSQLiteSpaceAndComments(schemaSQL, i+5)
+				if j < len(schemaSQL) && schemaSQL[j] == '(' {
+					buf = make([]byte, 0, 64)
+					depth = 1
+					i = j
+					continue
+				}
+			default:
+				if buf != nil {
+					buf = append(buf, c)
+				}
+			}
+		}
+	}
+	return exprs
+}
+
 // launchersNameCheck is the canonical Launcher-name grammar CHECK expression,
-// normalized (lowercase, whitespace-stripped) for comparison against the
-// declared schema in sqlite_master. Only this binary's initializeDatabase
-// writes that CREATE TABLE statement, so the expression must appear exactly:
-// grammar fragments occurring elsewhere in the DDL (reordered clauses, a
-// partial grammar, or additional CHECK constraints) are not the canonical
-// schema and must be rejected.
-const launchersNameCheck = "check(length(name)between1and63andnamenotglob'*[^a-z0-9-]*'andnamenotglob'-*'andnamenotglob'*-')"
+// normalized (lowercase, whitespace-stripped) as produced by
+// sqliteCheckExpressions from the declared schema. Only this binary's
+// initializeDatabase writes that CREATE TABLE statement, so a real CHECK
+// constraint must carry exactly this expression: text occurring merely inside
+// a comment, a string literal, or a quoted identifier (for example a
+// constraint name), a reordered expression, a partial grammar, or additional
+// CHECK constraints are not the canonical schema and must be rejected.
+const launchersNameCheck = "length(name)between1and63andnamenotglob'*[^a-z0-9-]*'andnamenotglob'-*'andnamenotglob'*-'"
 
 // verifyLaunchersNameInvariant fails closed when the launchers table does not
 // declare the canonical Launcher-name grammar CHECK. Released v2.0.0 databases
@@ -347,17 +527,20 @@ func verifyLaunchersNameInvariant(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("cannot read launchers table schema: %w", err)
 	}
-	// Do not accept merely because the grammar fragments occur somewhere in
-	// the DDL: require the exact canonical CHECK expression, compared after
-	// comment stripping so comment text can never satisfy the match.
-	normalized := normalizeSchemaSQL(ddl)
-	if !strings.Contains(normalized, launchersNameCheck) {
-		return errors.New("launchers table does not enforce the launcher-name invariant; " +
-			"this database has an unsupported intermediate pre-release 2.1 Launcher schema " +
-			"and cannot be opened by this build: restore a pre-2.1 backup, or recreate the " +
-			"database only if its current state is disposable")
+	// Require the canonical Launcher-name CHECK as an actual CHECK constraint:
+	// CHECK is recognized as SQL syntax outside comments, string literals, and
+	// quoted identifiers, so the exact canonical expression must appear among
+	// the declared CHECK expressions. The independent scope_mode CHECK is a
+	// different expression and remains valid.
+	for _, expr := range sqliteCheckExpressions(ddl) {
+		if expr == launchersNameCheck {
+			return nil
+		}
 	}
-	return nil
+	return errors.New("launchers table does not enforce the launcher-name invariant; " +
+		"this database has an unsupported intermediate pre-release 2.1 Launcher schema " +
+		"and cannot be opened by this build: restore a pre-2.1 backup, or recreate the " +
+		"database only if its current state is disposable")
 }
 
 // sessionsSchemaClass classifies the sessions table ownership shape. Ownership
@@ -917,11 +1100,21 @@ func verifyPre21NameUniqueness(db *sql.DB) error {
 	return nil
 }
 
+// credentialsOwnerCheck is the canonical concrete-owner CHECK expression,
+// normalized (lowercase, whitespace-stripped) as produced by
+// sqliteCheckExpressions from the declared schema: a Principal-owned
+// credential (principal_id and name set, launcher_id NULL) or a
+// Launcher-owned credential (launcher_id set, principal_id and name NULL),
+// never both owners and never neither.
+const credentialsOwnerCheck = "(principal_idisnotnullandlauncher_idisnullandnameisnotnull)or(principal_idisnullandlauncher_idisnotnullandnameisnull)"
+
 // verifyCredentialsOwnerCheck fails unless the credentials table declares the
 // one canonical concrete-owner CHECK expression. SQLite exposes CHECK constraints
-// only through the stored table DDL, so sqlite_master is inspected here
-// (normalized) and nowhere else. Do not accept merely because both branch
-// substrings occur somewhere in DDL; require the exact canonical expression.
+// only through the stored table DDL, so sqlite_master is inspected here. CHECK
+// constraints are recognized as SQL syntax (outside comments, string literals,
+// and quoted identifiers), so canonical text occurring merely inside a comment
+// or a quoted constraint name is not enforcement, and any additional CHECK
+// constraint that changes credential cardinality is rejected.
 func verifyCredentialsOwnerCheck(db *sql.DB) error {
 	var ddl sql.NullString
 	err := db.QueryRow(
@@ -933,23 +1126,16 @@ func verifyCredentialsOwnerCheck(db *sql.DB) error {
 	if !ddl.Valid || ddl.String == "" {
 		return unsupportedCredentialsSchema("credentials table definition unavailable")
 	}
-	normalized := normalizeSchemaSQL(ddl.String)
-	if !strings.Contains(normalized, "check(") {
+	checks := sqliteCheckExpressions(ddl.String)
+	if len(checks) == 0 {
 		return unsupportedCredentialsSchema("missing concrete-owner check")
 	}
-	// The canonical CHECK must be the exact expression:
-	// ((principal_id IS NOT NULL AND launcher_id IS NULL AND name IS NOT NULL)
-	//  OR (principal_id IS NULL AND launcher_id IS NOT NULL AND name IS NULL))
-	// Normalize whitespace and case, then match the exact expression.
-	expected := "((principal_idisnotnullandlauncher_idisnullandnameisnotnull)or(principal_idisnullandlauncher_idisnotnullandnameisnull))"
-	if !strings.Contains(normalized, "check"+expected) {
-		return unsupportedCredentialsSchema("non-canonical concrete-owner check")
+	if len(checks) > 1 {
+		return unsupportedCredentialsSchema(fmt.Sprintf("expected exactly one check constraint, found %d", len(checks)))
 	}
-	// Reject additional CHECK constraints that change credential cardinality.
-	// Count occurrences of "check(" - there must be exactly one.
-	checkCount := strings.Count(normalized, "check(")
-	if checkCount != 1 {
-		return unsupportedCredentialsSchema(fmt.Sprintf("expected exactly one check constraint, found %d", checkCount))
+	// The concrete-owner CHECK must be exactly the canonical expression.
+	if checks[0] != credentialsOwnerCheck {
+		return unsupportedCredentialsSchema("non-canonical concrete-owner check")
 	}
 	return nil
 }

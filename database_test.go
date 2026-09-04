@@ -212,6 +212,21 @@ func TestVerifyLaunchersNameInvariantRequiresCanonicalCheck(t *testing.T) {
 		)`,
 		},
 		{
+			name: "canonical text as a quoted constraint name",
+			ddl: `
+		CREATE TABLE launchers (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			scope_mode TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			CONSTRAINT "check(length(name)between1and63andnamenotglob'*[^a-z0-9-]*'andnamenotglob'-*'andnamenotglob'*-')" UNIQUE (principal_id, name),
+			CHECK (scope_mode IN ('inherit', 'restricted'))
+		)`,
+		},
+		{
 			name: "partial grammar",
 			ddl: `
 		CREATE TABLE launchers (
