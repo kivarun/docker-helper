@@ -117,8 +117,8 @@ reg_info "baseline RPM:  $BASELINE_RPM (version-release $BASELINE_VR)"
 
 ZYPPER_LOG="/tmp/uat-runtime-dir-zypper.log"
 # --allow-unsigned-rpm is an `install` COMMAND option (not a zypper global
-# option) and must follow the command word.
-ZYPPER() { timeout 600 zypper --non-interactive install --allow-unsigned-rpm "$@" >"$ZYPPER_LOG" 2>&1; }
+# option); it must follow the install command word at each call site.
+ZYPPER() { timeout 600 zypper --non-interactive "$@" >"$ZYPPER_LOG" 2>&1; }
 zypper_tail() { head -8 "$ZYPPER_LOG" 2>/dev/null | redact | tr '\n' ' '; }
 
 installed_vr() { rpm -q --qf '%{VERSION}-%{RELEASE}' docker-helper 2>/dev/null; }
@@ -260,7 +260,7 @@ rpm -e docker-helper >/dev/null 2>&1 || true
 rm -rf /etc/docker-helper /var/lib/docker-helper /run/docker-helper
 
 echo "--- phase 0: zypper install v2.0.0 baseline ---"
-if ! ZYPPER install "$BASELINE_RPM"; then
+if ! ZYPPER install --allow-unsigned-rpm "$BASELINE_RPM"; then
   reg_fail "zypper baseline install failed: $(zypper_tail)"
   reg_result
 fi
@@ -338,7 +338,7 @@ record_evidence "baseline"
 
 # --- 1. zypper install candidate (upgrade) --------------------------------------
 echo "--- phase 1: zypper install (baseline -> candidate upgrade) ---"
-if ! ZYPPER install "$CANDIDATE_RPM"; then
+if ! ZYPPER install --allow-unsigned-rpm "$CANDIDATE_RPM"; then
   reg_fail "zypper candidate install failed: $(zypper_tail)"
   reg_result
 fi
@@ -351,7 +351,7 @@ verify_phase "upgrade"
 
 # --- 2. zypper install --force (candidate reinstall) -----------------------------
 echo "--- phase 2: zypper install --force (candidate reinstall) ---"
-if ! ZYPPER install --force "$CANDIDATE_RPM"; then
+if ! ZYPPER install --allow-unsigned-rpm --force "$CANDIDATE_RPM"; then
   reg_fail "zypper --force reinstall failed: $(zypper_tail)"
   reg_result
 fi
