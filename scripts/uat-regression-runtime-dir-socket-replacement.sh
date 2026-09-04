@@ -116,7 +116,9 @@ reg_info "candidate RPM: $CANDIDATE_RPM (version-release $CANDIDATE_VR)"
 reg_info "baseline RPM:  $BASELINE_RPM (version-release $BASELINE_VR)"
 
 ZYPPER_LOG="/tmp/uat-runtime-dir-zypper.log"
-ZYPPER() { timeout 600 zypper --non-interactive --allow-unsigned-rpm "$@" >"$ZYPPER_LOG" 2>&1; }
+# --allow-unsigned-rpm is an `install` COMMAND option (not a zypper global
+# option) and must follow the command word.
+ZYPPER() { timeout 600 zypper --non-interactive install --allow-unsigned-rpm "$@" >"$ZYPPER_LOG" 2>&1; }
 zypper_tail() { head -8 "$ZYPPER_LOG" 2>/dev/null | redact | tr '\n' ' '; }
 
 installed_vr() { rpm -q --qf '%{VERSION}-%{RELEASE}' docker-helper 2>/dev/null; }
