@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -104,9 +105,9 @@ func TestPrincipalCredentialRotateAtomicReplacement(t *testing.T) {
 	}
 
 	// Exactly one credential row named default remains for the principal.
-	creds, err := listCredentials(app.DB, "rotuser")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "rotuser"))
 	if err != nil {
-		t.Fatalf("listCredentials: %v", err)
+		t.Fatalf("listCredentialsForScope: %v", err)
 	}
 	active := 0
 	for _, c := range creds {
@@ -201,9 +202,9 @@ func TestPrincipalCredentialRotateErrors(t *testing.T) {
 	// uses the still-valid caller credential.
 	deadToken := createNamedCredential(t, app, "alice", "dead")
 	revokedID := ""
-	creds, err := listCredentials(app.DB, "alice")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "alice"))
 	if err != nil {
-		t.Fatalf("listCredentials: %v", err)
+		t.Fatalf("listCredentialsForScope: %v", err)
 	}
 	for _, c := range creds {
 		if c.Name == "dead" {
@@ -275,9 +276,9 @@ func TestPrincipalCredentialRotateAtomicityOnFailure(t *testing.T) {
 	if _, err := authenticateCredential(realDB, rotateToken); err != nil {
 		t.Errorf("unrotated credential bearer must still authenticate: %v", err)
 	}
-	creds, err := listCredentials(realDB, "atomicrot")
+	creds, err := listCredentialsForScope(realDB, principalIDPtr(t, realDB, "atomicrot"))
 	if err != nil {
-		t.Fatalf("listCredentials: %v", err)
+		t.Fatalf("listCredentialsForScope: %v", err)
 	}
 	active := 0
 	for _, c := range creds {
@@ -362,6 +363,175 @@ func TestPrincipalCredentialListScope(t *testing.T) {
 	w = launcherRequest(t, app, "GET", "/principals/alice/credentials", launcherToken, "")
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("launcher authority list: expected 401, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// TestPrincipalCredentialRotateAfterNameReuse proves rotation after
+// documented name reuse targets the current active credential: create
+// TestPrincipalCredentialRotateAfterNameReuse proves rotation after
+// documented name reuse targets the current active credential: create
+// default A, revoke A, create default B, rotate default. B's row is rotated
+// in place while the revoked historical A row stays byte-for-byte unchanged
+// and no additional credential row is created.
+func TestPrincipalCredentialRotateAfterNameReuse(t *testing.T) {
+	app, callerToken, _ := principalCredentialApp(t, "reuserot")
+
+	// A: first credential named default; its bearer must stop working after
+	// the documented revoke.
+	aToken := createNamedCredential(t, app, "reuserot", "default")
+	var aID, aHash string
+	if err := app.DB.QueryRow(
+		`SELECT id, token_hash FROM credentials
+		 WHERE principal_id = ? AND name = 'default'`,
+		principalIDByName(t, app.DB, "reuserot"),
+	).Scan(&aID, &aHash); err != nil {
+		t.Fatalf("read credential A: %v", err)
+	}
+	if _, err := revokeCredential(app.DB, aID); err != nil {
+		t.Fatalf("revokeCredential(A): %v", err)
+	}
+	// The historical state that must survive the rotation of B is A's
+	// post-revoke row (revoked token hash and revoked_at timestamp).
+	var aRevokedAt sql.NullInt64
+	if err := app.DB.QueryRow(
+		`SELECT token_hash, revoked_at FROM credentials WHERE id = ?`, aID,
+	).Scan(&aHash, &aRevokedAt); err != nil {
+		t.Fatalf("read revoked credential A: %v", err)
+	}
+	if !aRevokedAt.Valid {
+		t.Fatal("fixture: credential A must be revoked before name reuse")
+	}
+
+	// Name reuse: B is the new active 'default' next to revoked historical A.
+	bOldToken := createNamedCredential(t, app, "reuserot", "default")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuserot"))
+	if err != nil {
+		t.Fatalf("listCredentialsForScope: %v", err)
+	}
+	if len(creds) != 3 { // caller + revoked A + active B
+		t.Fatalf("fixture: expected 3 credential rows, got %d", len(creds))
+	}
+	var bID string
+	for _, c := range creds {
+		if c.Name == "default" && c.RevokedAt == nil {
+			bID = c.ID
+		}
+	}
+	if bID == "" || bID == aID {
+		t.Fatalf("fixture: active B row not found (aID=%s, bID=%s)", aID, bID)
+	}
+
+	// Rotate 'default' with a valid caller: the active row must be the target.
+	w := launcherRequest(t, app, http.MethodPost, "/principals/reuserot/credentials/default/rotate", callerToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("rotate after name reuse: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp createCredentialResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Credential.ID != bID {
+		t.Errorf("rotated credential ID = %q, want the active B row %q", resp.Credential.ID, bID)
+	}
+
+	// B's old bearer is rejected; the replacement bearer authenticates.
+	w = launcherRequest(t, app, "GET", "/auth", bOldToken, "")
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("B old bearer after rotate: expected 401, got %d", w.Code)
+	}
+	w = launcherRequest(t, app, "GET", "/auth", resp.Token, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("replacement bearer: expected 200, got %d", w.Code)
+	}
+	var auth authResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth.Authority != "principal" || auth.Principal != "reuserot" {
+		t.Errorf("auth = %+v, want authority=principal principal=reuserot", auth)
+	}
+
+	// Historical A row is byte-for-byte unchanged: same hash, same revoked_at.
+	// A rotation must never resurrect a revoked row.
+	var aHashAfter string
+	var aRevokedAfter sql.NullInt64
+	if err := app.DB.QueryRow(
+		`SELECT token_hash, revoked_at FROM credentials WHERE id = ?`, aID,
+	).Scan(&aHashAfter, &aRevokedAfter); err != nil {
+		t.Fatalf("read credential A after rotate: %v", err)
+	}
+	if aHashAfter != aHash || aRevokedAfter != aRevokedAt {
+		t.Errorf("revoked historical row changed: hash %q -> %q, revoked_at %v -> %v",
+			aHash, aHashAfter, aRevokedAt, aRevokedAfter)
+	}
+
+	// Exactly one active 'default' remains and no additional credential row
+	// was created (still caller + A + B).
+	creds, err = listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuserot"))
+	if err != nil {
+		t.Fatalf("listCredentialsForScope after rotate: %v", err)
+	}
+	active := 0
+	for _, c := range creds {
+		if c.Name == "default" && c.RevokedAt == nil {
+			active++
+		}
+	}
+	if active != 1 || len(creds) != 3 {
+		t.Errorf("rows = %d with %d active 'default', want 3 rows with exactly 1 active", len(creds), active)
+	}
+
+	// A's revoked bearer stays invalid (never resurrected by the rotation).
+	w = launcherRequest(t, app, "GET", "/auth", aToken, "")
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("revoked A bearer after rotate of B: expected 401, got %d", w.Code)
+	}
+}
+
+// TestPrincipalCredentialRotateFailsClosedOnStaleState proves the rotation
+// mutation is guarded by the active-state predicate: when the guarded UPDATE
+// matches no row (the target stopped being the active credential between
+// lookup and mutation), the operation fails closed, leaves the old bearer
+// valid, and creates no second credential row.
+func TestPrincipalCredentialRotateFailsClosedOnStaleState(t *testing.T) {
+	app, _, _ := principalCredentialApp(t, "stalerot")
+	oldToken := createNamedCredential(t, app, "stalerot", "default")
+	dbPath := app.Config.DatabasePath
+	app.DB.Close()
+
+	zeroDB := newZeroRowsExecMatchDB(t, dbPath, "UPDATE credentials")
+	_, _, err := rotatePrincipalCredential(zeroDB, "stalerot", "default")
+	zeroDB.Close()
+	if err == nil {
+		t.Fatal("guarded rotation must fail closed when the UPDATE matches no row")
+	}
+	if !errors.Is(err, ErrCredentialRevoked) {
+		t.Errorf("stale-state rotation error = %v, want ErrCredentialRevoked", err)
+	}
+
+	realDB, err := openDatabase(dbPath)
+	if err != nil {
+		t.Fatalf("reopen database: %v", err)
+	}
+	defer realDB.Close()
+
+	// Nothing was mutated: the old bearer still authenticates and no
+	// additional credential row exists.
+	if _, err := authenticateCredential(realDB, oldToken); err != nil {
+		t.Errorf("old bearer must still authenticate after fail-closed rotation: %v", err)
+	}
+	creds, err := listCredentialsForScope(realDB, principalIDPtr(t, realDB, "stalerot"))
+	if err != nil {
+		t.Fatalf("listCredentialsForScope: %v", err)
+	}
+	activeDefault := 0
+	for _, c := range creds {
+		if c.Name == "default" && c.RevokedAt == nil {
+			activeDefault++
+		}
+	}
+	if activeDefault != 1 || len(creds) != 2 {
+		t.Errorf("credential rows = %d with %d active 'default', want 2 rows (caller + target), 1 active", len(creds), activeDefault)
 	}
 }
 

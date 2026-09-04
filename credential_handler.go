@@ -151,49 +151,74 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleListCredentials serves GET /principals/{username}/credentials: the
+// list of one Principal's credentials. The path Principal is a required
+// single-Principal filter of the shared scope-first list rule.
 func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
 	auth, err := a.authenticateControlRequest(w, r, "credential")
 	if err != nil || auth == nil {
 		return
 	}
+	username := r.PathValue("username")
+	if username == "" {
+		writeError(r.Context(), w, http.StatusBadRequest, "missing_username", "username is required")
+		return
+	}
+	a.servePrincipalCredentialList(w, r, auth, username)
+}
+
+// handleListCredentialsForAuthority serves GET /credentials: the scope-first
+// principal credential list. The authenticated authority establishes the
+// maximum visibility and the optional ?principal= filter can only narrow it;
+// the daemon remains the authorization authority.
+func (a *App) handleListCredentialsForAuthority(w http.ResponseWriter, r *http.Request) {
+	auth, err := a.authenticateControlRequest(w, r, "credential")
+	if err != nil || auth == nil {
+		return
+	}
+	a.servePrincipalCredentialList(w, r, auth, r.URL.Query().Get("principal"))
+}
+
+// servePrincipalCredentialList answers a principal credential list Query
+// under the scope-first list rule: the authority scope plus the optional
+// Principal filter resolve into one authorized query predicate. A filtered or
+// single-Principal list audits the target Principal; the unfiltered admin
+// list covers every Principal.
+func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Request, auth *controlAuthority, principalFilter string) {
+	started := time.Now()
 
 	ctx := r.Context()
 
-	username := r.PathValue("username")
-	if username == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_username", "username is required")
-		return
-	}
-
-	// The list is scope-aware: the authenticated credential defines the
-	// effective visibility scope. A Principal credential can only list its own
-	// Principal's credentials; an explicit foreign Principal is a
-	// non-disclosing 404 (it never expands visibility). An admin token must
-	// name the Principal explicitly.
-	p, ok := a.resolveControlPrincipal(w, r, auth, username)
+	// The list is scope-first: the authenticated authority defines the
+	// effective visibility and the optional Principal filter can only narrow
+	// it — never expand it (a foreign Principal filter is a non-disclosing
+	// 404). A Launcher credential is rejected by authentication.
+	scope, ok := a.resolveListScope(w, r, auth, principalFilter)
 	if !ok {
 		return
 	}
+	var principalID *int64
+	principalName := ""
+	if !scope.allPrincipals {
+		id := int64(scope.principal.ID)
+		principalID = &id
+		principalName = scope.principal.Username
+	}
 
-	creds, err := listCredentials(a.DB, p.Username)
+	creds, err := listCredentialsForScope(a.DB, principalID)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		writeControlAudit(ctx, auditRecord{
 			Event:         "principal.credential_list",
-			PrincipalName: p.Username,
+			PrincipalName: principalName,
 			Result:        "error",
 			Duration:      duration,
 		}, auth)
-		if isErrPrincipalNotFound(err) {
-			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		} else {
-			opLog(ctx).Error("credential list failed",
-				slog.String("operation", "credential_list"),
-				slog.String("error", err.Error()),
-			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-		}
+		opLog(ctx).Error("credential list failed",
+			slog.String("operation", "credential_list"),
+			slog.String("error", err.Error()),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
@@ -207,7 +232,7 @@ func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 
 	writeControlAudit(ctx, auditRecord{
 		Event:         "principal.credential_list",
-		PrincipalName: p.Username,
+		PrincipalName: principalName,
 		Result:        "success",
 		Duration:      duration,
 	}, auth)

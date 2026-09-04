@@ -13,25 +13,26 @@ import (
 
 // ---- principal credential CLI (mock daemon) ----
 
-// TestPrincipalCredentialListCLIInfersPrincipal proves the scope-aware
-// principal credential list: without an explicit selector the CLI performs
-// /auth introspection and lists the authenticated Principal credential's own
-// principal — no positional argument required.
-func TestPrincipalCredentialListCLIInfersPrincipal(t *testing.T) {
+// ---- principal credential CLI (mock daemon) ----
+
+// TestPrincipalCredentialListCLIScopeFirstNoFilter proves the scope-first
+// list: without a positional selector the CLI sends one GET /credentials
+// query and no auth introspection; the daemon authorizes visibility.
+func TestPrincipalCredentialListCLIScopeFirstNoFilter(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
-		case r.URL.Path == "/principals/alice/credentials" && r.Method == http.MethodGet:
+		if r.URL.Path == "/credentials" && r.Method == http.MethodGet {
+			if r.URL.RawQuery != "" {
+				t.Errorf("unfiltered list must not carry a query, got %q", r.URL.RawQuery)
+			}
 			writeJSONResponse(w, http.StatusOK, listCredentialsResponse{
 				OK: true,
 				Credentials: []credentialJSON{
-					{ID: "dhcr_1", Name: "default", CreatedAt: "2026-01-01T00:00:00Z"},
+					{ID: "dhcr_1", Name: "default", Principal: "alice", CreatedAt: "2026-01-01T00:00:00Z"},
 				},
 			})
-		default:
-			http.NotFound(w, r)
+			return
 		}
+		http.NotFound(w, r)
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -41,53 +42,27 @@ func TestPrincipalCredentialListCLIInfersPrincipal(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if len(*requests) != 2 || (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals/alice/credentials" {
-		t.Fatalf("requests = %+v, want /auth then nested list", *requests)
+	if len(*requests) != 1 || (*requests)[0].path != "/credentials" {
+		t.Fatalf("requests = %+v, want exactly GET /credentials and no /auth introspection", *requests)
 	}
-	if !strings.Contains(stdout.String(), "dhcr_1") || !strings.Contains(stdout.String(), "default") {
-		t.Errorf("stdout missing credential row: %s", stdout.String())
-	}
-}
-
-// TestPrincipalCredentialListCLIAdminRequiresExplicitSelector proves admin
-// authentication must name the Principal explicitly for the credential list;
-// the error occurs after auth introspection and before any list request.
-func TestPrincipalCredentialListCLIAdminRequiresExplicitSelector(t *testing.T) {
-	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "admin"})
-		default:
-			http.NotFound(w, r)
-		}
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{
-		"principal", "credential", "list", "--endpoint", endpoint, "--token-file", tokenPath,
-	}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "PRINCIPAL is required for admin authentication") {
-		t.Errorf("stderr missing admin selector requirement: %s", stderr.String())
-	}
-	if len(*requests) != 1 || (*requests)[0].path != "/auth" {
-		t.Fatalf("requests = %+v, want only /auth (no list request)", *requests)
+	if !strings.Contains(stdout.String(), "dhcr_1") || !strings.Contains(stdout.String(), "alice") {
+		t.Errorf("stdout missing credential row/principal: %s", stdout.String())
 	}
 }
 
-// TestPrincipalCredentialListCLIAdminExplicitSkipsAuth proves an explicit
-// selector goes straight to the nested list endpoint with no /auth call: the
-// daemon remains the authorization authority.
-func TestPrincipalCredentialListCLIAdminExplicitSkipsAuth(t *testing.T) {
+// TestPrincipalCredentialListCLIPrincipalFilter proves the positional
+// PRINCIPAL selector is passed to the daemon as the narrowing filter of the
+// scope-first list Query, with no /auth introspection.
+func TestPrincipalCredentialListCLIPrincipalFilter(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/principals/bob/credentials" && r.Method == http.MethodGet:
+		if r.URL.Path == "/credentials" && r.Method == http.MethodGet {
+			if got := r.URL.Query().Get("principal"); got != "bob" {
+				t.Errorf("principal filter = %q, want bob", got)
+			}
 			writeJSONResponse(w, http.StatusOK, listCredentialsResponse{OK: true})
-		default:
-			http.NotFound(w, r)
+			return
 		}
+		http.NotFound(w, r)
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -97,8 +72,8 @@ func TestPrincipalCredentialListCLIAdminExplicitSkipsAuth(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if len(*requests) != 1 || (*requests)[0].path != "/principals/bob/credentials" {
-		t.Fatalf("requests = %+v, want only the nested list", *requests)
+	if len(*requests) != 1 || (*requests)[0].path != "/credentials" {
+		t.Fatalf("requests = %+v, want exactly one GET /credentials?principal=bob", *requests)
 	}
 	if !strings.Contains(stdout.String(), "No credentials for bob") {
 		t.Errorf("stdout missing empty list notice: %s", stdout.String())
@@ -106,15 +81,19 @@ func TestPrincipalCredentialListCLIAdminExplicitSkipsAuth(t *testing.T) {
 }
 
 // TestPrincipalCredentialListCLILauncherCredentialRejected proves a Launcher
-// credential bearer cannot drive the Principal credential list.
+// credential bearer cannot drive the Principal credential list: the CLI sends
+// the list Query and the daemon's non-disclosing rejection becomes the error.
 func TestPrincipalCredentialListCLILauncherCredentialRejected(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "launcher", LauncherID: "dhl_9"})
-		default:
-			http.NotFound(w, r)
+		if r.URL.Path == "/credentials" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusUnauthorized, map[string]any{
+				"ok":      false,
+				"code":    "unauthorized",
+				"message": "Authentication required for credential management.",
+			})
+			return
 		}
+		http.NotFound(w, r)
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -124,11 +103,11 @@ func TestPrincipalCredentialListCLILauncherCredentialRejected(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (stderr=%s)", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "Launcher credentials do not manage Principal credentials") {
-		t.Errorf("stderr missing launcher rejection: %s", stderr.String())
+	if len(*requests) != 1 || (*requests)[0].path != "/credentials" {
+		t.Fatalf("requests = %+v, want one list request", *requests)
 	}
-	if len(*requests) != 1 {
-		t.Fatalf("requests = %+v, want only /auth", *requests)
+	if strings.Contains(stdout.String(), "dhcr_") {
+		t.Errorf("unauthorized list must print no credentials: %s", stdout.String())
 	}
 }
 
@@ -305,7 +284,7 @@ func TestLauncherCredentialCreateCLIProvesConflictOnSecondCreate(t *testing.T) {
 		case r.URL.Path == "/principals/alice/launchers/default/credential" && r.Method == http.MethodPut:
 			writeJSONResponse(w, http.StatusConflict, map[string]any{
 				"ok":      false,
-				"code":    "credential_already_exists",
+				"code":    "launcher_credential_exists",
 				"message": "launcher already has a credential",
 			})
 		default:
@@ -323,7 +302,7 @@ func TestLauncherCredentialCreateCLIProvesConflictOnSecondCreate(t *testing.T) {
 	if len(*requests) != 2 || (*requests)[0].path != "/auth" || (*requests)[1].method != http.MethodPut {
 		t.Fatalf("requests = %+v, want /auth then single PUT", *requests)
 	}
-	if !strings.Contains(stderr.String(), "credential_already_exists") {
+	if !strings.Contains(stderr.String(), "launcher_credential_exists") {
 		t.Errorf("stderr missing conflict code: %s", stderr.String())
 	}
 	if strings.Contains(stdout.String(), "credential") {
@@ -341,7 +320,7 @@ func TestLauncherCredentialShowCLIGetsCredential(t *testing.T) {
 		case r.URL.Path == "/principals/alice/launchers/default/credential" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, launcherCredentialResponse{
 				OK:         true,
-				Credential: &launcherCredentialJSON{ID: "dhc_9"},
+				Credential: &launcherCredentialJSON{ID: "dhcr_9"},
 			})
 		default:
 			http.NotFound(w, r)
@@ -358,7 +337,7 @@ func TestLauncherCredentialShowCLIGetsCredential(t *testing.T) {
 	if len(*requests) != 2 || (*requests)[0].path != "/auth" || (*requests)[1].method != http.MethodGet {
 		t.Fatalf("requests = %+v, want /auth then single GET", *requests)
 	}
-	if !strings.Contains(stdout.String(), "dhc_9") {
+	if !strings.Contains(stdout.String(), "dhcr_9") {
 		t.Errorf("stdout missing credential id: %s", stdout.String())
 	}
 }
@@ -478,29 +457,30 @@ func TestCredentialAliasesShareCanonicalImplementations(t *testing.T) {
 	}
 }
 
-// TestCredentialAliasListPrincipalInference proves the alias list command
-// keeps the same scope-aware inference as the canonical path.
-func TestCredentialAliasListPrincipalInference(t *testing.T) {
+// TestCredentialAliasListScopeFirst proves the alias list command uses the
+// same scope-first list Query as the canonical path: the positional selector
+// is the narrowing filter and no /auth introspection happens.
+func TestCredentialAliasListScopeFirstFilter(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
-		case r.URL.Path == "/principals/alice/credentials" && r.Method == http.MethodGet:
+		if r.URL.Path == "/credentials" && r.Method == http.MethodGet {
+			if got := r.URL.Query().Get("principal"); got != "alice" {
+				t.Errorf("principal filter = %q, want alice", got)
+			}
 			writeJSONResponse(w, http.StatusOK, listCredentialsResponse{OK: true})
-		default:
-			http.NotFound(w, r)
+			return
 		}
+		http.NotFound(w, r)
 	})
 
 	var stdout, stderr bytes.Buffer
 	code := runCommandWithWriters([]string{
-		"credential", "list", "--endpoint", endpoint, "--token-file", tokenPath,
+		"credential", "list", "--endpoint", endpoint, "--token-file", tokenPath, "alice",
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if len(*requests) != 2 || (*requests)[1].path != "/principals/alice/credentials" {
-		t.Fatalf("requests = %+v, want /auth then nested list", *requests)
+	if len(*requests) != 1 || (*requests)[0].path != "/credentials" {
+		t.Fatalf("requests = %+v, want /credentials?principal=alice and no /auth", *requests)
 	}
 	if !strings.Contains(stdout.String(), "No credentials for alice") {
 		t.Errorf("stdout = %s", stdout.String())

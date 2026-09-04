@@ -154,18 +154,24 @@ func createCredential(db *sql.DB, username string, name string) (*CredentialWith
 	}, token, nil
 }
 
-func listCredentials(db *sql.DB, username string) ([]CredentialWithPrincipal, error) {
-	principalID, err := findPrincipalIDByUsername(db, username)
-	if err != nil {
-		return nil, err
+// listCredentialsForScope returns the Principal credentials of one authorized
+// list scope: every Principal's credentials when principalID is nil, otherwise
+// only that Principal's, each row carrying its owning Principal's username.
+// Launcher credentials are excluded by the Principal-ownership predicate: they
+// are managed through the Launcher credential commands, never through a
+// Principal credential list.
+func listCredentialsForScope(db *sql.DB, principalID *int64) ([]CredentialWithPrincipal, error) {
+	var ownerID any
+	if principalID != nil {
+		ownerID = *principalID
 	}
-
 	rows, err := db.Query(
-		`SELECT c.id, c.name, c.created_at, c.revoked_at
+		`SELECT c.id, c.name, c.created_at, c.revoked_at, p.username
 		 FROM credentials c
-		 WHERE c.principal_id = ?
-		 ORDER BY c.created_at ASC`,
-		principalID,
+		 JOIN principals p ON p.id = c.principal_id
+		 WHERE c.principal_id IS NOT NULL AND (? IS NULL OR c.principal_id = ?)
+		 ORDER BY p.username, c.created_at ASC`,
+		ownerID, ownerID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot query credentials: %w", err)
@@ -177,7 +183,8 @@ func listCredentials(db *sql.DB, username string) ([]CredentialWithPrincipal, er
 		var c Credential
 		var revokedAt sql.NullInt64
 		var createdAt int64
-		if err := rows.Scan(&c.ID, &c.Name, &createdAt, &revokedAt); err != nil {
+		var username string
+		if err := rows.Scan(&c.ID, &c.Name, &createdAt, &revokedAt, &username); err != nil {
 			return nil, fmt.Errorf("cannot scan credential: %w", err)
 		}
 		c.CreatedAt = time.Unix(createdAt, 0)
@@ -275,14 +282,19 @@ func revokeCredential(db *sql.DB, id string) (bool, error) {
 }
 
 // rotatePrincipalCredential atomically replaces the bearer secret of the
-// named Principal credential: the credential ID, name, and Principal ownership
-// are unchanged, the old token is immediately invalid, and the new secret is
-// returned exactly once. No second credential row is created and there is no
-// overlapping validity window: the row's token hash is replaced within one
-// transaction. Fails with ErrCredentialNotFound when the principal has no
-// credential with that name, and ErrCredentialRevoked when the named
-// credential is already revoked (its token is already invalid; rotating it
-// would not resurrect it).
+// CURRENT ACTIVE Principal credential with the given name: the credential ID,
+// name, and Principal ownership are unchanged, the old token is immediately
+// invalid, and the new secret is returned exactly once. No second credential
+// row is created and there is no overlapping validity window.
+//
+// The primary lookup targets only the active row (revoked_at IS NULL), so
+// revoked historical rows that share the name through documented name reuse
+// never become the rotation target. When no active credential exists but
+// revoked history does, rotation fails with ErrCredentialRevoked; a name that
+// never existed fails with ErrCredentialNotFound. The mutation updates the
+// exact active row under the same ownership and active-state predicates and
+// fails closed on a zero affected-row count (stale concurrent state), so a
+// rotation can never resurrect a revoked row.
 func rotatePrincipalCredential(db *sql.DB, username, name string) (*CredentialWithPrincipal, string, error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -294,23 +306,37 @@ func rotatePrincipalCredential(db *sql.DB, username, name string) (*CredentialWi
 	var principalID int
 	var principalName string
 	var createdAt int64
-	var revokedAt sql.NullInt64
 	err = tx.QueryRow(
-		`SELECT c.id, c.created_at, c.revoked_at, p.id, p.username
+		`SELECT c.id, c.created_at, p.id, p.username
 		 FROM credentials c
 		 JOIN principals p ON p.id = c.principal_id
 		 WHERE p.username = ? AND c.name = ?
-		   AND c.principal_id IS NOT NULL AND c.launcher_id IS NULL`,
+		   AND c.principal_id IS NOT NULL AND c.launcher_id IS NULL
+		   AND c.revoked_at IS NULL`,
 		username, name,
-	).Scan(&credID, &createdAt, &revokedAt, &principalID, &principalName)
+	).Scan(&credID, &createdAt, &principalID, &principalName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// No active credential with this name: distinguish documented
+			// revoked history (conflict) from a name that never existed
+			// (not found). Neither branch mutates any row.
+			var history int
+			err = tx.QueryRow(
+				`SELECT COUNT(*) FROM credentials c
+				 JOIN principals p ON p.id = c.principal_id
+				 WHERE p.username = ? AND c.name = ?
+				   AND c.principal_id IS NOT NULL AND c.launcher_id IS NULL`,
+				username, name,
+			).Scan(&history)
+			if err != nil {
+				return nil, "", fmt.Errorf("cannot check credential history: %w", err)
+			}
+			if history > 0 {
+				return nil, "", fmt.Errorf("credential %q is revoked: %w", name, ErrCredentialRevoked)
+			}
 			return nil, "", fmt.Errorf("credential %q not found for principal %q: %w", name, username, ErrCredentialNotFound)
 		}
 		return nil, "", fmt.Errorf("cannot find credential: %w", err)
-	}
-	if revokedAt.Valid {
-		return nil, "", fmt.Errorf("credential %q is revoked: %w", name, ErrCredentialRevoked)
 	}
 
 	token, err := generateCredentialToken()
@@ -319,11 +345,14 @@ func rotatePrincipalCredential(db *sql.DB, username, name string) (*CredentialWi
 	}
 	newHash := hashCredentialToken(token)
 
-	// Update the SAME row: ID, name, and owner unchanged, token hash atomically
-	// replaced. The ownership predicate mirrors the lookup above.
+	// Fail-closed mutation of the SAME row: ID, name, and owner unchanged,
+	// token hash atomically replaced. The predicate mirrors the active-row
+	// lookup above; a zero affected count means the row is no longer the
+	// active credential (concurrent revoke between lookup and mutation).
 	result, err := tx.Exec(
 		`UPDATE credentials SET token_hash = ?
-		 WHERE id = ? AND principal_id = ? AND launcher_id IS NULL`,
+		 WHERE id = ? AND principal_id = ? AND launcher_id IS NULL
+		   AND revoked_at IS NULL`,
 		newHash, credID, principalID,
 	)
 	if err != nil {
@@ -334,7 +363,7 @@ func rotatePrincipalCredential(db *sql.DB, username, name string) (*CredentialWi
 		return nil, "", fmt.Errorf("cannot check rotate result: %w", err)
 	}
 	if affected == 0 {
-		return nil, "", fmt.Errorf("credential %q not found for principal %q: %w", name, username, ErrCredentialNotFound)
+		return nil, "", fmt.Errorf("credential %q is no longer active: %w", name, ErrCredentialRevoked)
 	}
 
 	if err := tx.Commit(); err != nil {

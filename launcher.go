@@ -210,14 +210,21 @@ func findLauncherForPrincipal(db *sql.DB, principalID int64, selector string) (*
 	return findLauncherByNameUnderPrincipal(db, principalID, selector)
 }
 
-// listLaunchersForPrincipal returns the Launchers of a Principal ordered by name.
-func listLaunchersForPrincipal(db *sql.DB, principalID int64) ([]LauncherWithPrincipal, error) {
+// listLaunchersForScope returns the Launchers of one authorized list scope:
+// every Launcher when principalID is nil, otherwise only that Principal's,
+// each row carrying its owning Principal's username, ordered by owning
+// Principal name and then Launcher name.
+func listLaunchersForScope(db *sql.DB, principalID *int64) ([]LauncherWithPrincipal, error) {
+	var ownerID any
+	if principalID != nil {
+		ownerID = *principalID
+	}
 	rows, err := db.Query(
 		`SELECT l.id, l.principal_id, p.username, l.name, l.enabled, l.scope_mode, l.created_at
 		 FROM launchers l JOIN principals p ON p.id = l.principal_id
-		 WHERE l.principal_id = ?
-		 ORDER BY l.name`,
-		principalID,
+		 WHERE (? IS NULL OR l.principal_id = ?)
+		 ORDER BY p.username, l.name`,
+		ownerID, ownerID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot list launchers: %w", err)

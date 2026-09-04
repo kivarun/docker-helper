@@ -208,9 +208,9 @@ func TestListCredentials(t *testing.T) {
 		t.Fatalf("createCredential(laptop) error: %v", err)
 	}
 
-	creds, err := listCredentials(app.DB, "listuser")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "listuser"))
 	if err != nil {
-		t.Fatalf("listCredentials() error: %v", err)
+		t.Fatalf("listCredentialsForScope() error: %v", err)
 	}
 
 	if len(creds) != 2 {
@@ -236,7 +236,7 @@ func TestListCredentials(t *testing.T) {
 func TestListCredentialsPrincipalNotFound(t *testing.T) {
 	app := newTestApp(t)
 
-	_, err := listCredentials(app.DB, "nonexistent")
+	_, err := findPrincipalIDByUsername(app.DB, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -361,9 +361,9 @@ func TestRevokedCredentialRemainsInList(t *testing.T) {
 		t.Fatalf("revokeCredential() error: %v", err)
 	}
 
-	creds, err := listCredentials(app.DB, "revlistuser")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "revlistuser"))
 	if err != nil {
-		t.Fatalf("listCredentials() error: %v", err)
+		t.Fatalf("listCredentialsForScope() error: %v", err)
 	}
 
 	if len(creds) != 1 {
@@ -417,9 +417,9 @@ func TestCredentialNameReusableAfterRevoke(t *testing.T) {
 	}
 
 	// The revoked record remains as history; the new active record also present.
-	creds, err := listCredentials(app.DB, "reuseuser")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuseuser"))
 	if err != nil {
-		t.Fatalf("listCredentials() error: %v", err)
+		t.Fatalf("listCredentialsForScope() error: %v", err)
 	}
 	if len(creds) != 2 {
 		t.Fatalf("expected 2 credentials (revoked + active), got %d", len(creds))
@@ -1156,9 +1156,9 @@ func TestCredentialMultipleForOnePrincipal(t *testing.T) {
 		}
 	}
 
-	creds, err := listCredentials(app.DB, "multiuser")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "multiuser"))
 	if err != nil {
-		t.Fatalf("listCredentials() error: %v", err)
+		t.Fatalf("listCredentialsForScope() error: %v", err)
 	}
 
 	if len(creds) != 3 {
@@ -1283,14 +1283,18 @@ func TestCredentialRevokeHelpExplainsCredentialID(t *testing.T) {
 }
 
 // TestCredentialListHumanOutput verifies the list output uses explicit column
-// headers (ID, NAME, CREATED, REVOKED) and renders revoked and active rows.
+// headers (ID, NAME, CREATED, REVOKED, PRINCIPAL) and renders revoked and
+// active rows with their owning Principal.
 func TestCredentialListHumanOutput(t *testing.T) {
 	activeCreated := "2026-08-26T10:00:00+03:00"
 	revokedCreated := "2026-08-25T09:00:00+03:00"
 	revokedAt := "2026-08-26T08:00:00+03:00"
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /principals/alice/credentials", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /credentials", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("principal"); got != "alice" {
+			t.Errorf("principal filter = %q, want alice", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(listCredentialsResponse{
 			OK: true,
@@ -1320,16 +1324,16 @@ func TestCredentialListHumanOutput(t *testing.T) {
 		t.Fatalf("expected 3 lines (header + 2 rows), got %d: %q", len(lines), stdout.String())
 	}
 	header := strings.Fields(lines[0])
-	if !slices.Equal(header, []string{"ID", "NAME", "CREATED", "REVOKED"}) {
-		t.Errorf("header = %v, want [ID NAME CREATED REVOKED]", header)
+	if !slices.Equal(header, []string{"ID", "NAME", "CREATED", "REVOKED", "PRINCIPAL"}) {
+		t.Errorf("header = %v, want [ID NAME CREATED REVOKED PRINCIPAL]", header)
 	}
 	active := strings.Fields(lines[1])
-	if active[0] != "dhcr_active" || active[1] != "oc" {
-		t.Errorf("active row = %v, want ID dhcr_active NAME oc", active)
+	if active[0] != "dhcr_active" || active[1] != "oc" || active[4] != "alice" {
+		t.Errorf("active row = %v, want ID dhcr_active NAME oc PRINCIPAL alice", active)
 	}
 	revoked := strings.Fields(lines[2])
-	if revoked[0] != "dhcr_revoked" || revoked[1] != "laptop" {
-		t.Errorf("revoked row = %v, want ID dhcr_revoked NAME laptop", revoked)
+	if revoked[0] != "dhcr_revoked" || revoked[1] != "laptop" || revoked[4] != "alice" {
+		t.Errorf("revoked row = %v, want ID dhcr_revoked NAME laptop PRINCIPAL alice", revoked)
 	}
 	if len(revoked) < 4 || revoked[3] == "-" {
 		t.Errorf("revoked row should show revoked timestamp, got: %v", revoked)

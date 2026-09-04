@@ -359,31 +359,60 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 	writeJSONRaw(ctx, w, http.StatusCreated, resp)
 }
 
+// handleListLaunchers serves GET /principals/{username}/launchers: the list of
+// one Principal's Launchers. The path Principal is a required single-Principal
+// filter of the shared scope-first list rule.
 func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
 	auth, err := a.authenticateControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
-	ctx := r.Context()
-
 	username := r.PathValue("username")
 	if username == "" {
-		writeError(ctx, w, http.StatusBadRequest, "missing_username", "username is required")
+		writeError(r.Context(), w, http.StatusBadRequest, "missing_username", "username is required")
 		return
 	}
+	a.serveLauncherList(w, r, auth, username)
+}
 
-	p, ok := a.resolveControlPrincipal(w, r, auth, username)
+// handleListLaunchersForAuthority serves GET /launchers: the scope-first
+// launcher list. The authenticated authority establishes the maximum
+// visibility and the optional ?principal= filter can only narrow it; the
+// daemon remains the authorization authority.
+func (a *App) handleListLaunchersForAuthority(w http.ResponseWriter, r *http.Request) {
+	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	if err != nil || auth == nil {
+		return
+	}
+	a.serveLauncherList(w, r, auth, r.URL.Query().Get("principal"))
+}
+
+// serveLauncherList answers a launcher list Query under the scope-first list
+// rule: the authority scope plus the optional Principal filter resolve into
+// one authorized query predicate. A filtered or single-Principal list audits
+// the target Principal; the unfiltered admin list covers every Principal.
+func (a *App) serveLauncherList(w http.ResponseWriter, r *http.Request, auth *controlAuthority, principalFilter string) {
+	started := time.Now()
+	ctx := r.Context()
+
+	scope, ok := a.resolveListScope(w, r, auth, principalFilter)
 	if !ok {
 		return
 	}
+	var principalID *int64
+	principalName := ""
+	if !scope.allPrincipals {
+		id := int64(scope.principal.ID)
+		principalID = &id
+		principalName = scope.principal.Username
+	}
 
-	launchers, err := listLaunchersForPrincipal(a.DB, int64(p.ID))
+	launchers, err := listLaunchersForScope(a.DB, principalID)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:         "launcher.list",
-			PrincipalName: username,
+			PrincipalName: principalName,
 			Result:        "error",
 			Duration:      duration,
 		}, auth, nil)
@@ -402,7 +431,7 @@ func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
 
 	writeLauncherControlAudit(ctx, auditRecord{
 		Event:         "launcher.list",
-		PrincipalName: username,
+		PrincipalName: principalName,
 		Result:        "success",
 		Duration:      duration,
 	}, auth, nil)

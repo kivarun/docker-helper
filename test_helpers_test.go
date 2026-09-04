@@ -320,6 +320,14 @@ func principalIDByName(t *testing.T, db *sql.DB, username string) int64 {
 	return int64(id)
 }
 
+// principalIDPtr resolves a test-created Principal's internal ID as the
+// single-Principal scope argument of the scope-first list queries.
+func principalIDPtr(t *testing.T, db *sql.DB, username string) *int64 {
+	t.Helper()
+	id := principalIDByName(t, db, username)
+	return &id
+}
+
 // newTestAppWithAdminToken creates an admin-authorized test app with the
 // admin token hash set.
 func newTestAppWithAdminToken(t *testing.T) *App {

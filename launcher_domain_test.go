@@ -315,9 +315,9 @@ func TestLauncherFindListScoped(t *testing.T) {
 		t.Errorf("unexpected launcher: %+v", got)
 	}
 
-	list, err := listLaunchersForPrincipal(db, pid)
+	list, err := listLaunchersForScope(db, &pid)
 	if err != nil {
-		t.Fatalf("listLaunchersForPrincipal: %v", err)
+		t.Fatalf("listLaunchersForScope: %v", err)
 	}
 	// "a", "b", plus the Principal's auto-provisioned 'default' Launcher.
 	if len(list) != 3 {

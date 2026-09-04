@@ -78,13 +78,14 @@ var principalCredentialCreateCommand = &Command{
 	},
 }
 
-// principalCredentialListCommand lists a Principal's named credentials. The
-// Principal selector is optional: a Principal-credential caller's own
-// Principal is inferred from the authenticated credential, while an explicit
-// selector is only available to callers with broader visibility (admin).
+// principalCredentialListCommand runs the scope-first principal credential
+// list Query: the daemon authorizes the query against the authenticated
+// bearer (a Principal credential sees its own Principal, admin sees every
+// Principal) and the optional PRINCIPAL positional selector is only a filter
+// that can narrow visibility, never expand it.
 var principalCredentialListCommand = &Command{
 	Name:       "list",
-	Summary:    "List a principal's credentials",
+	Summary:    "List principal credentials",
 	Usage:      "docker-helper principal credential list [--system] [--endpoint ENDPOINT] [--token-file PATH] [PRINCIPAL]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
@@ -93,9 +94,9 @@ var principalCredentialListCommand = &Command{
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				args := fs.Args()
-				explicit := ""
+				filter := ""
 				if len(args) > 0 {
-					explicit = args[0]
+					filter = args[0]
 				}
 
 				client, err := resolveOperatorClient(operatorClientOptions{
@@ -108,32 +109,32 @@ var principalCredentialListCommand = &Command{
 					return 1
 				}
 
-				username, err := resolvePrincipalTargetForCLI(client, explicit)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-
-				result, err := client.listPrincipalCredentials(username)
+				// Scope-first list: no Principal inference and no local
+				// pre-authorization; the daemon is the authorization authority.
+				result, err := client.listPrincipalCredentials(filter)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
 
 				if len(result.Credentials) == 0 {
-					fmt.Fprintln(stdout, "No credentials for", username)
+					if filter != "" {
+						fmt.Fprintln(stdout, "No credentials for", filter)
+					} else {
+						fmt.Fprintln(stdout, "No credentials")
+					}
 					return 0
 				}
 
 				tw := tabwriter.NewWriter(stdout, 0, 0, 1, ' ', 0)
-				fmt.Fprintln(tw, "ID\tNAME\tCREATED\tREVOKED")
+				fmt.Fprintln(tw, "ID\tNAME\tCREATED\tREVOKED\tPRINCIPAL")
 				for _, c := range result.Credentials {
 					revoked := "-"
 					if c.RevokedAt != nil {
 						revoked = *c.RevokedAt
 					}
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-						c.ID, c.Name, c.CreatedAt, revoked)
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+						c.ID, c.Name, c.CreatedAt, revoked, c.Principal)
 				}
 				tw.Flush()
 				return 0

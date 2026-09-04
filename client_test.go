@@ -1006,7 +1006,7 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 			name:       "listPrincipalCredentials",
 			call:       func(c *apiClient) error { _, err := c.listPrincipalCredentials("ali/ce"); return err },
 			wantMethod: "GET",
-			wantURI:    "/principals/ali%2Fce/credentials",
+			wantURI:    "/credentials?principal=ali%2Fce",
 		},
 		{
 			name:       "revokeCredential",
@@ -1027,8 +1027,8 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 			if stub.lastRequest.Method != tt.wantMethod {
 				t.Errorf("method = %q, want %q", stub.lastRequest.Method, tt.wantMethod)
 			}
-			if got := stub.lastRequest.URL.EscapedPath(); got != tt.wantURI {
-				t.Errorf("EscapedPath = %q, want %q", got, tt.wantURI)
+			if got := stub.lastRequest.URL.RequestURI(); got != tt.wantURI {
+				t.Errorf("RequestURI = %q, want %q", got, tt.wantURI)
 			}
 			if tt.wantBody != "" {
 				buf := new(strings.Builder)

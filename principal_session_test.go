@@ -93,9 +93,9 @@ func TestCredentialAuthRevoked(t *testing.T) {
 	}
 
 	// Revoke the credential.
-	creds, err := listCredentials(app.DB, "revokeduser")
+	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "revokeduser"))
 	if err != nil {
-		t.Fatalf("listCredentials() error: %v", err)
+		t.Fatalf("listCredentialsForScope() error: %v", err)
 	}
 	if _, err := revokeCredential(app.DB, creds[0].ID); err != nil {
 		t.Fatalf("revokeCredential() error: %v", err)

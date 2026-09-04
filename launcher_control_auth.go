@@ -87,3 +87,64 @@ func controlUnauthorizedMessage(auditScope string) string {
 	}
 	return "Authentication required for credential management."
 }
+
+// listQueryScope is the authorized visibility scope of a scope-first list
+// Query: allPrincipals when the authenticated authority may see every
+// Principal, otherwise exactly the one Principal the query is narrowed to.
+type listQueryScope struct {
+	allPrincipals bool
+	principal     *PrincipalWithRoots
+}
+
+// resolveListScope is the single authorization owner for scope-first list
+// Queries on Principal-owned resource families (launcher list, principal
+// credential list): the authenticated authority establishes the maximum
+// visibility — an admin token may see every Principal, a Principal credential
+// only its own — and the optional Principal selector can only narrow that
+// visibility, never expand it. An empty filter selects the caller's full
+// visible scope. A foreign selector under a Principal credential and an
+// unknown selector are both the established non-disclosing 404 (a foreign
+// selector is rejected without any lookup). A Launcher credential never
+// reaches this resolver: authenticateControlRequest rejects it.
+func (a *App) resolveListScope(w http.ResponseWriter, r *http.Request, auth *controlAuthority, filter string) (listQueryScope, bool) {
+	ctx := r.Context()
+	if auth.isAdmin {
+		if filter == "" {
+			return listQueryScope{allPrincipals: true}, true
+		}
+		p, err := findPrincipalByUsername(a.DB, filter)
+		if err != nil {
+			if isErrPrincipalNotFound(err) {
+				writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+			} else {
+				opLog(ctx).Error("launcher principal lookup failed",
+					slog.String("operation", "launcher_principal_lookup"),
+					slog.String("error", err.Error()),
+				)
+				writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			}
+			return listQueryScope{}, false
+		}
+		return listQueryScope{principal: p}, true
+	}
+
+	// Principal credential: its own Principal is the whole visible scope.
+	if filter != "" && filter != auth.principalCredential.PrincipalName {
+		writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+		return listQueryScope{}, false
+	}
+	p, err := findPrincipalByUsername(a.DB, auth.principalCredential.PrincipalName)
+	if err != nil {
+		if isErrPrincipalNotFound(err) {
+			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+		} else {
+			opLog(ctx).Error("launcher principal lookup failed",
+				slog.String("operation", "launcher_principal_lookup"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return listQueryScope{}, false
+	}
+	return listQueryScope{principal: p}, true
+}

@@ -692,7 +692,7 @@ func TestLauncherCredentialSecretPrintedOnce(t *testing.T) {
 		if r.URL.Path == "/principals/alice/launchers/dhl_1/credential" && r.Method == http.MethodPut {
 			json.NewEncoder(w).Encode(launcherCredentialResponse{
 				OK:         true,
-				Credential: &launcherCredentialJSON{ID: "dhc_1"},
+				Credential: &launcherCredentialJSON{ID: "dhcr_1"},
 				Token:      "secret-issue-abc",
 			})
 			return
@@ -906,21 +906,24 @@ func TestLauncherCreateCLIInfersPrincipalFromCredential(t *testing.T) {
 	}
 }
 
-// TestLauncherListCLIInfersPrincipalFromCredential proves list uses the same
-// inference: /auth lookup then the canonical nested list endpoint.
-func TestLauncherListCLIInfersPrincipalFromCredential(t *testing.T) {
+// TestLauncherListCLIScopeFirstNoFilter proves the scope-first launcher list:
+// without a Principal filter the CLI sends one GET /launchers query and no
+// auth introspection; the daemon authorizes visibility.
+func TestLauncherListCLIScopeFirstNoFilter(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
-			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
-		case r.URL.Path == "/principals/alice/launchers" && r.Method == http.MethodGet:
+		if r.URL.Path == "/launchers" && r.Method == http.MethodGet {
+			if r.URL.RawQuery != "" {
+				t.Errorf("unfiltered list must not carry a query, got %q", r.URL.RawQuery)
+			}
 			writeJSONResponse(w, http.StatusOK, listLaunchersResponse{
-				OK:        true,
-				Launchers: []launcherJSON{{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true}},
+				OK: true,
+				Launchers: []launcherJSON{
+					{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true},
+				},
 			})
-		default:
-			http.NotFound(w, r)
+			return
 		}
+		http.NotFound(w, r)
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -930,8 +933,41 @@ func TestLauncherListCLIInfersPrincipalFromCredential(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if len(*requests) != 2 || (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals/alice/launchers" {
-		t.Fatalf("requests = %+v, want /auth then nested list", *requests)
+	if len(*requests) != 1 || (*requests)[0].path != "/launchers" {
+		t.Fatalf("requests = %+v, want exactly GET /launchers and no /auth introspection", *requests)
+	}
+	if !strings.Contains(stdout.String(), "dhl_9") || !strings.Contains(stdout.String(), "alice") {
+		t.Errorf("stdout missing launcher id/principal: %s", stdout.String())
+	}
+}
+
+// TestLauncherListCLIPrincipalFilter proves the explicit --principal selector
+// is passed to the daemon as the narrowing filter of the scope-first list
+// Query.
+func TestLauncherListCLIPrincipalFilter(t *testing.T) {
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/launchers" && r.Method == http.MethodGet {
+			if got := r.URL.Query().Get("principal"); got != "alice" {
+				t.Errorf("principal filter = %q, want alice", got)
+			}
+			writeJSONResponse(w, http.StatusOK, listLaunchersResponse{
+				OK:        true,
+				Launchers: []launcherJSON{{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "inherit", Enabled: true}},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{
+		"launcher", "list", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if len(*requests) != 1 || (*requests)[0].path != "/launchers" {
+		t.Fatalf("requests = %+v, want exactly one GET /launchers?principal=alice", *requests)
 	}
 	if !strings.Contains(stdout.String(), "dhl_9") {
 		t.Errorf("stdout missing launcher id: %s", stdout.String())
@@ -952,7 +988,7 @@ func TestLauncherCreateCLIRestrictedIssuesCredentialTokenOnce(t *testing.T) {
 			writeJSONResponse(w, http.StatusCreated, createLauncherResponse{
 				OK:         true,
 				Launcher:   launcherJSON{ID: "dhl_9", Principal: "alice", Name: "default", Scope: "restricted", AllowedRoots: []string{"/a", "/b"}, Enabled: true},
-				Credential: &launcherCredentialJSON{ID: "dhc_9"},
+				Credential: &launcherCredentialJSON{ID: "dhcr_9"},
 				Token:      "secret-create-once-42",
 			})
 		default:
@@ -1348,7 +1384,7 @@ func TestLauncherCredentialRotateCLIPreservesIdentity(t *testing.T) {
 		if r.URL.Path == "/principals/alice/launchers/dhl_1/credential/rotate" && r.Method == http.MethodPost {
 			writeJSONResponse(w, http.StatusOK, launcherCredentialResponse{
 				OK:         true,
-				Credential: &launcherCredentialJSON{ID: "dhc_1"},
+				Credential: &launcherCredentialJSON{ID: "dhcr_1"},
 				Token:      "secret-rotated-77",
 			})
 			return
@@ -1367,7 +1403,7 @@ func TestLauncherCredentialRotateCLIPreservesIdentity(t *testing.T) {
 	if len(*requests) != 1 || (*requests)[0].method != http.MethodPost || (*requests)[0].path != "/principals/alice/launchers/dhl_1/credential/rotate" {
 		t.Fatalf("requests = %+v, want one POST rotate", *requests)
 	}
-	if !strings.Contains(stdout.String(), "dhc_1") {
+	if !strings.Contains(stdout.String(), "dhcr_1") {
 		t.Errorf("stdout missing preserved credential id: %s", stdout.String())
 	}
 	if got := strings.Count(stdout.String(), "secret-rotated-77"); got != 1 {

@@ -27,12 +27,13 @@ var errMockDeleteDB = errors.New("mock_delete_db_error")
 // failDriver wraps the real sqlite3 driver and optionally fails ExecContext
 // and/or QueryContext with given errors.
 type failDriver struct {
-	failExec        error  // non-nil → ExecContext returns this error
-	failExecMatch   string // non-empty → ExecContext fails only when the SQL contains this substring
-	failExecMatchE  error
-	failQuery       error // non-nil → QueryContext returns this error
-	failQueryAfter  int   // >0 → fail queries after (not including) this many successes
-	failQueryAfterE error
+	failExec          error  // non-nil → ExecContext returns this error
+	failExecMatch     string // non-empty → ExecContext fails only when the SQL contains this substring
+	failExecMatchE    error
+	zeroRowsExecMatch string // non-empty → ExecContext for matching SQL reports zero affected rows without executing
+	failQuery         error  // non-nil → QueryContext returns this error
+	failQueryAfter    int    // >0 → fail queries after (not including) this many successes
+	failQueryAfterE   error
 }
 
 func (d *failDriver) Open(dsn string) (driver.Conn, error) {
@@ -41,14 +42,15 @@ func (d *failDriver) Open(dsn string) (driver.Conn, error) {
 		return nil, err
 	}
 	return &failConn{
-		Conn:            realConn,
-		failExec:        d.failExec,
-		failExecMatch:   d.failExecMatch,
-		failExecMatchE:  d.failExecMatchE,
-		failQuery:       d.failQuery,
-		failQueryAfter:  d.failQueryAfter,
-		failQueryAfterE: d.failQueryAfterE,
-		db:              db,
+		Conn:              realConn,
+		failExec:          d.failExec,
+		failExecMatch:     d.failExecMatch,
+		failExecMatchE:    d.failExecMatchE,
+		zeroRowsExecMatch: d.zeroRowsExecMatch,
+		failQuery:         d.failQuery,
+		failQueryAfter:    d.failQueryAfter,
+		failQueryAfterE:   d.failQueryAfterE,
+		db:                db,
 	}, nil
 }
 
@@ -56,14 +58,15 @@ func (d *failDriver) Open(dsn string) (driver.Conn, error) {
 // may fail depending on the driver configuration.
 type failConn struct {
 	driver.Conn
-	failExec        error
-	failExecMatch   string
-	failExecMatchE  error
-	failQuery       error
-	failQueryAfter  int
-	failQueryAfterE error
-	queryCount      int
-	db              *sql.DB // kept open so the underlying conn stays valid
+	failExec          error
+	failExecMatch     string
+	failExecMatchE    error
+	zeroRowsExecMatch string
+	failQuery         error
+	failQueryAfter    int
+	failQueryAfterE   error
+	queryCount        int
+	db                *sql.DB // kept open so the underlying conn stays valid
 }
 
 func (c *failConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -72,6 +75,11 @@ func (c *failConn) ExecContext(ctx context.Context, query string, args []driver.
 	}
 	if c.failExecMatch != "" && strings.Contains(query, c.failExecMatch) {
 		return nil, c.failExecMatchE
+	}
+	if c.zeroRowsExecMatch != "" && strings.Contains(query, c.zeroRowsExecMatch) {
+		// Simulate the stale-state outcome of a guarded mutation: the
+		// predicate matched no row (zero affected rows) without executing.
+		return driver.RowsAffected(0), nil
 	}
 	if execer, ok := c.Conn.(driver.ExecerContext); ok {
 		return execer.ExecContext(ctx, query, args)
@@ -185,6 +193,26 @@ func newFailExecMatchDB(t *testing.T, dbPath string, match string, failErr error
 	if err := db.Ping(); err != nil {
 		db.Close()
 		t.Fatalf("newFailExecMatchDB: ping failed: %v", err)
+	}
+	return db
+}
+
+// newZeroRowsExecMatchDB opens the same SQLite file with a driver that reports
+// zero affected rows for the Exec whose SQL contains match, without executing
+// it. This simulates the guarded-mutation stale-state outcome (the predicate
+// matched no row) for fail-closed tests.
+func newZeroRowsExecMatchDB(t *testing.T, dbPath string, match string) *sql.DB {
+	t.Helper()
+	name := nextMockDriverName("zrm")
+	sql.Register(name, &failDriver{zeroRowsExecMatch: match})
+
+	db, err := sql.Open(name, dbPath)
+	if err != nil {
+		t.Fatalf("newZeroRowsExecMatchDB: cannot open: %v", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		t.Fatalf("newZeroRowsExecMatchDB: ping failed: %v", err)
 	}
 	return db
 }

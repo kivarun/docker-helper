@@ -254,7 +254,7 @@ var launcherListCommand = &Command{
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		principal := fs.String("principal", "", "Principal username filter (narrowing only; the daemon authorizes visibility)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -263,12 +263,11 @@ var launcherListCommand = &Command{
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
 				}
-				username, err := resolveLauncherPrincipalForCLI(client, *principal)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				result, err := client.listLaunchers(username)
+				// Scope-first list: the daemon authorizes the query against the
+				// authenticated bearer; the optional Principal filter can only
+				// narrow visibility. No Principal inference and no local
+				// pre-authorization happens in the CLI.
+				result, err := client.listLaunchers(*principal)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

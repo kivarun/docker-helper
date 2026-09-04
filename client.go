@@ -539,8 +539,16 @@ func (c *apiClient) createPrincipalCredential(username, name string) (*createCre
 	return &result, nil
 }
 
-func (c *apiClient) listPrincipalCredentials(username string) (*listCredentialsResponse, error) {
-	resp, err := c.doAuthenticatedRequest("GET", "/principals/"+url.PathEscape(username)+"/credentials", nil)
+// listPrincipalCredentials runs the scope-first principal credential list
+// Query: the daemon authorizes the query against the authenticated bearer and
+// the optional Principal filter can only narrow visibility. An empty filter
+// lists everything visible to the caller.
+func (c *apiClient) listPrincipalCredentials(principalFilter string) (*listCredentialsResponse, error) {
+	path := "/credentials"
+	if principalFilter != "" {
+		path += "?principal=" + url.QueryEscape(principalFilter)
+	}
+	resp, err := c.doAuthenticatedRequest("GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -688,8 +696,16 @@ func (c *apiClient) createLauncher(username string, req createLauncherClientRequ
 	return &result, nil
 }
 
-func (c *apiClient) listLaunchers(username string) (*listLaunchersResponse, error) {
-	resp, err := c.doAuthenticatedRequest("GET", "/principals/"+url.PathEscape(username)+"/launchers", nil)
+// listLaunchers runs the scope-first launcher list Query: the daemon
+// authorizes the query against the authenticated bearer and the optional
+// Principal filter can only narrow visibility. An empty filter lists
+// everything visible to the caller.
+func (c *apiClient) listLaunchers(principalFilter string) (*listLaunchersResponse, error) {
+	path := "/launchers"
+	if principalFilter != "" {
+		path += "?principal=" + url.QueryEscape(principalFilter)
+	}
+	resp, err := c.doAuthenticatedRequest("GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
