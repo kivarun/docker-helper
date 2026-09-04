@@ -485,7 +485,7 @@ func TestLauncherScopeSetValidation(t *testing.T) {
 }
 
 func TestLauncherSetValidation(t *testing.T) {
-	endpoint, tokenPath := startLauncherCLITestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
 	var stdout, stderr bytes.Buffer
@@ -495,6 +495,148 @@ func TestLauncherSetValidation(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "at least one of --name or --enabled") {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+	if len(*requests) != 0 {
+		t.Fatalf("local validation failure must issue no HTTP request, got %+v", *requests)
+	}
+}
+
+// TestLauncherSetCLINamePresence proves the CLI --name presence contract for
+// launcher set: an explicitly supplied empty name counts as supplied, is
+// transmitted exactly as "name":"" in the PATCH, and the daemon's
+// invalid_launcher_name rejection is surfaced — including when --enabled is
+// also supplied, so explicit invalid input can never turn into a silent
+// enabled-only mutation.
+func TestLauncherSetCLINamePresence(t *testing.T) {
+	rejectName := func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/principals/alice/launchers/dhl_1" && r.Method == http.MethodPatch {
+			writeJSONResponse(w, http.StatusBadRequest, struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}{Code: "invalid_launcher_name", Message: "invalid launcher name"})
+			return true
+		}
+		return false
+	}
+	respondLauncher := func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path == "/principals/alice/launchers/dhl_1" && r.Method == http.MethodPatch {
+			writeJSONResponse(w, http.StatusOK, launcherJSON{ID: "dhl_1", Principal: "alice", Name: "dhl_1", Enabled: true, Scope: "inherit"})
+			return true
+		}
+		return false
+	}
+
+	tests := []struct {
+		name      string
+		args      []string
+		responder func(w http.ResponseWriter, r *http.Request) bool
+		wantExit  int
+		wantCode  string
+		checkWire func(t *testing.T, wire map[string]json.RawMessage)
+	}{
+		{
+			name:      "explicit empty --name is transmitted and rejected",
+			args:      []string{"--name", ""},
+			responder: rejectName,
+			wantExit:  1,
+			wantCode:  "invalid_launcher_name",
+			checkWire: func(t *testing.T, wire map[string]json.RawMessage) {
+				raw, ok := wire["name"]
+				if !ok {
+					t.Fatalf("patch body has no name key")
+				}
+				if string(raw) != `""` {
+					t.Fatalf("wire name = %s, want present empty string", raw)
+				}
+				if _, ok := wire["enabled"]; ok {
+					t.Fatalf("enabled must not be set")
+				}
+			},
+		},
+		{
+			name:      "explicit empty --name with --enabled sends both and is rejected",
+			args:      []string{"--name", "", "--enabled", "true"},
+			responder: rejectName,
+			wantExit:  1,
+			wantCode:  "invalid_launcher_name",
+			checkWire: func(t *testing.T, wire map[string]json.RawMessage) {
+				raw, ok := wire["name"]
+				if !ok {
+					t.Fatalf("patch body has no name key: the empty name must not be dropped")
+				}
+				if string(raw) != `""` {
+					t.Fatalf("wire name = %s, want present empty string", raw)
+				}
+				if string(wire["enabled"]) != "true" {
+					t.Fatalf("wire enabled = %s, want true", wire["enabled"])
+				}
+			},
+		},
+		{
+			name:      "valid --name only remains unchanged",
+			args:      []string{"--name", "ops"},
+			responder: respondLauncher,
+			wantExit:  0,
+			checkWire: func(t *testing.T, wire map[string]json.RawMessage) {
+				if string(wire["name"]) != `"ops"` {
+					t.Fatalf("wire name = %s, want \"ops\"", wire["name"])
+				}
+				if _, ok := wire["enabled"]; ok {
+					t.Fatalf("enabled must not be set")
+				}
+			},
+		},
+		{
+			name:      "omitted --name with --enabled remains unchanged",
+			args:      []string{"--enabled", "true"},
+			responder: respondLauncher,
+			wantExit:  0,
+			checkWire: func(t *testing.T, wire map[string]json.RawMessage) {
+				if _, ok := wire["name"]; ok {
+					t.Fatalf("name must not be set when --name is omitted")
+				}
+				if string(wire["enabled"]) != "true" {
+					t.Fatalf("wire enabled = %s, want true", wire["enabled"])
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/auth" {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(authResponse{Authority: "admin"})
+					return
+				}
+				if !tc.responder(w, r) {
+					http.NotFound(w, r)
+				}
+			})
+			// All flags must precede the positional selector.
+			args := append([]string{
+				"launcher", "set", "--principal", "alice",
+				"--endpoint", endpoint, "--token-file", tokenPath,
+			}, tc.args...)
+			args = append(args, "dhl_1")
+
+			var stdout, stderr bytes.Buffer
+			exit := runCommandWithWriters(args, &stdout, &stderr)
+			if exit != tc.wantExit {
+				t.Fatalf("exit = %d, want %d (stderr=%s)", exit, tc.wantExit, stderr.String())
+			}
+			if tc.wantCode != "" && !strings.Contains(stderr.String(), tc.wantCode) {
+				t.Errorf("stderr = %q, want containing %q", stderr.String(), tc.wantCode)
+			}
+			if len(*requests) != 1 || (*requests)[0].method != http.MethodPatch {
+				t.Fatalf("requests = %+v, want one PATCH", *requests)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal([]byte((*requests)[0].body), &wire); err != nil {
+				t.Fatalf("decode patch body %q: %v", (*requests)[0].body, err)
+			}
+			tc.checkWire(t, wire)
+		})
 	}
 }
 

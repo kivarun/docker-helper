@@ -27,18 +27,19 @@ func (f *stringListFlag) Set(v string) error {
 	return nil
 }
 
-// launcherCreateNameFlag collects the optional --name value of launcher create
-// with explicit flag presence: an explicitly supplied empty value is an
-// invalid Launcher name submitted as-is, not omission, and is never silently
-// defaulted. The daemon remains the name-grammar authority.
-type launcherCreateNameFlag struct {
+// launcherNameFlag collects the optional --name value of the Launcher create
+// and set commands with explicit flag presence: an explicitly supplied empty
+// value is an invalid Launcher name submitted as-is, not omission, and is
+// never silently dropped or defaulted. The daemon remains the name-grammar
+// authority.
+type launcherNameFlag struct {
 	set   bool
 	value string
 }
 
-func (f *launcherCreateNameFlag) String() string { return f.value }
+func (f *launcherNameFlag) String() string { return f.value }
 
-func (f *launcherCreateNameFlag) Set(v string) error {
+func (f *launcherNameFlag) Set(v string) error {
 	f.set = true
 	f.value = v
 	return nil
@@ -168,7 +169,7 @@ var launcherCreateCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		name := &launcherCreateNameFlag{}
+		name := &launcherNameFlag{}
 		fs.Var(name, "name", "Launcher name (default: \"default\")")
 		allowedRoots := &stringListFlag{}
 		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
@@ -314,11 +315,12 @@ var launcherSetCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		name := fs.String("name", "", "New launcher name")
+		name := &launcherNameFlag{}
+		fs.Var(name, "name", "New launcher name")
 		enabled := fs.String("enabled", "", "Enable or disable the launcher (true|false)")
 		return Invocation{
 			Validate: func() error {
-				if *name == "" && *enabled == "" {
+				if !name.set && *enabled == "" {
 					return errors.New("at least one of --name or --enabled is required")
 				}
 				if *enabled != "" && *enabled != "true" && *enabled != "false" {
@@ -338,8 +340,8 @@ var launcherSetCommand = &Command{
 					return 1
 				}
 				req := patchLauncherRequest{}
-				if *name != "" {
-					n := *name
+				if name.set {
+					n := name.value
 					req.Name = &n
 				}
 				if *enabled != "" {
