@@ -118,6 +118,12 @@ Show help for any command path, for example
 .TP
 .B docker-helper completion bash
 Generate Bash completion.
+.TP
+.B docker-helper completion roots principal [\-\-principal USER] [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Machine-facing completion query: print the target Principal's effective allowed roots, one path per line. The target is \-\-principal when given, otherwise it is inferred from the authenticated credential. The daemon authorizes the query.
+.TP
+.B docker-helper completion roots session [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE]
+Machine-facing completion query: print the effective allowed roots of the Launcher a Session created right now with this authority would use, one path per line.
 .SS Session Commands
 .TP
 .B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-json]

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -40,7 +41,7 @@ Install for Bash:
 
 Or install persistently:
   docker-helper completion bash > ~/.local/share/bash-completion/completions/docker-helper`,
-	Subcommands: []*Command{completionBashCommand},
+	Subcommands: []*Command{completionBashCommand, completionRootsCommand},
 }
 
 var completionBashCommand = &Command{
@@ -51,6 +52,100 @@ var completionBashCommand = &Command{
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
 				generateBashCompletion(stdout)
+				return 0
+			},
+		}
+	},
+}
+
+// completionRootsCommand is the machine-facing policy introspection surface
+// used by generated Bash completion: the queried paths come from the daemon
+// (which remains the authorization and policy authority), never from the
+// local config interpreted as policy.
+var completionRootsCommand = &Command{
+	Name:        "roots",
+	Summary:     "Query effective policy roots for shell completion",
+	Usage:       "docker-helper completion roots <principal|session> [...]",
+	Subcommands: []*Command{completionRootsPrincipalCommand, completionRootsSessionCommand},
+}
+
+// completionRootsPrincipalCommand prints the effective allowed roots of the
+// targeted Principal, one path per line. The target Principal is --principal
+// when given; otherwise it is inferred from the authenticated credential with
+// the same scope-aware rule the launcher command family uses. The daemon
+// authorizes the query; this command performs no local policy computation.
+var completionRootsPrincipalCommand = &Command{
+	Name:       "principal",
+	Summary:    "Print a Principal's effective allowed roots",
+	Usage:      "docker-helper completion roots principal [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, err := resolveTargetPrincipalForCLI(client, *principal,
+					errors.New("--principal is required for admin authentication"),
+					errors.New("Launcher credentials cannot query Principal policy"))
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.principalEffectiveRoots(username)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				for _, root := range result.AllowedRoots {
+					fmt.Fprintln(stdout, root)
+				}
+				return 0
+			},
+		}
+	},
+}
+
+// completionRootsSessionCommand prints the effective allowed roots of the
+// Launcher that a Session created right now with this authority would use,
+// one path per line, resolved by the same daemon-side owner as real Session
+// creation.
+var completionRootsSessionCommand = &Command{
+	Name:       "session",
+	Summary:    "Print the Session-create effective allowed roots",
+	Usage:      "docker-helper completion roots session [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	MinPosArgs: 0,
+	MaxPosArgs: 0,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := resolveOperatorClient(operatorClientOptions{
+					System:    *system,
+					Endpoint:  *endpoint,
+					TokenFile: *tokenFile,
+				})
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.sessionCreatePolicy()
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				for _, root := range result.AllowedRoots {
+					fmt.Fprintln(stdout, root)
+				}
 				return 0
 			},
 		}
@@ -141,6 +236,24 @@ func collectBoolFlagNames(cmd *Command) []string {
 	// -h and --help are always boolean
 	names = append(names, "h", "help")
 	return names
+}
+
+// policyValueCompletion associates one (command path, flag) pair with the
+// daemon-backed completion query serving its values. The generated Bash
+// script re-invokes docker-helper itself for the query; the daemon remains
+// the authorization and policy authority and the local config is never
+// interpreted as policy. When the query fails, completion degrades silently
+// to the generic filesystem completion for the flag value.
+type policyValueCompletion struct {
+	commandPath string
+	flag        string
+	query       string
+}
+
+var policyValueCompletions = []policyValueCompletion{
+	{commandPath: "launcher create", flag: "allowed-root", query: "principal"},
+	{commandPath: "launcher scope set", flag: "allowed-root", query: "principal"},
+	{commandPath: "session create", flag: "workspace", query: "session"},
 }
 
 // generateBashCompletion generates a Bash completion script for the docker-helper CLI.
@@ -577,6 +690,15 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "_docker_helper_complete_flag_value() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local flag=\"$2\"")
+	fmt.Fprintln(w, "    # Daemon-backed policy roots take precedence for their registered")
+	fmt.Fprintln(w, "    # (command, flag) pairs. Convenience only: on any query failure")
+	fmt.Fprintln(w, "    # completion degrades silently to the generic filesystem completion.")
+	fmt.Fprintln(w, "    local mode")
+	fmt.Fprintln(w, "    if mode=\"$(_docker_helper_policy_value_mode \"$cmd_path\" \"$flag\")\"; then")
+	fmt.Fprintln(w, "        if _docker_helper_complete_policy_roots \"$mode\"; then")
+	fmt.Fprintln(w, "            return")
+	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    # Path-valued flags complete with filesystem paths.")
 	fmt.Fprintln(w, "    case \"$flag\" in")
 	for _, f := range pathValuedFlags {
@@ -586,6 +708,130 @@ func generateBashCompletion(w io.Writer) {
 		fmt.Fprintln(w, "            ;;")
 	}
 	fmt.Fprintln(w, "    esac")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Report the policy completion query serving a (command, flag) pair,")
+	fmt.Fprintln(w, "# or fail when the pair has no daemon-backed completion.")
+	fmt.Fprintln(w, "_docker_helper_policy_value_mode() {")
+	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
+	fmt.Fprintln(w, "    local flag=\"$2\"")
+	fmt.Fprintln(w, "    case \"$cmd_path/$flag\" in")
+	for _, p := range policyValueCompletions {
+		fmt.Fprintf(w, "        %q/%q) echo %q ;;\n", p.commandPath, p.flag, p.query)
+	}
+	fmt.Fprintln(w, "        *) return 1 ;;")
+	fmt.Fprintln(w, "    esac")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Forward the operator overrides already typed on the current command")
+	fmt.Fprintln(w, "# line (--system, --endpoint, --token-file) so the completion query")
+	fmt.Fprintln(w, "# targets the same daemon and token as the command being completed.")
+	fmt.Fprintln(w, "_docker_helper_operator_args() {")
+	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
+	fmt.Fprintln(w, "    local out=()")
+	fmt.Fprintln(w, "    local i=1")
+	fmt.Fprintln(w, "    while [ $i -lt $COMP_CWORD ]; do")
+	fmt.Fprintln(w, "        local w=\"${COMP_WORDS[$i]}\"")
+	fmt.Fprintln(w, "        case \"$w\" in")
+	fmt.Fprintln(w, "            --system) out+=(\"--system\") ;;")
+	fmt.Fprintln(w, "            --endpoint|--token-file)")
+	fmt.Fprintln(w, "                out+=(\"$w\" \"${COMP_WORDS[$((i+1))]:-}\")")
+	fmt.Fprintln(w, "                i=$((i + 2))")
+	fmt.Fprintln(w, "                continue")
+	fmt.Fprintln(w, "                ;;")
+	fmt.Fprintln(w, "            --endpoint=*|--token-file=*) out+=(\"$w\") ;;")
+	fmt.Fprintln(w, "            -*)")
+	fmt.Fprintln(w, "                # Skip values of other value-taking flags so they are")
+	fmt.Fprintln(w, "                # never mistaken for operator overrides.")
+	fmt.Fprintln(w, "                if [[ \"$w\" != *=* ]] && _docker_helper_flag_takes_value \"$cmd_path\" \"$w\"; then")
+	fmt.Fprintln(w, "                    i=$((i + 2))")
+	fmt.Fprintln(w, "                    continue")
+	fmt.Fprintln(w, "                fi")
+	fmt.Fprintln(w, "                ;;")
+	fmt.Fprintln(w, "        esac")
+	fmt.Fprintln(w, "        i=$((i + 1))")
+	fmt.Fprintln(w, "    done")
+	io.WriteString(w, "    printf '%s\\n' \"${out[*]:-}\"\n")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Print the value already typed for a flag on the current command line")
+	fmt.Fprintln(w, "# (--flag VALUE or --flag=VALUE); last occurrence wins, mirroring flag")
+	fmt.Fprintln(w, "# parsing. Empty output when the flag has no typed value yet.")
+	fmt.Fprintln(w, "_docker_helper_typed_flag_value() {")
+	fmt.Fprintln(w, "    local name=\"$1\"")
+	fmt.Fprintln(w, "    local value=\"\"")
+	fmt.Fprintln(w, "    local i=1")
+	fmt.Fprintln(w, "    while [ $i -lt $COMP_CWORD ]; do")
+	fmt.Fprintln(w, "        local w=\"${COMP_WORDS[$i]}\"")
+	fmt.Fprintln(w, "        case \"$w\" in")
+	fmt.Fprintln(w, "            \"--$name=\"*) value=\"${w#--$name=}\" ;;")
+	fmt.Fprintln(w, "            \"--$name\")")
+	fmt.Fprintln(w, "                i=$((i + 1))")
+	fmt.Fprintln(w, "                if [ $i -lt $COMP_CWORD ]; then value=\"${COMP_WORDS[$i]}\"; fi")
+	fmt.Fprintln(w, "                ;;")
+	fmt.Fprintln(w, "        esac")
+	fmt.Fprintln(w, "        i=$((i + 1))")
+	fmt.Fprintln(w, "    done")
+	io.WriteString(w, "    printf '%s\\n' \"$value\"\n")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Run the daemon-backed roots query through docker-helper itself and")
+	fmt.Fprintln(w, "# complete from the returned policy anchors. Prints nothing and fails")
+	fmt.Fprintln(w, "# silently when the query is unavailable.")
+	fmt.Fprintln(w, "_docker_helper_complete_policy_roots() {")
+	fmt.Fprintln(w, "    local mode=\"$1\"")
+	fmt.Fprintln(w, "    local opargs principal_arg principal_qargs=\"\"")
+	fmt.Fprintln(w, "    opargs=\"$(_docker_helper_operator_args \"$cmd_path\")\"")
+	fmt.Fprintln(w, "    if [ \"$mode\" = principal ]; then")
+	fmt.Fprintln(w, "        principal_arg=\"$(_docker_helper_typed_flag_value principal)\"")
+	fmt.Fprintln(w, "        if [ -n \"$principal_arg\" ]; then")
+	fmt.Fprintln(w, "            principal_qargs=\"--principal $principal_arg\"")
+	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    local roots")
+	fmt.Fprintln(w, "    if ! roots=\"$(\"${COMP_WORDS[0]}\" completion roots \"$mode\" $opargs $principal_qargs 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "        return 1")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    _docker_helper_complete_within_roots \"$flag\" \"$roots\"")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Complete a path-valued flag constrained to the effective policy roots:")
+	fmt.Fprintln(w, "# the roots are the entry anchors, and directory completion inside a")
+	fmt.Fprintln(w, "# root is confined to that root. Regular files and paths outside the")
+	fmt.Fprintln(w, "# roots are never suggested. Workspace anchors carry a trailing slash")
+	fmt.Fprintln(w, "# because a Session workspace must be a proper child of a root.")
+	fmt.Fprintln(w, "_docker_helper_complete_within_roots() {")
+	fmt.Fprintln(w, "    local flag=\"$1\"")
+	fmt.Fprintln(w, "    local roots=\"$2\"")
+	fmt.Fprintln(w, "    local -a anchors=()")
+	fmt.Fprintln(w, "    local r")
+	fmt.Fprintln(w, "    while IFS= read -r r; do")
+	fmt.Fprintln(w, "        [ -n \"$r\" ] || continue")
+	fmt.Fprintln(w, "        if [ \"$flag\" = workspace ]; then")
+	fmt.Fprintln(w, "            anchors+=(\"$r/\")")
+	fmt.Fprintln(w, "        else")
+	fmt.Fprintln(w, "            anchors+=(\"$r\")")
+	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "    done <<< \"$roots\"")
+	fmt.Fprintln(w, "    local comp=()")
+	fmt.Fprintln(w, "    local a d base")
+	fmt.Fprintln(w, "    for a in \"${anchors[@]}\"; do")
+	fmt.Fprintln(w, "        case \"$a\" in")
+	fmt.Fprintln(w, "            \"$cur\"*) comp+=(\"$a\") ;;")
+	fmt.Fprintln(w, "        esac")
+	fmt.Fprintln(w, "    done")
+	fmt.Fprintln(w, "    if [[ \"$cur\" == */* ]]; then")
+	fmt.Fprintln(w, "        while IFS= read -r d; do")
+	fmt.Fprintln(w, "            [ -n \"$d\" ] || continue")
+	fmt.Fprintln(w, "            for a in \"${anchors[@]}\"; do")
+	fmt.Fprintln(w, "                base=\"${a%/}\"")
+	fmt.Fprintln(w, "                case \"$d\" in")
+	fmt.Fprintln(w, "                    \"$base\"/*) comp+=(\"$d\") ;;")
+	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            done")
+	fmt.Fprintln(w, "        done < <(compgen -d -- \"$cur\" 2>/dev/null)")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    COMPREPLY=(\"${comp[@]}\")")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "complete -F _docker_helper_completion docker-helper")

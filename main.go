@@ -217,6 +217,8 @@ func registerRoutes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
 	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
 	mux.HandleFunc("GET /credentials", app.handleListCredentialsForAuthority)
+	mux.HandleFunc("GET /principals/{username}/effective-allowed-roots", app.handlePrincipalEffectiveRoots)
+	mux.HandleFunc("GET /sessions/create-policy", app.handleSessionCreatePolicy)
 	mux.HandleFunc("POST /principals/{username}/credentials/{name}/rotate", app.handleRotatePrincipalCredential)
 	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
 	mux.HandleFunc("POST /principals/{username}/launchers", app.handleCreateLauncher)

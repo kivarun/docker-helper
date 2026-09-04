@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // completionFixture holds the package-lifetime cached completion binary
@@ -866,10 +870,10 @@ func TestCompletionNoWorkspaceRoot(t *testing.T) {
 		t.Error("prefix 'wo' must NOT yield workspace-root")
 	}
 
-	// completion must complete "bash".
+	// completion must complete "bash" and the roots query namespace.
 	results = runCompletion(t, script, []string{"docker-helper", "completion", ""})
-	if len(results) != 1 || results[0] != "bash" {
-		t.Errorf("expected [bash], got %v", results)
+	if !slices.Equal(results, []string{"bash", "roots"}) {
+		t.Errorf("expected [bash roots], got %v", results)
 	}
 }
 
@@ -1555,4 +1559,505 @@ func TestCompletionTreeLeafDashWordFlags(t *testing.T) {
 			t.Errorf("%s -<TAB>: got %v, want %v", strings.Join(path, " "), results, want)
 		}
 	}
+}
+
+// ---- daemon-backed policy-aware completion harness ----
+
+// runCompletionWithPreamble sources the completion script after the given
+// bash preamble (PATH setup, working directory), then invokes the completion
+// function with the given words. Returns the suggested words and the
+// separate stderr text, so tests can prove completion never pollutes the
+// user's terminal.
+func runCompletionWithPreamble(t *testing.T, script, preamble string, compWords []string) ([]string, string) {
+	t.Helper()
+	cword := len(compWords) - 1
+
+	var sb strings.Builder
+	sb.WriteString(preamble)
+	sb.WriteString("\n")
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("# Test setup\n")
+	sb.WriteString("COMP_WORDS=(")
+	for _, w := range compWords {
+		sb.WriteString(" '" + w + "'")
+	}
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=" + strconv.Itoa(cword) + "\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	cmd := exec.Command("bash", "-c", sb.String())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bash completion failed: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	output := strings.TrimSpace(stdout.String())
+	if output == "" {
+		return nil, stderr.String()
+	}
+	return strings.Fields(output), stderr.String()
+}
+
+// completionPATHPreamble puts the built binary on the harness PATH so the
+// generated script re-invokes the same docker-helper the user is completing.
+func completionPATHPreamble(t *testing.T) string {
+	t.Helper()
+	return "PATH=" + filepath.Dir(getCompletionBinary(t)) + ":$PATH; export PATH"
+}
+
+// trimTrailingSlash normalizes one trailing slash for bash-version-robust
+// assertions on directory completions.
+func trimTrailingSlash(s string) string {
+	return strings.TrimSuffix(s, "/")
+}
+
+// sortedTrimmed sorts and normalizes completion results.
+func sortedTrimmed(results []string) []string {
+	out := make([]string, len(results))
+	for i, r := range results {
+		out[i] = trimTrailingSlash(r)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestCompletionPolicyValueTableConsistency proves every registered policy
+// completion target is a real command path whose FlagSet registers the flag
+// and whose value is a path: the semantic table can never drift from the
+// parser tree.
+func TestCompletionPolicyValueTableConsistency(t *testing.T) {
+	for _, p := range policyValueCompletions {
+		words := strings.Split(p.commandPath, " ")
+		cmd := completionCommandPath(words)
+		if cmd == nil {
+			t.Errorf("policy completion path %q is not a command path", p.commandPath)
+			continue
+		}
+		fs := flag.NewFlagSet("", flag.ContinueOnError)
+		cmd.NewInvocation(fs)
+		if f := fs.Lookup(p.flag); f == nil {
+			t.Errorf("policy completion flag --%s is not registered by %q", p.flag, p.commandPath)
+		}
+		if !slices.Contains(pathValuedFlags, p.flag) {
+			t.Errorf("policy completion flag --%s of %q is not path-valued", p.flag, p.commandPath)
+		}
+		switch p.query {
+		case "principal", "session":
+		default:
+			t.Errorf("policy completion query %q is unknown", p.query)
+		}
+	}
+}
+
+// TestCompletionPolicyLauncherAllowedRootAnchors proves the first TAB on
+// launcher create --allowed-root offers the daemon's effective Principal
+// roots as the policy anchors, queried through docker-helper itself with the
+// forwarded operator flags and the typed --principal target.
+func TestCompletionPolicyLauncherAllowedRootAnchors(t *testing.T) {
+	base := t.TempDir()
+	rootA := filepath.Join(base, "root-a")
+	rootB := filepath.Join(base, "root-b")
+	for _, d := range []string{rootA, rootB} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{rootA, rootB},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--allowed-root", "",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{rootA, rootB}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("anchors = %v, want %v", results, want)
+	}
+	requests.waitFor(t, 1)
+	if got := requests.snapshot(); len(got) != 1 || got[0].path != "/principals/alice/effective-allowed-roots" {
+		t.Fatalf("requests = %+v, want exactly one principal roots query", got)
+	}
+}
+
+// TestCompletionPolicyLauncherAllowedRootConfinement proves that after a
+// successful policy query, directory completion inside an allowed root stays
+// inside it: subdirectories are offered, a sibling root directory and a
+// regular file are not.
+func TestCompletionPolicyLauncherAllowedRootConfinement(t *testing.T) {
+	base := t.TempDir()
+	rootA := filepath.Join(base, "root-a")
+	rootB := filepath.Join(base, "root-b")
+	if err := os.MkdirAll(filepath.Join(rootA, "sub1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rootA, "zzdir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootA, "afile"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rootB, "xdir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, _ := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	baseWords := []string{"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice"}
+
+	// Inside the root: only its own subdirectories.
+	insideWords := append(append([]string{}, baseWords...), "--allowed-root", rootA+"/")
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), insideWords)
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{filepath.Join(rootA, "sub1"), filepath.Join(rootA, "zzdir")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("inside-root = %v, want %v", results, want)
+	}
+
+	// The sibling root directory is not offered even though it exists.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--allowed-root", rootB + "/",
+	})
+	if len(results) != 0 {
+		t.Errorf("sibling root must not be offered, got %v", results)
+	}
+
+	// A prefix of nothing outside the roots offers nothing.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--allowed-root", "/nonexistent-policy-prefix",
+	})
+	if len(results) != 0 {
+		t.Errorf("outside-roots prefix must not be offered, got %v", results)
+	}
+}
+
+// TestCompletionPolicyScopeSetAllowedRoot proves launcher scope set shares
+// the same principal roots provider.
+func TestCompletionPolicyScopeSetAllowedRoot(t *testing.T) {
+	base := t.TempDir()
+	rootA := filepath.Join(base, "root-a")
+	if err := os.MkdirAll(rootA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "scope", "set", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--allowed-root", "",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("anchors = %v, want %v", results, want)
+	}
+	requests.waitFor(t, 1)
+	if got := requests.snapshot(); len(got) != 1 || got[0].path != "/principals/alice/effective-allowed-roots" {
+		t.Fatalf("requests = %+v", got)
+	}
+}
+
+// TestCompletionPolicySessionWorkspaceAnchors proves session create
+// --workspace offers the Session-create policy roots as traversal prefixes
+// (with a trailing slash, because a workspace must be a proper child) and
+// that the query is the session policy query — the restricted Launcher's
+// narrowed roots, not a Principal's wider scope.
+func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
+	base := t.TempDir()
+	restricted := filepath.Join(base, "project-a")
+	if err := os.MkdirAll(filepath.Join(restricted, "src"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions/create-policy" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, sessionCreatePolicyResponse{
+				OK: true, Principal: "alice", LauncherID: "dhl_x", Launcher: "agent",
+				AllowedRoots: []string{restricted},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--workspace", "",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if len(results) != 1 || !strings.HasPrefix(results[0], restricted) || !strings.HasSuffix(results[0], "/") {
+		t.Fatalf("workspace anchors = %v, want the restricted root as a traversal prefix", results)
+	}
+	requests.waitFor(t, 1)
+	if got := requests.snapshot(); len(got) != 1 || got[0].path != "/sessions/create-policy" {
+		t.Fatalf("requests = %+v, want exactly one session policy query", got)
+	}
+
+	// Inside the restricted root: its subdirectories are offered, and
+	// everything offered stays inside the restricted root (the anchor
+	// itself may re-appear as the traversal prefix).
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "session", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--workspace", restricted + "/",
+	})
+	trimmed := sortedTrimmed(results)
+	if !slices.Contains(trimmed, filepath.Join(restricted, "src")) {
+		t.Errorf("inside restricted root must offer its subdirectories, got %v", results)
+	}
+	for _, r := range trimmed {
+		// The root itself may re-appear as the traversal anchor; everything
+		// else must stay inside the restricted root.
+		if r != restricted && !strings.HasPrefix(r, restricted+"/") {
+			t.Errorf("inside restricted root must stay confined, got %q", r)
+		}
+	}
+}
+
+// TestCompletionPolicyOperatorFlagForwarding proves the generated forwarding
+// helpers collect every operator override form already typed on the command
+// line and the typed --principal value, so the completion query targets the
+// same daemon and token as the command being completed.
+func TestCompletionPolicyOperatorFlagForwarding(t *testing.T) {
+	script := completionScript(t)
+	endpoint := "http://127.0.0.1:59999"
+
+	var sb strings.Builder
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("COMP_WORDS=(docker-helper launcher create --system --endpoint " + endpoint +
+		" --endpoint=" + endpoint + " --token-file /tmp/t1 --token-file=/tmp/t2 --principal alice --principal bob)\n")
+	sb.WriteString("COMP_CWORD=${#COMP_WORDS[@]}\n")
+	sb.WriteString("echo \"opargs=$(_docker_helper_operator_args 'launcher create')\"\n")
+	sb.WriteString("echo \"principal=$(_docker_helper_typed_flag_value principal)\"\n")
+
+	out, err := exec.Command("bash", "-c", sb.String()).CombinedOutput()
+	if err != nil {
+		t.Fatalf("harness failed: %v\n%s", err, out)
+	}
+	text := string(out)
+	wantOpargs := "opargs=--system --endpoint " + endpoint + " --endpoint=" + endpoint +
+		" --token-file /tmp/t1 --token-file=/tmp/t2"
+	if !strings.Contains(text, wantOpargs) {
+		t.Errorf("operator forwarding = %q, want containing %q", text, wantOpargs)
+	}
+	if !strings.Contains(text, "principal=bob") {
+		t.Errorf("typed --principal must mirror flag parsing (last wins): %s", text)
+	}
+}
+
+// TestCompletionPolicyForwardedEndpointForm proves the --endpoint=VALUE form
+// reaches the same daemon: the inner query is issued through the forwarded
+// endpoint and the token file forwarded from the typed line.
+func TestCompletionPolicyForwardedEndpointForm(t *testing.T) {
+	base := t.TempDir()
+	rootA := filepath.Join(base, "root-a")
+	if err := os.MkdirAll(rootA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization = %q, want the forwarded token", got)
+		}
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint=" + endpoint, "--token-file=" + tokenPath,
+		"--principal=alice", "--allowed-root", "",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("anchors = %v, want %v", results, want)
+	}
+	requests.waitFor(t, 1)
+	if got := requests.snapshot(); len(got) != 1 {
+		t.Fatalf("requests = %+v, want exactly one query", got)
+	}
+}
+
+// TestCompletionPolicyGracefulDegradation proves the failure contract: when
+// the daemon query fails (unreachable daemon or rejected bearer), completion
+// degrades silently to the generic filesystem completion — no stderr
+// pollution, sentinels offered again.
+func TestCompletionPolicyGracefulDegradation(t *testing.T) {
+	base := t.TempDir()
+	sentinel := filepath.Join(base, "sentinel-file")
+	if err := os.WriteFile(sentinel, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	preamble := completionPATHPreamble(t) + "; cd " + base
+
+	script := completionScript(t)
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		token    string
+	}{
+		{"unreachable daemon", "http://127.0.0.1:1", "unused"},
+		{"rejected bearer", "rejected", "unused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var endpoint, tokenPath string
+			if tc.endpoint == "rejected" {
+				endpoint, tokenPath, _ = startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
+					writeJSONResponse(w, http.StatusUnauthorized, map[string]any{
+						"ok": false, "code": "unauthorized", "message": "no",
+					})
+				})
+			} else {
+				endpoint, tokenPath = tc.endpoint, t.TempDir()+"/tok"
+				if err := os.WriteFile(tokenPath, []byte("tok"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			results, stderr := runCompletionWithPreamble(t, script, preamble, []string{
+				"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+				"--principal", "alice", "--allowed-root", "sent",
+			})
+			if stderr != "" {
+				t.Fatalf("degraded completion must not write to stderr: %q", stderr)
+			}
+			if want := []string{"sentinel-file"}; !slices.Equal(results, want) {
+				t.Errorf("filesystem fallback = %v, want %v", results, want)
+			}
+		})
+	}
+}
+
+// TestCompletionPolicyOwnPrincipalInference proves the bash-side path where
+// no --principal is typed: the generated script re-invokes docker-helper,
+// which infers the caller's own Principal via GET /auth (the same rule the
+// launcher command family uses) and queries the effective roots.
+func TestCompletionPolicyOwnPrincipalInference(t *testing.T) {
+	base := t.TempDir()
+	rootA := filepath.Join(base, "root-a")
+	if err := os.MkdirAll(rootA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, requests := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
+		case r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet:
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	script := completionScript(t)
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--allowed-root", "",
+	})
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("anchors = %v, want %v", results, want)
+	}
+	requests.waitFor(t, 2)
+	if got := requests.snapshot(); len(got) != 2 || got[0].path != "/auth" || got[1].path != "/principals/alice/effective-allowed-roots" {
+		t.Fatalf("requests = %+v, want /auth then effective-roots", got)
+	}
+}
+
+// policyQueryRecorder records the requests the bash-driven CLI queries make
+// against the harness mock daemon. The completion harness runs the CLI as a
+// child process, so request arrival is observable only through the server:
+// the seen channel gives tests a deterministic arrival signal and the mutex
+// keeps the recorder's slice race-free across process boundaries.
+type policyQueryRecorder struct {
+	mu       sync.Mutex
+	requests []recordedRequest
+	seen     chan recordedRequest
+}
+
+func (r *policyQueryRecorder) record(req recordedRequest) {
+	r.mu.Lock()
+	r.requests = append(r.requests, req)
+	r.mu.Unlock()
+	r.seen <- req
+}
+
+func (r *policyQueryRecorder) snapshot() []recordedRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedRequest{}, r.requests...)
+}
+
+// waitFor blocks until n requests have arrived, with an explicit deadline so
+// a query that never happens fails the test instead of hanging it.
+func (r *policyQueryRecorder) waitFor(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-r.seen:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("only %d of %d expected requests arrived", i, n)
+		}
+	}
+}
+
+// startCompletionPolicyServer is the harness mock daemon for bash-driven
+// completion queries: it records every request through policyQueryRecorder
+// and answers via the given responder.
+func startCompletionPolicyServer(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) (string, string, *policyQueryRecorder) {
+	t.Helper()
+	rec := &policyQueryRecorder{seen: make(chan recordedRequest, 32)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(recordedRequest{r.Method, r.URL.Path, ""})
+		respond(w, r)
+	}))
+	t.Cleanup(server.Close)
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	return server.URL, tokenPath, rec
 }

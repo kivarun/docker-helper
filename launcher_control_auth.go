@@ -85,6 +85,9 @@ func controlUnauthorizedMessage(auditScope string) string {
 	if auditScope == "launcher" {
 		return "Authentication required for launcher management."
 	}
+	if auditScope == "principal" {
+		return "Authentication required for Principal management."
+	}
 	return "Authentication required for credential management."
 }
 

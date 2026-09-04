@@ -443,6 +443,52 @@ func (c *apiClient) listPrincipals() (*listPrincipalsResponse, error) {
 	return &result, nil
 }
 
+// principalEffectiveRoots queries the read-only effective Principal
+// allowed-roots introspection endpoint (global ∩ Principal roots, computed
+// daemon-side). Used by the completion helper; never a substitute for
+// authorization.
+func (c *apiClient) principalEffectiveRoots(username string) (*effectiveRootsResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/principals/"+url.PathEscape(username)+"/effective-allowed-roots", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result effectiveRootsResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// sessionCreatePolicy queries the read-only Session-create policy
+// introspection endpoint: the ownership and effective roots a Session
+// created right now with this authority would use, resolved by the same
+// daemon-side owner as real Session creation.
+func (c *apiClient) sessionCreatePolicy() (*sessionCreatePolicyResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", "/sessions/create-policy", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result sessionCreatePolicyResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
 func (c *apiClient) setPrincipalEnabled(username string, enabled bool) (*principalChangedResponse, error) {
 	body, err := json.Marshal(setPrincipalRequest{Enabled: &enabled})
 	if err != nil {
