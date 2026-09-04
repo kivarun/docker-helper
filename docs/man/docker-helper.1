@@ -191,13 +191,15 @@ Remove an allowed root from a principal.
 Create a new credential for a principal. If \-\-name is not specified, defaults to "default".
 .TP
 .B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [USER]
-List a principal's credentials as a table with the columns
-ID, NAME, CREATED, and REVOKED. The ID column contains each credential's
+List principal credentials as a table with the columns
+ID, NAME, CREATED, REVOKED, and PRINCIPAL. The ID column contains each credential's
 \fBdhcr_\fR identifier, which is the value used by \fBcredential revoke\fR.
-With an authenticated principal credential, USER may be omitted: the
-principal is inferred from the credential. An explicit USER is a selector
-for callers with broader visibility (an admin token must name the
-principal).
+This is a scope-first list Query: the authenticated authority establishes
+the visible credentials (an admin token sees every principal's, a principal
+credential sees its own principal's), and the optional USER argument is
+only a filter that can narrow that visibility, never expand it. A foreign
+or unknown USER is the same non-disclosing not-found error as any other
+principal endpoint; no auth introspection happens in the CLI.
 .TP
 .B docker-helper principal credential revoke [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] CREDENTIAL_ID
 Revoke a credential by its credential ID.
@@ -227,8 +229,12 @@ to issue a launcher credential unless \fB\-\-issue-credential\fR or
 required.
 .TP
 .B docker-helper launcher list [\-\-principal USER] [\-\-json]
-List launchers. The principal is inferred as for \fBlauncher create\fR when
-\fB\-\-principal\fR is omitted.
+List launchers with the columns ID, NAME, SCOPE, ENABLED, and PRINCIPAL.
+This is a scope-first list Query: the authenticated authority establishes
+the visible launchers (an admin token without \fB\-\-principal\fR sees every
+principal's launchers; a principal credential sees its own), and the
+optional \fB\-\-principal\fR flag is only a filter that can narrow that
+visibility, never expand it. No principal inference happens in the CLI.
 .TP
 .B docker-helper launcher show [\-\-principal USER] [LAUNCHER]
 Show launcher details.
@@ -281,8 +287,8 @@ Canonical form of \fBcredential create\fR. Create a new credential for a
 principal. If \-\-name is not specified, defaults to "default".
 .TP
 .B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [USER]
-Canonical form of \fBcredential list\fR. List a principal's credentials;
-USER may be omitted with an authenticated principal credential.
+Canonical form of \fBcredential list\fR. Run the scope-first principal
+credential list Query; USER is an optional narrowing filter.
 .TP
 .B docker-helper principal credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] [USER]
 Canonical atomic credential rotation (see Principal Commands).

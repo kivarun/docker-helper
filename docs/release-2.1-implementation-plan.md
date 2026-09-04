@@ -889,10 +889,14 @@ docker-helper launcher credential delete [--principal USER] [LAUNCHER]
 
 `LAUNCHER` is a Launcher name or ID and may be omitted to address the
 Principal's `default` Launcher. Every individual Launcher command uses
-the create/list Principal resolution: a Principal credential infers its
+the create/show Principal resolution: a Principal credential infers its
 Principal via `GET /auth`; an admin token must pass `--principal`
 explicitly and is never globally searched; a Launcher credential cannot
-manage launchers.
+manage launchers. `launcher list` is the exception: it is a scope-first
+list Query where the authenticated authority establishes the visible
+Launchers (admin without a filter: every Principal; a Principal credential
+without a filter: its own) and the optional `--principal` selector is only
+a filter that can narrow visibility, never expand it.
 
 `launcher scope set` sends one complete
 `PUT /principals/{username}/launchers/{launcher}/allowed-roots`

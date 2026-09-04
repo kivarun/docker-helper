@@ -708,26 +708,30 @@ Principal credentials are lifecycle resources of their owning Principal
 `principal credential create|list|revoke|rotate`:
 
 - `create` and `revoke` remain administrator-controlled in 2.1;
-- `GET /principals/{username}/credentials` is scope-aware: a Principal
-  credential lists its own principal's credentials with no explicit
-  selector, and any explicit selector is accepted only as a targeting
-  filter for callers with broader visibility (the admin token must name
-  the Principal; a Principal credential targeting another principal is the
-  same non-disclosing `404 principal_not_found` as any other principal
-  endpoint; a Launcher credential is `401`);
+- `GET /credentials` is the scope-first principal credential list: the
+  authenticated authority establishes the maximum visibility (an admin token
+  sees every Principal's credentials, a Principal credential sees its own
+  Principal's), and the optional `?principal=NAME` filter can only narrow
+  that visibility — never expand it. A Principal credential naming another
+  Principal, and an unknown Principal filter, are the same non-disclosing
+  `404 principal_not_found` as any other principal endpoint; a Launcher
+  credential is `401`. `GET /principals/{username}/credentials` remains the
+  single-Principal form of the same query;
 - `POST /principals/{username}/credentials/{name}/rotate` rotates a named
   credential in one atomic server-side operation: the token hash is
   replaced in the same transaction (credential ID, name, ownership, and
   created_at are unchanged, no second row is created), the old bearer is
   rejected immediately, and the new bearer is returned exactly once.
-  Rotation of a revoked credential is `409 credential_revoked`; the name
-  is reused per principal credential semantics (a revoked credential's
-  name becomes available);
-- CLI target resolution is the same scope-aware rule as the Launcher
-  command family: the Principal defaults to the owner of the authenticated
-  Principal credential (`GET /auth`), an explicit selector is for
-  broader-visibility callers, and an admin caller must name the Principal
-  explicitly.
+  Rotation always targets the current active credential with that name:
+  revoked historical rows that share the name through documented name reuse
+  are never the target, a name that only has revoked history is
+  `409 credential_revoked`, and a name that never existed is
+  `404 credential_not_found`; the guarded mutation fails closed against
+  stale concurrent state, so a rotation never resurrects a revoked row;
+- list CLI resolution needs no auth introspection: the list command sends
+  one server-authorized Query and the daemon applies the scope-first rule
+  (targeting commands such as `show`, `set`, `rotate`, and `delete` keep
+  the `GET /auth` inference rule for the Principal-credential owner).
 
 ### Launcher credential
 
@@ -899,6 +903,7 @@ credential cannot manage launchers):
 |---|---|
 | `POST /principals/{username}/launchers` | create launcher (optional one-time credential issuance) |
 | `GET /principals/{username}/launchers` | list that principal's launchers |
+| `GET /launchers` | scope-first launcher list (authority visibility + optional `?principal=` narrowing filter) |
 | `GET /principals/{username}/launchers/{launcher}` | show launcher |
 | `PATCH /principals/{username}/launchers/{launcher}` | rename / enable / disable |
 | `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic scope replacement |
@@ -945,16 +950,23 @@ docker-helper launcher credential delete [--principal USER] [LAUNCHER]
 ```
 
 `LAUNCHER` is a Launcher name or ID, and omitting it selects the
-Principal's `default` Launcher. `create`/`list` and every individual
-Launcher command resolve the target Principal the same way: a Principal
-credential infers its Principal from `GET /auth`; an admin token must
-name the Principal explicitly with `--principal` (omission fails; the
-CLI never searches for a `default` Launcher globally). Principal
-inference is target construction only — the daemon remains the
-authorization authority. `launcher credential create` is the canonical
-issuance verb (the Release 2.0 `issue` spelling is retired from the
-public CLI); because a Launcher holds at most one credential, a second
-create is the daemon's normal `409 credential_already_exists` conflict.
+Principal's `default` Launcher. `create` and every individual Launcher
+command resolve the target Principal the same way: a Principal credential
+infers its Principal from `GET /auth`; an admin token must name the
+Principal explicitly with `--principal` (omission fails; the CLI never
+searches for a `default` Launcher globally). Principal inference is target
+construction only — the daemon remains the authorization authority.
+`launcher list` is the exception: it is a scope-first list Query where the
+authenticated authority establishes the visible Launchers (admin without a
+filter: every Principal; a Principal credential without a filter: its own)
+and the optional `--principal` selector is only a filter that can narrow
+visibility, never expand it — a foreign filter is the same non-disclosing
+`404 principal_not_found` as the nested list, a Launcher credential is
+`401`, and no auth introspection happens in the CLI.
+`launcher credential create` is the canonical issuance verb (the Release 2.0
+`issue` spelling is retired from the public CLI); because a Launcher holds
+at most one credential, a second create is the daemon's normal
+`409 launcher_credential_exists` conflict.
 `create` prompts for the credential choice on a
 TTY; non-interactive use must pass `--issue-credential` or
 `--no-credential` explicitly.
