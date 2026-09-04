@@ -10,6 +10,13 @@ import (
 
 // pathValuedFlags are flags whose value is a filesystem path (or endpoint
 // socket path); Bash completion completes them with filesystem paths.
+//
+// Daemon-backed effective-root completion for --allowed-root/--workspace is
+// a separate follow-up UX story: it must respect the real authority model
+// (Principal credential -> default Launcher -> effective roots; Launcher
+// credential -> authenticated Launcher), and the local config is not a
+// substitute for daemon policy. Until that exists, path-valued flags keep
+// generic filesystem completion.
 var pathValuedFlags = []string{
 	"endpoint",
 	"token-file",
@@ -142,6 +149,22 @@ func generateBashCompletion(w io.Writer) {
 	allPaths := collectAllCommandPaths(rootCommand, nil)
 	sort.Strings(allPaths)
 
+	// Flag-only leaves are derived structurally from the Command tree:
+	// leaf commands (NewInvocation set, no subcommands) that accept no
+	// positional arguments (MaxPosArgs == 0). For these commands no
+	// positional or subcommand completion applies, so an ordinary current
+	// word completes the command's own flags. This is never a
+	// hand-maintained command-name list: new flag-only leaf commands are
+	// picked up automatically.
+	var flagOnlyLeaves []string
+	for _, path := range allPaths {
+		cmd := completionCommandPath(strings.Split(path, " "))
+		if cmd != nil && cmd.NewInvocation != nil && len(cmd.Subcommands) == 0 && cmd.MaxPosArgs == 0 {
+			flagOnlyLeaves = append(flagOnlyLeaves, path)
+		}
+	}
+	sort.Strings(flagOnlyLeaves)
+
 	// Collect flags for each command path (leaf commands with NewInvocation).
 	commandFlags := make(map[string][]string)
 	collectAllFlags(rootCommand, []string{}, commandFlags)
@@ -228,9 +251,10 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    local flag_path=\"$cmd_path\"")
 	fmt.Fprintln(w, "    if [ $in_help -eq 1 ]; then flag_path=\"help\"; fi")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "    # After -- or after a positional argument, do not suggest flags")
-	fmt.Fprintln(w, "    # Also, if current word is --, do not suggest flags")
-	fmt.Fprintln(w, "    if [ \"$cur\" = \"--\" ] || [ $seen_double_dash -eq 1 ] || [ $seen_positional -eq 1 ]; then")
+	fmt.Fprintln(w, "    # After -- (option terminator) or after a positional argument, do")
+	fmt.Fprintln(w, "    # not suggest flags. A literal -- as the CURRENT word is an unfinished")
+	fmt.Fprintln(w, "    # long-flag word and completes below like any other dash word.")
+	fmt.Fprintln(w, "    if [ $seen_double_dash -eq 1 ] || [ $seen_positional -eq 1 ]; then")
 	fmt.Fprintln(w, "        # No flag completion after -- or positional")
 	fmt.Fprintln(w, "        case \"$cur\" in")
 	fmt.Fprintln(w, "            -*) return ;;")
@@ -260,14 +284,19 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "        return")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "    # Complete positional args or subcommands")
-	fmt.Fprintln(w, "    _docker_helper_complete_positional \"$cmd_path\" \"$in_help\"")
+	fmt.Fprintln(w, "    # Complete positional args or subcommands. Flag-only leaves fall back")
+	fmt.Fprintln(w, "    # to their own flags only while flags are still applicable (not after")
+	fmt.Fprintln(w, "    # -- or a positional argument, and not under help navigation).")
+	fmt.Fprintln(w, "    local nofallback=0")
+	fmt.Fprintln(w, "    if [ $seen_double_dash -eq 1 ] || [ $seen_positional -eq 1 ]; then nofallback=1; fi")
+	fmt.Fprintln(w, "    _docker_helper_complete_positional \"$cmd_path\" \"$in_help\" \"$nofallback\"")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Complete positional arguments or subcommands")
 	fmt.Fprintln(w, "_docker_helper_complete_positional() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local in_help=\"$2\"")
+	fmt.Fprintln(w, "    local nofallback=\"$3\"")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "    # Positional-value completion is keyed on real command paths; under")
 	fmt.Fprintln(w, "    # help navigation only tree navigation applies.")
@@ -427,6 +456,19 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "            ;;")
 	fmt.Fprintln(w, "    esac")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "    # Flag-only leaf fallback (parser tree == completion tree): a leaf")
+	fmt.Fprintln(w, "    # command that accepts no positional arguments has no applicable")
+	fmt.Fprintln(w, "    # positional or subcommand completion, so the current word completes")
+	fmt.Fprintln(w, "    # the command's own flags from the same table used for dash words.")
+	fmt.Fprintln(w, "    if [ \"$nofallback\" -eq 0 ] && [ \"$in_help\" -eq 0 ]; then")
+	fmt.Fprintln(w, "        case \"$cmd_path\" in")
+	fmt.Fprintf(w, "            %s)\n", strings.Join(quoteWords(flagOnlyLeaves), "|"))
+	fmt.Fprintln(w, "                COMPREPLY=( $(compgen -W \"$(_docker_helper_flags \"$cmd_path\")\" -- \"$cur\") )")
+	fmt.Fprintln(w, "                return")
+	fmt.Fprintln(w, "                ;;")
+	fmt.Fprintln(w, "        esac")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "    _docker_helper_complete_subcommands \"$cmd_path\"")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
@@ -547,6 +589,15 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "complete -F _docker_helper_completion docker-helper")
+}
+
+// quoteWords quotes each word for use as a Bash case pattern.
+func quoteWords(words []string) []string {
+	quoted := make([]string, len(words))
+	for i, word := range words {
+		quoted[i] = fmt.Sprintf("%q", word)
+	}
+	return quoted
 }
 
 // collectAllFlags recursively collects flags for each command path.

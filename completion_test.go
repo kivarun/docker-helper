@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -325,50 +326,6 @@ func TestCompletionNoLegacyAdminHierarchy(t *testing.T) {
 	}
 	if slices.Contains(results, "token") {
 		t.Error("legacy 'admin' must not offer token")
-	}
-}
-
-func TestCompletionLeafFlags(t *testing.T) {
-	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "-"})
-	if len(results) == 0 {
-		t.Error("expected flag completions for principal create")
-		return
-	}
-	expected := []string{"--system", "--endpoint", "--token-file", "-h", "--help"}
-	resultsMap := make(map[string]bool)
-	for _, r := range results {
-		resultsMap[r] = true
-	}
-	for _, exp := range expected {
-		if !resultsMap[exp] {
-			t.Errorf("expected flag %q not found in completions: %v", exp, results)
-		}
-	}
-}
-
-func TestCompletionHelpFlags(t *testing.T) {
-	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "principal", "create", "-"})
-	if len(results) == 0 {
-		t.Error("expected flag completions for -")
-		return
-	}
-	foundHelp := false
-	foundH := false
-	for _, r := range results {
-		if r == "--help" {
-			foundHelp = true
-		}
-		if r == "-h" {
-			foundH = true
-		}
-	}
-	if !foundHelp {
-		t.Error("expected --help in flag completions")
-	}
-	if !foundH {
-		t.Error("expected -h in flag completions")
 	}
 }
 
@@ -1103,7 +1060,7 @@ func TestCompletionAllowedRootRemoveFilesystemBehavioral(t *testing.T) {
 
 // TestCompletionAllowedRootListNoSuggestionsBehavioral verifies that
 // "config allowed-root list" produces no action or path suggestions.
-func TestCompletionAllowedRootListNoSuggestionsBehavioral(t *testing.T) {
+func TestCompletionAllowedRootListFlagsOnlyBehavioral(t *testing.T) {
 	script := completionScript(t)
 
 	tmpDir := t.TempDir()
@@ -1135,9 +1092,20 @@ func TestCompletionAllowedRootListNoSuggestionsBehavioral(t *testing.T) {
 
 	output := strings.TrimSpace(string(out))
 
-	// COMPREPLY must be actually empty (not just free of action words).
-	if output != "" {
-		t.Errorf("'list' completion must produce empty COMPREPLY, got: %s", output)
+	// "config allowed-root list" is a flag-only leaf: the generic tree model
+	// offers the command's own flags. No action words and no filesystem
+	// entries may appear.
+	results := strings.Fields(output)
+	if len(results) == 0 {
+		t.Fatal("flag-only leaf must offer its flags, got none")
+	}
+	for _, r := range results {
+		if !strings.HasPrefix(r, "-") {
+			t.Errorf("'list' completion must offer flag words only, got %q", r)
+		}
+	}
+	if !slices.Contains(results, "--help") {
+		t.Errorf("'list' completion must offer --help, got: %v", results)
 	}
 }
 
@@ -1222,18 +1190,14 @@ func TestCompletionFlagsBeforePositional(t *testing.T) {
 }
 
 func TestCompletionFlagEqualsValueDoesNotConsumeNext(t *testing.T) {
-	// --flag=value is self-contained; the following word must not be consumed.
-	// After --endpoint=http://localhost:9999, the next word should be treated
-	// as a new token, not as the flag value.
+	// --flag=value is self-contained; the following word must not be consumed
+	// as the flag value. If the completion walk consumed the positional that
+	// follows --endpoint=VALUE, flag completion would resume after it
+	// instead of stopping at the positional argument.
 	script := completionScript(t)
-	results := runCompletion(t, script, []string{"docker-helper", "session", "create", "--endpoint=http://localhost:9999", "--"})
-	// After --endpoint=VALUE, -- should be recognized as end-of-options.
-	// If -- was consumed as the flag value, we'd see flag completions.
-	for _, r := range results {
-		if strings.HasPrefix(r, "--") {
-			t.Errorf("--flag=value consumed next word; -- was not recognized: got %s", r)
-			break
-		}
+	results := runCompletion(t, script, []string{"docker-helper", "session", "create", "--endpoint=http://localhost:9999", "work", "--s"})
+	if len(results) != 0 {
+		t.Errorf("--flag=value consumed the following word; positional did not stop flag completion, got: %v", results)
 	}
 }
 
@@ -1321,5 +1285,274 @@ func TestCompletionAfterHelpFlags(t *testing.T) {
 	results := runCompletion(t, script, []string{"docker-helper", "help", "-"})
 	if !slices.Contains(results, "-h") || !slices.Contains(results, "--help") {
 		t.Errorf("help - <TAB> must offer -h --help, got: %v", results)
+	}
+}
+
+// ---- generic command-tree completion invariants ----
+//
+// The following tests walk the real declarative Command tree instead of
+// naming individual commands, so a newly added command automatically falls
+// under the same parser-tree == help-tree == completion-tree invariants.
+
+// completionTreeClasses walks the real Command tree and classifies every
+// non-root node by dispatch shape. A node must be exactly one of:
+// branch (subcommands, no NewInvocation) or leaf (NewInvocation, no
+// subcommands). A hybrid node would be unreachable by dispatch and invisible
+// to the generated completion model.
+func completionTreeClasses(t *testing.T) (leaves, branches [][]string) {
+	t.Helper()
+	var walk func(cmd *Command, path []string)
+	walk = func(cmd *Command, path []string) {
+		for _, sub := range cmd.Subcommands {
+			subPath := append(append([]string{}, path...), sub.Name)
+			isLeaf := sub.NewInvocation != nil
+			hasSubs := len(sub.Subcommands) > 0
+			label := strings.Join(subPath, " ")
+			switch {
+			case isLeaf && hasSubs:
+				t.Fatalf("command %q is both leaf and branch; dispatch and completion assume a clean tree", label)
+			case isLeaf:
+				leaves = append(leaves, subPath)
+			case hasSubs:
+				branches = append(branches, subPath)
+			default:
+				t.Fatalf("command %q has neither subcommands nor NewInvocation", label)
+			}
+			walk(sub, subPath)
+		}
+	}
+	walk(rootCommand, nil)
+	return leaves, branches
+}
+
+// treeCommandLongFlags derives the long flags a command accepts from its
+// real FlagSet, plus --help which every leaf registers at dispatch time.
+func treeCommandLongFlags(cmd *Command) []string {
+	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	cmd.NewInvocation(fs)
+	var flags []string
+	fs.VisitAll(func(f *flag.Flag) {
+		flags = append(flags, "--"+f.Name)
+	})
+	flags = append(flags, "--help")
+	slices.Sort(flags)
+	return flags
+}
+
+// treeCommandFlagWords derives the full flag word list a command's
+// completion table emits: long flags, single-character short forms, and the
+// always-present -h/--help pair.
+func treeCommandFlagWords(cmd *Command) []string {
+	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	cmd.NewInvocation(fs)
+	var words []string
+	fs.VisitAll(func(f *flag.Flag) {
+		words = append(words, "--"+f.Name)
+		if len(f.Name) == 1 {
+			words = append(words, "-"+f.Name)
+		}
+	})
+	words = append(words, "-h", "--help")
+	slices.Sort(words)
+	return words
+}
+
+// treeProviderLeafPaths lists leaf commands whose positional completion is
+// semantic: config FIELD/VALUE and filesystem PATH providers, and the help
+// navigation command whose unlimited positionals walk the command tree
+// itself. Their empty-word behavior is provider-owned, not the generic flag
+// fallback.
+var treeProviderLeafPaths = []string{
+	"config show",
+	"config set",
+	"config unset",
+	"config allowed-root add",
+	"config allowed-root remove",
+	"apparmor root add",
+	"apparmor root remove",
+	"help",
+}
+
+func treeProbeWords(path []string, cur ...string) []string {
+	words := make([]string, 0, len(path)+len(cur)+1)
+	words = append(words, "docker-helper")
+	words = append(words, path...)
+	words = append(words, cur...)
+	return words
+}
+
+// TestCompletionTreeBranchSubcommands proves that every branch command
+// completes exactly its real subcommands on an empty current word.
+func TestCompletionTreeBranchSubcommands(t *testing.T) {
+	script := completionScript(t)
+	_, branches := completionTreeClasses(t)
+	if len(branches) == 0 {
+		t.Fatal("no branch commands found in the tree")
+	}
+	for _, path := range branches {
+		cmd := completionCommandPath(path)
+		if cmd == nil {
+			t.Fatalf("branch path %q not resolvable", strings.Join(path, " "))
+		}
+		want := make([]string, 0, len(cmd.Subcommands))
+		for _, sub := range cmd.Subcommands {
+			want = append(want, sub.Name)
+		}
+		slices.Sort(want)
+		results := runCompletion(t, script, treeProbeWords(path, ""))
+		slices.Sort(results)
+		if !slices.Equal(results, want) {
+			t.Errorf("%s <TAB>: got %v, want subcommands %v", strings.Join(path, " "), results, want)
+		}
+	}
+}
+
+// TestCompletionTreeLeafLongFlags proves that every leaf command completes
+// exactly the long flags registered by its real FlagSet (plus --help) on an
+// unfinished -- current word, with no per-command special casing.
+func TestCompletionTreeLeafLongFlags(t *testing.T) {
+	script := completionScript(t)
+	leaves, _ := completionTreeClasses(t)
+	if len(leaves) == 0 {
+		t.Fatal("no leaf commands found in the tree")
+	}
+	for _, path := range leaves {
+		cmd := completionCommandPath(path)
+		if cmd == nil {
+			t.Fatalf("leaf path %q not resolvable", strings.Join(path, " "))
+		}
+		want := treeCommandLongFlags(cmd)
+		results := runCompletion(t, script, treeProbeWords(path, "--"))
+		slices.Sort(results)
+		if !slices.Equal(results, want) {
+			t.Errorf("%s --<TAB>: got %v, want %v", strings.Join(path, " "), results, want)
+		}
+	}
+}
+
+// TestCompletionTreeFlagOnlyLeafEmptyWord proves that every leaf command
+// with MaxPosArgs == 0 offers its own flags on an empty current word — the
+// generic fallback for commands with no applicable positional or subcommand
+// completion.
+func TestCompletionTreeFlagOnlyLeafEmptyWord(t *testing.T) {
+	script := completionScript(t)
+	leaves, _ := completionTreeClasses(t)
+	checked := 0
+	for _, path := range leaves {
+		cmd := completionCommandPath(path)
+		if cmd == nil || cmd.MaxPosArgs != 0 {
+			continue
+		}
+		want := treeCommandFlagWords(cmd)
+		results := runCompletion(t, script, treeProbeWords(path, ""))
+		slices.Sort(results)
+		if !slices.Equal(results, want) {
+			t.Errorf("%s <TAB>: got %v, want flags %v", strings.Join(path, " "), results, want)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no flag-only leaf commands found; tree shape changed")
+	}
+}
+
+// TestCompletionTreePositionalLeafEmptyWordNoFlagFallback proves that leaf
+// commands that accept positional arguments do not fall back to flag
+// completion on an empty word: their positional completion is either
+// semantic (providers) or intentionally empty.
+func TestCompletionTreePositionalLeafEmptyWordNoFlagFallback(t *testing.T) {
+	script := completionScript(t)
+	leaves, _ := completionTreeClasses(t)
+	for _, path := range leaves {
+		cmd := completionCommandPath(path)
+		if cmd == nil || cmd.MaxPosArgs == 0 {
+			continue
+		}
+		label := strings.Join(path, " ")
+		if slices.Contains(treeProviderLeafPaths, label) {
+			continue
+		}
+		results := runCompletion(t, script, treeProbeWords(path, ""))
+		if len(results) != 0 {
+			t.Errorf("%s <TAB>: positional leaf must not fall back to flags, got %v", label, results)
+		}
+	}
+}
+
+// TestCompletionTreeOptionTerminatorNoFlags proves that after an explicit
+// option terminator (--), no leaf command offers flags: the completed --
+// ends the options section.
+func TestCompletionTreeOptionTerminatorNoFlags(t *testing.T) {
+	script := completionScript(t)
+	leaves, _ := completionTreeClasses(t)
+	for _, path := range leaves {
+		results := runCompletion(t, script, treeProbeWords(path, "--", ""))
+		if len(results) != 0 {
+			t.Errorf("%s -- <TAB>: terminator must suppress flags, got %v", strings.Join(path, " "), results)
+		}
+	}
+}
+
+// TestCompletionTreeFlagPrefixFilter proves that a dash-prefixed current
+// word prefix-filters the command's real flags on every leaf command.
+func TestCompletionTreeFlagPrefixFilter(t *testing.T) {
+	script := completionScript(t)
+	leaves, _ := completionTreeClasses(t)
+	for _, path := range leaves {
+		cmd := completionCommandPath(path)
+		if cmd == nil {
+			continue
+		}
+		long := treeCommandLongFlags(cmd)
+		// Anchor on the first long flag; --help is always present.
+		anchor := long[0]
+		prefix := anchor[:len("--")+1]
+		results := runCompletion(t, script, treeProbeWords(path, prefix))
+		if len(results) == 0 {
+			t.Errorf("%s %s<TAB>: prefix filter returned nothing", strings.Join(path, " "), prefix)
+			continue
+		}
+		for _, r := range results {
+			if !strings.HasPrefix(r, prefix) {
+				t.Errorf("%s %s<TAB>: %q does not match prefix", strings.Join(path, " "), prefix, r)
+			}
+		}
+		if !slices.Contains(results, anchor) {
+			t.Errorf("%s %s<TAB>: anchor flag %q missing, got %v", strings.Join(path, " "), prefix, anchor, results)
+		}
+	}
+}
+
+// TestCompletionTreeHelpNavigationLeafNoFlagFallback proves the flag-only
+// fallback stays off under help navigation: help walks the command tree,
+// and a leaf path under help offers no flags on an empty word.
+func TestCompletionTreeHelpNavigationLeafNoFlagFallback(t *testing.T) {
+	script := completionScript(t)
+	leaves, _ := completionTreeClasses(t)
+	for _, path := range leaves {
+		results := runCompletion(t, script, treeProbeWords(append([]string{"help"}, path...), ""))
+		if len(results) != 0 {
+			t.Errorf("help %s <TAB>: navigation must not fall back to flags, got %v", strings.Join(path, " "), results)
+		}
+	}
+}
+
+// TestCompletionTreeLeafDashWordFlags proves that on a bare dash current
+// word every leaf command offers its complete flag word list: long flags,
+// single-character short forms, and the always-present -h/--help pair.
+func TestCompletionTreeLeafDashWordFlags(t *testing.T) {
+	script := completionScript(t)
+	leaves, _ := completionTreeClasses(t)
+	for _, path := range leaves {
+		cmd := completionCommandPath(path)
+		if cmd == nil {
+			continue
+		}
+		want := treeCommandFlagWords(cmd)
+		results := runCompletion(t, script, treeProbeWords(path, "-"))
+		slices.Sort(results)
+		if !slices.Equal(results, want) {
+			t.Errorf("%s -<TAB>: got %v, want %v", strings.Join(path, " "), results, want)
+		}
 	}
 }
