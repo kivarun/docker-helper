@@ -82,17 +82,13 @@ func issueLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential
 	return cred, token, nil
 }
 
-// findLauncherCredential returns the metadata of a Launcher's singular
-// credential, or ErrLauncherCredentialNotFound if none exists.
-func findLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential, error) {
+// scanLauncherCredential scans the singular Launcher credential columns
+// (id, created_at, revoked_at); a missing row is ErrLauncherCredentialNotFound.
+func scanLauncherCredential(s sqlScanner) (*launcherCredential, error) {
 	var c launcherCredential
 	var createdAt int64
 	var revokedAt sql.NullInt64
-	err := db.QueryRow(
-		`SELECT id, created_at, revoked_at FROM credentials WHERE launcher_id = ?`,
-		launcherID,
-	).Scan(&c.ID, &createdAt, &revokedAt)
-	if err != nil {
+	if err := s.Scan(&c.ID, &createdAt, &revokedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrLauncherCredentialNotFound
 		}
@@ -104,6 +100,15 @@ func findLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential,
 		c.RevokedAt = &t
 	}
 	return &c, nil
+}
+
+// findLauncherCredential returns the metadata of a Launcher's singular
+// credential, or ErrLauncherCredentialNotFound if none exists.
+func findLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential, error) {
+	return scanLauncherCredential(db.QueryRow(
+		`SELECT id, created_at, revoked_at FROM credentials WHERE launcher_id = ?`,
+		launcherID,
+	))
 }
 
 // rotateLauncherCredential atomically replaces the bearer secret of the same
@@ -161,19 +166,38 @@ func rotateLauncherCredential(db *sql.DB, launcherID string) (*launcherCredentia
 }
 
 // deleteLauncherCredential deletes the singular Launcher credential so a new
-// one may later be issued. Fails with ErrLauncherCredentialNotFound if none
-// exists. This is a physical delete, not a revoked_at mutation.
-func deleteLauncherCredential(db *sql.DB, launcherID string) error {
-	result, err := db.Exec(`DELETE FROM credentials WHERE launcher_id = ?`, launcherID)
+// one may later be issued, and returns the deleted credential's metadata so
+// the caller can record exactly which target credential was revoked. Fails
+// with ErrLauncherCredentialNotFound if none exists. This is a physical
+// delete, not a revoked_at mutation.
+func deleteLauncherCredential(db *sql.DB, launcherID string) (*launcherCredential, error) {
+	tx, err := db.Begin()
 	if err != nil {
-		return fmt.Errorf("cannot delete launcher credential: %w", err)
+		return nil, fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	cred, err := scanLauncherCredential(tx.QueryRow(
+		`SELECT id, created_at, revoked_at FROM credentials WHERE launcher_id = ?`,
+		launcherID,
+	))
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := tx.Exec(`DELETE FROM credentials WHERE launcher_id = ?`, launcherID)
+	if err != nil {
+		return nil, fmt.Errorf("cannot delete launcher credential: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("cannot check delete result: %w", err)
+		return nil, fmt.Errorf("cannot check delete result: %w", err)
 	}
 	if affected == 0 {
-		return ErrLauncherCredentialNotFound
+		return nil, ErrLauncherCredentialNotFound
 	}
-	return nil
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("cannot commit launcher credential delete: %w", err)
+	}
+	return cred, nil
 }

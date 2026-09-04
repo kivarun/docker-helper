@@ -272,14 +272,48 @@ func findPrincipalByUsername(db *sql.DB, username string) (*PrincipalWithRoots, 
 	}, nil
 }
 
+// launcherAdmissionsInTx observes every child Launcher's enabled state within
+// the given transaction and computes the final operation-admission state each
+// child must hold after the Principal's committed enabled transition: closed
+// iff the resulting Principal.enabled or the child's own Launcher.enabled does
+// not hold. The enable path applies these states in memory after commit
+// without another DB read.
+func launcherAdmissionsInTx(tx *sql.Tx, principalID int, principalEnabled int) ([]launcherAdmission, error) {
+	rows, err := tx.Query(`SELECT id, enabled FROM launchers WHERE principal_id = ?`, principalID)
+	if err != nil {
+		return nil, fmt.Errorf("cannot query principal launchers: %w", err)
+	}
+	defer rows.Close()
+	var admissions []launcherAdmission
+	for rows.Next() {
+		var id string
+		var enabled int
+		if err := rows.Scan(&id, &enabled); err != nil {
+			return nil, fmt.Errorf("cannot scan launcher admission state: %w", err)
+		}
+		admissions = append(admissions, launcherAdmission{
+			LauncherID: id,
+			Closed:     principalEnabled == 0 || enabled == 0,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate launchers: %w", err)
+	}
+	return admissions, nil
+}
+
 // persistPrincipalEnabledChange performs a transactionally correct enabled-state
 // transition for a principal. It:
 //   - determines Principal existence and current enabled state within the transaction;
-//   - if already in the requested state, returns Changed=false;
+//   - if already in the requested state, returns Changed=false with the
+//     transactionally computed child-Launcher admission states;
 //   - updates enabled state;
 //   - when disabling, collects and deletes the Principal's sessions;
 //   - commits;
-//   - returns explicit Changed and RevokedSessionIDs.
+//   - returns explicit Changed, RevokedSessionIDs, and the final
+//     child-Launcher admission states computed within the same transaction,
+//     so the enable path can apply them in memory after commit without
+//     another DB read.
 func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (principalEnabledChangeResult, error) {
 	if username == "" {
 		return principalEnabledChangeResult{}, fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
@@ -309,10 +343,17 @@ func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (p
 		newEnabled = 1
 	}
 
-	// Already in requested state.
+	// Already in requested state. The child Launchers' final admission states
+	// are still computed transactionally so an idempotent enable applies the
+	// same in-memory admission decision as a real transition.
 	if currentEnabled == newEnabled {
+		admissions, err := launcherAdmissionsInTx(tx, principalID, newEnabled)
+		if err != nil {
+			tx.Rollback()
+			return principalEnabledChangeResult{}, err
+		}
 		tx.Rollback()
-		return principalEnabledChangeResult{Changed: false}, nil
+		return principalEnabledChangeResult{Changed: false, LauncherAdmissions: admissions}, nil
 	}
 
 	_, err = tx.Exec(
@@ -363,13 +404,23 @@ func persistPrincipalEnabledChange(db *sql.DB, username string, enabled bool) (p
 		}
 	}
 
+	// Observe the child Launchers' enabled states within this same
+	// transaction so the committed transition's final admission states can be
+	// applied in memory without another DB read.
+	admissions, err := launcherAdmissionsInTx(tx, principalID, newEnabled)
+	if err != nil {
+		tx.Rollback()
+		return principalEnabledChangeResult{}, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return principalEnabledChangeResult{}, fmt.Errorf("cannot commit enabled change: %w", err)
 	}
 
 	return principalEnabledChangeResult{
-		Changed:           true,
-		RevokedSessionIDs: sessionIDs,
+		Changed:            true,
+		RevokedSessionIDs:  sessionIDs,
+		LauncherAdmissions: admissions,
 	}, nil
 }
 

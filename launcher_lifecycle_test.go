@@ -485,7 +485,7 @@ func TestDeleteLauncherCheckedActiveContainerRefusesWithoutProvenance(t *testing
 	app := deleteLifecycleApp(t, db)
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
 		if launcherID == laID {
-			return []helperContainer{{ID: "abc123", Running: true}}, nil
+			return []helperContainer{{ID: "abc123", State: "running"}}, nil
 		}
 		return nil, nil
 	}
@@ -527,7 +527,7 @@ func TestDeleteLauncherCheckedStaleContainerRemoved(t *testing.T) {
 	}
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
 		if launcherID == laID {
-			return []helperContainer{{ID: "stale123", Running: false}}, nil
+			return []helperContainer{{ID: "stale123", State: "exited"}}, nil
 		}
 		return nil, nil
 	}
@@ -537,6 +537,99 @@ func TestDeleteLauncherCheckedStaleContainerRemoved(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != "stale123" {
 		t.Errorf("expected stale container removed, got %v", removed)
+	}
+}
+
+// TestDeleteLauncherCheckedContainerStateClassification proves checked delete
+// classifies every Docker container state explicitly: running/paused/
+// restarting/removing refuse with ErrLauncherRuntimeActive and are never passed
+// to docker rm, created/exited/dead are the only removable (stale) states, and
+// an unrecognized state fails closed as a classification error without
+// mutating the Launcher or its Sessions.
+func TestDeleteLauncherCheckedContainerStateClassification(t *testing.T) {
+	cases := []struct {
+		name         string
+		state        string
+		wantActive   bool // ErrLauncherRuntimeActive refusal
+		wantClassErr bool // fail-closed classification error
+		wantRemoved  bool // container passed to docker rm
+	}{
+		{name: "running", state: "running", wantActive: true},
+		{name: "paused", state: "paused", wantActive: true},
+		{name: "restarting", state: "restarting", wantActive: true},
+		{name: "removing", state: "removing", wantActive: true},
+		{name: "created", state: "created", wantRemoved: true},
+		{name: "exited", state: "exited", wantRemoved: true},
+		{name: "dead", state: "dead", wantRemoved: true},
+		{name: "unknown state fails closed", state: "zombie", wantClassErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, laID, _ := launcherLifecycleDB(t)
+			app := deleteLifecycleApp(t, db)
+			var removed []string
+			app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				if name == "docker" && len(args) >= 2 && args[0] == "rm" {
+					removed = append(removed, args[len(args)-1])
+				}
+				return exec.CommandContext(ctx, "true")
+			}
+			app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
+				if launcherID == laID {
+					return []helperContainer{{ID: "c1", State: tc.state}}, nil
+				}
+				return nil, nil
+			}
+
+			_, err := app.deleteLauncherChecked(context.Background(), laID)
+
+			switch {
+			case tc.wantActive:
+				if !errors.Is(err, ErrLauncherRuntimeActive) {
+					t.Fatalf("state %q: expected ErrLauncherRuntimeActive, got %v", tc.state, err)
+				}
+			case tc.wantClassErr:
+				if err == nil || errors.Is(err, ErrLauncherRuntimeActive) {
+					t.Fatalf("state %q: expected fail-closed classification error, got %v", tc.state, err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("state %q: expected delete to succeed, got %v", tc.state, err)
+				}
+			}
+
+			// Active and unclassifiable states are never passed to docker rm.
+			if (tc.wantActive || tc.wantClassErr) && len(removed) != 0 {
+				t.Errorf("state %q: container passed to docker rm: %v", tc.state, removed)
+			}
+			if tc.wantRemoved && (len(removed) != 1 || removed[0] != "c1") {
+				t.Errorf("state %q: expected stale container removed, got %v", tc.state, removed)
+			}
+
+			if !tc.wantRemoved {
+				// The refusal is side-effect free: the Launcher row, its
+				// enabled state, and its Sessions are untouched, and admission
+				// is re-opened.
+				if _, err := findLauncherByID(db, laID); err != nil {
+					t.Fatalf("state %q: launcher should be preserved: %v", tc.state, err)
+				}
+				if enabled, err := launcherEnabledState(db, laID); err != nil {
+					t.Fatal(err)
+				} else if !enabled {
+					t.Errorf("state %q: expected refusal to leave launcher enabled", tc.state)
+				}
+				var count int
+				if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id=?`, laID).Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				if count != 2 {
+					t.Errorf("state %q: expected sessions preserved by refusal, got %d", tc.state, count)
+				}
+				if app.OperationSupervisor.isLauncherQuiesced(laID) {
+					t.Errorf("state %q: expected prologue quiesce undone after refusal", tc.state)
+				}
+			}
+		})
 	}
 }
 
@@ -552,7 +645,7 @@ func TestDeleteLauncherCheckedStaleRemovalFailureAborts(t *testing.T) {
 	}
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
 		if launcherID == laID {
-			return []helperContainer{{ID: "stale123", Running: false}}, nil
+			return []helperContainer{{ID: "stale123", State: "exited"}}, nil
 		}
 		return nil, nil
 	}
@@ -662,9 +755,9 @@ func TestDeleteLauncherCheckedRetryAfterExit(t *testing.T) {
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
 		if launcherID == laID {
 			if running {
-				return []helperContainer{{ID: "abc123", Running: true}}, nil
+				return []helperContainer{{ID: "abc123", State: "running"}}, nil
 			}
-			return []helperContainer{{ID: "abc123", Running: false}}, nil
+			return []helperContainer{{ID: "abc123", State: "exited"}}, nil
 		}
 		return nil, nil
 	}
@@ -716,9 +809,9 @@ func TestDeletePrincipalCheckedBlockedThenSucceeds(t *testing.T) {
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
 		if launcherID == laID {
 			if running {
-				return []helperContainer{{ID: "abc123", Running: true}}, nil
+				return []helperContainer{{ID: "abc123", State: "running"}}, nil
 			}
-			return []helperContainer{{ID: "abc123", Running: false}}, nil
+			return []helperContainer{{ID: "abc123", State: "exited"}}, nil
 		}
 		return nil, nil
 	}
@@ -793,17 +886,18 @@ func TestInspectHelperContainersParsesAndFailsClosed(t *testing.T) {
 	app := deleteLifecycleApp(t, openFreshTestDB(t))
 
 	cases := []struct {
-		name        string
-		output      string
-		wantIDs     []string
-		wantRunning []bool
-		wantErr     bool
+		name       string
+		output     string
+		wantIDs    []string
+		wantStates []string
+		wantErr    bool
 	}{
-		{name: "empty", output: "", wantIDs: nil, wantRunning: nil},
-		{name: "one running", output: "abc123 running\n", wantIDs: []string{"abc123"}, wantRunning: []bool{true}},
-		{name: "one exited", output: "def456 exited", wantIDs: []string{"def456"}, wantRunning: []bool{false}},
-		{name: "one created", output: "ghi789 created", wantIDs: []string{"ghi789"}, wantRunning: []bool{false}},
-		{name: "blank lines ignored", output: "\nabc123 running\n\n", wantIDs: []string{"abc123"}, wantRunning: []bool{true}},
+		{name: "empty", output: "", wantIDs: nil, wantStates: nil},
+		{name: "one running", output: "abc123 running\n", wantIDs: []string{"abc123"}, wantStates: []string{"running"}},
+		{name: "one exited", output: "def456 exited", wantIDs: []string{"def456"}, wantStates: []string{"exited"}},
+		{name: "one created", output: "ghi789 created", wantIDs: []string{"ghi789"}, wantStates: []string{"created"}},
+		{name: "one paused", output: "jkl012 paused", wantIDs: []string{"jkl012"}, wantStates: []string{"paused"}},
+		{name: "blank lines ignored", output: "\nabc123 running\n\n", wantIDs: []string{"abc123"}, wantStates: []string{"running"}},
 		{name: "malformed fails closed", output: "abc123 running extra\n", wantErr: true},
 	}
 	for _, tc := range cases {
@@ -830,8 +924,8 @@ func TestInspectHelperContainersParsesAndFailsClosed(t *testing.T) {
 				if got[i].ID != tc.wantIDs[i] {
 					t.Errorf("container[%d] id: expected %q, got %q", i, tc.wantIDs[i], got[i].ID)
 				}
-				if got[i].Running != tc.wantRunning[i] {
-					t.Errorf("container[%d] running: expected %v, got %v", i, tc.wantRunning[i], got[i].Running)
+				if got[i].State != tc.wantStates[i] {
+					t.Errorf("container[%d] state: expected %q, got %q", i, tc.wantStates[i], got[i].State)
 				}
 			}
 		})
@@ -843,7 +937,7 @@ func TestDeleteLauncherCheckedSiblingIsolation(t *testing.T) {
 	app := deleteLifecycleApp(t, db)
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
 		if launcherID == lbID {
-			return []helperContainer{{ID: "runningB", Running: true}}, nil
+			return []helperContainer{{ID: "runningB", State: "running"}}, nil
 		}
 		return nil, nil
 	}
@@ -1808,5 +1902,110 @@ func TestDisableAuthorityReReadFailureKeepsAdmissionQuiesced(t *testing.T) {
 	}
 	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
 		t.Fatal("admission must remain quiesced when the authoritative re-read itself fails (fail closed)")
+	}
+}
+
+// TestLauncherEnableCommitsWithoutPostCommitLookup proves the enable path can
+// no longer produce a "committed but 500": with every query after the
+// pre-commit reads rejected, the enable succeeds, applies its admission
+// decision (reopening the prologue-quiesced Launcher), and persists
+// enabled=true. Under the former post-commit admission re-read, that extra
+// query would be rejected here after the durable success.
+func TestLauncherEnableCommitsWithoutPostCommitLookup(t *testing.T) {
+	db, dbPath := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	l, _, _, err := createLauncher(db, pid, "la", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+	lID := l.ID
+
+	// Disable for real first, so the enable is a genuine transition.
+	disabled := false
+	if _, err := persistLauncherChange(db, lID, nil, &disabled); err != nil {
+		t.Fatalf("initial disable: %v", err)
+	}
+
+	// The PATCH owner performs two projection-lookup queries and the
+	// transition's own authority read before commit; permit exactly those and
+	// fail every later query.
+	failDB := newFailQueryAfterDB(t, dbPath, 3, errMockQueryFail)
+	app := deleteLifecycleApp(t, failDB)
+	// Mirror the disabled-state runtime companion so the committed enable must
+	// reopen admission in memory.
+	app.OperationSupervisor.quiesceLauncher(lID)
+
+	enabled := true
+	if _, _, err := app.updateLauncherWithLifecycle(lID, nil, &enabled); err != nil {
+		t.Fatalf("enable under post-commit query failure: %v", err)
+	}
+
+	if enabledState, err := launcherEnabledState(db, lID); err != nil {
+		t.Fatal(err)
+	} else if !enabledState {
+		t.Fatal("expected launcher durably enabled after committed enable")
+	}
+	if app.OperationSupervisor.isLauncherQuiesced(lID) {
+		t.Fatal("expected the transactionally decided admission to reopen the launcher after enable")
+	}
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lID)); admitted != admissionAccepted {
+		t.Fatal("expected operation admitted for launcher after committed enable")
+	}
+}
+
+// TestPrincipalEnableAppliesAllChildAdmissionsWithoutPostCommitLookup proves
+// the Principal enable commits durable state and then applies EVERY child
+// Launcher's admission in one non-fallible step: with all pre-commit reads
+// permitted and every post-commit query rejected, the enable succeeds and both
+// individually-enabled children reopen. Under the former per-child admission
+// re-sync, the first child's post-commit re-read would already be rejected
+// after the durable success, leaving the remaining children un-synced and
+// returning a committed-but-error result.
+func TestPrincipalEnableAppliesAllChildAdmissionsWithoutPostCommitLookup(t *testing.T) {
+	db, dbPath := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	la, _, _, err := createLauncher(db, pid, "a", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher(a): %v", err)
+	}
+	lb, _, _, err := createLauncher(db, pid, "b", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher(b): %v", err)
+	}
+	laID, lbID := la.ID, lb.ID
+
+	// Disable the Principal for real first, so the enable is a genuine
+	// transition whose commit must reopen the individually-enabled children.
+	if _, err := persistPrincipalEnabledChange(db, "owner", false); err != nil {
+		t.Fatalf("initial principal disable: %v", err)
+	}
+
+	// Permit the transition's own pre-commit reads and fail every later query.
+	failDB := newFailQueryAfterDB(t, dbPath, 5, errMockQueryFail)
+	app := deleteLifecycleApp(t, failDB)
+	// Mirror the disabled-state runtime companion for every child Launcher.
+	app.OperationSupervisor.quiesceLauncher(laID)
+	app.OperationSupervisor.quiesceLauncher(lbID)
+
+	if _, err := app.enablePrincipalLaunchers("owner"); err != nil {
+		t.Fatalf("principal enable under post-commit query failure: %v", err)
+	}
+
+	var pEnabled int
+	if err := db.QueryRow(`SELECT enabled FROM principals WHERE id = ?`, pid).Scan(&pEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if pEnabled != 1 {
+		t.Fatal("expected principal durably enabled after committed enable")
+	}
+	for _, id := range []string{laID, lbID} {
+		if app.OperationSupervisor.isLauncherQuiesced(id) {
+			t.Fatalf("expected child launcher %s admission reopened by the committed principal enable", id)
+		}
+		if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, id)); admitted != admissionAccepted {
+			t.Fatalf("expected operation admitted for child launcher %s after committed principal enable", id)
+		}
 	}
 }

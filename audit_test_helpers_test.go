@@ -13,6 +13,25 @@ import (
 	"testing"
 )
 
+// findAuditLinesByEvent returns every raw audit JSON line whose event matches,
+// in emission order, for tests that distinguish multiple records of one event.
+func findAuditLinesByEvent(buf *bytes.Buffer, event string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		if m["event"] == event {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
 // parseAuditMap unmarshals raw audit JSON; fails the test on error.
 func parseAuditMap(t *testing.T, raw string) map[string]any {
 	t.Helper()

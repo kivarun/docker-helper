@@ -9,12 +9,28 @@ import (
 	"time"
 )
 
+// applyLauncherTargetProvenance records the target/resource provenance of a
+// launcher-control event from the resolved or resulting Launcher: principal_name
+// is the target owner's Principal (never the caller identity), launcher_id and
+// launcher_name identify the Launcher, and launcher_scope/launcher_enabled
+// project the resolved or resulting Launcher state.
+func applyLauncherTargetProvenance(rec *auditRecord, l *LauncherWithPrincipal) {
+	if l == nil {
+		return
+	}
+	rec.PrincipalName = l.PrincipalName
+	rec.LauncherID = l.ID
+	rec.LauncherName = l.Name
+	rec.LauncherScope = string(l.ScopeMode)
+	rec.LauncherEnabled = &l.Enabled
+}
+
 // applyLauncherControlAuditProvenance records the initiating provenance of a
-// launcher-control event performed with a Principal credential: the acting
-// principal and the initiating credential's ID (initiator_credential_id).
-// credential_id keeps target-resource semantics where the event already
-// carries it — the issued or rotated Launcher credential on issue/rotate
-// events — and otherwise carries the initiating credential's ID. Admin
+// launcher-control event performed with a Principal credential: the initiating
+// credential's ID (initiator_credential_id). Where the record does not already
+// name its reachable target it also fills principal_name (a Principal
+// credential can only reach its own Principal) and credential_id; target
+// provenance from a resolved Launcher or target credential always wins. Admin
 // callers carry no credential provenance, and Launcher credentials cannot
 // perform launcher control.
 func applyLauncherControlAuditProvenance(rec *auditRecord, auth *launcherControlAuthority) {
@@ -33,8 +49,11 @@ func applyLauncherControlAuditProvenance(rec *auditRecord, auth *launcherControl
 }
 
 // writeLauncherControlAudit writes a launcher-control audit record with the
-// creator provenance of the authenticated launcher-control authority applied.
-func writeLauncherControlAudit(ctx context.Context, rec auditRecord, auth *launcherControlAuthority) {
+// target provenance of the resolved or resulting Launcher (when one was
+// resolved or created) and the initiating provenance of the authenticated
+// launcher-control authority applied.
+func writeLauncherControlAudit(ctx context.Context, rec auditRecord, auth *launcherControlAuthority, l *LauncherWithPrincipal) {
+	applyLauncherTargetProvenance(&rec, l)
 	applyLauncherControlAuditProvenance(&rec, auth)
 	writeRequestContextAudit(ctx, rec)
 }
@@ -227,7 +246,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 			Event:    "launcher.create",
 			Result:   "missing_username",
 			Duration: time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "missing_username", "username is required")
 		return
 	}
@@ -238,7 +257,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 			Event:    "launcher.create",
 			Result:   "invalid_json",
 			Duration: time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
@@ -262,7 +281,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 			PrincipalName: username,
 			Result:        "invalid_scope",
 			Duration:      time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_scope", "invalid scope")
 		return
 	}
@@ -272,7 +291,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 			PrincipalName: username,
 			Result:        "invalid_allowed_roots",
 			Duration:      time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
 		return
 	}
@@ -288,7 +307,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 			PrincipalName: username,
 			Result:        "error",
 			Duration:      duration,
-		}, auth)
+		}, auth, nil)
 		switch {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
@@ -322,14 +341,12 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeLauncherControlAudit(ctx, auditRecord{
-		Event:         "launcher.create",
-		PrincipalName: l.PrincipalName,
-		LauncherID:    l.ID,
-		LauncherName:  l.Name,
-		LauncherScope: string(l.ScopeMode),
-		Result:        "success",
-		Duration:      duration,
-	}, auth)
+		Event:  "launcher.create",
+		Result: "success",
+		// Target provenance is populated from the created Launcher, so an
+		// admin-created Launcher also names its target owner.
+		Duration: duration,
+	}, auth, l)
 
 	writeJSONRaw(ctx, w, http.StatusCreated, resp)
 }
@@ -361,7 +378,7 @@ func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
 			PrincipalName: username,
 			Result:        "error",
 			Duration:      duration,
-		}, auth)
+		}, auth, nil)
 		opLog(ctx).Error("launcher list failed",
 			slog.String("operation", "launcher_list"),
 			slog.String("error", err.Error()),
@@ -380,7 +397,7 @@ func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
 		PrincipalName: username,
 		Result:        "success",
 		Duration:      duration,
-	}, auth)
+	}, auth, nil)
 
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
 }
@@ -417,7 +434,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 			LauncherID: l.ID,
 			Result:     "invalid_json",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
@@ -427,7 +444,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 			LauncherID: l.ID,
 			Result:     "missing_field",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "missing_field", "name or enabled is required")
 		return
 	}
@@ -446,7 +463,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 			LauncherID: l.ID,
 			Result:     "error",
 			Duration:   duration,
-		}, auth)
+		}, auth, nil)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -478,14 +495,14 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Target provenance is populated from the resulting Launcher, so the
+	// success record always names the target owner (principal_name), including
+	// for admin-authenticated requests.
 	writeLauncherControlAudit(ctx, auditRecord{
-		Event:           "launcher.update",
-		LauncherID:      updated.ID,
-		LauncherName:    updated.Name,
-		LauncherEnabled: &updated.Enabled,
-		Result:          "success",
-		Duration:        duration,
-	}, auth)
+		Event:    "launcher.update",
+		Result:   "success",
+		Duration: duration,
+	}, auth, updated)
 	writeJSONRaw(ctx, w, http.StatusOK, launcherToJSON(*updated))
 }
 
@@ -509,7 +526,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "invalid_json",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_json", "invalid JSON request")
 		return
 	}
@@ -521,7 +538,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "invalid_scope",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_scope", "invalid scope")
 		return
 	}
@@ -531,7 +548,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "invalid_allowed_roots",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "restricted scope requires at least one allowed root")
 		return
 	}
@@ -541,7 +558,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "invalid_allowed_roots",
 			Duration:   time.Since(started).Round(time.Millisecond).String(),
-		}, auth)
+		}, auth, nil)
 		writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_roots", "inherit scope cannot carry allowed roots")
 		return
 	}
@@ -560,7 +577,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 			LauncherID: l.ID,
 			Result:     "error",
 			Duration:   duration,
-		}, auth)
+		}, auth, nil)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -581,13 +598,10 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	}
 
 	writeLauncherControlAudit(ctx, auditRecord{
-		Event:         "launcher.scope_replace",
-		LauncherID:    updated.ID,
-		LauncherName:  updated.Name,
-		LauncherScope: string(updated.ScopeMode),
-		Result:        "success",
-		Duration:      duration,
-	}, auth)
+		Event:    "launcher.scope_replace",
+		Result:   "success",
+		Duration: duration,
+	}, auth, updated)
 
 	writeJSONRaw(ctx, w, http.StatusOK, launcherToJSON(*updated))
 }
@@ -622,7 +636,7 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 			LauncherID: l.ID,
 			Result:     "error",
 			Duration:   duration,
-		}, auth)
+		}, auth, nil)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -638,13 +652,14 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Target provenance is populated from the resolved Launcher, so the
+	// success record always names the target owner and the resolved state,
+	// including for admin-authenticated requests.
 	writeLauncherControlAudit(ctx, auditRecord{
-		Event:        "launcher.delete",
-		LauncherID:   l.ID,
-		LauncherName: l.Name,
-		Result:       "success",
-		Duration:     duration,
-	}, auth)
+		Event:    "launcher.delete",
+		Result:   "success",
+		Duration: duration,
+	}, auth, l)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -670,7 +685,7 @@ func (a *App) handleIssueLauncherCredential(w http.ResponseWriter, r *http.Reque
 			LauncherID: l.ID,
 			Result:     "error",
 			Duration:   duration,
-		}, auth)
+		}, auth, nil)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -689,12 +704,10 @@ func (a *App) handleIssueLauncherCredential(w http.ResponseWriter, r *http.Reque
 	credJSON := launcherCredentialToJSON(*cred)
 	writeLauncherControlAudit(ctx, auditRecord{
 		Event:        "launcher.credential_issue",
-		LauncherID:   l.ID,
-		LauncherName: l.Name,
 		CredentialID: cred.ID,
 		Result:       "success",
 		Duration:     duration,
-	}, auth)
+	}, auth, l)
 
 	writeJSONRaw(ctx, w, http.StatusCreated, launcherCredentialResponse{
 		OK:         true,
@@ -754,7 +767,7 @@ func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Requ
 			LauncherID: l.ID,
 			Result:     "error",
 			Duration:   duration,
-		}, auth)
+		}, auth, nil)
 		if isErrLauncherCredentialNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_credential_not_found", "launcher credential not found")
 		} else {
@@ -770,12 +783,10 @@ func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Requ
 	credJSON := launcherCredentialToJSON(*cred)
 	writeLauncherControlAudit(ctx, auditRecord{
 		Event:        "launcher.credential_rotate",
-		LauncherID:   l.ID,
-		LauncherName: l.Name,
 		CredentialID: cred.ID,
 		Result:       "success",
 		Duration:     duration,
-	}, auth)
+	}, auth, l)
 
 	writeJSONRaw(ctx, w, http.StatusOK, launcherCredentialResponse{
 		OK:         true,
@@ -797,14 +808,15 @@ func (a *App) handleDeleteLauncherCredential(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := deleteLauncherCredential(a.DB, l.ID); err != nil {
+	deleted, err := deleteLauncherCredential(a.DB, l.ID)
+	if err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.credential_delete",
 			LauncherID: l.ID,
 			Result:     "error",
 			Duration:   duration,
-		}, auth)
+		}, auth, nil)
 		if isErrLauncherCredentialNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_credential_not_found", "launcher credential not found")
 		} else {
@@ -817,13 +829,15 @@ func (a *App) handleDeleteLauncherCredential(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// credential_id names the revoked target credential, resolved by the
+	// delete itself; target launcher provenance comes from the resolved
+	// Launcher, including for admin-authenticated requests.
 	writeLauncherControlAudit(ctx, auditRecord{
 		Event:        "launcher.credential_delete",
-		LauncherID:   l.ID,
-		LauncherName: l.Name,
+		CredentialID: deleted.ID,
 		Result:       "success",
 		Duration:     time.Since(started).Round(time.Millisecond).String(),
-	}, auth)
+	}, auth, l)
 
 	w.WriteHeader(http.StatusNoContent)
 }

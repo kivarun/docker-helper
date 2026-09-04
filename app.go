@@ -192,9 +192,14 @@ func (a *App) getAdminTokenHash() [sha256.Size]byte {
 // principalEnabledChangeResult is the explicit result of a principal
 // enabled-state transition. Changed indicates whether the state actually
 // transitioned. RevokedSessionIDs lists session IDs deleted when disabling.
+// LauncherAdmissions is the final operation-admission state for every child
+// Launcher after the committed transition, computed transactionally (closed
+// iff Principal.enabled or the child's own Launcher.enabled does not hold),
+// so callers apply it in memory after commit without another DB read.
 type principalEnabledChangeResult struct {
-	Changed           bool
-	RevokedSessionIDs []string
+	Changed            bool
+	RevokedSessionIDs  []string
+	LauncherAdmissions []launcherAdmission
 }
 
 // applyPrincipalEnabledChange is the App-level lifecycle operation for

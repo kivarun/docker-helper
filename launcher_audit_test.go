@@ -459,19 +459,256 @@ func TestLauncherControlAuditInitiatorCredentialProvenance(t *testing.T) {
 		t.Error("audit stream contains the rotating principal credential bearer")
 	}
 
-	// An admin-token launcher-control event carries no initiator credential.
+	// A launcher-control PATCH performed with the second Principal credential:
+	// the target-owner projection is recorded from the Launcher, and the
+	// initiating credential stays distinguishable.
+	if w := launcherAuditRequest(t, app, http.MethodPatch, "/principals/lncinitiator/launchers/"+l.ID, credBToken, `{"enabled":false}`); w.Code != http.StatusOK {
+		t.Fatalf("principal patch: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	updates := findAuditLinesByEvent(auditBuf, "launcher.update")
+	if len(updates) != 1 {
+		t.Fatalf("expected 1 launcher.update audit line, got %d\n%s", len(updates), auditBuf.String())
+	}
+	patchRaw := updates[0]
+	m = parseAuditMap(t, patchRaw)
+	if m["principal_name"] != "lncinitiator" {
+		t.Errorf("update principal_name = %v, want target owner lncinitiator", m["principal_name"])
+	}
+	if m["initiator_credential_id"] != credBID {
+		t.Errorf("update initiator_credential_id = %v, want initiating principal credential %s", m["initiator_credential_id"], credBID)
+	}
+	if m["launcher_id"] != l.ID {
+		t.Errorf("update launcher_id = %v, want %s", m["launcher_id"], l.ID)
+	}
+	if m["launcher_scope"] != "inherit" {
+		t.Errorf("update launcher_scope = %v, want inherit", m["launcher_scope"])
+	}
+	if m["launcher_enabled"] != false {
+		t.Errorf("update launcher_enabled = %v, want resulting false", m["launcher_enabled"])
+	}
+	assertNoSecrets(t, patchRaw, m, credBToken, testAdminToken)
+	if strings.Contains(auditBuf.String(), credBToken) {
+		t.Error("audit stream contains the patching principal credential bearer")
+	}
+
+	// An admin-token launcher-control event carries no initiator credential,
+	// but still names the target owner and the resulting Launcher state.
 	if w := launcherAuditRequest(t, app, http.MethodPatch, "/principals/lncinitiator/launchers/"+l.ID, testAdminToken, `{"name":"renamed"}`); w.Code != http.StatusOK {
 		t.Fatalf("admin patch: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	updateRaw := findAuditLine(auditBuf, "launcher.update")
-	if updateRaw == "" {
-		t.Fatalf("expected launcher.update audit line\n%s", auditBuf.String())
+	updates = findAuditLinesByEvent(auditBuf, "launcher.update")
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 launcher.update audit lines after admin patch, got %d\n%s", len(updates), auditBuf.String())
 	}
+	updateRaw := updates[1]
 	m = parseAuditMap(t, updateRaw)
 	if _, present := m["initiator_credential_id"]; present {
 		t.Errorf("admin-authenticated launcher.update must not carry initiator_credential_id: %v", m)
 	}
+	if m["principal_name"] != "lncinitiator" {
+		t.Errorf("admin update principal_name = %v, want target owner lncinitiator", m["principal_name"])
+	}
+	if m["launcher_name"] != "renamed" || m["launcher_enabled"] != false || m["launcher_scope"] != "inherit" {
+		t.Errorf("admin update target projection incomplete: %v", m)
+	}
 	assertNoSecrets(t, updateRaw, m, "", testAdminToken)
+}
+
+// TestLauncherControlAuditTargetOwnerProvenance proves every successful
+// launcher-control event performed with the ADMIN token records the target
+// owner from the resolved or resulting Launcher: principal_name is the target
+// owner's Principal (the admin caller has no Principal identity of its own),
+// with launcher_id, launcher_name, launcher_scope, and launcher_enabled
+// projecting the Launcher, no initiator credential, and the revoked/issued/
+// rotated Launcher credential named as credential_id on its events. No bearer
+// secret reaches the audit stream.
+func TestLauncherControlAuditTargetOwnerProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, credToken, _, l := launcherAuditApp(t, "lnctarget")
+
+	// Admin-created launcher: principal_name must come from the target owner
+	// even though the admin caller has no Principal identity.
+	createW := launcherAuditRequest(t, app, http.MethodPost, "/principals/lnctarget/launchers", testAdminToken, `{"name":"adm"}`)
+	if createW.Code != http.StatusCreated {
+		t.Fatalf("admin create launcher: expected 201, got %d (body=%s)", createW.Code, createW.Body.String())
+	}
+	var created createLauncherResponse
+	if err := json.Unmarshal(createW.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	raw := findAuditLine(auditBuf, "launcher.create")
+	if raw == "" {
+		t.Fatalf("expected launcher.create audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["principal_name"] != "lnctarget" {
+		t.Errorf("create principal_name = %v, want target owner lnctarget", m["principal_name"])
+	}
+	if m["launcher_id"] != created.Launcher.ID || m["launcher_name"] != "adm" || m["launcher_scope"] != "inherit" || m["launcher_enabled"] != true {
+		t.Errorf("create target projection incomplete: %v", m)
+	}
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.create must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, raw, m, "", testAdminToken)
+
+	// Admin rename on the provisioning launcher.
+	if w := launcherAuditRequest(t, app, http.MethodPatch, "/principals/lnctarget/launchers/"+l.ID, testAdminToken, `{"name":"renamed-adm"}`); w.Code != http.StatusOK {
+		t.Fatalf("admin patch: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	raw = findAuditLine(auditBuf, "launcher.update")
+	if raw == "" {
+		t.Fatalf("expected launcher.update audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["principal_name"] != "lnctarget" {
+		t.Errorf("update principal_name = %v, want target owner lnctarget", m["principal_name"])
+	}
+	if m["launcher_id"] != l.ID || m["launcher_name"] != "renamed-adm" || m["launcher_scope"] != "inherit" || m["launcher_enabled"] != true {
+		t.Errorf("update target projection incomplete: %v", m)
+	}
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.update must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, raw, m, "", testAdminToken)
+
+	// Admin scope replace to restricted, with a root under the target
+	// Principal's home.
+	ws := filepath.Join(app.Config.AllowedRoots[0], "home", "lnctarget", "proj")
+	if err := os.MkdirAll(ws, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if w := launcherAuditRequest(t, app, http.MethodPut, "/principals/lnctarget/launchers/"+l.ID+"/allowed-roots", testAdminToken,
+		`{"scope":"restricted","allowed_roots":["`+ws+`"]}`); w.Code != http.StatusOK {
+		t.Fatalf("admin scope replace: expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	raw = findAuditLine(auditBuf, "launcher.scope_replace")
+	if raw == "" {
+		t.Fatalf("expected launcher.scope_replace audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["principal_name"] != "lnctarget" {
+		t.Errorf("scope_replace principal_name = %v, want target owner lnctarget", m["principal_name"])
+	}
+	if m["launcher_id"] != l.ID || m["launcher_scope"] != "restricted" || m["launcher_enabled"] != true {
+		t.Errorf("scope_replace target projection incomplete: %v", m)
+	}
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.scope_replace must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, raw, m, "", testAdminToken)
+
+	// Admin revoke: credential_id names the deleted target credential, which
+	// the audit must distinguish from any initiating credential (the admin
+	// carries none).
+	var revokedID string
+	if err := app.DB.QueryRow(`SELECT id FROM credentials WHERE launcher_id = ?`, l.ID).Scan(&revokedID); err != nil {
+		t.Fatalf("resolve provisioning credential: %v", err)
+	}
+	if w := launcherAuditRequest(t, app, http.MethodDelete, "/principals/lnctarget/launchers/"+l.ID+"/credential", testAdminToken, ""); w.Code != http.StatusNoContent {
+		t.Fatalf("admin credential delete: expected 204, got %d", w.Code)
+	}
+	raw = findAuditLine(auditBuf, "launcher.credential_delete")
+	if raw == "" {
+		t.Fatalf("expected launcher.credential_delete audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["principal_name"] != "lnctarget" {
+		t.Errorf("credential_delete principal_name = %v, want target owner lnctarget", m["principal_name"])
+	}
+	if m["credential_id"] != revokedID {
+		t.Errorf("credential_delete credential_id = %v, want revoked %s", m["credential_id"], revokedID)
+	}
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.credential_delete must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, raw, m, "", testAdminToken)
+
+	// Admin issue: credential_id names the issued target credential.
+	issueW := launcherAuditRequest(t, app, http.MethodPut, "/principals/lnctarget/launchers/"+l.ID+"/credential", testAdminToken, "")
+	if issueW.Code != http.StatusCreated {
+		t.Fatalf("admin credential issue: expected 201, got %d (body=%s)", issueW.Code, issueW.Body.String())
+	}
+	var issued launcherCredentialResponse
+	if err := json.Unmarshal(issueW.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+	raw = findAuditLine(auditBuf, "launcher.credential_issue")
+	if raw == "" {
+		t.Fatalf("expected launcher.credential_issue audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["principal_name"] != "lnctarget" {
+		t.Errorf("credential_issue principal_name = %v, want target owner lnctarget", m["principal_name"])
+	}
+	if m["credential_id"] != issued.Credential.ID {
+		t.Errorf("credential_issue credential_id = %v, want issued %s", m["credential_id"], issued.Credential.ID)
+	}
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.credential_issue must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, raw, m, "", testAdminToken)
+	if strings.Contains(auditBuf.String(), issued.Token) {
+		t.Error("audit stream contains the issued bearer token")
+	}
+
+	// Admin rotate: the rotated credential keeps its ID.
+	rotateW := launcherAuditRequest(t, app, http.MethodPost, "/principals/lnctarget/launchers/"+l.ID+"/credential/rotate", testAdminToken, "")
+	if rotateW.Code != http.StatusOK {
+		t.Fatalf("admin credential rotate: expected 200, got %d (body=%s)", rotateW.Code, rotateW.Body.String())
+	}
+	var rotated launcherCredentialResponse
+	if err := json.Unmarshal(rotateW.Body.Bytes(), &rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Credential.ID != issued.Credential.ID {
+		t.Fatalf("rotation must keep the credential ID: got %s, want %s", rotated.Credential.ID, issued.Credential.ID)
+	}
+	raw = findAuditLine(auditBuf, "launcher.credential_rotate")
+	if raw == "" {
+		t.Fatalf("expected launcher.credential_rotate audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["principal_name"] != "lnctarget" {
+		t.Errorf("credential_rotate principal_name = %v, want target owner lnctarget", m["principal_name"])
+	}
+	if m["credential_id"] != issued.Credential.ID {
+		t.Errorf("credential_rotate credential_id = %v, want rotated %s", m["credential_id"], issued.Credential.ID)
+	}
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.credential_rotate must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, raw, m, "", testAdminToken)
+	if strings.Contains(auditBuf.String(), rotated.Token) {
+		t.Error("audit stream contains the rotated bearer token")
+	}
+
+	// Admin delete: the resolved Launcher's owner and state are recorded even
+	// though the admin caller has no Principal identity.
+	if w := launcherAuditRequest(t, app, http.MethodDelete, "/principals/lnctarget/launchers/"+l.ID, testAdminToken, ""); w.Code != http.StatusNoContent {
+		t.Fatalf("admin delete: expected 204, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	raw = findAuditLine(auditBuf, "launcher.delete")
+	if raw == "" {
+		t.Fatalf("expected launcher.delete audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["principal_name"] != "lnctarget" {
+		t.Errorf("delete principal_name = %v, want target owner lnctarget", m["principal_name"])
+	}
+	if m["launcher_id"] != l.ID || m["launcher_name"] != "renamed-adm" || m["launcher_scope"] != "restricted" || m["launcher_enabled"] != true {
+		t.Errorf("delete target projection incomplete: %v", m)
+	}
+	if _, present := m["initiator_credential_id"]; present {
+		t.Errorf("admin-authenticated launcher.delete must not carry initiator_credential_id: %v", m)
+	}
+	assertNoSecrets(t, raw, m, "", testAdminToken)
+
+	// The Principal credential bearer used by the provisioning helper and the
+	// admin token must never appear in the audit stream.
+	if strings.Contains(auditBuf.String(), credToken) || strings.Contains(auditBuf.String(), testAdminToken) {
+		t.Error("audit stream contains a bearer secret")
+	}
 }
 
 // TestRunAuditLauncherProvenance proves run.start and run.finish carry the

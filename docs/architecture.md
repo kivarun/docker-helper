@@ -992,7 +992,7 @@ correlation and checked cleanup; user input cannot set or override them:
 com.dockerhelper.session.id      = <session id>
 com.dockerhelper.launcher.id     = <launcher id>
 com.dockerhelper.principal.name  = <principal username>
-com.dockerhelper.correlation.schema = 1
+com.dockerhelper.schema = 1
 ```
 
 Labels are correlation/cleanup evidence, not authorization state. The
@@ -1001,22 +1001,24 @@ the Session and Principal labels are provenance.
 
 ### Launcher audit provenance
 
-Launcher audit events carry the full launcher projection fields
-(`launcher_id`, `launcher_name`, `launcher_scope`, plus
-`launcher_enabled` on update events). `session.create` additionally
-carries `launcher_id`, `launcher_name`, and `principal_name`. Docker
-operation events (`build`/`run`/`pull`, including `registry.login`)
-record `principal_name`, `launcher_id`, and `launcher_name` from the
-session's ownership. `session.delete` records the deleted session's
-ownership (`launcher_id`, `launcher_name`, `principal_name`). Launcher
-control events keep initiating and target credential provenance
-distinguishable. `initiator_credential_id` names the Principal credential
-that performed the request on every launcher-control event (absent for the
-admin token; Launcher credentials cannot manage launchers). `credential_id`
-carries target-resource semantics: the issued or rotated Launcher credential
-on issue/rotate events, and the initiating credential on other
-launcher-control events. `credential_name` is recorded where the credential
-has a name.
+Successful launcher-control events name the target owner from the resolved
+or resulting Launcher, independent of the caller:
+`principal_name` is the target owner's Principal (never the caller
+identity), with `launcher_id`, `launcher_name`, `launcher_scope`, and
+`launcher_enabled` projecting the resolved or resulting Launcher.
+`session.create` additionally carries `launcher_id`, `launcher_name`, and
+`principal_name`. Docker operation events (`build`/`run`/`pull`, including
+`registry.login`) record `principal_name`, `launcher_id`, and
+`launcher_name` from the session's ownership. `session.delete` records the
+deleted session's ownership (`launcher_id`, `launcher_name`,
+`principal_name`). Launcher control events keep initiating and target
+credential provenance distinguishable. `initiator_credential_id` names the
+Principal credential that performed the request on every launcher-control
+event (absent for the admin token; Launcher credentials cannot manage
+launchers). `credential_id` carries target-resource semantics: the issued,
+rotated, or revoked Launcher credential on issue/rotate/delete events, and
+the initiating credential on other launcher-control events.
+`credential_name` is recorded where the credential has a name.
 
 ## Workspace isolation
 

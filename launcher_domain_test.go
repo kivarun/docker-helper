@@ -707,8 +707,12 @@ func TestLauncherCredentialDeleteAndReissue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := deleteLauncherCredential(db, l.ID); err != nil {
+	deleted, err := deleteLauncherCredential(db, l.ID)
+	if err != nil {
 		t.Fatalf("deleteLauncherCredential: %v", err)
+	}
+	if deleted.ID != cred.ID {
+		t.Errorf("deleted credential ID = %q, want the issued credential %q", deleted.ID, cred.ID)
 	}
 	if _, err := authenticateCredential(db, token); !errors.Is(err, ErrCredentialNotFound) {
 		t.Fatalf("old token should be invalid after delete, got: %v", err)
@@ -736,7 +740,7 @@ func TestLauncherCredentialDeleteNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := deleteLauncherCredential(db, l.ID); !errors.Is(err, ErrLauncherCredentialNotFound) {
+	if _, err := deleteLauncherCredential(db, l.ID); !errors.Is(err, ErrLauncherCredentialNotFound) {
 		t.Fatalf("expected ErrLauncherCredentialNotFound, got: %v", err)
 	}
 }

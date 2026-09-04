@@ -15,18 +15,22 @@ packaging, README, or man pages are changed by this stage.
 - Design input (conceptual rationale): [`release-2.1-launcher-delegation.md`](release-2.1-launcher-delegation.md)
 
 **Implementation status: complete.** All six stages (1.1 persistence
-foundation through 1.5 CLI/simple defaults) are implemented on `main`, with
-the final implementation state at `ed5c7963a055ab15696b68d7cbecc70ec5b79611`.
+foundation through 1.5 CLI/simple defaults) are implemented on `main`, and
 Stage 1.6 (release integration) completes the implementation work for the
 release with the
 documentation/public-contract reconciliation, the Release 3 vocabulary map
 update to the actual 2.1 symbols, the v2.0.0 → 2.1 upgrade-migration and
 launcher-hierarchy acceptance scenarios
 (`scripts/uat-release2-acceptance.sh`, scenarios G/H), and the audit
-provenance/bearer-leak coverage (`launcher_audit_test.go`). The canonical
+provenance/bearer-leak coverage (`launcher_audit_test.go`). The originally
+recorded implementation state
+`ed5c7963a055ab15696b68d7cbecc70ec5b79611` predates the Release-2.1
+RC-blocker correction passes; `main` has since advanced beyond it, so this
+plan no longer pins a final implementation commit. The canonical
 current-behavior reference is [`architecture.md`](architecture.md)
-("Launcher ownership"); the Release 3 vocabulary map is pinned to the final
-2.1 implementation commit.
+("Launcher ownership"); the Release 3 vocabulary map still carries the
+`694ca5944c87b17303b761c5f38e4afd390a7d89` checkpoint and will be
+re-anchored once Release 2.1 reaches its final frozen SHA.
 
 Implementation completion is distinct from release acceptance: the Release
 2.1 promotion claim requires the artifact gate to pass, including a
@@ -942,7 +946,7 @@ identity, e.g.:
 com.dockerhelper.session.id       = <session id>
 com.dockerhelper.launcher.id      = <launcher id>
 com.dockerhelper.principal.name   = <principal username>
-com.dockerhelper.correlation.schema = 1
+com.dockerhelper.schema = 1
 ```
 
 The namespace is deliberately neutral: only Launcher is the Session owner; the

@@ -17,11 +17,47 @@ var ErrLauncherRuntimeActive = errors.New("launcher runtime active")
 func isErrLauncherRuntimeActive(err error) bool { return errors.Is(err, ErrLauncherRuntimeActive) }
 
 // helperContainer is one helper-owned container observed by the Docker
-// inspector during checked deletion. Only schema-coherent, launcher-attributable
-// containers are surfaced (labels are evidence, not authorization).
+// inspector during checked deletion. State preserves the actual Docker .State
+// string; classification is explicit (classifyHelperContainerState), so checked
+// deletion never guesses from a boolean. Only schema-coherent,
+// launcher-attributable containers are surfaced (labels are evidence, not
+// authorization).
 type helperContainer struct {
-	ID      string
-	Running bool
+	ID    string
+	State string
+}
+
+// helperContainerState is the checked-deletion classification of one
+// helper-owned container's Docker state.
+type helperContainerState int
+
+const (
+	// helperStateStale marks a container in an explicitly safe-to-remove
+	// Docker state (created, exited, dead).
+	helperStateStale helperContainerState = iota
+	// helperStateActive marks a container in a runtime-active or transitional
+	// Docker state (running, paused, restarting, removing): checked deletion
+	// refuses with ErrLauncherRuntimeActive.
+	helperStateActive
+	// helperStateUnknown marks a Docker state outside the known set: checked
+	// deletion fails closed on it instead of guessing.
+	helperStateUnknown
+)
+
+// classifyHelperContainerState maps a Docker container's .State string to the
+// checked-deletion class that governs it: created/exited/dead are explicitly
+// safe to remove, running/paused/restarting/removing are runtime-active or
+// transitional, and any unrecognized value is unknown so deletion fails
+// closed rather than treating the container as stale.
+func classifyHelperContainerState(state string) helperContainerState {
+	switch state {
+	case "created", "exited", "dead":
+		return helperStateStale
+	case "running", "paused", "restarting", "removing":
+		return helperStateActive
+	default:
+		return helperStateUnknown
+	}
 }
 
 // launcherEnabledChangeResult is the explicit result of a Launcher
@@ -29,6 +65,21 @@ type helperContainer struct {
 type launcherEnabledChangeResult struct {
 	Changed           bool
 	RevokedSessionIDs []string
+	// AdmissionClosed is the effective operation-admission state this Launcher
+	// must hold after the committed transition, decided transactionally:
+	// closed iff Principal.enabled or the resulting Launcher.enabled does not
+	// hold. It is set whenever an enabled-state change was requested
+	// (enabled != nil), so callers apply it in memory after commit without
+	// another DB read; it is nil when only a rename was requested.
+	AdmissionClosed *bool
+}
+
+// launcherAdmission is one child Launcher's final operation-admission state,
+// decided transactionally during a Principal/Launcher enabled-state
+// transition: closed refuses new Operations for that Launcher.
+type launcherAdmission struct {
+	LauncherID string
+	Closed     bool
 }
 
 // persistLauncherChange performs a transactionally correct rename and/or
@@ -41,9 +92,11 @@ type launcherEnabledChangeResult struct {
 //   - when disabling, collects and deletes only that Launcher's Sessions
 //     regardless of whether the enabled state already changed (retry-safe:
 //     re-invoking disable must not skip session cleanup);
-//   - updates the enabled state when requested;
+//   - updates the enabled state when requested, deciding the Launcher's final
+//     operation-admission state transactionally (closed iff Principal.enabled
+//     or the resulting Launcher.enabled does not hold);
 //   - commits;
-//   - returns explicit Changed and RevokedSessionIDs.
+//   - returns explicit Changed, RevokedSessionIDs, and the admission decision.
 //
 // Re-enabling only flips the enabled state; it never recreates Sessions. A nil
 // name or enabled pointer leaves that field untouched.
@@ -63,13 +116,14 @@ func persistLauncherChange(db *sql.DB, launcherID string, name *string, enabled 
 	}
 
 	var currentEnabled int
+	var principalEnabled int
 	var principalName string
 	err = tx.QueryRow(
-		`SELECT l.enabled, p.username
+		`SELECT l.enabled, p.enabled, p.username
 		   FROM launchers l JOIN principals p ON p.id = l.principal_id
 		  WHERE l.id = ?`,
 		launcherID,
-	).Scan(&currentEnabled, &principalName)
+	).Scan(&currentEnabled, &principalEnabled, &principalName)
 	if err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
@@ -94,12 +148,20 @@ func persistLauncherChange(db *sql.DB, launcherID string, name *string, enabled 
 
 	var changed bool
 	var sessionIDs []string
+	var admissionClosed *bool
 	if enabled != nil {
 		newEnabled := 0
 		if *enabled {
 			newEnabled = 1
 		}
 		changed = currentEnabled != newEnabled
+
+		// The final operation-admission state for this Launcher is decided
+		// within this same transaction — closed iff Principal.enabled or the
+		// resulting Launcher.enabled does not hold — so the committed enable
+		// is applied in memory without another (fallible) DB read.
+		closed := principalEnabled == 0 || newEnabled == 0
+		admissionClosed = &closed
 
 		if !*enabled {
 			// Collect this Launcher's Session IDs before deletion for runtime
@@ -148,6 +210,7 @@ func persistLauncherChange(db *sql.DB, launcherID string, name *string, enabled 
 	return launcherEnabledChangeResult{
 		Changed:           changed,
 		RevokedSessionIDs: sessionIDs,
+		AdmissionClosed:   admissionClosed,
 	}, nil
 }
 
@@ -174,12 +237,14 @@ func (a *App) applyLauncherEnabledChange(launcherID string, enabled bool) (launc
 // Disabling quiesces Operation admission before the change commits and keeps
 // it closed on success (quiesce is the runtime companion of durable disabled
 // state); a failed durable change restores admission from the hierarchical
-// authorities. Enabling commits first, then re-syncs admission: a Launcher
-// enabled while its Principal is disabled stays quiesced. After a successful
-// disable commit, every deleted Session binding is released through the MAC
-// coordinator; running operations are NOT terminated. The returned projection
-// is composed from the pre-change row and the committed overrides, so success
-// is never followed by a fallible lookup.
+// authorities. Enabling commits first and then applies the admission state
+// that was decided transactionally as part of the same serialized durable
+// decision — no post-commit DB read can fail after durable success — so a
+// Launcher enabled while its Principal is disabled stays quiesced. After a
+// successful disable commit, every deleted Session binding is released through
+// the MAC coordinator; running operations are NOT terminated. The returned
+// projection is composed from the pre-change row and the committed overrides,
+// so success is never followed by a fallible lookup.
 //
 // updateLauncherWithLifecycle is a lock-owning lifecycle mutator: it holds
 // lifecycleMu for the whole transition so it cannot interleave with another
@@ -225,13 +290,12 @@ func (a *App) updateLauncherWithLifecycleLocked(launcherID string, name *string,
 	}
 
 	if enabled != nil && *enabled {
-		// Enable commits the enabled state first; only after that success does
-		// the Launcher's admission re-sync to the effective hierarchical
-		// authorities (Principal.enabled && Launcher.enabled). A Launcher
-		// enabled while its Principal is disabled stays quiesced.
-		if err := a.syncLauncherAdmission(launcherID); err != nil {
-			return nil, nil, err
-		}
+		// Enable commits the enabled state first. The final admission state
+		// was decided transactionally as part of the same serialized durable
+		// decision, so applying it here is non-fallible and requires no DB
+		// read: a Launcher enabled while its Principal is disabled stays
+		// quiesced.
+		a.OperationSupervisor.setQuiesced(launcherID, *result.AdmissionClosed)
 	}
 
 	updated := *cur
@@ -384,6 +448,8 @@ func (a *App) inspectHelperContainersForLauncher(ctx context.Context, launcherID
 		"--filter", "label="+runtimeLabelLauncherID+"="+launcherID,
 		// docker ps renders .State as a plain string ("running", "exited",
 		// ...) — unlike docker inspect, where .State.Running is a boolean.
+		// The raw state string is preserved verbatim and classified
+		// explicitly by classifyHelperContainerState.
 		"--format", "{{.ID}} {{.State}}")
 	out, err := cmd.Output()
 	if err != nil {
@@ -402,23 +468,24 @@ func (a *App) inspectHelperContainersForLauncher(ctx context.Context, launcherID
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("unexpected docker ps output: %q", line)
 		}
-		containers = append(containers, helperContainer{ID: parts[0], Running: parts[1] == "running"})
+		containers = append(containers, helperContainer{ID: parts[0], State: parts[1]})
 	}
 	return containers, nil
 }
 
-// removeStaleHelperContainers removes exited (non-running) helper containers.
-// It is part of the committed path of checked deletion, never the check: the
-// check inspects runtime without mutating it, and stale removal runs only after
-// the classification confirmed the runtime is quiescent. A removal failure is
-// authoritative and aborts the delete so helper-owned runtime is never left
-// behind silently. Only schema-coherent containers already classified as
-// attributable belong to this list; genuinely running containers are never
-// passed here.
+// removeStaleHelperContainers removes helper containers whose classification is
+// explicitly safe to remove (created/exited/dead). It is part of the committed
+// path of checked deletion, never the check: the check inspects runtime without
+// mutating it, and stale removal runs only after the classification confirmed
+// the runtime is quiescent. A removal failure is authoritative and aborts the
+// delete so helper-owned runtime is never left behind silently. The function
+// never removes a container that is not explicitly stale: an active or
+// unclassifiable container here is a caller-contract violation and aborts the
+// delete instead of mutating Docker state.
 func (a *App) removeStaleHelperContainers(ctx context.Context, containers []helperContainer) error {
 	for _, c := range containers {
-		if c.Running {
-			continue
+		if classifyHelperContainerState(c.State) != helperStateStale {
+			return fmt.Errorf("helper container %s is not in a removable state: %q", c.ID, c.State)
 		}
 		cmd := a.newDockerCommand(ctx, "docker", "rm", "-f", c.ID)
 		if err := cmd.Run(); err != nil {
@@ -465,9 +532,11 @@ type launcherRuntimeInspection struct {
 
 // inspectLauncherRuntime classifies a Launcher's runtime without mutating
 // anything. An Operation admitted before the quiesce is still running refuses
-// immediately on supervisor provenance (no Docker round-trip is needed); a
-// failure to inspect the attributable containers fails closed so a Launcher is
-// never deleted when its runtime cannot be classified.
+// immediately on supervisor provenance (no Docker round-trip is needed); an
+// attributable container in a runtime-active or transitional state refuses with
+// ErrLauncherRuntimeActive, and an unrecognized container state is a
+// classification error — both fail closed so a Launcher is never deleted when
+// its runtime cannot be classified, and neither mutates anything.
 func (a *App) inspectLauncherRuntime(ctx context.Context, launcherID string) (launcherRuntimeInspection, error) {
 	if a.OperationSupervisor.hasRunningForLauncher(launcherID) {
 		return launcherRuntimeInspection{active: true}, nil
@@ -477,8 +546,11 @@ func (a *App) inspectLauncherRuntime(ctx context.Context, launcherID string) (la
 		return launcherRuntimeInspection{}, err
 	}
 	for _, c := range containers {
-		if c.Running {
+		switch classifyHelperContainerState(c.State) {
+		case helperStateActive:
 			return launcherRuntimeInspection{containers: containers, active: true}, nil
+		case helperStateUnknown:
+			return launcherRuntimeInspection{}, fmt.Errorf("cannot classify helper container %s state %q", c.ID, c.State)
 		}
 	}
 	return launcherRuntimeInspection{containers: containers}, nil
@@ -538,9 +610,10 @@ func (a *App) disableLauncherLocked(launcherID string) ([]string, error) {
 	return result.RevokedSessionIDs, nil
 }
 
-// enableLauncher re-enables a Launcher after the enabled state successfully
-// commits, then re-syncs the supervisor admission to the effective hierarchical
-// authorities. When the Launcher's Principal is disabled, the Launcher's
+// enableLauncher re-enables a Launcher: the enabled state commits first, and
+// the final admission state — decided transactionally as part of the same
+// serialized durable decision — is applied in memory afterwards without
+// another DB read. When the Launcher's Principal is disabled, the Launcher's
 // launcher.enabled may become true but its runtime admission MUST remain
 // quiesced; admission reopens only once both authorities are enabled. Sessions
 // are never recreated; a fresh Session must be created against the enabled
@@ -557,10 +630,12 @@ func (a *App) enableLauncher(launcherID string) error {
 // enableLauncherLocked is the lock-already-held form of enableLauncher. It is
 // used internally by lifecycle mutators that already hold lifecycleMu.
 func (a *App) enableLauncherLocked(launcherID string) error {
-	if _, err := a.applyLauncherEnabledChange(launcherID, true); err != nil {
+	result, err := a.applyLauncherEnabledChange(launcherID, true)
+	if err != nil {
 		return err
 	}
-	return a.syncLauncherAdmission(launcherID)
+	a.OperationSupervisor.setQuiesced(launcherID, *result.AdmissionClosed)
+	return nil
 }
 
 // deleteLauncherChecked deletes a Launcher only after checked cleanup confirms
@@ -854,12 +929,14 @@ func (a *App) disablePrincipalLaunchersLocked(username string) (principalEnabled
 }
 
 // enablePrincipalLaunchers is the Principal-level companion of enableLauncher.
-// It persists the enabled=true transition first and only after the successful
-// commit re-syncs each child Launcher's admission to the effective hierarchical
-// authorities: only Launchers whose own launcher.enabled=true are reopened;
-// individually-disabled Launchers stay quiesced. It never mutates child
-// Launcher.enabled values. Sessions are never recreated; fresh Sessions must be
-// created against the re-enabled Principal.
+// It persists the enabled=true transition first; every child Launcher's final
+// admission state is computed transactionally as part of the same serialized
+// durable decision, and applying them after the commit is non-fallible and
+// requires no DB read: only Launchers whose own launcher.enabled=true are
+// reopened, individually-disabled Launchers stay quiesced, and every child is
+// applied in one in-memory step (no partial admission update). It never
+// mutates child Launcher.enabled values. Sessions are never recreated; fresh
+// Sessions must be created against the re-enabled Principal.
 //
 // enablePrincipalLaunchers is a lock-owning lifecycle mutator: it holds
 // lifecycleMu for the whole transition.
@@ -873,18 +950,12 @@ func (a *App) enablePrincipalLaunchers(username string) (principalEnabledChangeR
 // enablePrincipalLaunchers. It is used internally by lifecycle mutators that
 // already hold lifecycleMu.
 func (a *App) enablePrincipalLaunchersLocked(username string) (principalEnabledChangeResult, error) {
-	launchers, err := a.principalLaunchersByUsername(username)
-	if err != nil {
-		return principalEnabledChangeResult{}, err
-	}
 	result, err := a.applyPrincipalEnabledChange(username, true)
 	if err != nil {
 		return principalEnabledChangeResult{}, err
 	}
-	for _, lid := range launchers {
-		if err := a.syncLauncherAdmission(lid); err != nil {
-			return result, err
-		}
+	for _, la := range result.LauncherAdmissions {
+		a.OperationSupervisor.setQuiesced(la.LauncherID, la.Closed)
 	}
 	return result, nil
 }
