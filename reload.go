@@ -70,8 +70,18 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	started := time.Now()
 	ctx := r.Context()
 
+	// The authoritative global-allowed-root transition shares the lifecycle
+	// serialization with Session creation: resolution and the setConfig commit
+	// are one critical section, so a concurrent Session create either observes
+	// the old global roots or the new ones, never a mix, and a narrowing that
+	// linearizes before the create commits prevents that Session. The runtime
+	// config load (filesystem, trusted CA preparation) runs inside the
+	// boundary so a config resolved for the transition cannot be interleaved
+	// with another transition. Lock ordering: lifecycleMu -> a.mu (setConfig).
+	a.lifecycleMu.Lock()
 	newCfg, err := deps.loadAndPrepareRuntimeConfig()
 	if err != nil {
+		a.lifecycleMu.Unlock()
 		duration := time.Since(started).Round(time.Millisecond).String()
 		diagnostic := "invalid configuration"
 		var caErr *trustedCAPreparationError
@@ -100,6 +110,7 @@ func (a *App) handleReloadWithDeps(w http.ResponseWriter, r *http.Request, deps 
 	newCfg.HTTPAddress = oldCfg.HTTPAddress
 
 	a.setConfig(newCfg)
+	a.lifecycleMu.Unlock()
 
 	// Snapshot writers under read lock, then re-initialize loggers
 	// with the new log level and audit setting under write lock.

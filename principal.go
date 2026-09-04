@@ -128,11 +128,16 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (
 }
 
 // createPrincipalWithOptionalCredential creates a Principal, its default
-// allowed root, and (when issueCredential is true) an initial Principal
-// credential named "default" as one logical atomic operation in a single
-// transaction. Returns the Principal projection and, when issued, the initial
-// credential and its bearer secret exactly once. If the combined operation
-// cannot complete, no half-created Principal remains.
+// allowed root, its canonical 'default' Launcher, and (when issueCredential is
+// true) an initial Principal credential named "default" as one logical atomic
+// operation in a single transaction. Returns the Principal projection and, when
+// issued, the initial credential and its bearer secret exactly once. If the
+// combined operation cannot complete, no half-created Principal remains.
+//
+// The 'default' Launcher is provisioned unconditionally (inherit scope, no
+// launcher allowed roots, no credential): every Principal exists only through
+// the Launcher-owned Session model, so a freshly created Principal must never
+// lack its default ownership anchor.
 func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []string, issueCredential bool) (*PrincipalWithRoots, *CredentialWithPrincipal, string, error) {
 	if username == "" {
 		return nil, nil, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
@@ -187,6 +192,10 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 		principalID, canonicalHome,
 	); err != nil {
 		return nil, nil, "", fmt.Errorf("cannot add default allowed root: %w", err)
+	}
+
+	if _, err := ensureDefaultLauncher(tx, principalID); err != nil {
+		return nil, nil, "", fmt.Errorf("cannot provision default Launcher: %w", err)
 	}
 
 	var cred *CredentialWithPrincipal

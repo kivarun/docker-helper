@@ -2844,7 +2844,7 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 
 	// Provision the principal's default Launcher (the Session-creation owner in
 	// the cutover model).
-	launcher, _, _, err := createLauncher(app.DB, stalePrincipalID, "default", LauncherScopeInherit, nil, app.getConfig().AllowedRoots, false)
+	launcher, _, _, err := createLauncher(app.DB, stalePrincipalID, "stale", LauncherScopeInherit, nil, app.getConfig().AllowedRoots, false)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}

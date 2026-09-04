@@ -282,10 +282,14 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	policy, perr := a.resolveCreatePolicy(authCtx, sel, req.Workspace)
-	if perr != nil {
-		te := classifyCreateTargetError(perr)
-		if te != nil {
+	result, cerr := a.createSessionAuthorized(authCtx, sel, req.Workspace)
+	if cerr != nil {
+		// Stale-owner/enabled rejection at final persistence carries the same
+		// deterministic typed contract as resolution-time rejection
+		// (422 launcher_unavailable); the underlying cause is preserved in the
+		// operational log. 400 invalid_workspace remains the workspace-shape
+		// contract.
+		if te := classifyCreateTargetError(cerr); te != nil {
 			auditRec := auditRecord{
 				Event:     "session.create",
 				Workspace: req.Workspace,
@@ -294,39 +298,16 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			}
 			a.populateSessionAudit(&auditRec, authCtx)
 			writeRequestContextAudit(ctx, auditRec)
-			if errors.Is(perr, ErrLauncherUnavailable) {
+			if errors.Is(cerr, ErrLauncherUnavailable) {
 				opLog(ctx).Warn("session creation rejected",
 					slog.String("operation", "session_create"),
-					slog.String("error", perr.Error()),
+					slog.String("error", cerr.Error()),
 				)
 			}
 			writeError(ctx, w, te.status, te.code, te.msg)
 			return
 		}
-		// Unclassified resolution error is a database/system error.
-		resultCode := "database_error"
-		if errors.Is(perr, ErrSystem) {
-			resultCode = "system_error"
-		}
-		auditRec := auditRecord{
-			Event:     "session.create",
-			Workspace: req.Workspace,
-			Result:    resultCode,
-			Duration:  duration,
-		}
-		a.populateSessionAudit(&auditRec, authCtx)
-		writeRequestContextAudit(ctx, auditRec)
-		opLog(ctx).Error("session creation error",
-			slog.String("operation", "session_create"),
-			slog.String("error", perr.Error()),
-		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
-	}
-
-	result, err := a.createSessionWithPolicy(policy)
-	if err != nil {
-		resultCode := classifyCreateSessionError(err)
+		resultCode := classifyCreateSessionError(cerr)
 		auditRec := auditRecord{
 			Event:     "session.create",
 			Workspace: req.Workspace,
@@ -336,7 +317,7 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		a.populateSessionAudit(&auditRec, authCtx)
 		writeRequestContextAudit(ctx, auditRec)
 
-		if errors.Is(err, ErrInvalidWorkspace) {
+		if errors.Is(cerr, ErrInvalidWorkspace) {
 			// Log the internal cause to the operational log.
 			// The client receives the specific actionable cause (missing
 			// directory, not a directory, outside an allowed root, no allowed
@@ -344,13 +325,13 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			// internal implementation detail.
 			opLog(ctx).Warn("session creation rejected",
 				slog.String("operation", "session_create"),
-				slog.String("error", err.Error()),
+				slog.String("error", cerr.Error()),
 			)
-			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", workspaceErrorMessage(err))
+			writeError(ctx, w, http.StatusBadRequest, "invalid_workspace", workspaceErrorMessage(cerr))
 		} else {
 			opLog(ctx).Error("session creation error",
 				slog.String("operation", "session_create"),
-				slog.String("error", err.Error()),
+				slog.String("error", cerr.Error()),
 			)
 			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		}
@@ -529,6 +510,11 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		if workspace != "" {
 			auditRec.Workspace = workspace
 		}
+		if session != nil {
+			auditRec.LauncherID = session.LauncherID
+			auditRec.LauncherName = session.LauncherName
+			auditRec.PrincipalName = session.PrincipalName
+		}
 		a.populateSessionAudit(&auditRec, authCtx)
 		writeRequestContextAudit(ctx, auditRec)
 
@@ -554,6 +540,9 @@ func (a *App) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if session != nil {
 		auditRec.Workspace = session.Workspace
+		auditRec.LauncherID = session.LauncherID
+		auditRec.LauncherName = session.LauncherName
+		auditRec.PrincipalName = session.PrincipalName
 	}
 	a.populateSessionAudit(&auditRec, authCtx)
 	writeRequestContextAudit(ctx, auditRec)

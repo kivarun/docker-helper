@@ -237,19 +237,21 @@ set_up_principal() {
   GLOBAL_CRED_TOKEN="$(printf '%s\n' "$out" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
   [ -n "$GLOBAL_CRED_ID" ] && [ -n "$GLOBAL_CRED_TOKEN" ] || return 1
   printf '%s\n' "$GLOBAL_CRED_TOKEN" > "$credfile"; chmod 600 "$credfile"
-  # The final ownership model realizes a Principal's ownership through an
-  # enabled inherit-scope 'default' Launcher, and a selector-less
+  # The final ownership model provisions a Principal's enabled inherit-scope
+  # 'default' Launcher automatically at Principal creation (and startup
+  # migration backfills Principals that predate the rule), and a selector-less
   # principal-credential Session resolves to that Launcher (deriving the
-  # Principal through it). Without it the session create fails closed with
-  # launcher_not_found. The admin creates the default Launcher over the raw
-  # control-plane API using the system admin token (never printed; sent only
-  # as an Authorization header): raw HTTP is used because scenario F seeds
-  # state under the v2.0.0 upgrade baseline, which predates the Launcher
-  # control plane (route absent -> HTTP 404, a plain text 404 page, no JSON
-  # body). Under that baseline a principal Session must still be creatable
-  # WITHOUT a Launcher, so a 404 (route not implemented) is tolerated and the
-  # Session create below exercises that version's own ownership semantics. Any
-  # other status demands a live default Launcher.
+  # Principal through it). Under the v2.0.0 upgrade baseline (scenario F),
+  # which predates the Launcher control plane, provisioning does not exist:
+  # raw HTTP is used to create the default Launcher over the control-plane API
+  # with the system admin token (never printed; sent only as an Authorization
+  # header), because under that baseline the route is absent (HTTP 404, a
+  # plain text 404 page, no JSON body). Under that baseline a principal Session
+  # must still be creatable WITHOUT a Launcher, so a 404 (route not
+  # implemented) is tolerated and the Session create below exercises that
+  # version's own ownership semantics. Any other status demands a live default
+  # Launcher — creation conflict (409) from the candidate's own eager
+  # provisioning is also acceptable, since the required state already exists.
   ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
   [ -n "$ADMIN_TOKEN" ] || { echo "error: could not read the admin token from /etc/docker-helper/admin.token" >&2; return 1; }
   LAUNCHER_HTTP="$(curl --silent --output /tmp/r2ac-launcher.json --write-out '%{http_code}' --max-time 5 \
@@ -258,8 +260,11 @@ set_up_principal() {
     -d '{"scope":"inherit"}' "http://localhost/principals/$user/launchers" 2>/dev/null || true)"
   if [ "$LAUNCHER_HTTP" != "404" ]; then
     LAUNCHER_JSON="$(cat /tmp/r2ac-launcher.json 2>/dev/null || true)"
+    # 200: the baseline/admin path created the Launcher. 409: the candidate
+    # already provisioned 'default' eagerly at Principal creation — the
+    # required state exists. Anything else is a real failure.
     printf '%s\n' "$LAUNCHER_JSON" | grep -q '"ok":true' \
-      || { echo "error: default launcher create for principal '$user' failed (http=$LAUNCHER_HTTP): $LAUNCHER_JSON" >&2; return 1; }
+      || { [ "$LAUNCHER_HTTP" = "409" ] || { echo "error: default launcher create for principal '$user' failed (http=$LAUNCHER_HTTP): $LAUNCHER_JSON" >&2; return 1; }; }
   fi
   json="$(dh session create --system --token-file "$credfile" --workspace "$home/ws" --json 2>/dev/null)" || return 1
   GLOBAL_SESSION_ID="$(printf '%s' "$json" | json_field id)"
@@ -1587,20 +1592,21 @@ if [ -n "${H_ALPHA_SESS:-}" ] && [ -n "${H_BETA_SESS:-}" ]; then
     H_ALPHA_SHOW2="$(dh launcher show --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null || true)"
     H_ADMIN_LIST="$(dh session list --system --token-file /etc/docker-helper/admin.token --json 2>/dev/null || true)"
     if [ "$H_DEL_ACT_HTTP" = 409 ] \
-        && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": false' \
+        && printf '%s\n' "$H_ALPHA_SHOW2" | grep -q '"enabled": true' \
         && [ -n "$H_ADMIN_LIST" ] \
-        && ! printf '%s\n' "$H_ADMIN_LIST" | grep -q "$H_RT_SESS"; then
-      acc_ok "launcher delete refused while runtime is active (409, launcher disabled, sessions invalidated)"
+        && printf '%s\n' "$H_ADMIN_LIST" | grep -q "$H_RT_SESS"; then
+      acc_ok "launcher delete refused side-effect-free while runtime is active (409 launcher_runtime_active, launcher stays enabled, sessions intact)"
     else
-      acc_fail "checked delete did not enforce the sanctioned 409 semantics (http=$H_DEL_ACT_HTTP)"
+      acc_fail "checked delete did not enforce the sanctioned side-effect-free 409 semantics (http=$H_DEL_ACT_HTTP)"
     fi
     # The daemon does not terminate running operations, and the refused delete
-    # already invalidated the Launcher's Sessions; the operator stops the
-    # container and retries the delete ("retries after the runtime exits").
-    # The runtime-active refusal is retryable: the run operation finalizes
-    # shortly after the container exits (its own completion path also releases
-    # the MAC bindings), so poll the delete until the daemon itself reports the
-    # runtime inactive instead of inferring finalization from side signals.
+    # must not invalidate the Launcher's Sessions (side-effect-free refusal);
+    # the operator stops the container and retries the delete ("retries after
+    # the runtime exits"). The runtime-active refusal is retryable: the run
+    # operation finalizes shortly after the container exits (its own completion
+    # path also releases the MAC bindings), so poll the delete until the daemon
+    # itself reports the runtime inactive instead of inferring finalization
+    # from side signals.
     docker stop -t 5 "$H_RT_CID" >/dev/null 2>&1 || true
     if wait_no_container "$H_RT_CID"; then
       H_DELETED=false

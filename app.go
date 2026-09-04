@@ -22,8 +22,9 @@ type App struct {
 	mu     sync.RWMutex
 	Config *Config
 	// lifecycleMu serializes ownership-lifecycle control-plane mutations that
-	// share admission authority (Launcher create / enabled transition / delete,
-	// Principal enabled transition / delete). It excludes Session and data-plane
+	// share admission authority (Launcher create / PATCH rename+enable+disable /
+	// scope replace / delete, Principal allowed-root add+remove / enabled
+	// transition / delete, config reload). It excludes Session and data-plane
 	// (admit / pull / build / run) requests and read-only ownership queries, so
 	// only lifecycle mutations contend. It is never acquired recursively; the
 	// lifecycle mutators split into lock-owning and *Locked-variant

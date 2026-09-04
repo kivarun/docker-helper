@@ -330,8 +330,8 @@ func TestCancelClassificationUsesSentinels(t *testing.T) {
 	}
 
 	// Terminal operation -> ErrOperationAlreadyTerminal.
-	op := newRunOperation("sess", "img", 4*1024*1024, "")
-	if !sup.admit(op) {
+	op := newRunOperation("sess", "img", 4*1024*1024, "", "", "")
+	if sup.admit(op) != admissionAccepted {
 		t.Fatal("admit failed")
 	}
 	op.succeed(nil)
@@ -603,7 +603,7 @@ func TestTerminationReasonOwnershipCancelFirst(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
 	app.OperationSupervisor.mu.Lock()
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
@@ -655,7 +655,7 @@ func TestTerminationReasonOwnershipShutdownFirst(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
 	app.OperationSupervisor.mu.Lock()
 	app.OperationSupervisor.ops[op.ID] = op
 	app.OperationSupervisor.mu.Unlock()
@@ -709,7 +709,7 @@ func TestTerminalTransitionSucceedWins(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
 
 	// Barrier: fail waits until succeed has completed the transition.
 	succeedDone := make(chan struct{})
@@ -799,7 +799,7 @@ func TestTerminalTransitionFailWins(t *testing.T) {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
 
 	// Barrier: succeed waits until fail has completed the transition.
 	failDone := make(chan struct{})
@@ -957,7 +957,7 @@ func TestCancelAfterNaturalFailurePreservesResult(t *testing.T) {
 	}
 
 	// Register an already-terminal build operation with a natural failure.
-	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "")
+	op := newBuildOperation(result.Session.ID, "test:image", ".", "Dockerfile", 4*1024*1024, "", "", "")
 	op.fail("docker_build_failed", "build failed", nil)
 	app.OperationSupervisor.mu.Lock()
 	app.OperationSupervisor.ops[op.ID] = op
@@ -1152,7 +1152,7 @@ func TestCancelPlusShutdownCleanup(t *testing.T) {
 	}
 
 	// Create a run operation directly with cidfile set.
-	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "")
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
 	op.cidfile = cidfile
 	op.started = true // simulate already-started process
 	app.OperationSupervisor.mu.Lock()
@@ -1294,7 +1294,7 @@ func TestForceCleanupLateFollowerSharedDeadline(t *testing.T) {
 	}
 
 	// Create a run operation with force cleanup already claimed by an owner.
-	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "")
+	op := newRunOperation(result.Session.ID, "test:image", 4*1024*1024, "", "", "")
 	op.started = true
 	op.forceOwned = true
 	op.forceDone = make(chan struct{})

@@ -121,7 +121,7 @@ func TestPruneCompletedConcurrency(t *testing.T) {
 		<-start
 		for i := 0; i < iterations; i++ {
 			op := newTestOperation(t, operationRunning, time.Time{})
-			if supervisor.admit(op) {
+			if supervisor.admit(op) == admissionAccepted {
 				// Complete the operation.
 				op.mu.Lock()
 				now := time.Now()

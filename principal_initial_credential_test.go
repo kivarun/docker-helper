@@ -171,12 +171,152 @@ func TestPrincipalCreateInitialCredentialAtomicRollback(t *testing.T) {
 	}
 }
 
+// TestPrincipalCreateProvisionsDefaultLauncherAtomically proves Principal
+// creation provisions the canonical 'default' Launcher in the same
+// transaction: a successful create leaves an enabled inherit-scope default
+// Launcher with no roots and no credential, and a rolled-back create (forced
+// credential failure) leaves no Launcher row either — no half-provisioned
+// Principal.
+func TestPrincipalCreateProvisionsDefaultLauncherAtomically(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+
+	t.Run("success", func(t *testing.T) {
+		home := filepath.Join(globalRoots[0], "home", "prov")
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		installOSUserMock(t, map[string]string{"prov": home})
+
+		if _, _, _, err := createPrincipalWithOptionalCredential(db, "prov", globalRoots, false); err != nil {
+			t.Fatalf("createPrincipalWithOptionalCredential: %v", err)
+		}
+		pid, err := findPrincipalIDByUsername(db, "prov")
+		if err != nil {
+			t.Fatal(err)
+		}
+		launcherID, err := findDefaultLauncher(db, int64(pid))
+		if err != nil {
+			t.Fatalf("expected auto-provisioned default Launcher, got %v", err)
+		}
+		if !strings.HasPrefix(launcherID, launcherIDPrefix) {
+			t.Errorf("expected dhl_ prefix, got %q", launcherID)
+		}
+		var enabled int
+		var scope string
+		if err := db.QueryRow(`SELECT enabled, scope_mode FROM launchers WHERE id=?`, launcherID).Scan(&enabled, &scope); err != nil {
+			t.Fatal(err)
+		}
+		if enabled != 1 || scope != string(LauncherScopeInherit) {
+			t.Errorf("expected enabled inherit-scope default Launcher, got enabled=%d scope=%s", enabled, scope)
+		}
+		var rootCount, credCount int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM launcher_allowed_roots WHERE launcher_id=?`, launcherID).Scan(&rootCount); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE launcher_id=?`, launcherID).Scan(&credCount); err != nil {
+			t.Fatal(err)
+		}
+		if rootCount != 0 || credCount != 0 {
+			t.Errorf("expected no roots and no credential on the default Launcher, got roots=%d creds=%d", rootCount, credCount)
+		}
+	})
+
+	t.Run("rollback", func(t *testing.T) {
+		home := filepath.Join(globalRoots[0], "home", "rb")
+		if err := os.MkdirAll(home, 0755); err != nil {
+			t.Fatal(err)
+		}
+		installOSUserMock(t, map[string]string{"rb": home})
+
+		// Force the credential token generation to fail deterministically.
+		orig := generateCredentialTokenFn
+		generateCredentialTokenFn = func() (string, error) {
+			return "", errors.New("forced token failure")
+		}
+		defer func() { generateCredentialTokenFn = orig }()
+
+		if _, _, _, err := createPrincipalWithOptionalCredential(db, "rb", globalRoots, true); err == nil {
+			t.Fatal("expected credential insertion failure")
+		}
+
+		var launcherCount int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM launchers l JOIN principals p ON p.id=l.principal_id WHERE p.username='rb'`,
+		).Scan(&launcherCount); err != nil {
+			t.Fatal(err)
+		}
+		if launcherCount != 0 {
+			t.Errorf("expected no Launcher after rollback, got %d", launcherCount)
+		}
+	})
+}
+
+// TestMigrateDefaultLaunchersBackfillsMissing proves the startup backfill
+// provisions a default Launcher exactly for Principals that lack one, is
+// idempotent (a second run provisions nothing), and never touches existing
+// defaults.
+func TestMigrateDefaultLaunchersBackfillsMissing(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+
+	// One Principal with an explicit non-default launcher (as a 2.0-era
+	// Principal without its default Launcher would look).
+	home := filepath.Join(globalRoots[0], "home", "legacy")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"legacy": home})
+	p, _, _, err := createPrincipalWithOptionalCredential(db, "legacy", globalRoots, false)
+	if err != nil {
+		t.Fatalf("createPrincipalWithOptionalCredential: %v", err)
+	}
+	if _, _, _, err := createLauncher(db, int64(p.ID), "agent", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+	// Remove the auto-provisioned default to reproduce the pre-invariant state.
+	if _, err := db.Exec(`DELETE FROM launchers WHERE principal_id=? AND name='default'`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := migrateDefaultLaunchers(db)
+	if err != nil {
+		t.Fatalf("migrateDefaultLaunchers: %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("expected 1 provisioned default Launcher, got %d", created)
+	}
+	launcherID, err := findDefaultLauncher(db, int64(p.ID))
+	if err != nil {
+		t.Fatalf("expected backfilled default Launcher, got %v", err)
+	}
+	var scope string
+	if err := db.QueryRow(`SELECT scope_mode FROM launchers WHERE id=?`, launcherID).Scan(&scope); err != nil {
+		t.Fatal(err)
+	}
+	if scope != string(LauncherScopeInherit) {
+		t.Errorf("expected inherit-scope backfilled default, got %s", scope)
+	}
+
+	// Idempotent: a second run provisions nothing.
+	again, err := migrateDefaultLaunchers(db)
+	if err != nil {
+		t.Fatalf("second migrateDefaultLaunchers: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("expected idempotent second run, got %d provisioned", again)
+	}
+}
+
 // TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLookup
 // proves createPrincipalWithOptionalCredential returns a projection built from
-// committed values: even with every query rejected, the function succeeds and
-// returns the one-time bearer secret because it never queries the DB (it only
-// Execs within the transaction). Were the removed post-commit
-// findPrincipalByUsername still performed, that query would be rejected here.
+// committed values: with every query after the transaction's own pre-commit
+// reads rejected, the function still succeeds and returns the one-time bearer
+// secret because it never queries the DB after commit (it only Execs within the
+// transaction). Were the removed post-commit findPrincipalByUsername still
+// performed, that query would be rejected here. The two pre-commit queries the
+// driver must permit are ensureDefaultLauncher's lookup and its post-insert
+// canonical re-read.
 func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLookup(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.db"
@@ -195,8 +335,8 @@ func TestPrincipalCreateInitialCredentialReturnsProjectionWithoutPostCommitLooku
 	}
 	installOSUserMock(t, map[string]string{"t": home})
 
-	// Reject every query; the creation path must not need any.
-	fq := newFailQueryDB(t, path, errMockQueryFail)
+	// Permit the transaction's pre-commit queries, reject everything after.
+	fq := newFailQueryAfterDB(t, path, 2, errMockQueryFail)
 	defer fq.Close()
 
 	p, cred, token, err := createPrincipalWithOptionalCredential(fq, "t", globalRoots, true)

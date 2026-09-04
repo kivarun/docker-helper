@@ -736,7 +736,7 @@ func TestOperationForSessionUnknownID(t *testing.T) {
 // returns nil when the operation belongs to a different session.
 func TestOperationForSessionForeignSession(t *testing.T) {
 	supervisor := newOperationSupervisor()
-	op := newRunOperation("other-session", "alpine:latest", 1024, "")
+	op := newRunOperation("other-session", "alpine:latest", 1024, "", "", "")
 	supervisor.admit(op)
 
 	app := &App{OperationSupervisor: supervisor}
@@ -750,7 +750,7 @@ func TestOperationForSessionForeignSession(t *testing.T) {
 // returns the operation when the session matches.
 func TestOperationForSessionOwner(t *testing.T) {
 	supervisor := newOperationSupervisor()
-	op := newRunOperation("session-1", "alpine:latest", 1024, "")
+	op := newRunOperation("session-1", "alpine:latest", 1024, "", "", "")
 	supervisor.admit(op)
 
 	app := &App{OperationSupervisor: supervisor}

@@ -462,7 +462,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	bufSize := cfg.OperationLogMaxBytes
 
 	// Create run operation and register it.
-	op := newRunOperation(session.ID, req.Image, bufSize, session.PrincipalName)
+	op := newRunOperation(session.ID, req.Image, bufSize, session.PrincipalName, session.LauncherID, session.LauncherName)
 	op.LauncherID = session.LauncherID
 	op.auditCommandArgCount = cmdArgCount
 	op.auditMounts = mountAudit
@@ -519,7 +519,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 
 	// Register the operation. Single admit after all pins are created.
 	if a.OperationSupervisor != nil {
-		if !a.OperationSupervisor.admit(op) {
+		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
 			// Cleanup pins before releasing lease.
 			pinCleanupErr := false
 			for j := len(pinnedMounts) - 1; j >= 0; j-- {
@@ -538,7 +538,11 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 					slog.String("operation", "run"),
 				)
 			}
-			writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
+			if decision == admissionRefusedShutdown {
+				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "run", "shutting_down", "daemon is shutting down", session.PrincipalName)
+			} else {
+				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "run", "launcher_unavailable", "launcher is not available", session.PrincipalName)
+			}
 			return
 		}
 		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
@@ -559,6 +563,8 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		ShmSize:           op.auditShmSize,
 		TrustedCAInjected: trustedCAInjected,
 		PrincipalName:     session.PrincipalName,
+		LauncherID:        session.LauncherID,
+		LauncherName:      session.LauncherName,
 	})
 
 	// Container security label determined above (before pins/registration/audit).

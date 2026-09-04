@@ -135,6 +135,17 @@ type sessionCreatePolicy struct {
 }
 
 func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.createSessionWithPolicyLocked(p)
+}
+
+// createSessionWithPolicyLocked is the lock-already-held form of
+// createSessionWithPolicy: the lifecycle serialization is already held, so
+// policy resolution and persistence cannot interleave with an authority
+// mutation. It performs one lifecycle critical section from workspace
+// validation through MAC preparation and the conditional final persistence.
+func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSession, error) {
 	if p.Workspace == "" {
 		return nil, fmt.Errorf("workspace is required: %w", ErrInvalidWorkspace)
 	}
@@ -222,8 +233,10 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 		}
 		// Verify exactly one row was inserted. If zero, the Launcher or its
 		// Principal was disabled or deleted between authentication and this
-		// insert. (RowsAffected is not reliable with INSERT...SELECT in SQLite,
-		// so we verify by checking the session exists.)
+		// insert. Under lifecycle serialization this cannot interleave with a
+		// policy mutation, so it surfaces only as a defense-in-depth recheck;
+		// the stale-owner rejection is a deterministic typed contract
+		// (422 launcher_unavailable), never an invalid_workspace relabel.
 		var count int
 		err = a.DB.QueryRow(
 			`SELECT COUNT(*) FROM sessions WHERE id = ?`,
@@ -233,7 +246,7 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 			return err
 		}
 		if count == 0 {
-			return fmt.Errorf("launcher is no longer enabled: %w", ErrInvalidWorkspace)
+			return fmt.Errorf("launcher is no longer available: %w", ErrLauncherUnavailable)
 		}
 		return nil
 	}
@@ -243,14 +256,22 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 			return insertSession()
 		})
 		if err != nil {
-			// Classify: MAC preparation errors vs DB insert errors.
-			if errors.Is(err, ErrMACPreparation) {
+			// Classify: stale-owner recheck, MAC preparation, and DB insert
+			// errors. The stale-owner rejection keeps its typed contract.
+			switch {
+			case errors.Is(err, ErrLauncherUnavailable):
+				return nil, fmt.Errorf("cannot create session: %w", err)
+			case errors.Is(err, ErrMACPreparation):
 				return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrMAC)
+			default:
+				return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
 			}
-			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
 		}
 	} else {
 		if err := insertSession(); err != nil {
+			if errors.Is(err, ErrLauncherUnavailable) {
+				return nil, fmt.Errorf("cannot create session: %w", err)
+			}
 			return nil, fmt.Errorf("cannot create session: %w: %w", err, ErrDatabase)
 		}
 	}
@@ -276,12 +297,27 @@ func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, 
 // the daemon-owner 'default' Launcher under the collapsed global roots; system
 // mode has no implicit default and resolves a missing-selector error. It is
 // the request-time-equivalent used by tests and any non-selector caller.
-func (a *App) createSession(workspace string) (*CreatedSession, error) {
-	policy, err := a.resolveCreatePolicy(&sessionControlAuthority{isAdmin: true}, createSelector{}, workspace)
+// createSessionAuthorized is the single linearized Session-create owner for an
+// authenticated authority: it holds the lifecycle serialization across
+// current-policy resolution through final Session persistence, so a concurrent
+// narrowing of any policy authority (global allowed roots, Principal allowed
+// roots, Launcher scope, Launcher/Principal enabled state, Launcher
+// existence/ownership) that linearizes before the create commits prevents that
+// Session, and one that linearizes after leaves the created Session intact.
+// It never mutates policy; it only consumes it.
+func (a *App) createSessionAuthorized(auth *sessionControlAuthority, sel createSelector, workspace string) (*CreatedSession, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+
+	policy, err := a.resolveCreatePolicy(auth, sel, workspace)
 	if err != nil {
 		return nil, err
 	}
-	return a.createSessionWithPolicy(policy)
+	return a.createSessionWithPolicyLocked(policy)
+}
+
+func (a *App) createSession(workspace string) (*CreatedSession, error) {
+	return a.createSessionAuthorized(&sessionControlAuthority{isAdmin: true}, createSelector{}, workspace)
 }
 
 // listSessions returns all active sessions in admin scope.

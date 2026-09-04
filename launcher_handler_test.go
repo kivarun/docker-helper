@@ -81,7 +81,7 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 
 	// Create with issue_credential=true.
 	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
-		`{"name":"default","scope":"inherit","allowed_roots":[],"issue_credential":true}`)
+		`{"name":"agent","scope":"inherit","allowed_roots":[],"issue_credential":true}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -90,7 +90,7 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := created.Launcher
-	if l.Principal != "alice" || l.Name != "default" || l.Scope != "inherit" || !l.Enabled {
+	if l.Principal != "alice" || l.Name != "agent" || l.Scope != "inherit" || !l.Enabled {
 		t.Errorf("unexpected launcher JSON: %+v", l)
 	}
 	if created.Credential == nil || !strings.HasPrefix(created.Token, credentialTokenPrefix) {
@@ -106,8 +106,9 @@ func TestLauncherHandlerAdminLifecycle(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Launchers) != 1 {
-		t.Fatalf("expected 1 launcher, got %d", len(list.Launchers))
+	// The created launcher plus the Principal's auto-provisioned 'default'.
+	if len(list.Launchers) != 2 {
+		t.Fatalf("expected 2 launchers (created + auto-provisioned default), got %d", len(list.Launchers))
 	}
 
 	// Show.
@@ -213,38 +214,40 @@ func TestLauncherHandlerCreateValidation(t *testing.T) {
 
 	// duplicate name -> 409 launcher_exists
 	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
-		`{"name":"default","scope":"inherit"}`)
+		`{"name":"agent","scope":"inherit"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("first create: expected 201, got %d %s", w.Code, w.Body.String())
 	}
 	w = launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
-		`{"name":"default","scope":"inherit"}`)
+		`{"name":"agent","scope":"inherit"}`)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "launcher_exists") {
 		t.Fatalf("duplicate: expected 409 launcher_exists, got %d %s", w.Code, w.Body.String())
 	}
 }
 
 // TestLauncherHandlerCreateNamePresence proves the frozen Launcher-create name
-// contract: an omitted "name" field selects defaultLauncherName, while an
-// explicitly supplied value — the empty string, JSON null, or any
-// grammar-invalid value — is validated exactly as supplied and rejected
-// instead of being reinterpreted as omission.
+// contract: an omitted "name" field selects defaultLauncherName — which, for a
+// freshly created Principal, is the auto-provisioned 'default' Launcher and
+// therefore conflicts — while an explicitly supplied value — the empty string,
+// JSON null, or any grammar-invalid value — is validated exactly as supplied
+// and rejected instead of being reinterpreted as omission.
 func TestLauncherHandlerCreateNamePresence(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Each case gets its own principal so successes and rejections are
 	// independent (no cross-case launcher_exists interference).
 	cases := []struct {
-		username string
-		body     string
-		wantCode int
-		wantName string
+		username  string
+		body      string
+		wantCode  int
+		wantName  string
+		wantError string
 	}{
-		{"presence1", `{"scope":"inherit"}`, http.StatusCreated, "default"},
-		{"presence2", `{"name":"default","scope":"inherit"}`, http.StatusCreated, "default"},
-		{"presence3", `{"name":"","scope":"inherit"}`, http.StatusBadRequest, ""},
-		{"presence4", `{"name":" Foo ","scope":"inherit"}`, http.StatusBadRequest, ""},
-		{"presence5", `{"name":null,"scope":"inherit"}`, http.StatusBadRequest, ""},
+		{"presence1", `{"scope":"inherit"}`, http.StatusConflict, "", "launcher_exists"},
+		{"presence2", `{"name":"agent","scope":"inherit"}`, http.StatusCreated, "agent", ""},
+		{"presence3", `{"name":"","scope":"inherit"}`, http.StatusBadRequest, "", "invalid_launcher_name"},
+		{"presence4", `{"name":" Foo ","scope":"inherit"}`, http.StatusBadRequest, "", "invalid_launcher_name"},
+		{"presence5", `{"name":null,"scope":"inherit"}`, http.StatusBadRequest, "", "invalid_launcher_name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
@@ -265,10 +268,11 @@ func TestLauncherHandlerCreateNamePresence(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(w.Body.String(), "invalid_launcher_name") {
-				t.Fatalf("create %s: expected invalid_launcher_name, got %s", tc.body, w.Body.String())
+			if !strings.Contains(w.Body.String(), tc.wantError) {
+				t.Fatalf("create %s: expected %s, got %s", tc.body, tc.wantError, w.Body.String())
 			}
-			// Rejection must not have created anything.
+			// Rejection must not have added a launcher beyond the Principal's
+			// auto-provisioned 'default' Launcher.
 			w = launcherRequest(t, app, http.MethodGet,
 				"/principals/"+tc.username+"/launchers", testAdminToken, "")
 			if w.Code != http.StatusOK {
@@ -278,8 +282,8 @@ func TestLauncherHandlerCreateNamePresence(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
 				t.Fatal(err)
 			}
-			if len(list.Launchers) != 0 {
-				t.Fatalf("rejected create %s must not create a launcher, got %d", tc.body, len(list.Launchers))
+			if len(list.Launchers) != 1 {
+				t.Fatalf("rejected create %s must not add a launcher, got %d", tc.body, len(list.Launchers))
 			}
 		})
 	}
@@ -306,7 +310,7 @@ func TestLauncherHandlerPrincipalCredentialManagesOwn(t *testing.T) {
 
 	// Create under self.
 	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", credToken,
-		`{"name":"default","scope":"inherit","issue_credential":true}`)
+		`{"name":"agent","scope":"inherit","issue_credential":true}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -359,7 +363,7 @@ func TestLauncherHandlerPrincipalCredentialForeignPrincipalPath(t *testing.T) {
 
 	// Foreign username (whether or not it exists) is non-disclosing 404.
 	w := launcherRequest(t, app, http.MethodPost, "/principals/bob/launchers", credToken,
-		`{"name":"default"}`)
+		`{"name":"agent"}`)
 	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "principal_not_found") {
 		t.Fatalf("expected 404 principal_not_found, got %d %s", w.Code, w.Body.String())
 	}
@@ -386,7 +390,7 @@ func TestLauncherHandlerPrincipalCredentialForeignLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobsLauncher, _, _, err := createLauncher(app.DB, int64(pb.ID), "default", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
+	bobsLauncher, _, _, err := createLauncher(app.DB, int64(pb.ID), "work", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,14 +432,8 @@ func TestLauncherHandlerScopedSelectorResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliceDefault, _, _, err := createLauncher(app.DB, int64(pa.ID), "default", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobDefault, _, _, err := createLauncher(app.DB, int64(pb.ID), "default", LauncherScopeInherit, nil, app.Config.AllowedRoots, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	aliceDefaultID := mustAddDefaultLauncher(t, app.DB, int64(pa.ID))
+	bobDefaultID := mustAddDefaultLauncher(t, app.DB, int64(pb.ID))
 
 	// Name and ID resolve the same Launcher.
 	byName := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/alpha", testAdminToken, "")
@@ -455,12 +453,12 @@ func TestLauncherHandlerScopedSelectorResolution(t *testing.T) {
 
 	// The same name under two Principals resolves independently.
 	aliceDef := launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/default", testAdminToken, "")
-	if got := decodeLauncher(t, aliceDef); aliceDef.Code != http.StatusOK || got.ID != aliceDefault.ID {
-		t.Errorf("alice/default: expected %q, got %q (http=%d)", aliceDefault.ID, got.ID, aliceDef.Code)
+	if got := decodeLauncher(t, aliceDef); aliceDef.Code != http.StatusOK || got.ID != aliceDefaultID {
+		t.Errorf("alice/default: expected %q, got %q (http=%d)", aliceDefaultID, got.ID, aliceDef.Code)
 	}
 	bobDef := launcherRequest(t, app, http.MethodGet, "/principals/bob/launchers/default", testAdminToken, "")
-	if got := decodeLauncher(t, bobDef); bobDef.Code != http.StatusOK || got.ID != bobDefault.ID {
-		t.Errorf("bob/default: expected %q, got %q (http=%d)", bobDefault.ID, got.ID, bobDef.Code)
+	if got := decodeLauncher(t, bobDef); bobDef.Code != http.StatusOK || got.ID != bobDefaultID {
+		t.Errorf("bob/default: expected %q, got %q (http=%d)", bobDefaultID, got.ID, bobDef.Code)
 	}
 
 	// A name that exists only under another Principal is not found through the
@@ -533,7 +531,7 @@ func TestLauncherHandlerLauncherCredentialUnauthorizedControl(t *testing.T) {
 		mux := http.NewServeMux()
 		registerRoutes(mux, app)
 		req := httptest.NewRequest(http.MethodPost, "/principals/alice/launchers", strings.NewReader(
-			`{"name":"default","scope":"inherit","issue_credential":true}`))
+			`{"name":"agent","scope":"inherit","issue_credential":true}`))
 		withAdminToken(req)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
@@ -588,7 +586,7 @@ func TestLauncherHandlerCredentialRotateNotFound(t *testing.T) {
 	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")
 
 	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
-		`{"name":"default","scope":"inherit"}`)
+		`{"name":"agent","scope":"inherit"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", w.Code)
 	}
@@ -610,7 +608,7 @@ func TestLauncherHandlerCredentialSecondIssueConflict(t *testing.T) {
 	_, _ = setupLauncherHandlerPrincipal(t, app, "alice")
 
 	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
-		`{"name":"default","scope":"inherit"}`)
+		`{"name":"agent","scope":"inherit"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", w.Code)
 	}

@@ -227,24 +227,22 @@ func initializeDatabase(db *sql.DB) error {
 	return nil
 }
 
-// launchersNameInvariantFragments are the CHECK fragments that enforce the
-// Launcher-name grammar in the launchers table schema. Only this binary's
-// initializeDatabase writes that CREATE TABLE statement, so the fragments
-// must appear verbatim in the declared schema.
-var launchersNameInvariantFragments = []string{
-	"length(name) BETWEEN 1 AND 63",
-	`name NOT GLOB '*[^a-z0-9-]*'`,
-	`name NOT GLOB '-*'`,
-	`name NOT GLOB '*-'`,
-}
+// launchersNameCheck is the canonical Launcher-name grammar CHECK expression,
+// normalized (lowercase, whitespace-stripped) for comparison against the
+// declared schema in sqlite_master. Only this binary's initializeDatabase
+// writes that CREATE TABLE statement, so the expression must appear exactly:
+// grammar fragments occurring elsewhere in the DDL (reordered clauses, a
+// partial grammar, or additional CHECK constraints) are not the canonical
+// schema and must be rejected.
+const launchersNameCheck = "check(length(name)between1and63andnamenotglob'*[^a-z0-9-]*'andnamenotglob'-*'andnamenotglob'*-')"
 
 // verifyLaunchersNameInvariant fails closed when the launchers table does not
-// enforce the Launcher-name grammar. Released v2.0.0 databases contain no
-// launchers table, and fresh databases are created with the CHECK constraint;
-// only a database produced by an intermediate unreleased 2.1 development
-// commit can carry the pre-invariant shape. Such state is unsupported: startup
-// fails with an actionable error instead of silently continuing with weaker
-// enforcement, and invalid rows are never rewritten.
+// declare the canonical Launcher-name grammar CHECK. Released v2.0.0 databases
+// contain no launchers table, and fresh databases are created with the CHECK
+// constraint; only a database produced by an intermediate unreleased 2.1
+// development commit can carry the pre-invariant shape. Such state is
+// unsupported: startup fails with an actionable error instead of silently
+// continuing with weaker enforcement, and invalid rows are never rewritten.
 func verifyLaunchersNameInvariant(db *sql.DB) error {
 	var ddl string
 	err := db.QueryRow(
@@ -253,13 +251,14 @@ func verifyLaunchersNameInvariant(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("cannot read launchers table schema: %w", err)
 	}
-	for _, fragment := range launchersNameInvariantFragments {
-		if !strings.Contains(ddl, fragment) {
-			return errors.New("launchers table does not enforce the launcher-name invariant; " +
-				"this database has an unsupported intermediate pre-release 2.1 Launcher schema " +
-				"and cannot be opened by this build: restore a pre-2.1 backup, or recreate the " +
-				"database only if its current state is disposable")
-		}
+	// Do not accept merely because the grammar fragments occur somewhere in
+	// the DDL: require the exact canonical CHECK expression.
+	normalized := strings.ToLower(strings.Join(strings.Fields(ddl), ""))
+	if !strings.Contains(normalized, launchersNameCheck) {
+		return errors.New("launchers table does not enforce the launcher-name invariant; " +
+			"this database has an unsupported intermediate pre-release 2.1 Launcher schema " +
+			"and cannot be opened by this build: restore a pre-2.1 backup, or recreate the " +
+			"database only if its current state is disposable")
 	}
 	return nil
 }

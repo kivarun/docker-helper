@@ -482,3 +482,46 @@ func checkSessionsForeignKeys(tx *sql.Tx) error {
 	}
 	return fmt.Errorf("cannot run session ownership integrity check: %w", err)
 }
+
+// migrateDefaultLaunchers backfills the canonical 'default' Launcher for every
+// Principal that does not have one yet: Principals created by earlier releases
+// and those without migrated Session rows. The Launcher-owned Session model
+// requires every Principal to have its default ownership anchor, so request-time
+// default resolution never fails for missing ownership. It is idempotent and
+// restart-safe: Principals that already carry a 'default' Launcher are skipped,
+// and each backfill is an independent idempotent insert, so a crash mid-way
+// leaves earlier Principals backfilled for the next startup to continue. It
+// returns the number of default Launchers provisioned by this run.
+func migrateDefaultLaunchers(db *sql.DB) (int, error) {
+	rows, err := db.Query(`SELECT id FROM principals`)
+	if err != nil {
+		return 0, fmt.Errorf("cannot enumerate principals: %w", err)
+	}
+	var principalIDs []int64
+	for rows.Next() {
+		var pid int64
+		if err := rows.Scan(&pid); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("cannot scan principal id: %w", err)
+		}
+		principalIDs = append(principalIDs, pid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate principals: %w", err)
+	}
+
+	created := 0
+	for _, pid := range principalIDs {
+		if _, err := findDefaultLauncher(db, pid); err == nil {
+			continue
+		} else if !errors.Is(err, ErrLauncherNotFound) {
+			return 0, fmt.Errorf("cannot resolve default Launcher for principal %d: %w", pid, err)
+		}
+		if _, err := ensureDefaultLauncher(db, pid); err != nil {
+			return 0, fmt.Errorf("cannot provision default Launcher for principal %d: %w", pid, err)
+		}
+		created++
+	}
+	return created, nil
+}

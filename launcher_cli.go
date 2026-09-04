@@ -170,7 +170,7 @@ var launcherCreateCommand = &Command{
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
 		name := &launcherNameFlag{}
-		fs.Var(name, "name", "Launcher name (default: \"default\")")
+		fs.Var(name, "name", "Launcher name (default: \"default\"; provisioned automatically at principal creation)")
 		allowedRoots := &stringListFlag{}
 		fs.Var(allowedRoots, "allowed-root", "Allowed root path (restricted scope)")
 		issueCredential := fs.Bool("issue-credential", false, "Issue a launcher credential")

@@ -27,7 +27,9 @@ var errMockDeleteDB = errors.New("mock_delete_db_error")
 // failDriver wraps the real sqlite3 driver and optionally fails ExecContext
 // and/or QueryContext with given errors.
 type failDriver struct {
-	failExec        error // non-nil → ExecContext returns this error
+	failExec        error  // non-nil → ExecContext returns this error
+	failExecMatch   string // non-empty → ExecContext fails only when the SQL contains this substring
+	failExecMatchE  error
 	failQuery       error // non-nil → QueryContext returns this error
 	failQueryAfter  int   // >0 → fail queries after (not including) this many successes
 	failQueryAfterE error
@@ -41,6 +43,8 @@ func (d *failDriver) Open(dsn string) (driver.Conn, error) {
 	return &failConn{
 		Conn:            realConn,
 		failExec:        d.failExec,
+		failExecMatch:   d.failExecMatch,
+		failExecMatchE:  d.failExecMatchE,
 		failQuery:       d.failQuery,
 		failQueryAfter:  d.failQueryAfter,
 		failQueryAfterE: d.failQueryAfterE,
@@ -53,6 +57,8 @@ func (d *failDriver) Open(dsn string) (driver.Conn, error) {
 type failConn struct {
 	driver.Conn
 	failExec        error
+	failExecMatch   string
+	failExecMatchE  error
 	failQuery       error
 	failQueryAfter  int
 	failQueryAfterE error
@@ -63,6 +69,9 @@ type failConn struct {
 func (c *failConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if c.failExec != nil {
 		return nil, c.failExec
+	}
+	if c.failExecMatch != "" && strings.Contains(query, c.failExecMatch) {
+		return nil, c.failExecMatchE
 	}
 	if execer, ok := c.Conn.(driver.ExecerContext); ok {
 		return execer.ExecContext(ctx, query, args)
@@ -158,6 +167,24 @@ func newFailExecDB(t *testing.T, dbPath string, failErr error) *sql.DB {
 	if err := db.Ping(); err != nil {
 		db.Close()
 		t.Fatalf("newFailExecDB: ping failed: %v", err)
+	}
+	return db
+}
+
+// newFailExecMatchDB opens the same SQLite file with a driver that fails only
+// the Exec whose SQL contains match, leaving every other statement untouched.
+func newFailExecMatchDB(t *testing.T, dbPath string, match string, failErr error) *sql.DB {
+	t.Helper()
+	name := nextMockDriverName("fem")
+	sql.Register(name, &failDriver{failExecMatch: match, failExecMatchE: failErr})
+
+	db, err := sql.Open(name, dbPath)
+	if err != nil {
+		t.Fatalf("newFailExecMatchDB: cannot open: %v", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		t.Fatalf("newFailExecMatchDB: ping failed: %v", err)
 	}
 	return db
 }

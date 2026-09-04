@@ -303,6 +303,16 @@ func runDaemon(stdout, stderr io.Writer) error {
 			return err
 		}
 
+		// Default-Launcher backfill: every Principal must carry its canonical
+		// 'default' Launcher so the Launcher-owned Session model never fails
+		// for missing ownership. Idempotent: a no-op once every Principal has
+		// one. Runs after the ownership cutover, which already provisions
+		// defaults for Principals with migrated Session rows.
+		if _, err := migrateDefaultLaunchers(db); err != nil {
+			serveStartupError(err, "")
+			return err
+		}
+
 		if _, err := cleanupExpiredSessions(db); err != nil {
 			serveStartupError(err, "")
 			return err

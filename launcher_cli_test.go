@@ -94,7 +94,7 @@ func TestHandleAuthLauncher(t *testing.T) {
 	// Create a launcher with a credential via the admin HTTP path, and capture
 	// its bearer token (returned exactly once on creation).
 	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
-		`{"name":"default","scope":"inherit","allowed_roots":[],"issue_credential":true}`)
+		`{"name":"agent","scope":"inherit","allowed_roots":[],"issue_credential":true}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -832,7 +832,7 @@ func TestHandleAuthDisabledLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	launcher, _, token, err := createLauncher(app.DB, int64(pid), "default", LauncherScopeInherit, nil, nil, true)
+	launcher, _, token, err := createLauncher(app.DB, int64(pid), "agent", LauncherScopeInherit, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +842,7 @@ func TestHandleAuthDisabledLauncher(t *testing.T) {
 	}
 
 	disabled := false
-	if _, err := updateLauncher(app.DB, launcher.ID, nil, &disabled); err != nil {
+	if _, _, err := app.updateLauncherWithLifecycle(launcher.ID, nil, &disabled); err != nil {
 		t.Fatalf("disable launcher: %v", err)
 	}
 	w := launcherRequest(t, app, "GET", "/auth", token, "")

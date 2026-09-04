@@ -129,6 +129,106 @@ func TestInitializeDatabaseRejectsLaunchersTableWithoutNameInvariant(t *testing.
 	}
 }
 
+// TestVerifyLaunchersNameInvariantRequiresCanonicalCheck proves the verifier
+// matches the exact canonical CHECK expression rather than merely the grammar
+// fragments occurring somewhere in the DDL: a reordered expression, fragments
+// scattered across several weaker CHECK constraints, or a partial grammar all
+// describe schemas this binary does not write and must fail closed, while the
+// schema initializeDatabase actually writes is accepted.
+func TestVerifyLaunchersNameInvariantRequiresCanonicalCheck(t *testing.T) {
+	// The schema initializeDatabase writes must pass.
+	canonical := openFreshTestDB(t)
+	if err := verifyLaunchersNameInvariant(canonical); err != nil {
+		t.Fatalf("canonical schema must pass: %v", err)
+	}
+
+	db := openFreshTestDB(t)
+	openLaunchersFixture := func(t *testing.T, ddl string) {
+		t.Helper()
+		if _, err := db.Exec(`DROP TABLE launchers`); err != nil {
+			t.Fatalf("drop launchers: %v", err)
+		}
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatalf("create launchers fixture: %v", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		ddl  string
+	}{
+		{
+			name: "reordered clauses",
+			ddl: `
+		CREATE TABLE launchers (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			scope_mode TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name),
+			CHECK (scope_mode IN ('inherit', 'restricted')),
+			CHECK (
+				name NOT GLOB '-*'
+				AND length(name) BETWEEN 1 AND 63
+				AND name NOT GLOB '*-'
+				AND name NOT GLOB '*[^a-z0-9-]*'
+			)
+		)`,
+		},
+		{
+			name: "fragments scattered across several checks",
+			ddl: `
+		CREATE TABLE launchers (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 63),
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK (name NOT GLOB '*[^a-z0-9-]*'),
+			scope_mode TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name),
+			CHECK (name NOT GLOB '-*'),
+			CHECK (name NOT GLOB '*-'),
+			CHECK (scope_mode IN ('inherit', 'restricted'))
+		)`,
+		},
+		{
+			name: "partial grammar",
+			ddl: `
+		CREATE TABLE launchers (
+			id TEXT PRIMARY KEY,
+			principal_id INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			scope_mode TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (principal_id) REFERENCES principals(id) ON DELETE CASCADE,
+			UNIQUE (principal_id, name),
+			CHECK (scope_mode IN ('inherit', 'restricted')),
+			CHECK (
+				length(name) BETWEEN 1 AND 63
+				AND name NOT GLOB '*[^a-z0-9-]*'
+				AND name NOT GLOB '-*'
+			)
+		)`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			openLaunchersFixture(t, tc.ddl)
+			err := verifyLaunchersNameInvariant(db)
+			if err == nil {
+				t.Fatal("expected verifyLaunchersNameInvariant to fail closed on a non-canonical launchers schema")
+			}
+			if !strings.Contains(err.Error(), "launcher-name invariant") {
+				t.Errorf("actionable error expected, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestJournalModeWAL(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/test.db"

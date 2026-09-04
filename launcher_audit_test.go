@@ -37,7 +37,7 @@ func launcherAuditApp(t *testing.T, username string) (*App, string, string, *Lau
 	if err != nil {
 		t.Fatalf("createCredential(%s): %v", username, err)
 	}
-	l, _, launcherToken, err := createLauncher(app.DB, int64(p.ID), "default", LauncherScopeInherit, nil, globalRoots, true)
+	l, _, launcherToken, err := createLauncher(app.DB, int64(p.ID), "agent", LauncherScopeInherit, nil, globalRoots, true)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestSessionCreateAuditLauncherProvenance(t *testing.T) {
 	if m["launcher_id"] != resp.Session.LauncherID {
 		t.Errorf("launcher_id = %v, want %s", m["launcher_id"], resp.Session.LauncherID)
 	}
-	if m["launcher_name"] != "default" {
+	if m["launcher_name"] != "agent" {
 		t.Errorf("launcher_name = %v, want default", m["launcher_name"])
 	}
 	if m["principal_name"] != "lncaudit3" {
@@ -275,5 +275,214 @@ func TestLauncherAuditBufferIsJSONLines(t *testing.T) {
 		if m["stream"] != "audit" {
 			t.Errorf("stream = %v, want audit", m["stream"])
 		}
+	}
+}
+
+// TestLauncherControlAuditCreatorProvenance proves launcher-control events
+// performed with a Principal credential carry the creator provenance: the
+// acting principal and its credential ID, without leaking the bearer secret.
+// The issued launcher credential's own ID is preserved on credential events.
+func TestLauncherControlAuditCreatorProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, credToken, _, l := launcherAuditApp(t, "lncauditprov")
+
+	// launcher.credential_rotate performed with the Principal credential: the
+	// record's credential_id is the rotated launcher credential.
+	var rotated launcherCredentialResponse
+	if w := launcherAuditRequest(t, app, http.MethodPost, "/principals/lncauditprov/launchers/"+l.ID+"/credential/rotate", credToken, ""); w.Code != http.StatusOK {
+		t.Fatalf("rotate: expected 200, got %d", w.Code)
+	} else if err := json.Unmarshal(w.Body.Bytes(), &rotated); err != nil {
+		t.Fatal(err)
+	}
+
+	var creatorCredID string
+	{
+		raw := findAuditLine(auditBuf, "launcher.credential_rotate")
+		if raw == "" {
+			t.Fatalf("expected launcher.credential_rotate audit line\n%s", auditBuf.String())
+		}
+		m := parseAuditMap(t, raw)
+		if m["credential_id"] != rotated.Credential.ID {
+			t.Errorf("credential_rotate credential_id = %v, want rotated %s", m["credential_id"], rotated.Credential.ID)
+		}
+		if m["principal_name"] != "lncauditprov" {
+			t.Errorf("credential_rotate principal_name = %v", m["principal_name"])
+		}
+		assertNoSecrets(t, raw, m, credToken, rotated.Token)
+	}
+
+	// A fresh launcher credential to authenticate the controlled launcher's
+	// sessions... not needed here; instead use the Principal credential for a
+	// scope replace and a delete, which have no other credential_id to carry.
+	if w := launcherAuditRequest(t, app, http.MethodPut, "/principals/lncauditprov/launchers/"+l.ID+"/allowed-roots", credToken,
+		`{"scope":"inherit","allowed_roots":[]}`); w.Code != http.StatusOK {
+		t.Fatalf("scope replace: expected 200, got %d", w.Code)
+	}
+
+	raw := findAuditLine(auditBuf, "launcher.scope_replace")
+	if raw == "" {
+		t.Fatalf("expected launcher.scope_replace audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["principal_name"] != "lncauditprov" {
+		t.Errorf("scope_replace principal_name = %v, want lncauditprov", m["principal_name"])
+	}
+	if m["credential_id"] == "" {
+		t.Fatal("scope_replace must carry the creator credential_id")
+	}
+	creatorCredID, _ = m["credential_id"].(string)
+	assertNoSecrets(t, raw, m, credToken, "")
+
+	// The creator credential ID matches the Principal credential "audit"
+	// created by launcherAuditApp.
+	var dbCredID string
+	if err := app.DB.QueryRow(
+		`SELECT id FROM credentials WHERE principal_id = (SELECT id FROM principals WHERE username='lncauditprov') AND name='audit'`,
+	).Scan(&dbCredID); err != nil {
+		t.Fatalf("resolve creator credential: %v", err)
+	}
+	if creatorCredID != dbCredID {
+		t.Errorf("creator credential_id = %q, want %q", creatorCredID, dbCredID)
+	}
+
+	// launcher.delete with the Principal credential.
+	if w := launcherAuditRequest(t, app, http.MethodDelete, "/principals/lncauditprov/launchers/"+l.ID, credToken, ""); w.Code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d", w.Code)
+	}
+	raw = findAuditLine(auditBuf, "launcher.delete")
+	if raw == "" {
+		t.Fatalf("expected launcher.delete audit line\n%s", auditBuf.String())
+	}
+	m = parseAuditMap(t, raw)
+	if m["principal_name"] != "lncauditprov" {
+		t.Errorf("delete principal_name = %v", m["principal_name"])
+	}
+	if m["credential_id"] != creatorCredID {
+		t.Errorf("delete credential_id = %v, want creator %q", m["credential_id"], creatorCredID)
+	}
+	assertNoSecrets(t, raw, m, credToken, "")
+}
+
+// TestRunAuditLauncherProvenance proves run.start and run.finish carry the
+// owning session's launcher identity (launcher_id, launcher_name), so a
+// Docker operation's audit trail names its Launcher owner directly.
+func TestRunAuditLauncherProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, _, launcherToken, l := launcherAuditApp(t, "lncauditrun")
+	app.OperationSupervisor = newOperationSupervisor()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /run", app.handleRun)
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+
+	workspace := filepath.Join(app.Config.AllowedRoots[0], "home", "lncauditrun", "ws")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sreq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"workspace":"`+workspace+`"}`))
+	sreq.Header.Set("Authorization", "Bearer "+launcherToken)
+	sw := httptest.NewRecorder()
+	mux.ServeHTTP(sw, sreq)
+	if sw.Code != http.StatusCreated {
+		t.Fatalf("session create: expected 201, got %d (body=%s)", sw.Code, sw.Body.String())
+	}
+	var sresp createSessionResponse
+	if err := json.Unmarshal(sw.Body.Bytes(), &sresp); err != nil {
+		t.Fatal(err)
+	}
+
+	req := newRunRequest(map[string]any{
+		"image":   "alpine:3.24",
+		"command": []string{"echo", "hello"},
+	}, sresp.Token)
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+	if rw.Code != http.StatusCreated {
+		t.Fatalf("run: expected 201, got %d (body=%s)", rw.Code, rw.Body.String())
+	}
+	waitRun(t, app, rw)
+
+	startRaw := findAuditLine(auditBuf, "run.start")
+	finishRaw := findAuditLine(auditBuf, "run.finish")
+	if startRaw == "" || finishRaw == "" {
+		t.Fatalf("expected run.start and run.finish audit lines\n%s", auditBuf.String())
+	}
+	start := parseAuditMap(t, startRaw)
+	finish := parseAuditMap(t, finishRaw)
+
+	for _, tc := range []struct {
+		event string
+		m     map[string]any
+	}{
+		{"run.start", start},
+		{"run.finish", finish},
+	} {
+		if tc.m["launcher_id"] != l.ID {
+			t.Errorf("%s launcher_id = %v, want %s", tc.event, tc.m["launcher_id"], l.ID)
+		}
+		if tc.m["launcher_name"] != "agent" {
+			t.Errorf("%s launcher_name = %v, want agent", tc.event, tc.m["launcher_name"])
+		}
+	}
+	assertNoSecrets(t, startRaw, start, sresp.Token, launcherToken)
+	assertNoSecrets(t, finishRaw, finish, sresp.Token, launcherToken)
+}
+
+// TestSessionDeleteAuditOwnershipProvenance proves a successful session.delete
+// audit record names the deleted session's ownership: launcher_id,
+// launcher_name, and principal_name, even when the delete is performed by an
+// admin (whose authority carries no credential provenance).
+func TestSessionDeleteAuditOwnershipProvenance(t *testing.T) {
+	auditBuf, _ := setupTestLogging(t)
+	app, _, launcherToken, l := launcherAuditApp(t, "lncauditdel")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /sessions", app.handleCreateSession)
+	mux.HandleFunc("DELETE /sessions/{id}", app.handleDeleteSession)
+
+	workspace := filepath.Join(app.Config.AllowedRoots[0], "home", "lncauditdel", "ws")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sreq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"workspace":"`+workspace+`"}`))
+	sreq.Header.Set("Authorization", "Bearer "+launcherToken)
+	sw := httptest.NewRecorder()
+	mux.ServeHTTP(sw, sreq)
+	if sw.Code != http.StatusCreated {
+		t.Fatalf("session create: expected 201, got %d (body=%s)", sw.Code, sw.Body.String())
+	}
+	var sresp createSessionResponse
+	if err := json.Unmarshal(sw.Body.Bytes(), &sresp); err != nil {
+		t.Fatal(err)
+	}
+
+	dreq := httptest.NewRequest(http.MethodDelete, "/sessions/"+sresp.Session.ID, nil)
+	withAdminToken(dreq)
+	dw := httptest.NewRecorder()
+	mux.ServeHTTP(dw, dreq)
+	if dw.Code != http.StatusNoContent {
+		t.Fatalf("session delete: expected 204, got %d (body=%s)", dw.Code, dw.Body.String())
+	}
+
+	raw := findAuditLine(auditBuf, "session.delete")
+	if raw == "" {
+		t.Fatalf("expected session.delete audit line\n%s", auditBuf.String())
+	}
+	m := parseAuditMap(t, raw)
+	if m["result"] != "success" {
+		t.Errorf("result = %v, want success", m["result"])
+	}
+	if m["launcher_id"] != l.ID {
+		t.Errorf("launcher_id = %v, want %s", m["launcher_id"], l.ID)
+	}
+	if m["launcher_name"] != "agent" {
+		t.Errorf("launcher_name = %v, want agent", m["launcher_name"])
+	}
+	if m["principal_name"] != "lncauditdel" {
+		t.Errorf("principal_name = %v, want lncauditdel", m["principal_name"])
+	}
+	assertNoSecrets(t, raw, m, sresp.Token, launcherToken)
+	if strings.Contains(raw, testAdminToken) {
+		t.Error("audit contains admin token")
 	}
 }

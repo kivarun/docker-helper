@@ -92,8 +92,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create the operation first so we have an ID for staging.
-	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName)
-	op.LauncherID = session.LauncherID
+	op := newBuildOperation(session.ID, req.Image, req.Context, req.Dockerfile, bufSize, session.PrincipalName, session.LauncherID, session.LauncherName)
 	op.auditBuildArgKeys = buildArgKeys
 
 	// Stage the build context into an isolated directory.
@@ -111,7 +110,7 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.OperationSupervisor != nil {
-		if !a.OperationSupervisor.admit(op) {
+		if decision := a.OperationSupervisor.admit(op); decision != admissionAccepted {
 			// Cleanup staging before releasing lease.
 			cleanupErr := staged.Cleanup()
 			if cleanupErr != nil {
@@ -124,7 +123,11 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 			if cleanupErr == nil && leaseRelease != nil {
 				leaseRelease()
 			}
-			writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
+			if decision == admissionRefusedShutdown {
+				writeDockerActionRejected(ctx, w, http.StatusServiceUnavailable, "build", "shutting_down", "daemon is shutting down", session.PrincipalName)
+			} else {
+				writeDockerActionRejected(ctx, w, http.StatusUnprocessableEntity, "build", "launcher_unavailable", "launcher is not available", session.PrincipalName)
+			}
 			return
 		}
 		a.OperationSupervisor.pruneCompleted(cfg.OperationRetentionTTL, cfg.OperationMaxCompleted)
@@ -143,6 +146,8 @@ func (a *App) handleBuild(w http.ResponseWriter, r *http.Request) {
 		Dockerfile:    req.Dockerfile,
 		BuildArgKeys:  buildArgKeys,
 		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
 	})
 
 	// Build the command using staged paths — Docker never sees workspace paths.

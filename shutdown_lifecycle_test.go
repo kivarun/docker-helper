@@ -78,8 +78,8 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 
 	// Start first operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile1)
-	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "")
-	if !supervisor.admit(op1) {
+	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "", "", "")
+	if supervisor.admit(op1) != admissionAccepted {
 		t.Fatal("admit op1 failed")
 	}
 	cmd1 := app.newDockerCommand(context.Background(), "sh", "-c",
@@ -96,8 +96,8 @@ func TestShutdownTwoStuckOpsOneBudget(t *testing.T) {
 
 	// Start second operation.
 	app.ExecCommandContext = makeIgnoringCmd(readyFile2)
-	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "")
-	if !supervisor.admit(op2) {
+	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "", "", "")
+	if supervisor.admit(op2) != admissionAccepted {
 		t.Fatal("admit op2 failed")
 	}
 	cmd2 := app.newDockerCommand(context.Background(), "sh", "-c",
@@ -201,7 +201,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	}
 
 	// Create two run operations with cidfiles.
-	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "")
+	op1 := newRunOperation(result.Session.ID, "test:image1", 4*1024*1024, "", "", "")
 	op1.cidfile = cidfile1
 	op1.started = true
 	ready1 := filepath.Join(t.TempDir(), "op1.ready")
@@ -214,7 +214,7 @@ func TestShutdownRunContainerCleanup(t *testing.T) {
 	supervisor.ops[op1.ID] = op1
 	supervisor.mu.Unlock()
 
-	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "")
+	op2 := newRunOperation(result.Session.ID, "test:image2", 4*1024*1024, "", "", "")
 	op2.cidfile = cidfile2
 	op2.started = true
 	ready2 := filepath.Join(t.TempDir(), "op2.ready")

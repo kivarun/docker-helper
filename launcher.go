@@ -444,53 +444,6 @@ func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherSc
 	return l, cred, token, nil
 }
 
-// updateLauncher applies scalar field changes (name and/or enabled) to a
-// Launcher. Name changes must remain unique within the owning Principal.
-func updateLauncher(db *sql.DB, launcherID string, name *string, enabled *bool) (*LauncherWithPrincipal, error) {
-	cur, err := findLauncherByID(db, launcherID)
-	if err != nil {
-		return nil, err
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("cannot begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	if name != nil {
-		nm, err := validateLauncherName(*name)
-		if err != nil {
-			return nil, err
-		}
-		// SQLite's UNIQUE(principal_id, name) is the final authority on name
-		// uniqueness, so we do not pre-check: a concurrent rename that races
-		// this UPDATE is surfaced by the constraint and mapped to
-		// ErrLauncherExists below rather than surfacing as an internal error.
-		if _, err := tx.Exec(`UPDATE launchers SET name = ? WHERE id = ?`, nm, launcherID); err != nil {
-			if isSQLiteUniqueError(err) {
-				return nil, fmt.Errorf("launcher %q already exists for principal %q: %w", nm, cur.PrincipalName, ErrLauncherExists)
-			}
-			return nil, fmt.Errorf("cannot update launcher name: %w", err)
-		}
-	}
-
-	if enabled != nil {
-		en := 0
-		if *enabled {
-			en = 1
-		}
-		if _, err := tx.Exec(`UPDATE launchers SET enabled = ? WHERE id = ?`, en, launcherID); err != nil {
-			return nil, fmt.Errorf("cannot update launcher enabled: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("cannot commit launcher update: %w", err)
-	}
-	return findLauncherByID(db, launcherID)
-}
-
 // replaceLauncherScope atomically replaces a Launcher's scope and complete
 // stored root set. For restricted scope all roots are canonicalized and
 // validated against the current effective Principal ceiling before any

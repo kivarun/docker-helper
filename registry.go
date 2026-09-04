@@ -76,6 +76,8 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		SessionID:     session.ID,
 		Registry:      req.Registry,
 		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
 	})
 
 	// Execute docker login with password via stdin.
@@ -117,6 +119,8 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 			Result:        "login_failed",
 			Duration:      duration,
 			PrincipalName: session.PrincipalName,
+			LauncherID:    session.LauncherID,
+			LauncherName:  session.LauncherName,
 		})
 
 		opLog(ctx).Warn("registry login failed",
@@ -140,6 +144,8 @@ func (a *App) handleRegistryLogin(w http.ResponseWriter, r *http.Request) {
 		Result:        "success",
 		Duration:      duration,
 		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
 	})
 
 	writeJSON(ctx, w, http.StatusOK, response{

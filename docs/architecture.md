@@ -818,9 +818,11 @@ not a subtype or a global singleton.
 
 Every principal has an implicit default Launcher named `default`:
 
-- provisioning is idempotent (`ensureDefaultLauncher`): the first need
-  creates the row; later startups resolve it read-only
-  (`findDefaultLauncher`);
+- provisioning is eager and idempotent: Principal creation provisions its
+  `default` Launcher in the same transaction
+  (`ensureDefaultLauncher`, atomic rollback), and startup backfills any
+  Principal that predates that rule (`migrateDefaultLaunchers`); later
+  startups resolve it read-only (`findDefaultLauncher`);
 - user mode transparently maps all ownership to one daemon-owner principal
   and its default Launcher, so quick start requires no Principal, Launcher,
   or credential and preserves the effective global-root semantics;
@@ -997,11 +999,14 @@ Launcher audit events carry the full launcher projection fields
 (`launcher_id`, `launcher_name`, `launcher_scope`, plus
 `launcher_enabled` on update events). `session.create` additionally
 carries `launcher_id`, `launcher_name`, and `principal_name`. Docker
-operation events (`build`/`run`/`pull`) continue to record
-`principal_name`; launcher identity lives on the session that owns the
-operation. Credential provenance (`credential_id`, and `credential_name`
-where the credential has a name) is recorded on session-control events
-performed with a credential.
+operation events (`build`/`run`/`pull`, including `registry.login`)
+record `principal_name`, `launcher_id`, and `launcher_name` from the
+session's ownership. `session.delete` records the deleted session's
+ownership (`launcher_id`, `launcher_name`, `principal_name`). Launcher
+control events carry the caller's provenance
+(`credential_id`, and `credential_name` where the credential has a
+name), except for credential issue/rotate events, which record the newly
+issued credential.
 
 ## Workspace isolation
 
@@ -1291,8 +1296,8 @@ support classification.
 
 | Event | Fields |
 |-------|--------|
-| `registry.login.start` | `session_id`, `registry`, `principal_name` (present for principal-owned sessions) |
-| `registry.login.finish` | `session_id`, `registry`, `result`, `duration`, `principal_name` (present for principal-owned sessions) |
+| `registry.login.start` | `session_id`, `registry`, `principal_name` (present for principal-owned sessions), `launcher_id`/`launcher_name` (present for launcher-owned sessions) |
+| `registry.login.finish` | `session_id`, `registry`, `result`, `duration`, `principal_name` (present for principal-owned sessions), `launcher_id`/`launcher_name` (present for launcher-owned sessions) |
 
 `result` is `success` or `login_failed`. The password and username are
 never included in audit records.
@@ -1583,6 +1588,9 @@ Current error codes (non-exhaustive):
 | `invalid_environment` | `POST /run` | environment variable name invalid |
 | `invalid_shm_size` | `POST /run` | shm_size invalid, zero, or over 2 GiB |
 | `invalid_workspace` | `POST /sessions` | workspace invalid or outside AllowedRoot; the message carries the actionable cause |
+| `missing_launcher_selector` | `POST /sessions` | system-mode admin request supplies no launcher selector |
+| `launcher_not_found` | `POST /sessions` | the selected launcher does not exist under the resolved principal |
+| `launcher_unavailable` | `POST /sessions` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422) |
 | `invalid_session_id` | `DELETE /sessions/{id}` | session ID is empty |
 | `shutting_down` | `POST /build`, `POST /run` | daemon is shutting down |
 | `docker_pull_failed` | `POST /pull` | docker pull returned non-zero and the failure is not classified |
@@ -1613,7 +1621,7 @@ The rejected event schema contains only:
 
 - `event`: `<kind>.rejected`
 - `result`: the public API error code (e.g., `invalid_image`, `invalid_mount`,
-  `shutting_down`, `internal_error`)
+  `launcher_unavailable`, `shutting_down`, `internal_error`)
 - `principal_name`: when available
 - `session_id`: from the authenticated session
 - `request_id`: from the request context
@@ -1798,6 +1806,8 @@ Emitted before a Docker build begins.
 | `dockerfile` | string | Dockerfile path from the request |
 | `build_arg_keys` | string[] | build-arg names, sorted (present when set; values are never logged) |
 | `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
+| `launcher_id` | string | owning launcher ID (present for launcher-owned sessions) |
+| `launcher_name` | string | owning launcher name (present for launcher-owned sessions) |
 
 No `result` or `duration` field.
 
@@ -1815,6 +1825,8 @@ Does not include `request_id` because completion is not request-scoped.
 | `dockerfile` | string | Dockerfile path from the request |
 | `build_arg_keys` | string[] | build-arg names, sorted (present when set; values are never logged) |
 | `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
+| `launcher_id` | string | owning launcher ID (present for launcher-owned sessions) |
+| `launcher_name` | string | owning launcher name (present for launcher-owned sessions) |
 | `result` | string | `succeeded`, `docker_build_failed`, or `cancelled` |
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | build wall-clock time |
@@ -1842,7 +1854,11 @@ Result codes:
 | `invalid_json` | request body is not valid JSON |
 | `conflicting_selectors` | both `launcher_id` and `principal` selectors present |
 | `invalid_selector` | an explicitly present selector is empty or malformed |
+| `missing_launcher_selector` | system-mode admin request supplies no selector |
+| `launcher_not_found` | the selected launcher does not exist under the resolved principal (404) |
+| `launcher_unavailable` | the selected launcher or its principal is durably disabled, or a final stale-owner recheck refuses the creation (422); the launcher may become available again when re-enabled |
 | `invalid_workspace` | workspace is empty, does not exist, is not a directory, or is outside the effective allowed roots |
+| `mac_preparation_failed` | MAC boundary preparation failed after persistence |
 | `database_error` | SQLite write failure |
 | `system_error` | cannot resolve `AllowedRoot` path |
 | `unknown_error` | unexpected error not classified above |
@@ -1855,6 +1871,9 @@ Emitted for every `DELETE /sessions/{id}` request after authentication.
 |-------|------|-------------|
 | `session_id` | string | session identifier from the URL |
 | `workspace` | string | workspace of the session (present when the session was found) |
+| `launcher_id` | string | owning launcher ID of the deleted session (present when the session was found) |
+| `launcher_name` | string | owning launcher name of the deleted session (present when the session was found) |
+| `principal_name` | string | owning principal of the deleted session (present when the session was found) |
 | `result` | string | outcome code |
 | `duration` | string | request wall-clock time |
 
@@ -1942,6 +1961,8 @@ Emitted before a container starts.
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection is active for this run |
 | `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
+| `launcher_id` | string | owning launcher ID (present for launcher-owned sessions) |
+| `launcher_name` | string | owning launcher name (present for launcher-owned sessions) |
 
 No `result` or `duration` field.
 
@@ -1969,6 +1990,8 @@ Does not include `request_id` because completion is not request-scoped.
 | `shm_size` | string | /dev/shm size from the request (present when set) |
 | `trusted_ca_injected` | boolean | true when trusted CA injection was active for this run |
 | `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
+| `launcher_id` | string | owning launcher ID (present for launcher-owned sessions) |
+| `launcher_name` | string | owning launcher name (present for launcher-owned sessions) |
 | `result` | string | outcome code |
 | `exit_code` | number | container exit code (present when available) |
 | `duration` | string | container run attempt wall-clock time |
@@ -2012,6 +2035,8 @@ Emitted before a Docker pull begins.
 | `session_id` | string | session identifier |
 | `image` | string | image reference |
 | `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
+| `launcher_id` | string | owning launcher ID (present for launcher-owned sessions) |
+| `launcher_name` | string | owning launcher name (present for launcher-owned sessions) |
 
 No `result` or `duration` field.
 
@@ -2024,6 +2049,8 @@ Emitted after a Docker pull completes (success or failure).
 | `session_id` | string | session identifier |
 | `image` | string | image reference |
 | `principal_name` | string | principal name (present for principal-owned sessions; omitted for legacy/admin sessions) |
+| `launcher_id` | string | owning launcher ID (present for launcher-owned sessions) |
+| `launcher_name` | string | owning launcher name (present for launcher-owned sessions) |
 | `result` | string | `success` or `pull_error` |
 | `exit_code` | number | present when an exit code is available |
 | `duration` | string | pull wall-clock time |

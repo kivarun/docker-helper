@@ -101,9 +101,10 @@ type operation struct {
 	auditShmSize           string
 	auditTrustedCAInjected bool
 	auditPrincipalName     string
+	auditLauncherName      string
 }
 
-func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64, principalName string) *operation {
+func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int64, principalName, launcherID, launcherName string) *operation {
 	opID := generateOperationID()
 	now := time.Now()
 	return &operation{
@@ -117,11 +118,13 @@ func newBuildOperation(sessionID, image, ctxPath, dockerfile string, bufSize int
 		Dockerfile:         dockerfile,
 		LogBuffer:          newBoundedBuffer(bufSize),
 		done:               make(chan struct{}),
+		LauncherID:         launcherID,
 		auditPrincipalName: principalName,
+		auditLauncherName:  launcherName,
 	}
 }
 
-func newRunOperation(sessionID, image string, bufSize int64, principalName string) *operation {
+func newRunOperation(sessionID, image string, bufSize int64, principalName, launcherID, launcherName string) *operation {
 	opID := generateOperationID()
 	now := time.Now()
 	return &operation{
@@ -133,7 +136,9 @@ func newRunOperation(sessionID, image string, bufSize int64, principalName strin
 		Image:              image,
 		LogBuffer:          newBoundedBuffer(bufSize),
 		done:               make(chan struct{}),
+		LauncherID:         launcherID,
 		auditPrincipalName: principalName,
+		auditLauncherName:  launcherName,
 	}
 }
 
@@ -163,20 +168,39 @@ func newOperationSupervisor() *operationSupervisor {
 	}
 }
 
+// admissionDecision is the narrow result of operation admission. It lets HTTP
+// distinguish the two refusal causes: daemon shutdown (a global condition) and
+// per-Launcher quiesce (the runtime companion of a disabled Launcher or an
+// in-progress checked deletion). A quiesced Launcher must never be reported as
+// "daemon is shutting down".
+type admissionDecision uint8
+
+const (
+	// admissionAccepted admits the operation and registers it.
+	admissionAccepted admissionDecision = iota
+	// admissionRefusedShutdown refuses admission because the daemon is
+	// shutting down.
+	admissionRefusedShutdown
+	// admissionRefusedQuiesced refuses admission because Operation admission
+	// is closed for the operation's Launcher.
+	admissionRefusedQuiesced
+)
+
 // admit atomically checks the shutdown gate and the per-Launcher quiesce gate,
-// then registers the operation. Returns true if admitted. The caller must not
-// start the operation process if admit returns false.
-func (s *operationSupervisor) admit(op *operation) bool {
+// then registers the operation. The caller must not start the operation
+// process unless admit returns admissionAccepted, and it must distinguish the
+// refusal causes in its public error contract.
+func (s *operationSupervisor) admit(op *operation) admissionDecision {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.shutting {
-		return false
+		return admissionRefusedShutdown
 	}
 	if s.quiesced[op.LauncherID] {
-		return false
+		return admissionRefusedQuiesced
 	}
 	s.ops[op.ID] = op
-	return true
+	return admissionAccepted
 }
 
 func (s *operationSupervisor) lookup(id string) *operation {
@@ -676,6 +700,8 @@ func (op *operation) writeFinishAudit(exitCode *int, duration *string) {
 		ShmSize:           op.auditShmSize,
 		TrustedCAInjected: op.auditTrustedCAInjected,
 		PrincipalName:     op.auditPrincipalName,
+		LauncherID:        op.LauncherID,
+		LauncherName:      op.auditLauncherName,
 		Result:            *op.ResultCode,
 		ExitCode:          exitCode,
 		Duration:          dur,

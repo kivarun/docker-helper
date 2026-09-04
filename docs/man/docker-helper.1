@@ -190,7 +190,9 @@ Remove an allowed root from a principal.
 .B docker-helper launcher create [\-\-principal USER] [\-\-name NAME] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential]
 Create a launcher for a principal. If \fB\-\-principal\fR is omitted it is
 inferred from the authenticated credential via \fBGET /auth\fR. The launcher
-name defaults to \fBdefault\fR. Launcher names are path-safe identifiers:
+name defaults to \fBdefault\fR; every principal always has its \fBdefault\fR
+launcher (provisioned automatically at principal creation), so an omitted
+name conflicts if the principal is fresh. Launcher names are path-safe identifiers:
 1..63 characters of lowercase letters, digits, and internal hyphens, with
 alphanumeric first and last characters; the exact supplied value is
 accepted or rejected. With no \fB\-\-allowed-root\fR the scope is

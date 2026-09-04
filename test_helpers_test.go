@@ -296,18 +296,18 @@ func provisionTestOwner(t *testing.T, db *sql.DB, allowedRoot, home string, uid,
 	return &userModeDefaultLauncher{principalID: pid, launcherID: launcherID, username: username}
 }
 
-// mustAddDefaultLauncher provisions a named Principal's 'default' inherit
-// Launcher and returns its ID, failing the test on error. It is the shared
-// setup for tests that create Sessions via a Principal credential, because in
-// the cutover model those Sessions are owned by the Principal's default
-// Launcher.
+// mustAddDefaultLauncher resolves a named Principal's 'default' inherit
+// Launcher and returns its ID, failing the test on error. Principal creation
+// auto-provisions the canonical default Launcher, so this normally resolves the
+// existing row; for a Principal that predates provisioning it provisions it
+// through the production ownership helper.
 func mustAddDefaultLauncher(t *testing.T, db *sql.DB, principalID int64) string {
 	t.Helper()
-	l, _, _, err := createLauncher(db, principalID, "default", LauncherScopeInherit, nil, nil, false)
+	id, err := ensureDefaultLauncher(db, principalID)
 	if err != nil {
-		t.Fatalf("createLauncher(default) for principal %d: %v", principalID, err)
+		t.Fatalf("ensureDefaultLauncher for principal %d: %v", principalID, err)
 	}
-	return l.ID
+	return id
 }
 
 // principalIDByName resolves a test-created Principal's internal ID.

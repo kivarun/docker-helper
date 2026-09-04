@@ -345,7 +345,13 @@ func (a *App) handleAddPrincipalAllowedRoot(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// The Principal allowed-root mutation is a policy-authority mutation: it
+	// shares the lifecycle serialization with Session creation so a concurrent
+	// create either linearizes before the mutation (and observed the old
+	// policy) or after it (and observes the narrowed/widened one).
+	a.lifecycleMu.Lock()
 	changed, canonicalPath, err := addPrincipalAllowedRoot(a.DB, username, req.Path, a.getConfig().AllowedRoots)
+	a.lifecycleMu.Unlock()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -440,7 +446,11 @@ func (a *App) handleRemovePrincipalAllowedRoot(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Same lifecycle serialization boundary as Session creation and the
+	// Principal allowed-root add (see handleAddPrincipalAllowedRoot).
+	a.lifecycleMu.Lock()
 	changed, canonicalPath, err := removePrincipalAllowedRoot(a.DB, username, req.Path)
+	a.lifecycleMu.Unlock()
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

@@ -711,7 +711,7 @@ existing authoritative owners:
 | Action | Effect | Owner path |
 | --- | --- | --- |
 | Credential revoke/delete | Affects that credential only; existing Sessions survive. | `revokeCredential` (`credential.go:188`) extended for Launcher credentials; Session rows untouched. |
-| Launcher disable | Its Launcher credential can no longer authenticate; owned Sessions invalidated/removed through the existing Session cleanup boundary; Launcher identity and credential resource remain. | New `applyLauncherEnabledChange` modeled on `applyPrincipalEnabledChange` (`app.go:195`); reuses `releaseSessionBindings` + runtime-dir cleanup. |
+| Launcher disable | Its Launcher credential can no longer authenticate; owned Sessions invalidated/removed through the existing Session cleanup boundary; Launcher identity and credential resource remain. | `applyLauncherEnabledChange` → `persistLauncherChange` (single-transaction rename+enabled+session deletion owner used by the PATCH path too); reuses `releaseSessionBindings` + runtime-dir cleanup. |
 | Launcher re-enable | Does not recreate old Sessions. | Same function, inverse direction; no Session recreation. |
 | Launcher delete | Only after checked cleanup of owned Sessions/runtime; then removes Launcher roots and optional credential. | New App-level `deleteLauncherWithMAC` modeled on `deletePrincipalWithMAC` (`app.go:220`); explicit checked cleanup first. No `ON DELETE CASCADE` from Launcher→Session. |
 | Principal disable/delete | Applies the same Session invalidation/cleanup across every Launcher attached to that Principal. | Existing `applyPrincipalEnabledChange`/`deletePrincipalWithMAC` extended to collect Sessions across all Launchers of the Principal. |
@@ -995,8 +995,10 @@ fixtures. Required coverage (from the concept, mapped to owners):
 - Default vs explicit Launcher selection; system-mode Admin requires exactly
   one selector, while user-mode Admin omission resolves the local default;
   conflicting-selector and invalid-selector behavior.
-- Launcher and Principal disable/delete cleanup boundaries (Sessions
-  invalidated, MAC/runtime cleaned via existing owners, no cascade substitute).
+- Launcher and Principal disable/delete cleanup boundaries (disable invalidates
+  Sessions; delete refuses side-effect-free with `409 launcher_runtime_active`
+  while attributable runtime is active and stays retryable; MAC/runtime cleaned
+  via existing owners, no cascade substitute).
 - Migration: 2.0 credentials preserved byte-for-byte as Principal credentials;
   attributable Principal Sessions → default Launcher; user-mode NULL-owner
   Sessions → local daemon-owner default Launcher; system-mode non-attributable

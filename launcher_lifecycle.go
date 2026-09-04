@@ -31,20 +31,30 @@ type launcherEnabledChangeResult struct {
 	RevokedSessionIDs []string
 }
 
-// persistLauncherEnabledChange performs a transactionally correct enabled-state
-// transition for a Launcher. It:
+// persistLauncherChange performs a transactionally correct rename and/or
+// enabled-state transition for a Launcher. It:
 //   - determines Launcher existence within the transaction;
+//   - validates and applies a requested rename (SQLite's
+//     UNIQUE(principal_id, name) is the final uniqueness authority; a colliding
+//     rename aborts the whole transaction, so a combined rename+disable leaves
+//     no partial state);
 //   - when disabling, collects and deletes only that Launcher's Sessions
 //     regardless of whether the enabled state already changed (retry-safe:
 //     re-invoking disable must not skip session cleanup);
-//   - updates the enabled state;
+//   - updates the enabled state when requested;
 //   - commits;
 //   - returns explicit Changed and RevokedSessionIDs.
 //
-// Re-enabling only flips the enabled state; it never recreates Sessions.
-func persistLauncherEnabledChange(db *sql.DB, launcherID string, enabled bool) (launcherEnabledChangeResult, error) {
+// Re-enabling only flips the enabled state; it never recreates Sessions. A nil
+// name or enabled pointer leaves that field untouched.
+func persistLauncherChange(db *sql.DB, launcherID string, name *string, enabled *bool) (launcherEnabledChangeResult, error) {
 	if launcherID == "" {
 		return launcherEnabledChangeResult{}, ErrLauncherNotFound
+	}
+	if name != nil {
+		if _, err := validateLauncherName(*name); err != nil {
+			return launcherEnabledChangeResult{}, err
+		}
 	}
 
 	tx, err := db.Begin()
@@ -53,7 +63,13 @@ func persistLauncherEnabledChange(db *sql.DB, launcherID string, enabled bool) (
 	}
 
 	var currentEnabled int
-	err = tx.QueryRow(`SELECT enabled FROM launchers WHERE id = ?`, launcherID).Scan(&currentEnabled)
+	var principalName string
+	err = tx.QueryRow(
+		`SELECT l.enabled, p.username
+		   FROM launchers l JOIN principals p ON p.id = l.principal_id
+		  WHERE l.id = ?`,
+		launcherID,
+	).Scan(&currentEnabled, &principalName)
 	if err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
@@ -62,53 +78,71 @@ func persistLauncherEnabledChange(db *sql.DB, launcherID string, enabled bool) (
 		return launcherEnabledChangeResult{}, fmt.Errorf("cannot read launcher enabled state: %w", err)
 	}
 
-	newEnabled := 0
-	if enabled {
-		newEnabled = 1
-	}
-	changed := currentEnabled != newEnabled
-
-	var sessionIDs []string
-	if !enabled {
-		// Collect this Launcher's Session IDs before deletion for runtime
-		// cleanup. Runs unconditionally on disable so a re-invoked disable
-		// still cleans up any Sessions left behind by a prior partial failure.
-		rows, err := tx.Query(`SELECT id FROM sessions WHERE launcher_id = ?`, launcherID)
-		if err != nil {
+	if name != nil {
+		// SQLite's UNIQUE(principal_id, name) is the final authority on name
+		// uniqueness, so we do not pre-check: a concurrent rename that races
+		// this UPDATE is surfaced by the constraint and mapped to
+		// ErrLauncherExists below rather than surfacing as an internal error.
+		if _, err := tx.Exec(`UPDATE launchers SET name = ? WHERE id = ?`, *name, launcherID); err != nil {
 			tx.Rollback()
-			return launcherEnabledChangeResult{}, fmt.Errorf("cannot query launcher sessions: %w", err)
+			if isSQLiteUniqueError(err) {
+				return launcherEnabledChangeResult{}, fmt.Errorf("launcher %q already exists for principal %q: %w", *name, principalName, ErrLauncherExists)
+			}
+			return launcherEnabledChangeResult{}, fmt.Errorf("cannot update launcher name: %w", err)
 		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+	}
+
+	var changed bool
+	var sessionIDs []string
+	if enabled != nil {
+		newEnabled := 0
+		if *enabled {
+			newEnabled = 1
+		}
+		changed = currentEnabled != newEnabled
+
+		if !*enabled {
+			// Collect this Launcher's Session IDs before deletion for runtime
+			// cleanup. Runs unconditionally on disable so a re-invoked disable
+			// still cleans up any Sessions left behind by a prior partial
+			// failure.
+			rows, err := tx.Query(`SELECT id FROM sessions WHERE launcher_id = ?`, launcherID)
+			if err != nil {
+				tx.Rollback()
+				return launcherEnabledChangeResult{}, fmt.Errorf("cannot query launcher sessions: %w", err)
+			}
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					tx.Rollback()
+					return launcherEnabledChangeResult{}, fmt.Errorf("cannot scan session id: %w", err)
+				}
+				sessionIDs = append(sessionIDs, id)
+			}
+			if err := rows.Err(); err != nil {
 				rows.Close()
 				tx.Rollback()
-				return launcherEnabledChangeResult{}, fmt.Errorf("cannot scan session id: %w", err)
+				return launcherEnabledChangeResult{}, fmt.Errorf("iterate sessions: %w", err)
 			}
-			sessionIDs = append(sessionIDs, id)
-		}
-		if err := rows.Err(); err != nil {
 			rows.Close()
-			tx.Rollback()
-			return launcherEnabledChangeResult{}, fmt.Errorf("iterate sessions: %w", err)
-		}
-		rows.Close()
 
-		if _, err := tx.Exec(`DELETE FROM sessions WHERE launcher_id = ?`, launcherID); err != nil {
-			tx.Rollback()
-			return launcherEnabledChangeResult{}, fmt.Errorf("cannot delete launcher sessions: %w", err)
+			if _, err := tx.Exec(`DELETE FROM sessions WHERE launcher_id = ?`, launcherID); err != nil {
+				tx.Rollback()
+				return launcherEnabledChangeResult{}, fmt.Errorf("cannot delete launcher sessions: %w", err)
+			}
 		}
-	}
 
-	if changed {
-		if _, err := tx.Exec(`UPDATE launchers SET enabled = ? WHERE id = ?`, newEnabled, launcherID); err != nil {
-			tx.Rollback()
-			return launcherEnabledChangeResult{}, fmt.Errorf("cannot update launcher enabled: %w", err)
+		if changed {
+			if _, err := tx.Exec(`UPDATE launchers SET enabled = ? WHERE id = ?`, newEnabled, launcherID); err != nil {
+				tx.Rollback()
+				return launcherEnabledChangeResult{}, fmt.Errorf("cannot update launcher enabled: %w", err)
+			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return launcherEnabledChangeResult{}, fmt.Errorf("cannot commit enabled change: %w", err)
+		return launcherEnabledChangeResult{}, fmt.Errorf("cannot commit launcher change: %w", err)
 	}
 
 	return launcherEnabledChangeResult{
@@ -122,7 +156,7 @@ func persistLauncherEnabledChange(db *sql.DB, launcherID string, enabled bool) (
 // successful commit, releases every deleted Session binding through the MAC
 // coordinator. Running operations are NOT terminated.
 func (a *App) applyLauncherEnabledChange(launcherID string, enabled bool) (launcherEnabledChangeResult, error) {
-	result, err := persistLauncherEnabledChange(a.DB, launcherID, enabled)
+	result, err := persistLauncherChange(a.DB, launcherID, nil, &enabled)
 	if err != nil {
 		return launcherEnabledChangeResult{}, err
 	}
@@ -130,6 +164,84 @@ func (a *App) applyLauncherEnabledChange(launcherID string, enabled bool) (launc
 		a.releaseSessionBindings(result.RevokedSessionIDs)
 	}
 	return result, nil
+}
+
+// updateLauncherWithLifecycle is the App-level lifecycle operation for a
+// Launcher PATCH (rename and/or enable/disable). Rename and enabled-state
+// change commit atomically, so a failed durable change leaves no partial
+// rename behind and a colliding rename aborts a requested disable as well.
+//
+// Disabling quiesces Operation admission before the change commits and keeps
+// it closed on success (quiesce is the runtime companion of durable disabled
+// state); a failed durable change restores admission from the hierarchical
+// authorities. Enabling commits first, then re-syncs admission: a Launcher
+// enabled while its Principal is disabled stays quiesced. After a successful
+// disable commit, every deleted Session binding is released through the MAC
+// coordinator; running operations are NOT terminated. The returned projection
+// is composed from the pre-change row and the committed overrides, so success
+// is never followed by a fallible lookup.
+//
+// updateLauncherWithLifecycle is a lock-owning lifecycle mutator: it holds
+// lifecycleMu for the whole transition so it cannot interleave with another
+// Launcher/Principal lifecycle mutation on the same ownership.
+func (a *App) updateLauncherWithLifecycle(launcherID string, name *string, enabled *bool) (*LauncherWithPrincipal, []string, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	return a.updateLauncherWithLifecycleLocked(launcherID, name, enabled)
+}
+
+// updateLauncherWithLifecycleLocked is the lock-already-held form of
+// updateLauncherWithLifecycle. It is used internally by lifecycle mutators
+// that already hold lifecycleMu.
+func (a *App) updateLauncherWithLifecycleLocked(launcherID string, name *string, enabled *bool) (*LauncherWithPrincipal, []string, error) {
+	cur, err := findLauncherByID(a.DB, launcherID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	disabling := enabled != nil && !*enabled
+	if disabling {
+		a.OperationSupervisor.quiesceLauncher(launcherID)
+	}
+
+	result, err := persistLauncherChange(a.DB, launcherID, name, enabled)
+	if err != nil {
+		if disabling {
+			// The quiesce is the prologue of the durable disable: if the
+			// durable change fails before committing, admission must mirror
+			// exactly what Principal.enabled and Launcher.enabled now say. If
+			// that authoritative re-read itself fails, admission stays
+			// quiesced — never fail open. The original DB error is preserved
+			// as the returned operation error.
+			if syncErr := a.syncLauncherAdmission(launcherID); syncErr != nil {
+				logLifecycleAdmissionSyncError(launcherID, syncErr)
+			}
+		}
+		return nil, nil, err
+	}
+
+	if len(result.RevokedSessionIDs) > 0 {
+		a.releaseSessionBindings(result.RevokedSessionIDs)
+	}
+
+	if enabled != nil && *enabled {
+		// Enable commits the enabled state first; only after that success does
+		// the Launcher's admission re-sync to the effective hierarchical
+		// authorities (Principal.enabled && Launcher.enabled). A Launcher
+		// enabled while its Principal is disabled stays quiesced.
+		if err := a.syncLauncherAdmission(launcherID); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	updated := *cur
+	if name != nil {
+		updated.Name = *name
+	}
+	if enabled != nil {
+		updated.Enabled = *enabled
+	}
+	return &updated, result.RevokedSessionIDs, nil
 }
 
 // hasRunningForLauncher reports whether any in-memory operation of the given
@@ -295,11 +407,15 @@ func (a *App) inspectHelperContainersForLauncher(ctx context.Context, launcherID
 	return containers, nil
 }
 
-// removeStaleHelperContainers removes exited (non-running) helper containers in
-// a best-effort fashion. Only schema-coherent containers already classified as
+// removeStaleHelperContainers removes exited (non-running) helper containers.
+// It is part of the committed path of checked deletion, never the check: the
+// check inspects runtime without mutating it, and stale removal runs only after
+// the classification confirmed the runtime is quiescent. A removal failure is
+// authoritative and aborts the delete so helper-owned runtime is never left
+// behind silently. Only schema-coherent containers already classified as
 // attributable belong to this list; genuinely running containers are never
 // passed here.
-func (a *App) removeStaleHelperContainers(ctx context.Context, containers []helperContainer) {
+func (a *App) removeStaleHelperContainers(ctx context.Context, containers []helperContainer) error {
 	for _, c := range containers {
 		if c.Running {
 			continue
@@ -310,8 +426,10 @@ func (a *App) removeStaleHelperContainers(ctx context.Context, containers []help
 				slog.String("operation", "checked_delete"),
 				slog.String("error", err.Error()),
 			)
+			return fmt.Errorf("cannot remove stale helper container %s: %w", c.ID, err)
 		}
 	}
+	return nil
 }
 
 // deleteLauncherRow removes the Launcher row. Its Sessions were already removed
@@ -335,86 +453,48 @@ func deleteLauncherRow(db *sql.DB, launcherID string) error {
 	return tx.Commit()
 }
 
-// runtimeActiveForLauncher reports whether checked deletion must be refused for
-// launcherID: an in-memory Operation admitted before the quiesce is running, or
-// an attributable running helper container exists. Fail-closes on inspection
-// error so a Launcher is never deleted when its runtime cannot be classified.
-func (a *App) runtimeActiveForLauncher(ctx context.Context, launcherID string) (bool, error) {
+// launcherRuntimeInspection is the side-effect-free result of the checked-delete
+// runtime classification: whether attributable runtime is active (an in-memory
+// Operation admitted before the quiesce is still running, or an attributable
+// running helper container exists), plus the full attributable container list
+// for the committed-path stale cleanup.
+type launcherRuntimeInspection struct {
+	containers []helperContainer
+	active     bool
+}
+
+// inspectLauncherRuntime classifies a Launcher's runtime without mutating
+// anything. An Operation admitted before the quiesce is still running refuses
+// immediately on supervisor provenance (no Docker round-trip is needed); a
+// failure to inspect the attributable containers fails closed so a Launcher is
+// never deleted when its runtime cannot be classified.
+func (a *App) inspectLauncherRuntime(ctx context.Context, launcherID string) (launcherRuntimeInspection, error) {
 	if a.OperationSupervisor.hasRunningForLauncher(launcherID) {
-		return true, nil
+		return launcherRuntimeInspection{active: true}, nil
 	}
 	containers, err := a.inspectHelperContainersForLauncher(ctx, launcherID)
 	if err != nil {
-		return false, err
+		return launcherRuntimeInspection{}, err
 	}
 	for _, c := range containers {
 		if c.Running {
-			return true, nil
+			return launcherRuntimeInspection{containers: containers, active: true}, nil
 		}
 	}
-	a.removeStaleHelperContainers(ctx, containers)
-	return false, nil
+	return launcherRuntimeInspection{containers: containers}, nil
 }
 
-// launcherPriorState captures a Launcher's enabled value before a checked-delete
-// prologue disables it, so an abortive delete whose runtime cannot be classified
-// can restore the authoritative state it had before it refused to proceed. It is
-// internal to the checked-delete failure path and is never introduced to the
-// existing disabled-state contract.
-type launcherPriorState struct {
-	id      string
-	enabled bool
-}
-
-// launcherEnabledState reports the Launcher's current enabled value, or an error
-// if it cannot be read.
-func launcherEnabledState(db *sql.DB, launcherID string) (bool, error) {
-	var v int
-	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id = ?`, launcherID).Scan(&v); err != nil {
-		return false, fmt.Errorf("cannot read launcher enabled state: %w", err)
-	}
-	return v != 0, nil
-}
-
-// launcherPriorStates captures the enabled state of every given Launcher before
-// a checked-delete disables them.
-func (a *App) launcherPriorStates(launchers []string) ([]launcherPriorState, error) {
-	states := make([]launcherPriorState, 0, len(launchers))
-	for _, id := range launchers {
-		enabled, err := launcherEnabledState(a.DB, id)
-		if err != nil {
-			return nil, err
-		}
-		states = append(states, launcherPriorState{id: id, enabled: enabled})
-	}
-	return states, nil
-}
-
-// restoreLauncherStateAfterFailedDelete re-applies the captured authoritative
-// enabled state of a Launcher whose checked delete was refused because its
-// runtime could not be classified (and therefore the delete left no durable
-// disabled authority behind), then re-syncs supervisor admission to the effective
-// hierarchical authorities. A previously-enabled Launcher is re-opened; a
-// previously-disabled one stays admission-closed. Sessions destroyed during the
-// abortive disable prologue are not recreated; the disable was a genuine
-// invalidation regardless of the delete's eventual outcome.
-func (a *App) restoreLauncherStateAfterFailedDelete(ctx context.Context, prior launcherPriorState) {
-	if prior.enabled {
-		if _, err := a.applyLauncherEnabledChange(prior.id, true); err != nil {
-			opLog(ctx).Error("restore launcher state after failed checked delete",
-				slog.String("operation", "checked_delete"),
-				slog.String("launcher_id", prior.id),
-				slog.String("error", err.Error()),
-			)
-			return
-		}
-	}
-	if err := a.syncLauncherAdmission(prior.id); err != nil {
-		opLog(ctx).Error("restore launcher admission after failed checked delete",
-			slog.String("operation", "checked_delete"),
-			slog.String("launcher_id", prior.id),
-			slog.String("error", err.Error()),
-		)
+// restoreLauncherAdmissionAfterRefusal re-syncs a Launcher's Operation
+// admission from its durable hierarchical authorities after a checked delete
+// was refused while the Launcher was merely prologue-quiesced. The supervisor
+// forgets the quiesce (admission re-opens) exactly where the authorities say
+// the Launcher is effectively enabled, and a Launcher the operator had already
+// disabled stays admission-closed. A failed re-read keeps the Launcher
+// quiesced — never fail open — and is surfaced through
+// logLifecycleAdmissionSyncError for operator visibility.
+func (a *App) restoreLauncherAdmissionAfterRefusal(launcherID string) {
+	if err := a.syncLauncherAdmission(launcherID); err != nil {
+		logLifecycleAdmissionSyncError(launcherID, err)
 	}
 }
 
@@ -486,24 +566,37 @@ func (a *App) enableLauncherLocked(launcherID string) error {
 // deleteLauncherChecked deletes a Launcher only after checked cleanup confirms
 // no attributable runtime remains active or unclassifiable. Exact ordering:
 //
-//  1. Disable the Launcher, invalidate its Sessions, and quiesce Operation
-//     admission (disableLauncher). Quiesce is set before the DB transition so no in-flight request whose Session resolved before the
-//     disable can admit an Operation after it, and it is kept once the disable
-//     commits because quiesce is the companion of durable disabled state.
-//  2. Runtime check: any operation admitted before the quiesce that is still
-//     running, or an attributable running container, refuses deletion with
-//     ErrLauncherRuntimeActive (leaving the Launcher disabled, its Sessions
-//     invalidated, admission closed, and the row preserved). Inspection failure
+//  1. Quiesce Operation admission. The quiesce is in-memory only: it is set
+//     before the runtime check so every Operation admitted before it is visible
+//     to that check and no Operation can be admitted after it while the owner
+//     removal proceeds.
+//  2. Runtime check, side-effect free: any operation admitted before the
+//     quiesce that is still running, or an attributable running container,
+//     refuses deletion with ErrLauncherRuntimeActive. Inspection failure
 //     (runtime cannot be classified — for example Docker CLI unavailable)
-//     also refuses deletion, but restores the Launcher to its prior enabled
-//     state and re-opens admission rather than leaving it durably disabled.
-//  3. If clean, remove stale/exited helper containers and delete the Launcher
-//     row. Sessions were already removed by step 1.
+//     also refuses deletion. Both refusals leave the Launcher exactly as it
+//     was: row, Sessions, and enabled state untouched, and the prologue
+//     quiesce undone by re-syncing admission from the authorities — the
+//     Launcher stays enabled so it can be disabled explicitly first.
+//  3. Authoritative stale-container removal: exited attributable containers
+//     are removed before the durable disable, so a removal failure aborts the
+//     delete before any durable state changes.
+//  4. Durable disable: Sessions are invalidated here, and only here, after the
+//     runtime was confirmed quiescent and stale containers were removed. The
+//     quiesce is kept: it is the runtime companion of the durable disabled
+//     state.
+//  5. Launcher row removal. A row-removal failure leaves the Launcher durably
+//     disabled, its Sessions invalidated, and admission closed; a retry is
+//     safe because the disable is idempotent and re-runs the whole check.
 //
-// A running Operation can never lose its persisted Launcher owner: quiesce
-// closes admission (post-quiesce admits return false), while every pre-quiesce
-// admitted Operation is visible to the step-2 check, and on refusal the row is
-// preserved. It never kills a genuinely running Operation.
+// A running Operation can never lose its persisted Launcher owner: the quiesce
+// closes admission (post-quiesce admits are refused), while every Operation
+// admitted before the quiesce is visible to the step-2 check, and on refusal
+// the row, its Sessions, and the enabled state are preserved. It never kills a
+// genuinely running Operation. The supervisor's quiesce entry outlives a
+// successful delete deliberately: it refuses admission for an in-flight request
+// that resolved its Session before the owner removal, and Launcher IDs are
+// never reused, so it cannot leak into a re-created owner.
 //
 // deleteLauncherChecked is a lock-owning lifecycle mutator: it holds lifecycleMu
 // across the runtime inspection so no competing enable/disable/delete of the
@@ -519,34 +612,42 @@ func (a *App) deleteLauncherChecked(ctx context.Context, launcherID string) ([]s
 // deleteLauncherChecked. It is used internally by lifecycle mutators that
 // already hold lifecycleMu.
 func (a *App) deleteLauncherCheckedLocked(ctx context.Context, launcherID string) ([]string, error) {
-	prior, err := launcherEnabledState(a.DB, launcherID)
+	// Step 1: quiesce Operation admission. In-memory only: the quiesce is the
+	// operation-admission closing point, set before the runtime check so every
+	// Operation admitted before it is visible to that check and no Operation
+	// can be admitted after it while the checked deletion proceeds. It is
+	// undone on refusal for an effectively-enabled Launcher.
+	a.OperationSupervisor.quiesceLauncher(launcherID)
+
+	// Step 2: side-effect-free runtime classification.
+	inspection, err := a.inspectLauncherRuntime(ctx, launcherID)
 	if err != nil {
+		a.restoreLauncherAdmissionAfterRefusal(launcherID)
+		return nil, fmt.Errorf("cannot inspect launcher runtime: %w", err)
+	}
+	if inspection.active {
+		a.restoreLauncherAdmissionAfterRefusal(launcherID)
+		return nil, ErrLauncherRuntimeActive
+	}
+
+	// Step 3: authoritative stale-container removal, still before any durable
+	// state change.
+	if err := a.removeStaleHelperContainers(ctx, inspection.containers); err != nil {
+		a.restoreLauncherAdmissionAfterRefusal(launcherID)
 		return nil, err
 	}
 
+	// Step 4: durable disable. Sessions are invalidated here — and only here —
+	// so a refused delete leaves the Sessions and the enabled state untouched.
 	revoked, err := a.disableLauncherLocked(launcherID)
 	if err != nil {
 		return nil, err
 	}
 
-	active, err := a.runtimeActiveForLauncher(ctx, launcherID)
-	if err != nil {
-		// Runtime cannot be classified (for example the Docker CLI is
-		// unavailable): refuse the delete WITHOUT leaving the Launcher durably
-		// disabled. The disable above was only the deletion prologue, so the
-		// authoritative state is restored and admission re-synced to the
-		// effective hierarchical authorities. This keeps checked deletion from
-		// wedging a Launcher merely because its runtime cannot be inspected.
-		a.restoreLauncherStateAfterFailedDelete(ctx, launcherPriorState{id: launcherID, enabled: prior})
-		return nil, fmt.Errorf("cannot inspect launcher runtime: %w", err)
-	}
-	if active {
-		// Sanctioned 409: the Launcher stays disabled + quiesced (quiesce is the
-		// companion of durable disabled state); the operator re-enables or
-		// retries after the runtime exits.
-		return revoked, ErrLauncherRuntimeActive
-	}
-
+	// Step 5: owner removal. On failure the Launcher stays disabled +
+	// quiesced with its Sessions invalidated (the disable was a genuine
+	// invalidation); a retry re-runs the whole check against the disabled
+	// Launcher.
 	if err := deleteLauncherRow(a.DB, launcherID); err != nil {
 		return nil, err
 	}
@@ -576,17 +677,18 @@ func principalLaunchers(db *sql.DB, principalID int64) ([]string, error) {
 
 // deletePrincipalChecked deletes a Principal only after checked cleanup confirms
 // no attributable runtime remains active or unclassifiable across any of its
-// Launchers. The admission-closing prologue runs across every Launcher beneath
-// the Principal via disableLauncher: each is disabled and its Sessions
-// invalidated (closing Session admission) and quiesced on the supervisor
-// (closing Operation admission). Any running Operation admitted before the
-// quiesce refuses the delete with ErrLauncherRuntimeActive (409), leaving all
-// of the Principal's Launchers disabled, quiesced, and their Sessions
-// invalidated but preserving the rows. Inspection failure (runtime cannot be
-// classified — for example Docker CLI unavailable) also refuses the delete, but
-// restores every Launcher to its prior enabled state and re-opens admission so
-// the Principal is not left half-torn-down. On a clean check it removes stale
-// containers and delegates the committed removal to the Principal delete owner.
+// Launchers. The admission-closing prologue quiesces Operation admission for
+// every Launcher beneath the Principal BEFORE the runtime check. The check is
+// side-effect free: any running Operation admitted before the quiesce, or an
+// attributable running container, refuses the delete with ErrLauncherRuntimeActive
+// (409), leaving the Principal, its Launchers, their Sessions, and their enabled
+// states untouched, with the prologue quiesce undone for effectively-enabled
+// Launchers. Inspection failure (runtime cannot be classified — for example
+// Docker CLI unavailable) also refuses the delete with the same side-effect-free
+// guarantee. On a clean check, stale containers are removed authoritatively for
+// every Launcher (still before any durable state change), every Launcher is then
+// durably disabled — invalidating its Sessions — and the committed removal is
+// delegated to the existing Principal delete owner.
 //
 // deletePrincipalChecked is a lock-owning lifecycle mutator: it holds lifecycleMu
 // across the whole check so no Launcher can be created beneath this Principal,
@@ -612,51 +714,74 @@ func (a *App) deletePrincipalCheckedLocked(ctx context.Context, username string)
 		return nil, err
 	}
 
-	states, err := a.launcherPriorStates(launchers)
-	if err != nil {
-		return nil, err
+	// Prologue: quiesce Operation admission for every Launcher beneath the
+	// Principal before the runtime check, so no Operation can be admitted for
+	// any of them while the checked deletion proceeds.
+	for _, lid := range launchers {
+		a.OperationSupervisor.quiesceLauncher(lid)
 	}
 
-	var revokedAll []string
+	// Side-effect-free check phase across every Launcher.
+	inspections := make(map[string]launcherRuntimeInspection, len(launchers))
 	for _, lid := range launchers {
+		inspection, err := a.inspectLauncherRuntime(ctx, lid)
+		if err != nil {
+			a.restoreLauncherAdmissionAfterPrincipalRefusal(launchers)
+			return nil, fmt.Errorf("cannot inspect principal runtime: %w", err)
+		}
+		if inspection.active {
+			a.restoreLauncherAdmissionAfterPrincipalRefusal(launchers)
+			return nil, ErrLauncherRuntimeActive
+		}
+		inspections[lid] = inspection
+	}
+
+	// Authoritative stale-container removal for every Launcher, still before
+	// any durable state changes.
+	for _, lid := range launchers {
+		if err := a.removeStaleHelperContainers(ctx, inspections[lid].containers); err != nil {
+			a.restoreLauncherAdmissionAfterPrincipalRefusal(launchers)
+			return nil, err
+		}
+	}
+
+	// Durable disable across every Launcher. Sessions are invalidated here —
+	// and only here — after every Launcher passed the check and stale cleanup.
+	var revokedAll []string
+	for i, lid := range launchers {
 		revoked, err := a.disableLauncherLocked(lid)
 		if err != nil {
 			// disableLauncher restored admission for the Launcher whose DB
 			// transition failed; Launchers already durably disabled in this
-			// attempt stay disabled + quiesced.
+			// attempt stay disabled + quiesced. The Launchers not yet reached
+			// are still enabled but were prologue-quiesced: re-sync their
+			// admission from the authorities so the failure does not leave
+			// enabled Launchers admission-closed.
+			a.restoreLauncherAdmissionAfterPrincipalRefusal(launchers[i+1:])
 			return nil, err
 		}
 		revokedAll = append(revokedAll, revoked...)
 	}
 
-	for _, lid := range launchers {
-		active, err := a.runtimeActiveForLauncher(ctx, lid)
-		if err != nil {
-			// Runtime cannot be classified (for example the Docker CLI is
-			// unavailable): refuse the Principal delete WITHOUT leaving its
-			// Launchers durably disabled. Restore every Launcher to the state it
-			// had before this abortive delete prologue and re-sync admission to
-			// the effective hierarchical authorities.
-			for _, st := range states {
-				a.restoreLauncherStateAfterFailedDelete(ctx, st)
-			}
-			return nil, fmt.Errorf("cannot inspect principal runtime: %w", err)
-		}
-		if active {
-			// Sanctioned 409: all Launchers stay disabled + quiesced.
-			return revokedAll, ErrLauncherRuntimeActive
-		}
-	}
-
 	// Delegate the committed delete and MAC-binding release to the existing
 	// Principal delete owner. This preserves a single production owner for the
-	// DB commit. The Session IDs for runtime-dir cleanup were already collected
-	// by the disable step (revokedAll); the owner's own discovery returns none
-	// because the disable removed the Sessions.
+	// DB commit. The Session IDs for runtime-dir cleanup were collected by the
+	// disable step (revokedAll); the owner's own discovery returns none because
+	// the disable removed the Sessions.
 	if _, err := a.deletePrincipalWithMAC(username); err != nil {
 		return nil, err
 	}
 	return revokedAll, nil
+}
+
+// restoreLauncherAdmissionAfterPrincipalRefusal re-syncs the Operation admission
+// of every given Launcher after a Principal checked delete was refused while
+// they were merely prologue-quiesced. See
+// restoreLauncherAdmissionAfterRefusal for the per-Launcher semantics.
+func (a *App) restoreLauncherAdmissionAfterPrincipalRefusal(launchers []string) {
+	for _, lid := range launchers {
+		a.restoreLauncherAdmissionAfterRefusal(lid)
+	}
 }
 
 // principalLaunchersByUsername returns the IDs of all Launchers beneath the

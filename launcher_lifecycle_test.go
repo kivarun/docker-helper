@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ func launcherLifecycleDB(t *testing.T) (*sql.DB, string, string) {
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
 
-	la, _, _, err := createLauncher(db, pid, "default", LauncherScopeInherit, nil, globalRoots, false)
+	la, _, _, err := createLauncher(db, pid, "la", LauncherScopeInherit, nil, globalRoots, false)
 	if err != nil {
 		t.Fatalf("createLauncher(a): %v", err)
 	}
@@ -48,15 +49,16 @@ func launcherLifecycleDB(t *testing.T) (*sql.DB, string, string) {
 	return db, la.ID, lb.ID
 }
 
-// TestPersistLauncherEnabledChangeDisableInvalidatesOnlyOwnSessions proves a
+// TestPersistLauncherChangeDisableInvalidatesOnlyOwnSessions proves a
 // Launcher disable invalidates exactly that Launcher's Sessions transactionally
 // while leaving sibling Launchers' Sessions valid.
-func TestPersistLauncherEnabledChangeDisableInvalidatesOnlyOwnSessions(t *testing.T) {
+func TestPersistLauncherChangeDisableInvalidatesOnlyOwnSessions(t *testing.T) {
 	db, laID, lbID := launcherLifecycleDB(t)
 
-	result, err := persistLauncherEnabledChange(db, laID, false)
+	disabled := false
+	result, err := persistLauncherChange(db, laID, nil, &disabled)
 	if err != nil {
-		t.Fatalf("persistLauncherEnabledChange: %v", err)
+		t.Fatalf("persistLauncherChange: %v", err)
 	}
 	if !result.Changed {
 		t.Error("expected changed=true on first disable")
@@ -88,13 +90,14 @@ func TestPersistLauncherEnabledChangeDisableInvalidatesOnlyOwnSessions(t *testin
 	}
 }
 
-// TestPersistLauncherEnabledChangeDisableRetrySafe proves a re-invoked disable
+// TestPersistLauncherChangeDisableRetrySafe proves a re-invoked disable
 // on an already-disabled Launcher still invalidates/cleans its Sessions rather
 // than skipping cleanup because enabled was already false.
-func TestPersistLauncherEnabledChangeDisableRetrySafe(t *testing.T) {
+func TestPersistLauncherChangeDisableRetrySafe(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 
-	if _, err := persistLauncherEnabledChange(db, laID, false); err != nil {
+	disabled := false
+	if _, err := persistLauncherChange(db, laID, nil, &disabled); err != nil {
 		t.Fatalf("first disable: %v", err)
 	}
 	// Re-inject a Session to simulate one left behind by a prior partial
@@ -105,7 +108,7 @@ func TestPersistLauncherEnabledChangeDisableRetrySafe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := persistLauncherEnabledChange(db, laID, false)
+	result, err := persistLauncherChange(db, laID, nil, &disabled)
 	if err != nil {
 		t.Fatalf("second disable: %v", err)
 	}
@@ -124,15 +127,17 @@ func TestPersistLauncherEnabledChangeDisableRetrySafe(t *testing.T) {
 	}
 }
 
-// TestPersistLauncherEnabledChangeEnableDoesNotRecreateSessions proves re-enable
+// TestPersistLauncherChangeEnableDoesNotRecreateSessions proves re-enable
 // only flips enabled state and never recreates invalidated Sessions.
-func TestPersistLauncherEnabledChangeEnableDoesNotRecreateSessions(t *testing.T) {
+func TestPersistLauncherChangeEnableDoesNotRecreateSessions(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 
-	if _, err := persistLauncherEnabledChange(db, laID, false); err != nil {
+	disabled := false
+	if _, err := persistLauncherChange(db, laID, nil, &disabled); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	result, err := persistLauncherEnabledChange(db, laID, true)
+	enabled := true
+	result, err := persistLauncherChange(db, laID, nil, &enabled)
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -142,11 +147,11 @@ func TestPersistLauncherEnabledChangeEnableDoesNotRecreateSessions(t *testing.T)
 	if len(result.RevokedSessionIDs) != 0 {
 		t.Errorf("expected no revoked sessions on enable, got %v", result.RevokedSessionIDs)
 	}
-	var enabled, count int
-	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, laID).Scan(&enabled); err != nil {
+	var enabledState, count int
+	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, laID).Scan(&enabledState); err != nil {
 		t.Fatal(err)
 	}
-	if enabled != 1 {
+	if enabledState != 1 {
 		t.Error("expected launcher re-enabled")
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id=?`, laID).Scan(&count); err != nil {
@@ -157,10 +162,116 @@ func TestPersistLauncherEnabledChangeEnableDoesNotRecreateSessions(t *testing.T)
 	}
 }
 
-func TestPersistLauncherEnabledChangeNotFound(t *testing.T) {
+func TestPersistLauncherChangeNotFound(t *testing.T) {
 	db, _, _ := launcherLifecycleDB(t)
-	if _, err := persistLauncherEnabledChange(db, "dhl_missing", false); !errors.Is(err, ErrLauncherNotFound) {
+	disabled := false
+	if _, err := persistLauncherChange(db, "dhl_missing", nil, &disabled); !errors.Is(err, ErrLauncherNotFound) {
 		t.Fatalf("expected ErrLauncherNotFound, got %v", err)
+	}
+}
+
+// TestLauncherPatchRenameDisableAtomic proves the PATCH owner commits rename
+// and disable as one transaction: when the durable enabled-state change fails
+// after a successful rename, the rename rolls back with it — no partial rename
+// is left behind, the Launcher stays enabled with its Sessions intact, and
+// admission is restored for the still effectively-enabled Launcher. Under the
+// former rename-then-disable sequence the rename would have persisted.
+func TestLauncherPatchRenameDisableAtomic(t *testing.T) {
+	db, dbPath := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+	lID := l.ID
+	sum := sha256.Sum256([]byte("token-patch"))
+	if _, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		"dhs_patch", hex.EncodeToString(sum[:]), "/patch", time.Now().Unix(), time.Now().Add(time.Hour).Unix(), lID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fail exactly the durable enabled-state UPDATE, after the rename UPDATE
+	// and the Session deletion have succeeded inside the same transaction.
+	failDB := newFailExecMatchDB(t, dbPath, "UPDATE launchers SET enabled", errMockDeleteDB)
+	app := deleteLifecycleApp(t, failDB)
+
+	newName := "renamed"
+	disabled := false
+	_, _, err = app.updateLauncherWithLifecycle(lID, &newName, &disabled)
+	if err == nil {
+		t.Fatal("expected failing durable disable to fail the PATCH, got nil")
+	} else if !errors.Is(err, errMockDeleteDB) {
+		t.Fatalf("expected the original DB error to be preserved, got %v", err)
+	}
+
+	var name string
+	if err := failDB.QueryRow(`SELECT name FROM launchers WHERE id = ?`, lID).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "work" {
+		t.Fatalf("partial rename survived a failed disable: name = %q, want %q", name, "work")
+	}
+	if enabled, err := launcherEnabledState(failDB, lID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Fatal("expected launcher to stay enabled after failed PATCH disable")
+	}
+	var sessions int
+	if err := failDB.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id = ?`, lID).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 {
+		t.Fatalf("expected the launcher's session to survive the failed PATCH, got %d", sessions)
+	}
+	if app.OperationSupervisor.isLauncherQuiesced(lID) {
+		t.Fatal("supervisor must not stay quiesced after a failed PATCH disable of an enabled launcher")
+	}
+}
+
+// TestLauncherPatchCollidingRenameAbortsDisable proves a rename that collides
+// with a sibling Launcher's name aborts a requested disable as well: the whole
+// transaction rolls back, leaving the Launcher enabled with its Sessions
+// intact and its admission re-opened after the prologue quiesce.
+func TestLauncherPatchCollidingRenameAbortsDisable(t *testing.T) {
+	db, _ := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+	if _, _, _, err := createLauncher(db, pid, "other", LauncherScopeInherit, nil, globalRoots, false); err != nil {
+		t.Fatalf("createLauncher(other): %v", err)
+	}
+	lID := l.ID
+	sum := sha256.Sum256([]byte("token-collide"))
+	if _, err := db.Exec(`INSERT INTO sessions (id, token_hash, workspace, created_at, expires_at, launcher_id) VALUES (?, ?, ?, ?, ?, ?)`,
+		"dhs_collide", hex.EncodeToString(sum[:]), "/collide", time.Now().Unix(), time.Now().Add(time.Hour).Unix(), lID); err != nil {
+		t.Fatal(err)
+	}
+
+	app := deleteLifecycleApp(t, db)
+	dup := "other"
+	disabled := false
+	if _, _, err := app.updateLauncherWithLifecycle(lID, &dup, &disabled); !errors.Is(err, ErrLauncherExists) {
+		t.Fatalf("expected ErrLauncherExists, got: %v", err)
+	}
+
+	if enabled, err := launcherEnabledState(db, lID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Fatal("expected launcher to stay enabled after aborted PATCH")
+	}
+	var sessions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id = ?`, lID).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 {
+		t.Fatalf("expected the launcher's session to survive the aborted PATCH, got %d", sessions)
+	}
+	if app.OperationSupervisor.isLauncherQuiesced(lID) {
+		t.Fatal("supervisor must not stay quiesced after an aborted PATCH disable")
 	}
 }
 
@@ -180,6 +291,16 @@ func deleteLifecycleApp(t *testing.T, db *sql.DB) *App {
 	}
 	app.OperationSupervisor = newOperationSupervisor()
 	return app
+}
+
+// launcherEnabledState reports the Launcher's current enabled value directly
+// from the database, for asserting durable enabled state in lifecycle tests.
+func launcherEnabledState(db *sql.DB, launcherID string) (bool, error) {
+	var v int
+	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id = ?`, launcherID).Scan(&v); err != nil {
+		return false, fmt.Errorf("cannot read launcher enabled state: %w", err)
+	}
+	return v != 0, nil
 }
 
 func TestDeleteLauncherCheckedClean(t *testing.T) {
@@ -221,40 +342,42 @@ func TestDeleteLauncherCheckedActiveRunningOpRefuses(t *testing.T) {
 	if !errors.Is(err, ErrLauncherRuntimeActive) {
 		t.Fatalf("expected ErrLauncherRuntimeActive for running op, got %v (revoked=%v)", err, revoked)
 	}
-	if len(revoked) != 2 {
-		t.Errorf("expected the running launcher's 2 sessions reported revoked, got %v", revoked)
-	}
-	// The launcher row is preserved but left disabled, and its Sessions are
-	// invalidated (the sanctioned 409 semantics of the destructive delete).
-	if _, err := findLauncherByID(db, laID); err != nil {
-		t.Fatalf("launcher row should be preserved: %v", err)
-	}
-	var enabled int
-	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, laID).Scan(&enabled); err != nil {
-		t.Fatal(err)
-	}
-	if enabled != 0 {
-		t.Error("expected refused delete to leave launcher disabled")
+	// The refusal is side-effect free: no Sessions were invalidated...
+	if len(revoked) != 0 {
+		t.Errorf("expected no sessions revoked by refused delete, got %v", revoked)
 	}
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id=?`, laID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Errorf("expected sessions invalidated by refused delete, got %d", count)
+	if count != 2 {
+		t.Errorf("expected sessions preserved by refused delete, got %d", count)
 	}
-	// The Launcher remains durably disabled, so its operation admission stays
-	// closed: quiesce is the runtime companion of disabled state and is NOT
-	// released merely because the delete was refused.
-	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
-		t.Error("expected quiesce kept after refused delete (launcher durably disabled)")
+	// ...and the Launcher stays enabled so it can be disabled explicitly first.
+	if _, err := findLauncherByID(db, laID); err != nil {
+		t.Fatalf("launcher row should be preserved: %v", err)
+	}
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Error("expected refused delete to leave launcher enabled")
+	}
+	// Admission is re-synced from the authorities: the prologue quiesce is
+	// undone for the effectively-enabled Launcher, so Operations can be
+	// admitted again without an enable/disable cycle.
+	if app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Error("expected prologue quiesce undone after refused delete (launcher enabled)")
+	}
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
+		t.Error("expected operation admitted for launcher after refused delete restored admission")
 	}
 }
 
 // TestDeleteLauncherCheckedActiveContainerRefusesWithoutProvenance proves
 // restart-style detection: an attributable running container blocks deletion
 // even with no in-memory operation provenance (labels are evidence). The 409
-// leaves the Launcher disabled and its Sessions invalidated, row preserved.
+// is side-effect free: the Launcher stays enabled, its Sessions are preserved,
+// and its operation admission is re-opened.
 func TestDeleteLauncherCheckedActiveContainerRefusesWithoutProvenance(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app := deleteLifecycleApp(t, db)
@@ -268,16 +391,24 @@ func TestDeleteLauncherCheckedActiveContainerRefusesWithoutProvenance(t *testing
 	if _, err := app.deleteLauncherChecked(context.Background(), laID); !errors.Is(err, ErrLauncherRuntimeActive) {
 		t.Fatalf("expected ErrLauncherRuntimeActive for running container, got %v", err)
 	}
-	// Launcher row preserved but disabled; sessions invalidated.
+	// Launcher row preserved and enabled; sessions preserved.
 	if _, err := findLauncherByID(db, laID); err != nil {
 		t.Fatalf("launcher should be preserved: %v", err)
 	}
-	var enabled int
-	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, laID).Scan(&enabled); err != nil {
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Error("expected refused delete to leave launcher enabled")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id=?`, laID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if enabled != 0 {
-		t.Error("expected refused delete to leave launcher disabled")
+	if count != 2 {
+		t.Errorf("expected sessions preserved by refused delete, got %d", count)
+	}
+	if app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Error("expected prologue quiesce undone after refused delete (launcher enabled)")
 	}
 }
 
@@ -307,11 +438,51 @@ func TestDeleteLauncherCheckedStaleContainerRemoved(t *testing.T) {
 	}
 }
 
+// TestDeleteLauncherCheckedStaleRemovalFailureAborts proves stale-container
+// removal is authoritative: a docker rm failure aborts the delete before any
+// durable state changes, leaving the Launcher enabled with its Sessions
+// preserved and its admission re-opened, so the operator can retry.
+func TestDeleteLauncherCheckedStaleRemovalFailureAborts(t *testing.T) {
+	db, laID, _ := launcherLifecycleDB(t)
+	app := deleteLifecycleApp(t, db)
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "false")
+	}
+	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
+		if launcherID == laID {
+			return []helperContainer{{ID: "stale123", Running: false}}, nil
+		}
+		return nil, nil
+	}
+
+	if _, err := app.deleteLauncherChecked(context.Background(), laID); err == nil {
+		t.Fatal("expected stale-removal failure to abort the delete, got nil")
+	}
+	if _, err := findLauncherByID(db, laID); err != nil {
+		t.Fatalf("launcher should be preserved on stale-removal failure: %v", err)
+	}
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Error("expected aborted delete to leave launcher enabled")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE launcher_id=?`, laID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected sessions preserved by aborted delete, got %d", count)
+	}
+	if app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Error("expected prologue quiesce undone after aborted delete (launcher enabled)")
+	}
+}
+
 // TestDeleteLauncherCheckedInspectErrorFailClosed proves an unclassifiable
 // inspection preserves the Launcher, refuses the delete, and — because the
-// runtime could not be classified rather than being confirmed active — restores
-// the Launcher to its prior enabled state and re-opens its admission instead of
-// leaving it durably disabled. This is the UAT regression where a Docker
+// runtime could not be classified rather than being confirmed active — leaves
+// the Launcher exactly as it was: enabled, Sessions preserved, and admission
+// re-opened instead of wedged. This is the UAT regression where a Docker
 // inspection failure must not wedge a Launcher.
 func TestDeleteLauncherCheckedInspectErrorFailClosed(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
@@ -328,20 +499,18 @@ func TestDeleteLauncherCheckedInspectErrorFailClosed(t *testing.T) {
 	if _, err := findLauncherByID(db, laID); err != nil {
 		t.Fatalf("launcher should be preserved on inspect failure: %v", err)
 	}
-	// The Launcher is restored to its prior enabled state (not wedged disabled).
-	var enabled int
-	if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, laID).Scan(&enabled); err != nil {
+	// The Launcher stays enabled (never durably disabled by the refusal).
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
 		t.Fatal(err)
-	}
-	if enabled != 1 {
-		t.Errorf("expected inspect-failure delete to restore launcher enabled=1, got %d", enabled)
+	} else if !enabled {
+		t.Errorf("expected inspect-failure delete to leave launcher enabled=1")
 	}
 	// Admission is re-opened: a fresh Operation for the Launcher can be admitted
 	// again, exactly as the post-UAT mount-pin/session flow requires.
 	if app.OperationSupervisor.isLauncherQuiesced(laID) {
 		t.Error("expected launcher admission re-opened after inspect-failure delete (not quiesced)")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); !admitted {
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
 		t.Error("expected operation admitted for launcher after inspect-failure delete restored it")
 	}
 }
@@ -381,6 +550,11 @@ func TestDeleteLauncherCheckedInspectErrorPreservesDisabledLauncher(t *testing.T
 func TestDeleteLauncherCheckedRetryAfterExit(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app := deleteLifecycleApp(t, db)
+	// Stale-container removal is authoritative, so the retry's docker rm must
+	// succeed for the delete to complete.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
 
 	running := true
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
@@ -430,6 +604,11 @@ func TestHasRunningForLauncherSiblingIsolation(t *testing.T) {
 func TestDeletePrincipalCheckedBlockedThenSucceeds(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app := deleteLifecycleApp(t, db)
+	// Stale-container removal is authoritative, so the successful delete's
+	// docker rm must succeed.
+	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
 
 	running := true
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
@@ -463,10 +642,10 @@ func TestDeletePrincipalCheckedBlockedThenSucceeds(t *testing.T) {
 
 // TestDeletePrincipalCheckedInspectErrorRestoresLaunchers proves the UAT
 // scenario: when runtime inspection fails (e.g. Docker CLI unavailable on a
-// confined host), a Principal delete is refused AND its Launchers are restored
-// to their prior enabled state with admission re-opened. It must never leave the
-// Principal half-torn-down with all Launchers durably disabled, which would
-// wedge every subsequent session create for that Principal.
+// confined host), a Principal delete is refused AND its Launchers are left
+// enabled with admission re-opened. It must never leave the Principal
+// half-torn-down with all Launchers durably disabled, which would wedge every
+// subsequent session create for that Principal.
 func TestDeletePrincipalCheckedInspectErrorRestoresLaunchers(t *testing.T) {
 	db, laID, lbID := launcherLifecycleDB(t)
 	app := deleteLifecycleApp(t, db)
@@ -488,16 +667,16 @@ func TestDeletePrincipalCheckedInspectErrorRestoresLaunchers(t *testing.T) {
 	if _, err := findLauncherByID(db, lbID); err != nil {
 		t.Fatalf("launcher b should be preserved: %v", err)
 	}
-	// Every Launcher is restored to enabled and admission re-opened so fresh
-	// Sessions and Operations can be created afterwards (the mount-pin/session
-	// flow that previously failed with "launcher is not available").
+	// Every Launcher stays enabled with admission re-opened so fresh Sessions
+	// and Operations can be created afterwards (the mount-pin/session flow
+	// that previously failed with "launcher is not available").
 	for _, id := range []string{laID, lbID} {
-		var enabled int
-		if err := db.QueryRow(`SELECT enabled FROM launchers WHERE id=?`, id).Scan(&enabled); err != nil {
+		enabled, err := launcherEnabledState(db, id)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if enabled != 1 {
-			t.Errorf("expected launcher %s restored to enabled=1 after inspect-failure principal delete, got %d", id, enabled)
+		if !enabled {
+			t.Errorf("expected launcher %s to stay enabled=1 after inspect-failure principal delete", id)
 		}
 		if app.OperationSupervisor.isLauncherQuiesced(id) {
 			t.Errorf("expected launcher %s admission re-opened after inspect-failure principal delete", id)
@@ -587,20 +766,22 @@ func strippedStringCmd(t *testing.T, s string) *exec.Cmd {
 
 // quiesceBarrier app returns an app whose InspectHelperContainers seam blocks
 // the first call (which occurs AFTER deleteLauncherChecked/deletePrincipalChecked
-// has disabled the launcher and quiesced operation admission) until the test
-// releases it. It returns a channel that is closed when the delete is parked at
-// the admission-closing point, and a release channel the test closes to let the
-// delete proceed.
+// has quiesced operation admission for the launcher, but BEFORE the durable
+// disable) until the test releases it. It returns a channel that is closed when
+// the delete is parked at the runtime check, and a release channel the test
+// closes to let the delete proceed.
 func quiesceBarrierApp(t *testing.T, db *sql.DB) (*App, chan struct{}, chan struct{}) {
 	t.Helper()
 	app := deleteLifecycleApp(t, db)
 	atQuiesce := make(chan struct{})
 	release := make(chan struct{})
 	app.InspectHelperContainers = func(ctx context.Context, launcherID string) ([]helperContainer, error) {
-		// The seam is invoked at the runtime-inspection point, which checked
-		// deletion reaches only after disabling the launcher and quiescing
-		// operation admission. Blocking here deterministically parks the delete
-		// at its admission-closing point before the final owner removal.
+		// The seam is invoked at the side-effect-free runtime-check point,
+		// which checked deletion reaches after quiescing operation admission
+		// but before the durable disable, while still holding the lifecycle
+		// lock. Blocking here deterministically parks the delete at its
+		// admission-closing point before the durable transitions and owner
+		// removal.
 		close(atQuiesce)
 		<-release
 		return nil, nil
@@ -609,9 +790,9 @@ func quiesceBarrierApp(t *testing.T, db *sql.DB) (*App, chan struct{}, chan stru
 }
 
 // TestRaceLauncherConcurrentOperationAdmissionRefused proves that once checked
-// deletion crosses its admission-closing point (disable + quiesce), a concurrent
-// Operation admission for that Launcher is refused. Without the quiesce, the
-// delete would remove the Launcher while that Operation runs.
+// deletion crosses its admission-closing point (quiesce, before the runtime
+// check), a concurrent Operation admission for that Launcher is refused. Without
+// the quiesce, the delete would remove the Launcher while that Operation runs.
 func TestRaceLauncherConcurrentOperationAdmissionRefused(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app, atQuiesce, release := quiesceBarrierApp(t, db)
@@ -623,15 +804,16 @@ func TestRaceLauncherConcurrentOperationAdmissionRefused(t *testing.T) {
 		_, deleteErr = app.deleteLauncherChecked(context.Background(), laID)
 	}()
 
-	// Wait until the delete has disabled + quiesced the launcher and is parked
-	// at the runtime inspection, before the final row removal.
+	// Wait until the delete has quiesced the launcher and is parked at the
+	// side-effect-free runtime check, before the durable disable and row
+	// removal.
 	<-atQuiesce
 
 	// A session that was already authorized before the quiesce now tries to
 	// admit a running Operation for this Launcher, concurrently with the delete.
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	if admitted := app.OperationSupervisor.admit(op); admitted {
+	if admitted := app.OperationSupervisor.admit(op); admitted == admissionAccepted {
 		t.Fatal("operation admitted after checked deletion closed admission; delete would remove launcher while it runs")
 	}
 
@@ -664,10 +846,11 @@ func TestRaceLauncherPreQuiescedRunningOperationBlocksDelete(t *testing.T) {
 	}
 }
 
-// TestRaceNoNewSessionAfterQuiesce proves that once checked deletion has crossed
-// its admission-closing point, concurrent Session creation for that Launcher
-// fails (the DB-level enabled-conditional insert admits no row).
-func TestRaceNoNewSessionAfterQuiesce(t *testing.T) {
+// TestRaceNoNewSessionAfterCheckedDelete proves that a concurrent Session
+// creation for a Launcher under checked deletion cannot slip in mid-delete: the
+// create serializes behind the delete's lifecycle lock and, once the owner is
+// removed, refuses with launcher-not-found.
+func TestRaceNoNewSessionAfterCheckedDelete(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app, atQuiesce, release := quiesceBarrierApp(t, db)
 
@@ -682,23 +865,29 @@ func TestRaceNoNewSessionAfterQuiesce(t *testing.T) {
 
 	<-atQuiesce
 
-	// A concurrent Session creation for this Launcher must be refused now that
-	// the launcher is disabled by the delete's admission-closing point.
-	_, err := app.createSessionWithPolicy(&sessionCreatePolicy{
-		Workspace:             ws,
-		EffectiveAllowedRoots: app.Config.AllowedRoots,
-		LauncherID:            laID,
-		LauncherName:          "default",
-		PrincipalName:         "owner",
-	})
-	if err == nil {
-		t.Fatal("session admitted for launcher after checked deletion closed admission")
-	}
+	// A concurrent Session creation for this Launcher is serialized behind the
+	// delete's lifecycle lock — it cannot complete while the delete is parked —
+	// and once the delete removes the owner it must be refused rather than
+	// producing a Session against a deleted Launcher.
+	createDone := make(chan error, 1)
+	go func() {
+		_, err := app.createSessionWithPolicy(&sessionCreatePolicy{
+			Workspace:             ws,
+			EffectiveAllowedRoots: app.Config.AllowedRoots,
+			LauncherID:            laID,
+			LauncherName:          "default",
+			PrincipalName:         "owner",
+		})
+		createDone <- err
+	}()
 
 	close(release)
 	<-deleteDone
 	if deleteErr != nil {
 		t.Fatalf("delete should succeed, got %v", deleteErr)
+	}
+	if err := <-createDone; err == nil {
+		t.Fatal("session admitted for launcher after checked deletion removed the owner")
 	}
 }
 
@@ -775,29 +964,27 @@ func TestRacePrincipalRunningOperationPreservesLaunchers(t *testing.T) {
 	}
 }
 
-// TestRaceLauncherSessionResolvedBeforeDisableAdmissionRefusedAfterDelete proves
-// the reviewer scenario: a request authenticates and resolves its Session
-// successfully, then is paused BEFORE OperationSupervisor.admit(). While it is
-// paused, the Launcher is deleted, and the DELETE returns 409 because another
-// Operation under the same Launcher is running. When the paused request is
-// released and calls admit(), its admission MUST be refused even though the
-// DELETE has already returned. This is the case that regressed when quiesce was
-// restored on the 409 path while the Launcher stayed durably disabled.
-func TestRaceLauncherSessionResolvedBeforeDisableAdmissionRefusedAfterDelete(t *testing.T) {
+// TestRaceLauncherSessionResolvedBeforeRefusedDeleteCanAdmit proves a refused
+// (409) checked delete does not wedge the Launcher: the refusal is side-effect
+// free (Sessions and enabled state preserved) and re-opens operation admission,
+// so an in-flight request that resolved its Session before the delete — and was
+// paused before admit() — can still admit once the DELETE has returned, exactly
+// as the enabled Launcher's live Sessions require.
+func TestRaceLauncherSessionResolvedBeforeRefusedDeleteCanAdmit(t *testing.T) {
 	db, laID, _ := launcherLifecycleDB(t)
 	app := deleteLifecycleApp(t, db)
 
 	// The in-flight request resolves its Session through the real production
-	// path BEFORE the disable. The session exists and launcher+principal are
+	// path BEFORE the delete. The session exists and launcher+principal are
 	// enabled, so resolution succeeds.
 	sess, err := app.findSessionByToken("token-dhs_a")
 	if err != nil {
-		t.Fatalf("session should resolve before disable: %v", err)
+		t.Fatalf("session should resolve before delete: %v", err)
 	}
 
 	resolved := make(chan struct{})
 	release := make(chan struct{})
-	admitted := make(chan bool, 1)
+	admitted := make(chan admissionDecision, 1)
 	go func() {
 		close(resolved)
 		<-release
@@ -817,18 +1004,75 @@ func TestRaceLauncherSessionResolvedBeforeDisableAdmissionRefusedAfterDelete(t *
 	if _, err := app.deleteLauncherChecked(context.Background(), laID); !errors.Is(err, ErrLauncherRuntimeActive) {
 		t.Fatalf("expected delete refused by running operation, got %v", err)
 	}
-	// The DELETE already returned; the Launcher stays disabled, so its admission
-	// must remain closed.
-	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
-		t.Fatal("expected launcher still quiesced after refused delete returned")
+	// The refusal is side-effect free: the Launcher stays enabled and its
+	// Sessions (including the resolved one) are preserved, so its admission
+	// must be re-opened.
+	if enabled, err := launcherEnabledState(db, laID); err != nil {
+		t.Fatal(err)
+	} else if !enabled {
+		t.Fatal("expected launcher still enabled after refused delete")
+	}
+	if _, err := app.findSessionByToken("token-dhs_a"); err != nil {
+		t.Fatalf("expected resolved session preserved by refused delete, got %v", err)
+	}
+	if app.OperationSupervisor.isLauncherQuiesced(laID) {
+		t.Fatal("expected launcher admission re-opened after refused delete")
+	}
+
+	// Release the paused in-flight request. Its admission must be accepted: the
+	// delete was refused, the owner and Session are live, and the refusal
+	// re-opened admission.
+	close(release)
+	if got := <-admitted; got != admissionAccepted {
+		t.Fatalf("in-flight request refused after side-effect-free refused delete (decision %v); wedged launcher", got)
+	}
+}
+
+// TestRaceLauncherSessionResolvedBeforeSuccessfulDeleteCannotAdmit proves the
+// vanishing-owner guard: a request that resolved its Session before a checked
+// delete that SUCCEEDS must not admit an Operation afterwards. Its Session was
+// invalidated by the delete's disable, and the supervisor's quiesce entry —
+// which deliberately outlives the owner removal — refuses the admission, so no
+// Operation can run against a Launcher whose owner row is already gone.
+func TestRaceLauncherSessionResolvedBeforeSuccessfulDeleteCannotAdmit(t *testing.T) {
+	db, laID, _ := launcherLifecycleDB(t)
+	app := deleteLifecycleApp(t, db)
+
+	// The in-flight request resolves its Session through the real production
+	// path BEFORE the delete.
+	sess, err := app.findSessionByToken("token-dhs_a")
+	if err != nil {
+		t.Fatalf("session should resolve before delete: %v", err)
+	}
+
+	resolved := make(chan struct{})
+	release := make(chan struct{})
+	admitted := make(chan admissionDecision, 1)
+	go func() {
+		close(resolved)
+		<-release
+		pausedOp := newTestOperation(t, operationRunning, time.Time{})
+		pausedOp.LauncherID = sess.LauncherID
+		admitted <- app.OperationSupervisor.admit(pausedOp)
+	}()
+
+	// Pause the in-flight request right after its Session resolution, before
+	// admit(). Meanwhile, DELETE the Launcher; no attributable runtime is
+	// active, so the delete succeeds.
+	<-resolved
+	if _, err := app.deleteLauncherChecked(context.Background(), laID); err != nil {
+		t.Fatalf("delete should succeed with no active runtime, got %v", err)
+	}
+	if _, err := findLauncherByID(db, laID); !errors.Is(err, ErrLauncherNotFound) {
+		t.Fatalf("expected launcher deleted, got %v", err)
 	}
 
 	// Release the paused in-flight request. Its admission must be refused even
-	// though its Session was resolved before the disable and the DELETE already
-	// returned.
+	// though the DELETE has already returned: the quiesce set by the delete
+	// outlives the owner removal.
 	close(release)
-	if got := <-admitted; got {
-		t.Fatal("in-flight request admitted after launcher disabled + deleted (409); would run with no persisted owner")
+	if got := <-admitted; got == admissionAccepted {
+		t.Fatal("in-flight request admitted after owner removal; would run with no persisted owner")
 	}
 }
 
@@ -849,7 +1093,7 @@ func TestDisableEnableFreshSessionCanAdmit(t *testing.T) {
 	if _, err := app.disableLauncher(laID); err != nil {
 		t.Fatalf("disableLauncher: %v", err)
 	}
-	if admitted := app.OperationSupervisor.admit(op()); admitted {
+	if admitted := app.OperationSupervisor.admit(op()); admitted == admissionAccepted {
 		t.Fatal("operation admitted while launcher disabled")
 	}
 
@@ -881,7 +1125,7 @@ func TestDisableEnableFreshSessionCanAdmit(t *testing.T) {
 	}
 	fresh := newTestOperation(t, operationRunning, time.Time{})
 	fresh.LauncherID = created.Session.LauncherID
-	if admitted := app.OperationSupervisor.admit(fresh); !admitted {
+	if admitted := app.OperationSupervisor.admit(fresh); admitted != admissionAccepted {
 		t.Fatal("expected fresh session's operation admitted after re-enable")
 	}
 }
@@ -907,7 +1151,7 @@ func TestPrincipalDisableEnableQuiescesAllLaunchers(t *testing.T) {
 		if !app.OperationSupervisor.isLauncherQuiesced(id) {
 			t.Fatalf("expected launcher %s quiesced after principal disable", id)
 		}
-		if admitted := app.OperationSupervisor.admit(opFor(id)); admitted {
+		if admitted := app.OperationSupervisor.admit(opFor(id)); admitted == admissionAccepted {
 			t.Fatalf("operation admitted for launcher %s after principal disable", id)
 		}
 	}
@@ -919,7 +1163,7 @@ func TestPrincipalDisableEnableQuiescesAllLaunchers(t *testing.T) {
 		if app.OperationSupervisor.isLauncherQuiesced(id) {
 			t.Fatalf("expected launcher %s unquiesced after principal enable", id)
 		}
-		if admitted := app.OperationSupervisor.admit(opFor(id)); !admitted {
+		if admitted := app.OperationSupervisor.admit(opFor(id)); admitted != admissionAccepted {
 			t.Fatalf("operation refused for launcher %s after principal enable", id)
 		}
 	}
@@ -963,13 +1207,13 @@ func TestHierarchyPrincipalReenableRespectsIndividuallyDisabledLauncher(t *testi
 	if app.OperationSupervisor.isLauncherQuiesced(laID) {
 		t.Fatal("expected launcher A admission open after principal re-enable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); !admitted {
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for enabled launcher A after principal re-enable")
 	}
 	if !app.OperationSupervisor.isLauncherQuiesced(lbID) {
 		t.Fatal("expected individually-disabled launcher B to stay quiesced after principal re-enable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted {
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted == admissionAccepted {
 		t.Fatal("expected operation refused for individually-disabled launcher B after principal re-enable")
 	}
 }
@@ -1005,7 +1249,7 @@ func TestHierarchyLauncherEnableWhilePrincipalDisabledStaysClosed(t *testing.T) 
 	if !app.OperationSupervisor.isLauncherQuiesced(lbID) {
 		t.Fatal("expected launcher B admission still closed while principal disabled")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted {
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted == admissionAccepted {
 		t.Fatal("expected operation refused for launcher B while principal disabled")
 	}
 
@@ -1016,7 +1260,7 @@ func TestHierarchyLauncherEnableWhilePrincipalDisabledStaysClosed(t *testing.T) 
 	if app.OperationSupervisor.isLauncherQuiesced(lbID) {
 		t.Fatal("expected launcher B admission open after principal re-enable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); !admitted {
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for launcher B after principal re-enable")
 	}
 }
@@ -1057,19 +1301,10 @@ func TestHierarchyPrincipalDisableEnablePreservesLauncherEnabled(t *testing.T) {
 }
 
 // TestRaceLauncherDeleteExcludesConcurrentEnable proves the lifecycle lock
-// serializes a checked Launcher delete against a concurrent enable. The delete
-// holds lifecycleMu across its runtime inspection (after the disable+quiesce
-// admission-closing prologue and before the owner removal), so the concurrent
-// enable cannot enter its critical section and reopen operation admission
-// before the delete removes the Launcher row. Without the lock, the enable
-// would interleave between the prologue and the row removal, reopening
-// admission for a Launcher about to be deleted so an Operation could admit
-// against a vanishing owner.
-// TestRaceLauncherDeleteExcludesConcurrentEnable proves the lifecycle lock
 // serializes a checked Launcher delete against a concurrent enable that contends
-// for the same ownership. The delete holds lifecycleMu across its runtime
-// inspection (after the disable+quiesce admission-closing prologue and before
-// the owner removal), so the concurrent enable cannot reach its own critical
+// for the same ownership. The delete holds lifecycleMu across its side-effect-
+// free runtime check (after the quiesce prologue and before the durable disable
+// and owner removal), so the concurrent enable cannot reach its own critical
 // section and reopen operation admission before the delete removes the Launcher
 // row; once the delete releases the lock the enable runs and finds the owner
 // gone (ErrLauncherNotFound), rather than resurrecting an owner for an Operation.
@@ -1086,8 +1321,8 @@ func TestRaceLauncherDeleteExcludesConcurrentEnable(t *testing.T) {
 		_, deleteErr = app.deleteLauncherChecked(context.Background(), laID)
 	}()
 
-	// The delete has disabled + quiesced the launcher and parked at the runtime
-	// inspection, still holding lifecycleMu.
+	// The delete has quiesced the launcher and parked at the side-effect-free
+	// runtime check, still holding lifecycleMu.
 	<-atQuiesce
 
 	// Launch a concurrent enable that contends for the same lifecycle lock.
@@ -1096,21 +1331,22 @@ func TestRaceLauncherDeleteExcludesConcurrentEnable(t *testing.T) {
 		enableDone <- app.enableLauncher(laID)
 	}()
 
-	// Point-in-time state at the barrier: a pre-disable-resolved Session
-	// request must still fail admit(), and durable + supervisor authorities
-	// agree (enabled=false + quiesced). The delete has not yet removed the row,
-	// so if the concurrent enable had interleaved, admission would be open.
+	// Point-in-time state at the barrier: the check is side-effect free, so the
+	// Launcher is NOT yet disabled (the durable disable happens only after the
+	// check passes), and the delete's prologue quiesce stands — proving the
+	// serialized enable has not interleaved (it would have cleared the
+	// quiesce).
 	if enabled, err := launcherEnabledState(db, laID); err != nil {
 		t.Fatal(err)
-	} else if enabled {
-		t.Fatal("launcher re-enabled while the delete holds the lifecycle lock")
+	} else if !enabled {
+		t.Fatal("launcher disabled before the runtime check completed; check is not side-effect free")
 	}
 	if !app.OperationSupervisor.isLauncherQuiesced(laID) {
 		t.Fatal("operation admission reopened while the delete holds the lifecycle lock")
 	}
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	if app.OperationSupervisor.admit(op) {
+	if app.OperationSupervisor.admit(op) == admissionAccepted {
 		t.Fatal("operation admitted against a launcher being concurrently deleted")
 	}
 
@@ -1164,8 +1400,8 @@ func TestRacePrincipalDeleteExcludesConcurrentLauncherCreate(t *testing.T) {
 		deleteCode = launcherRequest(t, app, http.MethodDelete, "/principals/owner", testAdminToken, "").Code
 	}()
 
-	// The delete has disabled + quiesced the launcher and parked at inspection,
-	// still holding lifecycleMu.
+	// The delete has quiesced the launcher and parked at the side-effect-free
+	// runtime check, still holding lifecycleMu.
 	<-atInspect
 
 	// Launch a concurrent Launcher create that contends for the same lifecycle
@@ -1177,7 +1413,8 @@ func TestRacePrincipalDeleteExcludesConcurrentLauncherCreate(t *testing.T) {
 	}()
 
 	// Point-in-time barrier: no Launcher was created mid-delete — the Principal
-	// still has exactly its single launcher (the delete's prologue disabled it).
+	// still has exactly its single launcher (the delete's quiesce prologue
+	// stands).
 	ids, err := principalLaunchers(app.DB, pid)
 	if err != nil {
 		t.Fatal(err)
@@ -1240,12 +1477,12 @@ func TestRaceConcurrentDisableEnableFinalAdmissionAgrees(t *testing.T) {
 
 // TestRaceInspectionErrorRestoreExcludesConcurrentEnable proves the lifecycle
 // lock also serializes a concurrent enable against an inspection-error delete,
-// so the checked-deletion restoration cannot overwrite a concurrent transition.
-// The delete parks at inspection (holding lifecycleMu), the inspection errors,
-// and the concurrent enable can only run after the delete releases the lock; it
-// then runs against the already-restored, re-synced state and leaves admission
-// consistent with the durable authorities. This preserves the 0a36d16
-// inspection-error restoration semantics under concurrency. Proven
+// so the checked-deletion refusal cannot be overwritten by a concurrent
+// transition. The delete parks at the runtime check (holding lifecycleMu), the
+// inspection errors, and the concurrent enable can only run after the delete
+// releases the lock; it then runs against the already-restored, re-synced state
+// and leaves admission consistent with the durable authorities. This preserves
+// the 0a36d16 inspection-error refusal semantics under concurrency. Proven
 // deterministically by the point-in-time admit() refusal at the barrier and the
 // final restored-state + admission-consistency assertions.
 func TestRaceInspectionErrorRestoreExcludesConcurrentEnable(t *testing.T) {
@@ -1276,12 +1513,11 @@ func TestRaceInspectionErrorRestoreExcludesConcurrentEnable(t *testing.T) {
 		enableDone <- app.enableLauncher(laID)
 	}()
 
-	// Point-in-time barrier: a pre-disable-resolved Session request must still
-	// fail admit() while the delete owns the ownership and the enable contends
-	// for the same lock.
+	// Point-in-time barrier: operation admission must be refused while the
+	// delete owns the ownership and the enable contends for the same lock.
 	op := newTestOperation(t, operationRunning, time.Time{})
 	op.LauncherID = laID
-	if app.OperationSupervisor.admit(op) {
+	if app.OperationSupervisor.admit(op) == admissionAccepted {
 		t.Fatal("operation admitted while delete pending and enable serialized behind it")
 	}
 
@@ -1290,11 +1526,11 @@ func TestRaceInspectionErrorRestoreExcludesConcurrentEnable(t *testing.T) {
 	if !errors.Is(deleteErr, sentinel) {
 		t.Fatalf("expected inspection error to refuse the delete, got %v", deleteErr)
 	}
-	// Restoration preserved the prior enabled state.
+	// The side-effect-free refusal left the Launcher enabled.
 	if enabled, err := launcherEnabledState(db, laID); err != nil {
 		t.Fatal(err)
 	} else if !enabled {
-		t.Fatal("inspection-error delete did not restore the launcher to its prior enabled state")
+		t.Fatal("inspection-error delete did not leave the launcher enabled")
 	}
 	// The serialized enable now runs against the restored, re-synced state and
 	// must leave admission consistent with the durable authorities.
@@ -1338,7 +1574,7 @@ func TestDisableFailedRepeatedDisableKeepsSupervisorQuiesced(t *testing.T) {
 	db, dbPath := freshFileTestDB(t)
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
-	la, _, _, err := createLauncher(db, pid, "default", LauncherScopeInherit, nil, globalRoots, false)
+	la, _, _, err := createLauncher(db, pid, "la", LauncherScopeInherit, nil, globalRoots, false)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}
@@ -1346,7 +1582,8 @@ func TestDisableFailedRepeatedDisableKeepsSupervisorQuiesced(t *testing.T) {
 
 	// Disable the launcher for real first, so it is already disabled before the
 	// failing repeated disable, and its Sessions are gone.
-	if _, err := persistLauncherEnabledChange(db, laID, false); err != nil {
+	disabled := false
+	if _, err := persistLauncherChange(db, laID, nil, &disabled); err != nil {
 		t.Fatalf("initial disable: %v", err)
 	}
 	if enabled, err := launcherEnabledState(db, laID); err != nil {
@@ -1399,7 +1636,8 @@ func TestPrincipalDisableFailureRestoresAdmissionPerChildAuthorities(t *testing.
 	laID, lbID := la.ID, lb.ID
 
 	// B is individually disabled; A stays enabled.
-	if _, err := persistLauncherEnabledChange(db, lbID, false); err != nil {
+	disabled := false
+	if _, err := persistLauncherChange(db, lbID, nil, &disabled); err != nil {
 		t.Fatalf("disable launcher B: %v", err)
 	}
 
@@ -1419,14 +1657,14 @@ func TestPrincipalDisableFailureRestoresAdmissionPerChildAuthorities(t *testing.
 	if app.OperationSupervisor.isLauncherQuiesced(laID) {
 		t.Fatal("expected launcher A admission open after failed principal disable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); !admitted {
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, laID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for enabled launcher A after failed principal disable")
 	}
 	// B remains admission-closed (individually disabled).
 	if !app.OperationSupervisor.isLauncherQuiesced(lbID) {
 		t.Fatal("expected individually-disabled launcher B to remain quiesced after failed principal disable")
 	}
-	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted {
+	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lbID)); admitted == admissionAccepted {
 		t.Fatal("expected operation refused for individually-disabled launcher B after failed principal disable")
 	}
 	// Child enabled flags unchanged: A still enabled, B still disabled.
@@ -1451,7 +1689,7 @@ func TestDisableAuthorityReReadFailureKeepsAdmissionQuiesced(t *testing.T) {
 	db, _ := freshFileTestDB(t)
 	globalRoots := []string{testAllowedRootDir(t)}
 	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
-	la, _, _, err := createLauncher(db, pid, "default", LauncherScopeInherit, nil, globalRoots, false)
+	la, _, _, err := createLauncher(db, pid, "la", LauncherScopeInherit, nil, globalRoots, false)
 	if err != nil {
 		t.Fatalf("createLauncher: %v", err)
 	}

@@ -67,6 +67,8 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		SessionID:     session.ID,
 		Image:         req.Image,
 		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
 	})
 
 	started := time.Now()
@@ -147,5 +149,7 @@ func (a *App) handlePull(w http.ResponseWriter, r *http.Request) {
 		ExitCode:      exitCode,
 		Duration:      duration,
 		PrincipalName: session.PrincipalName,
+		LauncherID:    session.LauncherID,
+		LauncherName:  session.LauncherName,
 	})
 }
