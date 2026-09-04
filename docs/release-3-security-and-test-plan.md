@@ -281,8 +281,10 @@ contract.
 Release evidence covers:
 
 - the repository-pinned Go toolchain and race detector;
-- user and system deployment modes;
-- rootful Docker and the supported rootless configuration;
+- user and system deployment modes; user mode remains fully supported and
+  tested in Release 3 despite its Release 4 deprecation;
+- rootful Docker and the supported rootless configuration; rootless remains a
+  Release 3 acceptance requirement despite its Release 4 deprecation;
 - the minimum supported Docker Engine/API combination and one representative
   newer supported version;
 - BuildKit-enabled and supported legacy build behavior for the D0 compatibility
@@ -358,6 +360,12 @@ Release 3 is accepted only when:
    data.
 7. Release documentation and shipped client surfaces describe the implemented
    contract without unresolved architectural placeholders.
+8. User-mode initialization and daemon startup, and every project-produced
+   tarball installer, emit the required Release 4 deprecation warning without
+   changing successful stdout or exit-status contracts.
+9. A non-root client using the system service receives no user-mode
+   deprecation warning, and DEB/RPM system-mode installation remains the
+   recommended path in README, man pages, help, and packaging documentation.
 
 ## Completion criterion
 

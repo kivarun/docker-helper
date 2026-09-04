@@ -493,6 +493,19 @@ Release 3 is reserved for the larger runtime architecture:
 - narrow Launcher-governed TCP port publishing on host IPv4 loopback;
 - explicit CPU, memory, and related resource limits.
 
+Release 3 is the LTS line and the final major release supporting the user-mode
+daemon, its supported rootless Docker configuration, and the project-produced
+installation tarball. All three remain fully supported and release-gated in
+3.x but are deprecated; system mode installed from the native DEB or RPM is the
+recommended deployment. Non-root clients and agents using the system service
+remain first-class and are not deprecated.
+
+After Release 4.0, the 3.x line is maintenance-only: security, critical
+correctness/data-integrity, and critical packaging/upgrade fixes, without
+Release 4 feature or architecture backports. Maintenance lasts for at least
+twelve months after Release 4.0; the exact end-of-support date is published no
+later than the Release 4.0 release.
+
 Release 3 uses the Docker Engine API behind a docker-helper-owned backend
 boundary. Workload output remains a bounded direct client result and is not
 copied into daemon logs, audit, or journald.
@@ -550,7 +563,30 @@ Release 3.1 semantics, API, persistence, migration, and acceptance work remain
 deferred until Release 3 is complete. The feature concept is recorded in
 [`release-3.1-session-lease-concept.md`](release-3.1-session-lease-concept.md).
 
-## Possible 4.0 / use-case driven
+## 4.0
+
+### First step: system-mode-only cutover
+
+Release 4 begins by removing the user-mode daemon and the project-produced
+installation tarball. This is the mandatory first Release 4 work package and
+must be completed and reviewed before any new Release 4 capability begins.
+After the cutover, the daemon has one supported deployment: the root-owned
+system service, installed from the native DEB or RPM and protected by the
+existing mandatory system-mode MAC boundary.
+
+The cutover removes user-mode service/runtime paths, transparent daemon-owner
+bootstrap, user socket selection, rootless-only support, tarball installers and
+bundle production, and their current-contract documentation and tests. It does
+not remove non-root CLI or agent access to the system service. Existing
+user-mode deployments either remain on the Release 3 LTS line or migrate
+explicitly; Release 4 does not adopt or silently transfer active user-mode
+Sessions or state.
+
+The short accepted direction and the later design/acceptance boundary are
+recorded in
+[`release-4-system-mode-only.md`](release-4-system-mode-only.md).
+
+### Later capabilities: use-case driven
 
 If concrete use cases justify remote capabilities, they remain a later,
 separate architecture problem:

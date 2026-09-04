@@ -382,6 +382,12 @@ Responsibilities:
 - local troubleshooting sections and CLI recovery hints for the capability
   that owns each public Condition;
 - compatibility with the normal blocking Release 2 CLI experience for run and build, while intentionally replacing their asynchronous HTTP Operation workflow;
+- user-mode initialization and daemon-startup deprecation warnings without
+  warning for non-root clients of the system service;
+- project-produced tarball installer deprecation warnings while retaining full
+  tarball build, install, upgrade, and uninstall acceptance for Release 3;
+- Release 3 LTS release notes and migration guidance toward the Release 4
+  system-mode-only deployment;
 - packaging and service-upgrade verification.
 
 The CLI is deliberately thin. It may read explicit configuration and credentials, validate syntax, issue one request, wait or poll transiently, service a WebSocket, and render results. It must not persist execution state, implement local queues or reconciliation, automatically retry ambiguous mutations, or mirror server state machines. Protocol capabilities that require client-side workflow state may remain API-only.
@@ -429,7 +435,11 @@ Every work package must cover:
 - audit attribution without secret disclosure;
 - bounded input, output, time, and resource use;
 - failure cleanup;
-- compatibility with both user and system deployment modes;
+- compatibility with both user and system deployment modes, including the
+  supported rootless configuration; Release 3 deprecation does not permit a
+  skipped or weakened user-mode gate;
+- absence of user-mode deprecation warnings for non-root clients using the
+  system service;
 - real-Docker integration tests in addition to unit tests.
 
 Interactive streaming, port allocation, lifecycle mutation, and cleanup require dedicated race and disconnect tests; unit-only coverage is insufficient for these boundaries.

@@ -8,6 +8,41 @@ The release adds long-lived managed containers while preserving the authorizatio
 
 Release 3 does **not** turn docker-helper into a container orchestrator.
 
+## Release line and deployment compatibility
+
+Release 3 is the docker-helper **LTS line** and the final major release that
+supports the user-mode daemon, the supported rootless Docker configuration,
+and the project-produced installation tarball.
+
+System mode with native DEB or RPM packaging is the recommended deployment for
+all new Release 3 installations. The following surfaces remain fully supported
+and release-gated throughout the 3.x line, but are deprecated for removal in
+Release 4:
+
+- the user-mode daemon and its per-user service, socket, configuration, state,
+  and transparent daemon-owner ownership bootstrap;
+- the supported rootless Docker configuration that depends on user-mode daemon
+  operation;
+- the project-produced release tarball and its user/system installation
+  scripts.
+
+Deprecation does not weaken Release 3 compatibility or acceptance. User mode,
+rootless operation, and tarball installation must pass the same Release 3
+security, upgrade, packaging, and lifecycle gates as supported features. No
+Release 4 removal may be pulled into a 3.x release.
+
+Non-root clients and agents are not deprecated. They continue to use the
+system service through Principal, Launcher, and Session credentials. Source
+code and GitHub-generated source archives also remain available; they are not
+the project-produced installation tarball.
+
+Compatible feature work, including a possible Release 3.1, may land before
+Release 4. Once Release 4.0 is published, the 3.x line receives security fixes,
+critical correctness and data-integrity fixes, and critical packaging or
+upgrade fixes, but no Release 4 features or architectural backports. Release 3
+will be maintained for at least twelve months after Release 4.0; its exact
+end-of-support date must be published no later than the Release 4.0 release.
+
 ## Scope
 
 Release 3 adds the following capabilities.
@@ -237,5 +272,11 @@ docker-helper is responsible for controlled access to container functionality, n
 ## Release boundary
 
 Release 3 is complete when docker-helper can safely manage the lifecycle, execution, logs, networking exposure, and basic resource constraints of session-owned containers without weakening the authorization and isolation guarantees established by previous releases.
+
+Release integration must also mark user-mode daemon operation, the supported
+rootless configuration, and the project-produced installation tarball as
+deprecated while retaining their complete Release 3 behavior and acceptance
+coverage. System mode and native packages are the recommended path; non-root
+clients of the system service remain first-class.
 
 Features that require reconciliation, scheduling, autonomous recovery, or a broader orchestration model belong outside Release 3.

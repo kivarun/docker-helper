@@ -219,6 +219,23 @@ Release 3 must start from the final implementation of this model. It must not
 add an alternative `owner_type/owner_id` pair or re-add `principal_id` as a
 second authorization path.
 
+### Release 3 deployment compatibility
+
+Release 3 retains the complete user-mode implementation, including transparent
+daemon-owner Principal/default-Launcher ownership, per-user paths and socket,
+rootless support, and user-mode MAC behavior. It also retains the complete
+project-produced tarball lifecycle. These surfaces are deprecated for Release
+4, not removed or redesigned during Release 3.
+
+The deprecation implementation is deliberately narrow: user-mode init and
+daemon startup and tarball installers emit the warnings owned by
+`release-3-api-cli.md`; non-root clients using the system service do not. The
+Release 3 operational architect must not interpret the future deletion as
+permission to split ownership paths, skip user-mode/rootless/package evidence,
+or introduce an early compatibility shim. The first Release 4 work package
+will delete the obsolete production branches and tests as one reviewed
+system-mode-only cutover.
+
 ### Release 3 extension
 
 | Existing symbol or behavior | Release 3 action |
