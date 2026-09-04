@@ -1026,7 +1026,7 @@ systemctl stop docker-helper.service >/dev/null 2>&1 || true
 #   G7  restart idempotency: after a daemon restart the migrated ownership is
 #       unchanged and the final sessions schema never re-gains principal_id
 #       (schema asserted via the python3 sqlite3 stdlib)
-#   G8  the migrated default Launcher is fully functional: credential issue,
+#   G8  the migrated default Launcher is fully functional: credential create,
 #       launcher-credential session create, and rotate (old rejected, new
 #       works, same credential ID)
 # ==============================================================================
@@ -1266,7 +1266,7 @@ sys.exit(0 if ("principal_id" not in cols and "launcher_id" in cols) else 1)
   fi
 
   # G8: migrated default Launcher is fully functional.
-  G_ISSUE_OUT="$(dh launcher credential issue --system --principal "$G_USER" "$G_DEFAULT_ID" 2>/dev/null || true)"
+  G_ISSUE_OUT="$(dh launcher credential create --system --principal "$G_USER" "$G_DEFAULT_ID" 2>/dev/null || true)"
   G_LC_TOKEN="$(printf '%s' "$G_ISSUE_OUT" | json_field token || true)"
   G_LC_ID="$(printf '%s' "$G_ISSUE_OUT" | json_field id || true)"
   if [ -n "$G_LC_TOKEN" ] && [ -n "$G_LC_ID" ]; then
@@ -1386,8 +1386,8 @@ else
   acc_fail "launcher selector resolution broken (default=$H_SEL_DEF_ID by-name=$H_SEL_DEF_NAME_ID alpha-by-name=$H_SEL_ALPHA_NAME_ID/$H_ALPHA_ID upgrade-default=$H_SEL_UPG_DEF_ID foreign=$H_SEL_FOREIGN_HTTP malformed=$H_SEL_MALFORMED_HTTP)"
 fi
 
-H_ALPHA_TOK="$(dh launcher credential issue --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
-H_BETA_TOK="$(dh launcher credential issue --system --principal "$H_USER" "$H_BETA_ID" 2>/dev/null | json_field token || true)"
+H_ALPHA_TOK="$(dh launcher credential create --system --principal "$H_USER" "$H_ALPHA_ID" 2>/dev/null | json_field token || true)"
+H_BETA_TOK="$(dh launcher credential create --system --principal "$H_USER" "$H_BETA_ID" 2>/dev/null | json_field token || true)"
 [ -n "$H_ALPHA_TOK" ] && [ -n "$H_BETA_TOK" ] \
   && acc_ok "credentials issued for both launchers" \
   || acc_fail "launcher credential issuance failed"

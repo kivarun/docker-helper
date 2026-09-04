@@ -268,12 +268,13 @@ are advanced workflows rather than quick-start steps:
 
 ```text
 docker-helper principal credential create USER
-docker-helper launcher credential issue [LAUNCHER]
+docker-helper launcher credential create [LAUNCHER]
 docker-helper launcher credential rotate [LAUNCHER]
 docker-helper credential install
 ```
 
-`launcher credential issue` is valid only when the Launcher has no credential.
+`launcher credential create` is valid only when the Launcher has no
+credential; a second create is the normal already-exists conflict.
 `launcher credential rotate` replaces the secret of the existing credential
 and returns the new secret exactly once.
 
