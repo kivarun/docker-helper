@@ -433,19 +433,25 @@ objects are defined in `release-3-managed-container-lifecycle.md` and must be
 repeated in the owning CLI help, man pages, and user documentation when the
 capability is implemented.
 
-## Deferred to subsequent designs
+## Cross-document ownership
 
-The following decisions are owned outside this document:
+The following accepted contracts are intentionally owned outside this domain
+document rather than left unresolved here:
 
 - Session-network provisioning and cleanup mechanics;
 - supported resource constraints and hierarchy;
 - port-publication grants and allocation;
 - logs and exec request contracts;
 - WebSocket framing and terminal behavior;
-- exact create, networking, resource-limit, publishing, logs, exec, and streaming request fields owned by their later designs.
+- exact create, networking, resource-limit, publishing, logs, exec, and
+  streaming request fields owned by their capability and public-surface
+  designs.
 
 The accepted networking and resource contracts are
 `release-3-session-networking.md` and
 `release-3-resource-constraints.md`. The accepted publishing contract is
-`release-3-port-publishing.md`. Their values remain part of the immutable
-Managed Container create specification defined here.
+`release-3-port-publishing.md`; logs and exec are defined by
+`release-3-logs-and-exec.md` and `release-3-interactive-streaming.md`; exact
+request and response fields are defined by `release-3-api-cli.md`. Their values
+remain part of the immutable Managed Container create specification defined
+here where applicable.

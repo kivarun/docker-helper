@@ -310,8 +310,9 @@ architect pins a reviewed library version during implementation. docker-helper
 does not implement WebSocket framing, masking, fragmentation, or the Engine
 attach protocol by hand.
 
-All third-party WebSocket types remain inside `internal/wstransport`. The
-package exposes only docker-helper-owned message-kind and close-code values and
+All third-party WebSocket types remain inside one package-local transport
+adapter in the repository's existing `package main`. The adapter exposes only
+docker-helper-owned message-kind and close-code values to the exec core through
 a narrow connection contract equivalent to:
 
 ```go
@@ -333,15 +334,15 @@ the WebSocket library hijacks the connection. A successful upgrade must clear
 those inherited `net.Conn` deadlines at the docker-helper-owned hijack boundary
 before D6 installs its own liveness and per-write bounds. The implementation
 must not disable or weaken the ordinary HTTP server timeouts globally. This
-compatibility behavior belongs to `internal/wstransport`, because
+compatibility behavior belongs to the transport adapter, because
 `github.com/coder/websocket` performs the hijack but does not clear deadlines
 installed by docker-helper's response wrapper.
 
 This is a compile-time replacement boundary, not a runtime provider system.
 Release 3 ships one WebSocket implementation and no factory registry,
 selection setting, optional fallback, or second adapter. A future dependency
-replacement may change this one package and its contract tests but must not
-change the public D6 protocol silently.
+replacement may change this adapter and its contract tests but must not change
+the public D6 protocol silently.
 
 Raw Docker attach headers or frame markers never cross the public WebSocket
 boundary. Exactly one goroutine owns WebSocket reads and one owns WebSocket

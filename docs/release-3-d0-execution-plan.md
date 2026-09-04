@@ -30,8 +30,8 @@ The following decisions are already binding:
 - `container.create` is also synchronous, returns `201 Created` with a stopped Managed Container, and creates no Operation;
 - interactive exec uses WebSocket and is not an Operation;
 - durable Operation types are limited to `container.start`, `container.stop`,
-  `container.restart`, `container.remove`, `container.repair`, and
-  `session.repair` and `session.cleanup`; container policy repair is
+  `container.restart`, `container.remove`, `container.repair`,
+  `session.repair`, and `session.cleanup`; container policy repair is
   administrator-only, while Session network repair follows Session credential
   scope; a state-matching start or stop returns `200 OK` as a no-op and creates
   neither an Operation nor an idempotency record;

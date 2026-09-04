@@ -271,10 +271,11 @@ client text frame carries argv, environment, workdir, and initial terminal
 size. The exec is accepted only after common admission succeeds, the Engine
 exec is created and attached, and the server sends a `started` control frame.
 
-Daemon and CLI use `github.com/coder/websocket` behind one narrow
-`internal/wstransport` compile-time adapter. Third-party types do not enter the
-exec core or public frame model. Release 3 ships no runtime-selectable provider
-or speculative second implementation.
+Daemon and CLI use `github.com/coder/websocket` behind one narrow package-local
+compile-time adapter. Third-party types do not enter the exec core or public
+frame model. The adapter remains inside the repository's existing single
+`package main`; Release 3 ships no runtime-selectable provider or speculative
+second implementation.
 
 The adapter clears inherited HTTP connection deadlines after successful
 hijack and then installs the D6 liveness and per-write bounds. Ordinary HTTP
@@ -411,6 +412,9 @@ The implementation order is therefore:
 D7 and D8 may be implemented later than the core lifecycle, but their required inputs must be designed before the create contract and persistent specification are considered stable.
 
 ## Cross-cutting verification
+
+The canonical release-wide threat model, environment matrix, and acceptance
+gate are defined in `release-3-security-and-test-plan.md`.
 
 Every work package must cover:
 

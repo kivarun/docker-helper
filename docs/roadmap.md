@@ -530,7 +530,8 @@ Release 3 foundation documents:
 - [`release-3-interactive-streaming.md`](release-3-interactive-streaming.md) — versioned, bounded TTY transport over WebSocket;
 - [`release-3-resource-constraints.md`](release-3-resource-constraints.md) — resource hierarchy, Session quotas, safe workload defaults, and enforcement;
 - [`release-3-port-publishing.md`](release-3-port-publishing.md) — hierarchical grants, loopback TCP allocation, durable leases, and collision handling;
-- [`release-3-api-cli.md`](release-3-api-cli.md) — incrementally frozen HTTP, CLI, response, and error contracts;
+- [`release-3-api-cli.md`](release-3-api-cli.md) — frozen HTTP, CLI, response, and error contracts;
+- [`release-3-security-and-test-plan.md`](release-3-security-and-test-plan.md) — cross-cutting threat boundaries, verification matrix, and release gates;
 - [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.
 
 ## Possible 4.0 / use-case driven
