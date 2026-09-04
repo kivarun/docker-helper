@@ -142,7 +142,7 @@ dh() { /usr/bin/docker-helper "$@"; }
 # reg_setup_principal USER creates (or reuses) the OS user + docker-helper
 # principal (enabled), and prints the user's home directory.
 reg_setup_principal() {
-  local user="$1" home admin_token launcher_http launcher_json root root_ok home_base
+  local user="$1" home launcher_json root root_ok home_base
   # The OS user's home must be under a global allowed root, or `principal
   # create` rejects it (final model). Pick a home base that is under an
   # existing allowed root: prefer /home when it is itself allowed (the common
@@ -177,29 +177,21 @@ reg_setup_principal() {
   dh principal set --system "$user" enabled true >/dev/null 2>&1 || true
   # Final ownership model: a selector-less principal Session resolves to the
   # principal's inherit-scope 'default' Launcher, so that Launcher must exist
-  # before any reg_session. There is no Launcher CLI command, so the admin
-  # creates it over the raw control-plane API using the system admin token
-  # (never printed; sent only as an Authorization header). The regression
-  # runners always exercise the candidate release, which implements the
-  # Launcher API, so the create must report ok:true.
-  admin_token="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
-  if [ -z "$admin_token" ]; then
-    echo "error: could not read the admin token from /etc/docker-helper/admin.token" >&2
-    return 1
-  fi
-  launcher_http="$(curl --silent --output /tmp/reg-launcher.json --write-out '%{http_code}' --max-time 5 \
-    --unix-socket /run/docker-helper/docker-helper.sock -H "Authorization: Bearer $admin_token" \
-    -H 'Content-Type: application/json' \
-    -d '{"scope":"inherit"}' "http://localhost/principals/$user/launchers" 2>/dev/null || true)"
-  launcher_json="$(cat /tmp/reg-launcher.json 2>/dev/null || true)"
-  # Idempotent: a fresh create reports ok:true; reusing a principal whose
-  # default Launcher already exists (e.g. the same guest reused across stages)
-  # reports 409 launcher_exists. Either confirms the Launcher is present.
-  if ! printf '%s\n' "$launcher_json" | grep -q '"ok":true' \
-    && ! printf '%s\n' "$launcher_json" | grep -q '"launcher_exists"'; then
-    echo "error: default launcher create for principal '$user' failed (http=$launcher_http)" >&2
-    return 1
-  fi
+  # before any reg_session. Eager default provisioning provisions it
+  # atomically at principal creation (also when reusing a principal across
+  # stages), so prove presence positively via the canonical Admin-scoped
+  # launcher show path: 'default' must exist, belong to the principal, and be
+  # enabled with inherit scope.
+  launcher_json="$(dh launcher show --system --principal "$user" 2>/dev/null)" \
+    || { echo "error: principal '$user' has no default Launcher after principal create (eager provisioning broken)" >&2; return 1; }
+  printf '%s\n' "$launcher_json" | grep -q "\"principal\": \"$user\"" \
+    || { echo "error: default launcher does not belong to principal '$user': $launcher_json" >&2; return 1; }
+  printf '%s\n' "$launcher_json" | grep -q '"name": "default"' \
+    || { echo "error: default launcher show returned an unexpected name: $launcher_json" >&2; return 1; }
+  printf '%s\n' "$launcher_json" | grep -q '"enabled": true' \
+    || { echo "error: default launcher is not enabled: $launcher_json" >&2; return 1; }
+  printf '%s\n' "$launcher_json" | grep -q '"scope": "inherit"' \
+    || { echo "error: default launcher is not inherit scope: $launcher_json" >&2; return 1; }
   printf '%s' "$home"
 }
 

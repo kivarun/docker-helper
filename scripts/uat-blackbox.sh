@@ -458,21 +458,29 @@ CRED_TOKEN="$(printf '%s\n' "$CRED_OUT" | sed -n 's/^  Token: //p')"
 printf '%s\n' "$CRED_TOKEN" > "$CRED_FILE"
 chmod 600 "$CRED_FILE"
 
-# The principal's ownership is realized through an enabled inherit-scope
-# 'default' Launcher (the final model derives the Principal through its
-# Launcher). The admin creates it via the launcher API; sessions for this
-# Principal then resolve to this default Launcher. There is no CLI command for
-# launchers, so this goes over the raw control-plane API with the admin token.
+# Release 2.1 eager default provisioning: `principal create` atomically
+# provisions the Principal's conventional enabled inherit-scope 'default'
+# Launcher (the final model derives the Principal through its Launcher). The
+# admin must NOT create a second 'default' Launcher here; instead prove the
+# contract positively via the canonical Admin-scoped launcher show path:
+# 'default' already exists, belongs to the just-created Principal, and is
+# usable by the scenario below (enabled, inherit scope).
+LAUNCHER_JSON="$(docker-helper launcher show --system --principal "$PRINCIPAL")" \
+  || fail_uat "principal '$PRINCIPAL' has no default Launcher after principal create (eager provisioning broken)"
+printf '%s\n' "$LAUNCHER_JSON" | grep -q "\"principal\": \"$PRINCIPAL\"" \
+  || fail_uat "default launcher does not belong to principal '$PRINCIPAL': $LAUNCHER_JSON"
+printf '%s\n' "$LAUNCHER_JSON" | grep -q '"name": "default"' \
+  || fail_uat "default launcher show returned an unexpected name: $LAUNCHER_JSON"
+printf '%s\n' "$LAUNCHER_JSON" | grep -q '"enabled": true' \
+  || fail_uat "default launcher is not enabled: $LAUNCHER_JSON"
+printf '%s\n' "$LAUNCHER_JSON" | grep -q '"scope": "inherit"' \
+  || fail_uat "default launcher is not inherit scope: $LAUNCHER_JSON"
+# The admin token is still needed below for the raw control-plane session proof
+# (read from /etc/docker-helper/admin.token, written by system init; sent only
+# as an Authorization header, never printed).
 ADMIN_TOKEN="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
 [ -n "$ADMIN_TOKEN" ] || fail_uat "could not read the admin token from /etc/docker-helper/admin.token"
-LAUNCHER_JSON="$(curl --silent --fail --max-time 5 \
-  --unix-socket "$DH_SOCK" -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"scope":"inherit"}' "http://localhost/principals/$PRINCIPAL/launchers")" \
-  || fail_uat "default launcher create for principal '$PRINCIPAL' failed"
-printf '%s\n' "$LAUNCHER_JSON" | grep -q '"ok":true' \
-  || fail_uat "default launcher create did not report ok: $LAUNCHER_JSON"
-info "default launcher for $PRINCIPAL established (principal-derived ownership)"
+info "default launcher for $PRINCIPAL proved present via launcher show (eager provisioning)"
 
 # --- Focused control-plane proof: Admin is creation authority, not owner. ---
 # The final model retires selector-less / global-root admin Sessions: a Session
@@ -507,6 +515,8 @@ ADMIN_CREATED_PRINC="$(printf '%s\n' "$ADMIN_CREATED_JSON" | grep -oP '"principa
   || fail_uat "admin-created session returned no id/token"
 [ -n "$ADMIN_CREATED_LID" ] \
   || fail_uat "admin-created session must carry a non-empty launcher_id: $ADMIN_CREATED_JSON"
+[ "$ADMIN_CREATED_LAUNCHER" = "default" ] \
+  || fail_uat "admin-created session must resolve to the eagerly provisioned default Launcher, got '$ADMIN_CREATED_LAUNCHER'"
 [ "$ADMIN_CREATED_PRINC" = "$PRINCIPAL" ] \
   || fail_uat "admin-created session must resolve to principal '$PRINCIPAL', got '$ADMIN_CREATED_PRINC'"
 info "admin-created session (control-plane proof): $ADMIN_CREATED_ID -> launcher $ADMIN_CREATED_LID ($ADMIN_CREATED_LAUNCHER, principal $ADMIN_CREATED_PRINC)"

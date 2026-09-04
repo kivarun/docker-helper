@@ -138,25 +138,20 @@ docker-helper principal allowed-root add --system "$PRINCIPAL" /home/opc >/dev/n
 
 # Final ownership model: a selector-less principal Session resolves to the
 # principal's inherit-scope 'default' Launcher, so that Launcher must exist
-# before the Session create below. There is no Launcher CLI command, so the
-# admin creates it over the raw control-plane API using the system admin token
-# (never printed; sent only as an Authorization header). Idempotent: 409
-# launcher_exists is fine (e.g. black-box UAT already established it for opc).
-admin_token="$(cat /etc/docker-helper/admin.token 2>/dev/null || true)"
-if [ -z "$admin_token" ]; then
-  echo "error: could not read the admin token from /etc/docker-helper/admin.token" >&2
-  exit 1
-fi
-launcher_http="$(curl --silent --output /tmp/uat-pin-launcher.json --write-out '%{http_code}' --max-time 5 \
-  --unix-socket /run/docker-helper/docker-helper.sock -H "Authorization: Bearer $admin_token" \
-  -H 'Content-Type: application/json' \
-  -d '{"scope":"inherit"}' "http://localhost/principals/$PRINCIPAL/launchers" 2>/dev/null || true)"
-launcher_json="$(cat /tmp/uat-pin-launcher.json 2>/dev/null || true)"
-if ! printf '%s\n' "$launcher_json" | grep -q '"ok":true' \
-  && ! printf '%s\n' "$launcher_json" | grep -q '"launcher_exists"'; then
-  echo "error: default launcher create for principal '$PRINCIPAL' failed (http=$launcher_http)" >&2
-  exit 1
-fi
+# before the Session create below. Eager default provisioning provisions it
+# atomically at principal creation (also when the principal already exists,
+# e.g. the common black-box UAT created it for this OS user), so prove
+# presence positively via the canonical Admin-scoped launcher show path.
+launcher_json="$(docker-helper launcher show --system --principal "$PRINCIPAL" 2>/dev/null)" \
+  || { echo "error: principal '$PRINCIPAL' has no default Launcher after principal create (eager provisioning broken)" >&2; exit 1; }
+printf '%s\n' "$launcher_json" | grep -q "\"principal\": \"$PRINCIPAL\"" \
+  || { echo "error: default launcher does not belong to principal '$PRINCIPAL': $launcher_json" >&2; exit 1; }
+printf '%s\n' "$launcher_json" | grep -q '"name": "default"' \
+  || { echo "error: default launcher show returned an unexpected name: $launcher_json" >&2; exit 1; }
+printf '%s\n' "$launcher_json" | grep -q '"enabled": true' \
+  || { echo "error: default launcher is not enabled: $launcher_json" >&2; exit 1; }
+printf '%s\n' "$launcher_json" | grep -q '"scope": "inherit"' \
+  || { echo "error: default launcher is not inherit scope: $launcher_json" >&2; exit 1; }
 
 CRED_FILE="/tmp/uat-pin-credential.token"
 rm -f "$CRED_FILE"
