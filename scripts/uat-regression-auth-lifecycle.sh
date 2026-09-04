@@ -17,6 +17,11 @@
 #   E. Principal disable            — active Sessions invalidated per contract;
 #                                     Principal credentials no longer control
 #                                     resources.
+#   F. Principal credential rotate  — canonical create/revoke/create-name-reuse/
+#                                     rotate lifecycle targets the active row,
+#                                     preserves its ID, invalidates the old
+#                                     bearer, and never resurrects revoked
+#                                     history.
 #
 # Each subcase uses its own OS user/principal/session so results are
 # independent. A subcase failure does not stop the others (collect-all).
@@ -261,14 +266,121 @@ subcase_e() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# F. Principal credential rotate after revoked-name reuse
+# ---------------------------------------------------------------------------
+subcase_f() {
+  reg_info "subcase F: principal credential rotate after revoked-name reuse"
+  local user="uatreg3f" home ws cred_a_file cred_b_file cred_new_file
+  local out_a id_a tok_a out_b id_b tok_b revoked_out revoked_rc
+  local rotate_out rotate_id rotate_tok list_out row_count revoked_a revoked_b sid_new
+
+  home="$(reg_setup_principal "$user")" || { reg_fail "F: setup principal failed"; return; }
+  ws="$home/ws-f"; mkdir -p "$ws"
+  chown -R "$user:$user" "$ws"
+  cred_a_file="$CRED_DIR/f-a.token"
+  cred_b_file="$CRED_DIR/f-b.token"
+  cred_new_file="$CRED_DIR/f-new.token"
+
+  # Use the canonical Release-2.1 ownership tree for the whole lifecycle.
+  out_a="$(dh principal credential create --system --name default "$user" 2>/dev/null)" \
+    || { reg_fail "F: canonical principal credential create A failed"; return; }
+  id_a="$(printf '%s\n' "$out_a" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
+  tok_a="$(printf '%s\n' "$out_a" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
+  if [ -z "$id_a" ] || [ -z "$tok_a" ]; then
+    reg_fail "F: create A did not return credential ID and one-time token"
+    return
+  fi
+  printf '%s\n' "$tok_a" > "$cred_a_file"; chmod 600 "$cred_a_file"
+
+  if dh principal credential revoke --system "$id_a" >/dev/null 2>&1; then
+    reg_ok "F: canonical revoke created revoked history for default ($id_a)"
+  else
+    reg_fail "F: canonical revoke A failed"
+    return
+  fi
+
+  # With only revoked history, rotate must not select/resurrect it.
+  revoked_out="$(dh principal credential rotate --system --name default "$user" 2>&1)"
+  revoked_rc=$?
+  if [ "$revoked_rc" -ne 0 ] && printf '%s' "$revoked_out" | grep -q 'status 409, code credential_revoked'; then
+    reg_ok "F: rotate with revoked history only fails closed (409 credential_revoked)"
+  else
+    reg_fail "F: rotate selected revoked history instead of returning credential_revoked: $(printf '%s' "$revoked_out" | redact | head -1)"
+    return
+  fi
+
+  out_b="$(dh principal credential create --system --name default "$user" 2>/dev/null)" \
+    || { reg_fail "F: recreate default credential B after revoke failed"; return; }
+  id_b="$(printf '%s\n' "$out_b" | sed -n 's/^  ID:    //p' | tr -d '[:space:]')"
+  tok_b="$(printf '%s\n' "$out_b" | sed -n 's/^  Token: //p' | tr -d '[:space:]')"
+  if [ -z "$id_b" ] || [ -z "$tok_b" ] || [ "$id_b" = "$id_a" ]; then
+    reg_fail "F: name reuse did not create a distinct active credential row"
+    return
+  fi
+  printf '%s\n' "$tok_b" > "$cred_b_file"; chmod 600 "$cred_b_file"
+  reg_ok "F: same name reused with a new active row ($id_b)"
+
+  # Authenticate as B and omit PRINCIPAL: this exercises the canonical CLI's
+  # Principal-auth targeting as well as the daemon's atomic rotate endpoint.
+  rotate_out="$(dh principal credential rotate --system --token-file "$cred_b_file" --name default 2>/dev/null)" \
+    || { reg_fail "F: Principal-auth canonical rotate failed"; return; }
+  rotate_id="$(printf '%s' "$rotate_out" | json_field id || true)"
+  rotate_tok="$(printf '%s' "$rotate_out" | json_field token || true)"
+  if [ "$rotate_id" = "$id_b" ] && [ -n "$rotate_tok" ] && [ "$rotate_tok" != "$tok_b" ]; then
+    reg_ok "F: rotate preserved active credential ID and returned a replacement bearer once"
+  else
+    reg_fail "F: rotate response did not preserve active row identity"
+    return
+  fi
+
+  if dh session create --system --token-file "$cred_b_file" --workspace "$ws" --json >/dev/null 2>&1; then
+    reg_fail "F: pre-rotate bearer B remained valid"
+  else
+    reg_ok "F: pre-rotate bearer B rejected immediately"
+  fi
+  if dh session create --system --token-file "$cred_a_file" --workspace "$ws" --json >/dev/null 2>&1; then
+    reg_fail "F: revoked historical bearer A was resurrected"
+  else
+    reg_ok "F: historical revoked bearer A remains rejected"
+  fi
+
+  printf '%s\n' "$rotate_tok" > "$cred_new_file"; chmod 600 "$cred_new_file"
+  sid_new="$(dh session create --system --token-file "$cred_new_file" --workspace "$ws" --json 2>/dev/null | json_field id || true)"
+  if [ -n "$sid_new" ]; then
+    reg_ok "F: replacement bearer authenticates and creates a Session"
+  else
+    reg_fail "F: replacement bearer did not authenticate"
+  fi
+
+  # Canonical list proves there are exactly two same-name rows: A remains
+  # revoked, B is the one active row, and rotate created no third row.
+  list_out="$(dh principal credential list --system "$user" 2>&1)" \
+    || { reg_fail "F: canonical credential list failed"; return; }
+  row_count="$(printf '%s\n' "$list_out" | awk -v p="$user" '$2=="default" && $5==p {c++} END {print c+0}')"
+  revoked_a="$(printf '%s\n' "$list_out" | awk -v id="$id_a" '$1==id {print $4; exit}')"
+  revoked_b="$(printf '%s\n' "$list_out" | awk -v id="$id_b" '$1==id {print $4; exit}')"
+  if [ "$row_count" = 2 ] && [ -n "$revoked_a" ] && [ "$revoked_a" != "-" ] && [ "$revoked_b" = "-" ]; then
+    reg_ok "F: list proves revoked history + one active row, with no rotate-created row"
+  else
+    reg_fail "F: post-rotate credential rows violate active/history contract (rows=$row_count A_revoked=${revoked_a:-missing} B_revoked=${revoked_b:-missing})"
+  fi
+  if printf '%s\n' "$list_out" | grep -qE 'dhc_[A-Za-z0-9_-]+'; then
+    reg_fail "F: canonical credential list leaked a bearer secret"
+  else
+    reg_ok "F: canonical credential list exposes metadata only"
+  fi
+}
+
 subcase_a
 subcase_b
 subcase_c
 subcase_d
 subcase_e
+subcase_f
 
 # best-effort cleanup of OS users (kept for evidence on failure)
-for u in uatreg3a uatreg3b uatreg3c uatreg3d uatreg3e; do
+for u in uatreg3a uatreg3b uatreg3c uatreg3d uatreg3e uatreg3f; do
   dh principal delete --system "$u" >/dev/null 2>&1 || true
   dh credential revoke --system "$(dh credential list --system "$u" 2>/dev/null | sed -n 's/^  ID:    //p' | head -1)" >/dev/null 2>&1 || true
   userdel -r "$u" >/dev/null 2>&1 || true
