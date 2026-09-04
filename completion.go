@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 // pathValuedFlags are flags whose value is a filesystem path (or endpoint
@@ -62,6 +63,15 @@ var completionBashCommand = &Command{
 // used by generated Bash completion: the queried paths come from the daemon
 // (which remains the authorization and policy authority), never from the
 // local config interpreted as policy.
+//
+// completionQueryTimeout bounds the whole daemon exchange (dial, request,
+// response) for these queries: an unavailable, unresponsive, or overloaded
+// daemon must make the helper exit non-zero within a bounded sub-second
+// interval so the generated Bash degrades silently to generic filesystem
+// completion instead of stalling the interactive shell. Ordinary operator
+// commands keep the unbounded operator client.
+const completionQueryTimeout = 750 * time.Millisecond
+
 var completionRootsCommand = &Command{
 	Name:        "roots",
 	Summary:     "Query effective policy roots for shell completion",
@@ -89,6 +99,7 @@ var completionRootsPrincipalCommand = &Command{
 					System:    *system,
 					Endpoint:  *endpoint,
 					TokenFile: *tokenFile,
+					Timeout:   completionQueryTimeout,
 				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
@@ -133,6 +144,7 @@ var completionRootsSessionCommand = &Command{
 					System:    *system,
 					Endpoint:  *endpoint,
 					TokenFile: *tokenFile,
+					Timeout:   completionQueryTimeout,
 				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
@@ -726,6 +738,9 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "# Forward the operator overrides already typed on the current command")
 	fmt.Fprintln(w, "# line (--system, --endpoint, --token-file) so the completion query")
 	fmt.Fprintln(w, "# targets the same daemon and token as the command being completed.")
+	fmt.Fprintln(w, "# Emits one argument per NUL so the caller can read them into a Bash")
+	fmt.Fprintln(w, "# array verbatim: no string round-trip, no word splitting, no glob")
+	fmt.Fprintln(w, "# expansion, and values with spaces survive intact.")
 	fmt.Fprintln(w, "_docker_helper_operator_args() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
 	fmt.Fprintln(w, "    local out=()")
@@ -751,7 +766,9 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "        esac")
 	fmt.Fprintln(w, "        i=$((i + 1))")
 	fmt.Fprintln(w, "    done")
-	io.WriteString(w, "    printf '%s\\n' \"${out[*]:-}\"\n")
+	fmt.Fprintln(w, "    if [ ${#out[@]} -gt 0 ]; then")
+	io.WriteString(w, "        printf '%s\\0' \"${out[@]}\"\n")
+	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Print the value already typed for a flag on the current command line")
@@ -776,20 +793,24 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Run the daemon-backed roots query through docker-helper itself and")
-	fmt.Fprintln(w, "# complete from the returned policy anchors. Prints nothing and fails")
-	fmt.Fprintln(w, "# silently when the query is unavailable.")
+	fmt.Fprintln(w, "# complete from the returned policy anchors. The forwarded operator")
+	fmt.Fprintln(w, "# overrides and the typed --principal value stay Bash arrays end to")
+	fmt.Fprintln(w, "# end, so values with spaces reach the helper as single arguments.")
+	fmt.Fprintln(w, "# Prints nothing and fails silently when the query is unavailable.")
 	fmt.Fprintln(w, "_docker_helper_complete_policy_roots() {")
 	fmt.Fprintln(w, "    local mode=\"$1\"")
-	fmt.Fprintln(w, "    local opargs principal_arg principal_qargs=\"\"")
-	fmt.Fprintln(w, "    opargs=\"$(_docker_helper_operator_args \"$cmd_path\")\"")
+	fmt.Fprintln(w, "    local -a opargs=()")
+	fmt.Fprintln(w, "    mapfile -d '' -t opargs < <(_docker_helper_operator_args \"$cmd_path\")")
+	fmt.Fprintln(w, "    local -a principal_qargs=()")
 	fmt.Fprintln(w, "    if [ \"$mode\" = principal ]; then")
+	fmt.Fprintln(w, "        local principal_arg")
 	fmt.Fprintln(w, "        principal_arg=\"$(_docker_helper_typed_flag_value principal)\"")
 	fmt.Fprintln(w, "        if [ -n \"$principal_arg\" ]; then")
-	fmt.Fprintln(w, "            principal_qargs=\"--principal $principal_arg\"")
+	fmt.Fprintln(w, "            principal_qargs=(--principal \"$principal_arg\")")
 	fmt.Fprintln(w, "        fi")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    local roots")
-	fmt.Fprintln(w, "    if ! roots=\"$(\"${COMP_WORDS[0]}\" completion roots \"$mode\" $opargs $principal_qargs 2>/dev/null)\"; then")
+	fmt.Fprintln(w, "    if ! roots=\"$(\"${COMP_WORDS[0]}\" completion roots \"$mode\" \"${opargs[@]}\" \"${principal_qargs[@]}\" 2>/dev/null)\"; then")
 	fmt.Fprintln(w, "        return 1")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    _docker_helper_complete_within_roots \"$flag\" \"$roots\"")
@@ -800,10 +821,17 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "# root is confined to that root. Regular files and paths outside the")
 	fmt.Fprintln(w, "# roots are never suggested. Workspace anchors carry a trailing slash")
 	fmt.Fprintln(w, "# because a Session workspace must be a proper child of a root.")
+	fmt.Fprintln(w, "#")
+	fmt.Fprintln(w, "# Filesystem candidates are confined symlink-safely: a candidate is")
+	fmt.Fprintln(w, "# accepted only when its canonicalized path (realpath) lies strictly")
+	fmt.Fprintln(w, "# inside the canonicalized root, so a link escaping the root is never")
+	fmt.Fprintln(w, "# suggested and a link pointing inside is treated as its target. The")
+	fmt.Fprintln(w, "# daemon remains the security boundary; this only keeps obviously")
+	fmt.Fprintln(w, "# invalid paths out of the suggestions.")
 	fmt.Fprintln(w, "_docker_helper_complete_within_roots() {")
 	fmt.Fprintln(w, "    local flag=\"$1\"")
 	fmt.Fprintln(w, "    local roots=\"$2\"")
-	fmt.Fprintln(w, "    local -a anchors=()")
+	fmt.Fprintln(w, "    local -a anchors=() roots_can=()")
 	fmt.Fprintln(w, "    local r")
 	fmt.Fprintln(w, "    while IFS= read -r r; do")
 	fmt.Fprintln(w, "        [ -n \"$r\" ] || continue")
@@ -812,9 +840,10 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "        else")
 	fmt.Fprintln(w, "            anchors+=(\"$r\")")
 	fmt.Fprintln(w, "        fi")
+	fmt.Fprintln(w, "        roots_can+=(\"$(realpath -m -- \"$r\" 2>/dev/null)\")")
 	fmt.Fprintln(w, "    done <<< \"$roots\"")
 	fmt.Fprintln(w, "    local comp=()")
-	fmt.Fprintln(w, "    local a d base")
+	fmt.Fprintln(w, "    local a d d_can i root_can")
 	fmt.Fprintln(w, "    for a in \"${anchors[@]}\"; do")
 	fmt.Fprintln(w, "        case \"$a\" in")
 	fmt.Fprintln(w, "            \"$cur\"*) comp+=(\"$a\") ;;")
@@ -823,11 +852,15 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    if [[ \"$cur\" == */* ]]; then")
 	fmt.Fprintln(w, "        while IFS= read -r d; do")
 	fmt.Fprintln(w, "            [ -n \"$d\" ] || continue")
-	fmt.Fprintln(w, "            for a in \"${anchors[@]}\"; do")
-	fmt.Fprintln(w, "                base=\"${a%/}\"")
-	fmt.Fprintln(w, "                case \"$d\" in")
-	fmt.Fprintln(w, "                    \"$base\"/*) comp+=(\"$d\") ;;")
-	fmt.Fprintln(w, "                esac")
+	fmt.Fprintln(w, "            d_can=\"$(realpath -m -- \"$d\" 2>/dev/null)\"")
+	fmt.Fprintln(w, "            [ -n \"$d_can\" ] || continue")
+	fmt.Fprintln(w, "            for i in \"${!roots_can[@]}\"; do")
+	fmt.Fprintln(w, "                root_can=\"${roots_can[$i]}\"")
+	fmt.Fprintln(w, "                [ -n \"$root_can\" ] || continue")
+	fmt.Fprintln(w, "                if [ \"$d_can\" != \"$root_can\" ] && [[ \"$d_can\" == \"$root_can/\"* ]]; then")
+	fmt.Fprintln(w, "                    comp+=(\"$d\")")
+	fmt.Fprintln(w, "                    break")
+	fmt.Fprintln(w, "                fi")
 	fmt.Fprintln(w, "            done")
 	fmt.Fprintln(w, "        done < <(compgen -d -- \"$cur\" 2>/dev/null)")
 	fmt.Fprintln(w, "    fi")

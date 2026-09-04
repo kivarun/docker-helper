@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1609,6 +1611,73 @@ func completionPATHPreamble(t *testing.T) string {
 	return "PATH=" + filepath.Dir(getCompletionBinary(t)) + ":$PATH; export PATH"
 }
 
+// runCompletionWithDeadline runs the completion harness exactly like
+// runCompletionWithPreamble, but bounds the bash process with an explicit
+// deadline so a completion that never terminates fails the test instead of
+// hanging it. Output is captured through temp files rather than pipes: a
+// hung completion child would otherwise keep the inherited pipe write ends
+// open forever and block Wait even after the deadline kill. Returns the
+// suggestions, the separate stderr text, and the harness error (deadline
+// expiry included).
+func runCompletionWithDeadline(t *testing.T, script, preamble string, compWords []string, limit time.Duration) ([]string, string, error) {
+	t.Helper()
+	cword := len(compWords) - 1
+
+	var sb strings.Builder
+	sb.WriteString(preamble)
+	sb.WriteString("\n")
+	sb.WriteString(script)
+	sb.WriteString("\n\n")
+	sb.WriteString("# Test setup\n")
+	sb.WriteString("COMP_WORDS=(")
+	for _, w := range compWords {
+		sb.WriteString(" '" + w + "'")
+	}
+	sb.WriteString(")\n")
+	sb.WriteString("COMP_CWORD=" + strconv.Itoa(cword) + "\n")
+	sb.WriteString("COMPREPLY=()\n")
+	sb.WriteString("_docker_helper_completion\n")
+	sb.WriteString("echo \"${COMPREPLY[@]}\"\n")
+
+	dir := t.TempDir()
+	writeHarnessOutput := func(name string) (*os.File, string) {
+		t.Helper()
+		f, err := os.CreateTemp(dir, name)
+		if err != nil {
+			t.Fatalf("create harness %s file: %v", name, err)
+		}
+		return f, f.Name()
+	}
+	stdoutFile, stdoutPath := writeHarnessOutput("stdout")
+	stderrFile, stderrPath := writeHarnessOutput("stderr")
+
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", sb.String())
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+	err := cmd.Run()
+	stdoutFile.Close()
+	stderrFile.Close()
+	if err != nil {
+		return nil, strings.TrimSpace(readHarnessFile(t, stderrPath)), err
+	}
+	output := strings.TrimSpace(readHarnessFile(t, stdoutPath))
+	if output == "" {
+		return nil, strings.TrimSpace(readHarnessFile(t, stderrPath)), nil
+	}
+	return strings.Fields(output), strings.TrimSpace(readHarnessFile(t, stderrPath)), nil
+}
+
+func readHarnessFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read harness output %s: %v", path, err)
+	}
+	return string(data)
+}
+
 // trimTrailingSlash normalizes one trailing slash for bash-version-robust
 // assertions on directory completions.
 func trimTrailingSlash(s string) string {
@@ -1755,6 +1824,107 @@ func TestCompletionPolicyLauncherAllowedRootConfinement(t *testing.T) {
 	}
 }
 
+// TestCompletionPolicySymlinkOutsideNotSuggested proves the confinement of
+// filesystem candidates is canonical, not lexical: a symlink under the
+// allowed root pointing outside the root is never suggested, and its
+// target's children are not reachable through the link. A real directory
+// inside the root is still offered, proving the harness reached the
+// candidate stage rather than failing earlier.
+func TestCompletionPolicySymlinkOutsideNotSuggested(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{root, filepath.Join(root, "realdir"), outside, filepath.Join(outside, "escapee")} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{root},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	baseWords := []string{"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice"}
+
+	// One level down: the real directory is offered, the escaping link is not.
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--allowed-root", root+"/"))
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{filepath.Join(root, "realdir")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("inside root = %v, want %v (link escaping the root must not be suggested)", results, want)
+	}
+
+	// Through the link: the outside children are not reachable.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--allowed-root", root+"/link/"))
+	if len(results) != 0 {
+		t.Errorf("children behind a link leaving the root must not be suggested, got %v", results)
+	}
+}
+
+// TestCompletionPolicySymlinkInsideSuggested proves the canonical
+// confinement check admits legitimate traversal: a symlink under the allowed
+// root pointing to a directory inside the same root is suggested, and its
+// target's children are reachable through the link. Regular files inside the
+// root are still never suggested.
+func TestCompletionPolicySymlinkInsideSuggested(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	internal := filepath.Join(root, "internal")
+	for _, d := range []string{root, internal, filepath.Join(internal, "sub1"), filepath.Join(internal, "sub2")} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "afile"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(internal, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, tokenPath, _ := startCompletionPolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{root},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	script := completionScript(t)
+	baseWords := []string{"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice"}
+
+	// One level down: the link pointing inside and the real directory are
+	// offered; the regular file is not.
+	results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--allowed-root", root+"/"))
+	if stderr != "" {
+		t.Fatalf("policy completion must not write to stderr: %q", stderr)
+	}
+	if want := []string{internal, filepath.Join(root, "link")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("inside root = %v, want %v", results, want)
+	}
+
+	// Through the link: internal's children are suggested via the link path.
+	results, _ = runCompletionWithPreamble(t, script, completionPATHPreamble(t),
+		append(append([]string{}, baseWords...), "--allowed-root", root+"/link/"))
+	if want := []string{filepath.Join(root, "link", "sub1"), filepath.Join(root, "link", "sub2")}; !slices.Equal(sortedTrimmed(results), want) {
+		t.Errorf("through inside link = %v, want %v", results, want)
+	}
+}
+
 // TestCompletionPolicyScopeSetAllowedRoot proves launcher scope set shares
 // the same principal roots provider.
 func TestCompletionPolicyScopeSetAllowedRoot(t *testing.T) {
@@ -1848,34 +2018,57 @@ func TestCompletionPolicySessionWorkspaceAnchors(t *testing.T) {
 }
 
 // TestCompletionPolicyOperatorFlagForwarding proves the generated forwarding
-// helpers collect every operator override form already typed on the command
-// line and the typed --principal value, so the completion query targets the
-// same daemon and token as the command being completed.
+// helper collects every operator override form already typed on the command
+// line as separate Bash array elements plus the typed --principal value, so
+// the completion query targets the same daemon and token as the command
+// being completed. The args travel end to end as arrays: no string
+// round-trip, so values with spaces survive verbatim.
 func TestCompletionPolicyOperatorFlagForwarding(t *testing.T) {
 	script := completionScript(t)
 	endpoint := "http://127.0.0.1:59999"
+	spacey := "/tmp/path with spaces/token"
 
 	var sb strings.Builder
 	sb.WriteString(script)
 	sb.WriteString("\n\n")
 	sb.WriteString("COMP_WORDS=(docker-helper launcher create --system --endpoint " + endpoint +
-		" --endpoint=" + endpoint + " --token-file /tmp/t1 --token-file=/tmp/t2 --principal alice --principal bob)\n")
+		" --endpoint=" + endpoint + " --token-file '" + spacey + "' --token-file=/tmp/t2 --principal alice --principal bob)\n")
 	sb.WriteString("COMP_CWORD=${#COMP_WORDS[@]}\n")
-	sb.WriteString("echo \"opargs=$(_docker_helper_operator_args 'launcher create')\"\n")
+	sb.WriteString("mapfile -d '' -t opargs < <(_docker_helper_operator_args 'launcher create')\n")
+	sb.WriteString("if [ ${#opargs[@]} -gt 0 ]; then printf 'ARG:%s\\n' \"${opargs[@]}\"; fi\n")
 	sb.WriteString("echo \"principal=$(_docker_helper_typed_flag_value principal)\"\n")
 
 	out, err := exec.Command("bash", "-c", sb.String()).CombinedOutput()
 	if err != nil {
 		t.Fatalf("harness failed: %v\n%s", err, out)
 	}
-	text := string(out)
-	wantOpargs := "opargs=--system --endpoint " + endpoint + " --endpoint=" + endpoint +
-		" --token-file /tmp/t1 --token-file=/tmp/t2"
-	if !strings.Contains(text, wantOpargs) {
-		t.Errorf("operator forwarding = %q, want containing %q", text, wantOpargs)
+	var got []string
+	principalSeen := false
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		switch {
+		case strings.HasPrefix(line, "ARG:"):
+			got = append(got, strings.TrimPrefix(line, "ARG:"))
+		case strings.HasPrefix(line, "principal="):
+			principalSeen = true
+			if line != "principal=bob" {
+				t.Errorf("typed --principal must mirror flag parsing (last wins), got %q", line)
+			}
+		default:
+			t.Errorf("unexpected harness line %q", line)
+		}
 	}
-	if !strings.Contains(text, "principal=bob") {
-		t.Errorf("typed --principal must mirror flag parsing (last wins): %s", text)
+	if !principalSeen {
+		t.Error("typed --principal line missing from harness output")
+	}
+	want := []string{
+		"--system",
+		"--endpoint", endpoint,
+		"--endpoint=" + endpoint,
+		"--token-file", spacey,
+		"--token-file=/tmp/t2",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("forwarded operator args = %q, want %q", got, want)
 	}
 }
 
@@ -1916,6 +2109,72 @@ func TestCompletionPolicyForwardedEndpointForm(t *testing.T) {
 	if got := requests.snapshot(); len(got) != 1 {
 		t.Fatalf("requests = %+v, want exactly one query", got)
 	}
+}
+
+// TestCompletionPolicyForwardedValueWithSpaces proves the removed string
+// round-trip end to end: operator values containing spaces typed on the
+// command line — a --token-file path with spaces, and a Unix endpoint socket
+// path with a space — reach the daemon as single arguments (the query
+// authenticates and answers), and the returned roots are suggested.
+func TestCompletionPolicyForwardedValueWithSpaces(t *testing.T) {
+	base := t.TempDir()
+	rootA := filepath.Join(base, "root-a")
+	if err := os.MkdirAll(rootA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(base, "tok en file")
+	if err := os.WriteFile(tokenPath, []byte("test-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	respond := func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Errorf("Authorization = %q, want the forwarded token", got)
+		}
+		if r.URL.Path == "/principals/alice/effective-allowed-roots" && r.Method == http.MethodGet {
+			writeJSONResponse(w, http.StatusOK, effectiveRootsResponse{
+				OK: true, Principal: "alice", AllowedRoots: []string{rootA},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}
+	script := completionScript(t)
+
+	t.Run("token file path with spaces", func(t *testing.T) {
+		endpoint, _, _ := startCompletionPolicyServer(t, respond)
+		words := []string{"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "--allowed-root", ""}
+		results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
+		if stderr != "" {
+			t.Fatalf("policy completion must not write to stderr: %q", stderr)
+		}
+		if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
+			t.Errorf("anchors = %v, want %v", results, want)
+		}
+	})
+
+	t.Run("unix socket path with spaces", func(t *testing.T) {
+		sockPath := filepath.Join(base, "dh sp ace.sock")
+		ln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(respond)}
+		go srv.Serve(ln)
+		t.Cleanup(func() {
+			srv.Close()
+			ln.Close()
+		})
+
+		words := []string{"docker-helper", "launcher", "create", "--endpoint", sockPath, "--token-file", tokenPath, "--principal", "alice", "--allowed-root", ""}
+		results, stderr := runCompletionWithPreamble(t, script, completionPATHPreamble(t), words)
+		if stderr != "" {
+			t.Fatalf("policy completion must not write to stderr: %q", stderr)
+		}
+		if want := []string{rootA}; !slices.Equal(sortedTrimmed(results), want) {
+			t.Errorf("anchors = %v, want %v", results, want)
+		}
+	})
 }
 
 // TestCompletionPolicyGracefulDegradation proves the failure contract: when
@@ -1964,6 +2223,73 @@ func TestCompletionPolicyGracefulDegradation(t *testing.T) {
 				t.Errorf("filesystem fallback = %v, want %v", results, want)
 			}
 		})
+	}
+}
+
+// TestCompletionPolicyHangingDaemonBoundedFallback proves the machine-facing
+// completion query cannot stall the shell: a daemon that accepts the
+// connection but never answers makes the helper exit non-zero within the
+// bounded completion query timeout, the generated Bash degrades silently to
+// the generic filesystem completion, and nothing reaches stderr.
+func TestCompletionPolicyHangingDaemonBoundedFallback(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, "sentinel-dir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "sentinel-file"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(base, "tok")
+	if err := os.WriteFile(tokenPath, []byte("tok"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// HTTP server that accepts requests but never answers: the exact
+	// accept-but-hang failure mode the completion query timeout exists for.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan struct{}, 8)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		<-r.Context().Done()
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() {
+		srv.Close()
+		ln.Close()
+	})
+	endpoint := "http://" + ln.Addr().String()
+
+	script := completionScript(t)
+	preamble := completionPATHPreamble(t) + "; cd " + base
+
+	start := time.Now()
+	results, stderr, harnessErr := runCompletionWithDeadline(t, script, preamble, []string{
+		"docker-helper", "launcher", "create", "--endpoint", endpoint, "--token-file", tokenPath,
+		"--principal", "alice", "--allowed-root", "",
+	}, 15*time.Second)
+	elapsed := time.Since(start)
+
+	if harnessErr != nil {
+		t.Fatalf("completion did not terminate on its own (elapsed %s): %v", elapsed, harnessErr)
+	}
+	if elapsed > 10*completionQueryTimeout {
+		t.Errorf("completion took %s, want bounded by the query timeout (<= %s)", elapsed, 10*completionQueryTimeout)
+	}
+	// The query reached the hanging daemon, so the bound was genuinely
+	// exercised: dial and request succeeded, only the answer was withheld.
+	select {
+	case <-requests:
+	case <-time.After(5 * time.Second):
+		t.Error("the hanging daemon never received the query; the bound was not exercised")
+	}
+	if stderr != "" {
+		t.Errorf("degraded completion must not write to stderr: %q", stderr)
+	}
+	if !slices.Contains(results, "sentinel-file") {
+		t.Errorf("fallback to generic filesystem completion missing sentinel-file, got %v", results)
 	}
 }
 

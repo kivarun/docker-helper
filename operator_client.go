@@ -29,6 +29,22 @@ type operatorClientOptions struct {
 	System    bool   // --system: force system daemon
 	Endpoint  string // --endpoint: explicit endpoint URL
 	TokenFile string // --token-file: explicit token file path
+	// Timeout bounds the whole HTTP exchange (dial, request, response) when
+	// non-zero; zero keeps the unbounded operator client. Only the
+	// machine-facing completion roots queries set it: completion is an
+	// interactive convenience and must never stall the shell on an
+	// unavailable or unresponsive daemon.
+	Timeout time.Duration
+}
+
+// clientTimeout returns the pointer form newUnixAPIClient and
+// newHTTPAPIClient expect, or nil when no timeout was requested.
+func (opts operatorClientOptions) clientTimeout() *time.Duration {
+	if opts.Timeout <= 0 {
+		return nil
+	}
+	timeout := opts.Timeout
+	return &timeout
 }
 
 // resolveOperatorClient resolves the operator client based on the given options.
@@ -96,9 +112,9 @@ func resolveExplicitEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	}
 
 	if isUnix {
-		return newUnixAPIClient(socketPath, tokenSource, nil), nil
+		return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
 	}
-	return newHTTPAPIClient(socketPath, tokenSource, nil), nil
+	return newHTTPAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
 }
 
 func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
@@ -114,7 +130,7 @@ func resolveSystemEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	}
 	tokenSource := func() (string, error) { return token, nil }
 
-	return newUnixAPIClient(socketPath, tokenSource, nil), nil
+	return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
 }
 
 func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
@@ -146,7 +162,7 @@ func resolveDefaultEndpoint(opts operatorClientOptions) (*apiClient, error) {
 	}
 	tokenSource := func() (string, error) { return token, nil }
 
-	return newUnixAPIClient(socketPath, tokenSource, nil), nil
+	return newUnixAPIClient(socketPath, tokenSource, opts.clientTimeout()), nil
 }
 
 // systemSocketExists reports whether the system daemon socket is present.
