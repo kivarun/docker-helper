@@ -288,7 +288,7 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "_docker_helper_completion_euid() {")
-	fmt.Fprint(w, "    if [ -n \"${EUID+x}\" ]; then printf '%s\\n' \"$EUID\"; else id -u; fi\n")
+	io.WriteString(w, "    if [ -n \"${EUID+x}\" ]; then printf '%s\\n' \"$EUID\"; else id -u; fi\n")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 
