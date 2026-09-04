@@ -36,6 +36,10 @@ const (
 type completionAvailability struct {
 	Local       completionLocalPrivilege
 	Authorities completionAuthorityMask
+	// Hidden suppresses a machine-facing command from ordinary completion
+	// suggestions while keeping it in the parser/help tree and directly
+	// invokable. This is UI metadata, not authorization.
+	Hidden bool
 }
 
 // completionAvailabilityByCommand is keyed by command nodes, not command-name
@@ -108,6 +112,17 @@ func setCompletionAuthorities(authorities completionAuthorityMask, commands ...*
 	}
 }
 
+func setCompletionHidden(hidden bool, commands ...*Command) {
+	for _, cmd := range commands {
+		if cmd == nil {
+			panic("completion availability: nil command")
+		}
+		v := completionAvailabilityByCommand[cmd]
+		v.Hidden = hidden
+		completionAvailabilityByCommand[cmd] = v
+	}
+}
+
 func mustCompletionSubcommand(parent *Command, name string) *Command {
 	cmd := parent.resolveSubcommand(name)
 	if cmd == nil {
@@ -117,6 +132,8 @@ func mustCompletionSubcommand(parent *Command, name string) *Command {
 }
 
 func configureCompletionAvailability() {
+	setCompletionHidden(true, completionAuthorityCommand)
+
 	setCompletionLocal(completionPrivilegeRoot,
 		appArmorRootListCommand,
 		appArmorRootAddCommand,
@@ -189,6 +206,9 @@ func completionAuthorityForName(name string) completionAuthorityMask {
 // descendant command is available in the supplied local/authority context.
 func completionCommandAvailable(cmd *Command, euid int, authority string) bool {
 	availability := completionAvailabilityByCommand[cmd]
+	if availability.Hidden {
+		return false
+	}
 	switch availability.Local {
 	case completionPrivilegeRoot:
 		if euid != 0 {
@@ -260,8 +280,21 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	sort.Strings(sortedPaths)
 
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "# Capability-aware availability overlay. Explicit command paths and help")
-	fmt.Fprintln(w, "# keep the full parser tree; only ordinary subcommand suggestions are pruned.")
+	fmt.Fprintln(w, "# Capability-aware availability overlay. Explicit command paths remain")
+	fmt.Fprintln(w, "# parseable; ordinary suggestions apply local, authority and hidden UI metadata.")
+
+	fmt.Fprintln(w, "_docker_helper_completion_hidden() {")
+	fmt.Fprintln(w, "    case \"$1\" in")
+	for _, path := range sortedPaths {
+		if paths[path].Hidden {
+			fmt.Fprintf(w, "        %q) return 0 ;;\n", path)
+		}
+	}
+	fmt.Fprintln(w, "        *) return 1 ;;")
+	fmt.Fprintln(w, "    esac")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "_docker_helper_completion_local_requirement() {")
 	fmt.Fprintln(w, "    case \"$1\" in")
 	for _, path := range sortedPaths {
@@ -303,6 +336,7 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w, "_docker_helper_completion_path_available() {")
 	fmt.Fprintln(w, "    local path=\"$1\" euid=\"$2\" authority=\"$3\"")
 	fmt.Fprintln(w, "    local local_req auths child")
+	fmt.Fprintln(w, "    if _docker_helper_completion_hidden \"$path\"; then return 1; fi")
 	fmt.Fprintln(w, "    local_req=\"$(_docker_helper_completion_local_requirement \"$path\")\"")
 	fmt.Fprintln(w, "    case \"$local_req\" in")
 	fmt.Fprintln(w, "        root) [ \"$euid\" -eq 0 ] || return 1 ;;\n        non-root) [ \"$euid\" -ne 0 ] || return 1 ;;\n    esac")
@@ -328,13 +362,21 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w, "    local subcmds=($(_docker_helper_subcommands \"$cmd_path\"))")
 	fmt.Fprintln(w, "    local comp_cmds=() c child_path")
 	fmt.Fprintln(w, "    if [ \"${in_help:-0}\" -eq 1 ]; then")
-	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac; done")
+	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do")
+	fmt.Fprintln(w, "            child_path=\"$c\"; [ -n \"$cmd_path\" ] && child_path=\"$cmd_path $c\"")
+	fmt.Fprintln(w, "            _docker_helper_completion_hidden \"$child_path\" && continue")
+	fmt.Fprintln(w, "            case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac")
+	fmt.Fprintln(w, "        done")
 	fmt.Fprintln(w, "        COMPREPLY=(\"${comp_cmds[@]}\")")
 	fmt.Fprintln(w, "        return")
 	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w, "    local authority")
 	fmt.Fprintln(w, "    if ! authority=\"$(_docker_helper_completion_authority \"$cmd_path\")\"; then")
-	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac; done")
+	fmt.Fprintln(w, "        for c in \"${subcmds[@]}\"; do")
+	fmt.Fprintln(w, "            child_path=\"$c\"; [ -n \"$cmd_path\" ] && child_path=\"$cmd_path $c\"")
+	fmt.Fprintln(w, "            _docker_helper_completion_hidden \"$child_path\" && continue")
+	fmt.Fprintln(w, "            case \"$c\" in \"$cur\"*) comp_cmds+=(\"$c\") ;; esac")
+	fmt.Fprintln(w, "        done")
 	fmt.Fprintln(w, "        COMPREPLY=(\"${comp_cmds[@]}\")")
 	fmt.Fprintln(w, "        return")
 	fmt.Fprintln(w, "    fi")
@@ -349,6 +391,34 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w, "    done")
 	fmt.Fprintln(w, "    COMPREPLY=(\"${comp_cmds[@]}\")")
 	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+
+	// The base generator correctly uses `compopt -o filenames` for generic
+	// filesystem completion, but daemon-backed policy roots can return a
+	// directory anchor before that fallback is reached. Register a tiny
+	// entrypoint that enables filename semantics whenever the current value
+	// belongs to a path-valued flag. Readline then keeps a trailing directory
+	// slash open for continued completion instead of appending a space.
+	fmt.Fprintln(w, "_docker_helper_completion_path_flag() {")
+	fmt.Fprintln(w, "    case \"$1\" in")
+	for _, flagName := range pathValuedFlags {
+		fmt.Fprintf(w, "        --%s) return 0 ;;\n", flagName)
+	}
+	fmt.Fprintln(w, "        *) return 1 ;;")
+	fmt.Fprintln(w, "    esac")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "_docker_helper_completion_entrypoint() {")
+	fmt.Fprintln(w, "    local current=\"${COMP_WORDS[COMP_CWORD]}\"")
+	fmt.Fprintln(w, "    local previous=\"${COMP_WORDS[COMP_CWORD-1]:-}\"")
+	fmt.Fprintln(w, "    local inline_flag=\"\"")
+	fmt.Fprintln(w, "    if [[ \"$current\" == --*=* ]]; then inline_flag=\"${current%%=*}\"; fi")
+	fmt.Fprintln(w, "    if _docker_helper_completion_path_flag \"$previous\" || { [ -n \"$inline_flag\" ] && _docker_helper_completion_path_flag \"$inline_flag\"; }; then")
+	fmt.Fprintln(w, "        compopt -o filenames 2>/dev/null || true")
+	fmt.Fprintln(w, "    fi")
+	fmt.Fprintln(w, "    _docker_helper_completion")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w, "complete -F _docker_helper_completion_entrypoint docker-helper")
 }
 
 func init() {
