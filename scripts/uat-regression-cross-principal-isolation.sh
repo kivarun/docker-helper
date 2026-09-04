@@ -9,6 +9,8 @@
 #     visibility from the bearer, while an explicit Principal filter can only
 #     narrow it (admin all/narrow, Principal own/narrow, foreign/unknown
 #     non-disclosing 404, Launcher credential unauthorized);
+#   * the Release 2 compatibility alias `credential list` preserves the
+#     scope-first semantics without a mandatory Principal argument;
 #   * A cannot delete B's Session;
 #   * A cannot modify B's Principal;
 #   * A cannot manage B's credentials;
@@ -177,6 +179,16 @@ else
   reg_fail "scope-first credential list: Principal own-scope resolution failed"
 fi
 
+# Release 2 compatibility alias: `credential list` must behave exactly like
+# the canonical command, in particular without a mandatory Principal positional.
+C_ALIAS="$(dh credential list --system --token-file "$CRED_A" 2>&1)"; C_ALIAS_RC=$?
+if [ "$C_ALIAS_RC" -eq 0 ] && only_principal_rows "$C_ALIAS" "$USER_A" \
+    && printf '%s' "$C_ALIAS" | grep -q "$credA" && ! printf '%s' "$C_ALIAS" | grep -q "$credB"; then
+  reg_ok "scope-first credential list: Release 2 alias works without a Principal argument and preserves own scope"
+else
+  reg_fail "scope-first credential list: Release 2 alias failed (mandatory Principal restored or own scope broken)"
+fi
+
 C_FOREIGN="$(dh principal credential list --system --token-file "$CRED_A" "$USER_B" 2>&1)"; C_FOREIGN_RC=$?
 C_MISSING="$(dh principal credential list --system --token-file "$CRED_A" uatreg4missing 2>&1)"; C_MISSING_RC=$?
 if [ "$C_FOREIGN_RC" -ne 0 ] && [ "$C_MISSING_RC" -ne 0 ] \
@@ -207,7 +219,8 @@ $L_A_OWN
 $C_ADMIN
 $C_ADMIN_A
 $C_A
-$C_A_OWN"
+$C_A_OWN
+$C_ALIAS"
 if { [ -n "$TOK_A" ] && printf '%s' "$ALL_LISTS" | grep -Fq "$TOK_A"; } \
     || { [ -n "$TOK_B" ] && printf '%s' "$ALL_LISTS" | grep -Fq "$TOK_B"; } \
     || { [ -n "$LC_TOKEN" ] && printf '%s' "$ALL_LISTS" | grep -Fq "$LC_TOKEN"; } \

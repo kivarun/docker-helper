@@ -28,9 +28,10 @@ recorded implementation state
 RC-blocker correction passes; `main` has since advanced beyond it, so this
 plan no longer pins a final implementation commit. The canonical
 current-behavior reference is [`architecture.md`](architecture.md)
-("Launcher ownership"); the Release 3 vocabulary map still carries the
-`694ca5944c87b17303b761c5f38e4afd390a7d89` checkpoint and will be
-re-anchored once Release 2.1 reaches its final frozen SHA.
+("Launcher ownership"); the Release 3 vocabulary map has already been
+reconciled against the final implemented Release 2.1 production baseline at
+`44281a84591cff6bb75cd069a5032ecdf947a282`. Commits after that baseline are
+UAT/docs-only corrections and do not change the mapped production symbols.
 
 Implementation completion is distinct from release acceptance: the Release
 2.1 promotion claim requires the artifact gate to pass, including a
@@ -922,8 +923,10 @@ exclusive; the latter selects `restricted` scope.
 ### Credential install
 
 `docker-helper credential install` (`credential_install.go`) is unchanged and
-installs a Principal-credential bearer for system-mode non-root clients. It is
-not repurposed for Launcher credentials.
+installs a non-admin `dhc_...` credential bearer for system-mode non-root
+clients. The installed bearer may belong to either a Principal or a Launcher;
+the local store is owner-agnostic, and the daemon resolves the concrete
+ownership and authorization scope when the bearer is presented.
 
 ### Man pages / help / completion
 
@@ -1031,6 +1034,26 @@ fixtures. Required coverage (from the concept, mapped to owners):
 UAT (Stage 1.6): v2.0.0 → 2.1 upgrade on existing databases; hierarchy,
 isolation, and lifecycle end-to-end; secret-leak checks on raw audit/log
 output.
+
+Final RC correction passes extended the acceptance coverage of already tested
+behavior as follows:
+
+- Principal credential rotation after revoked-name reuse
+  (`scripts/uat-regression-auth-lifecycle.sh`, scenario F): rotate selects the
+  active credential row, the active credential ID is preserved, old and
+  revoked bearers remain invalid, the replacement bearer authenticates, and
+  no extra credential row is created.
+- Scope-first Launcher list and Principal credential list
+  (`scripts/uat-regression-cross-principal-isolation.sh`, regression group 4):
+  admin global and admin narrowed visibility, Principal own scope with or
+  without an explicit Principal, foreign == unknown as the same
+  non-disclosing `404 principal_not_found`, and Launcher credential
+  unauthorized.
+- The Release 2 compatibility alias `docker-helper credential list` works
+  without a mandatory Principal argument and preserves the scope-first
+  semantics of the canonical command.
+- List output remains metadata-only and does not expose bearer values in
+  either list family.
 
 ## R3 compatibility gate
 
