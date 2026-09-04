@@ -534,6 +534,22 @@ Release 3 foundation documents:
 - [`release-3-security-and-test-plan.md`](release-3-security-and-test-plan.md) — cross-cutting threat boundaries, verification matrix, and release gates;
 - [`release-3-vocabulary-and-implementation-map.md`](release-3-vocabulary-and-implementation-map.md) — canonical terms and the current-to-target code map.
 
+## 3.1
+
+### Candidate: bounded Session leases for delegated orchestration
+
+After Release 3, evaluate bounded self-renewal for an orchestrator Session
+without making it the owner or lifecycle parent of Sessions created through a
+delegated Launcher credential. The candidate direction separates the current
+renewable lease from an absolute higher-authority lifetime ceiling and treats
+temporal limits on delegated Launcher credentials as a related but distinct
+authorization question.
+
+Release 3 retains its binding owner-only Session renewal contract. Detailed
+Release 3.1 semantics, API, persistence, migration, and acceptance work remain
+deferred until Release 3 is complete. The feature concept is recorded in
+[`release-3.1-session-lease-concept.md`](release-3.1-session-lease-concept.md).
+
 ## Possible 4.0 / use-case driven
 
 If concrete use cases justify remote capabilities, they remain a later,
