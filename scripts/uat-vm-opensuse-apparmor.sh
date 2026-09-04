@@ -342,6 +342,17 @@ run_guest_uat "RPM lifecycle inside the guest" \
 log "RPM/AppArmor lifecycle passed inside the guest"
 
 # ---------------------------------------------------------------------------
+# 7c. RuntimeDirectory socket replacement regression (real zypper upgrade +
+#     candidate --force reinstall, observed by a long-lived container with a
+#     bind-mount of /run/docker-helper; the shipped RuntimeDirectoryPreserve
+#     contract)
+# ---------------------------------------------------------------------------
+log "== 7c. RuntimeDirectory socket replacement regression (zypper) =="
+run_guest_uat "RuntimeDirectory socket replacement regression inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_PLATFORM=opensuse UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE_RPM=/opt/uat-import/docker-helper-baseline.rpm scripts/uat-regression-runtime-dir-socket-replacement.sh"
+log "RuntimeDirectory socket replacement regression passed inside the guest"
+
+# ---------------------------------------------------------------------------
 # 8. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"

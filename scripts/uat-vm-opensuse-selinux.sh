@@ -29,8 +29,10 @@
 #
 # This file owns the RPM-specific stages ONLY — the exact RPM transfer, and the
 # RPM SELinux stage set (black-box UAT, SELinux mount-pin / RPM postinstall
-# regression, the Phase-A2 docker socket micro-proof, and the Release-2 SELinux
-# targeted regression groups 1-5). All VM mechanics live in the harness; all
+# regression, the Phase-A2 docker socket micro-proof, the Release-2 SELinux
+# targeted regression groups 1-5, the RPM/SELinux lifecycle, and the
+# RuntimeDirectory socket replacement regression). All VM mechanics live in the
+# harness; all
 # SELinux host construction lives in the shared lib; the guest-side UAT is the
 # existing scripts/uat-blackbox.sh with its uat-platform-opensuse.sh (platform
 # owner) and uat-mac-selinux.sh (MAC owner) adapters, which remain the owners of
@@ -68,6 +70,10 @@
 #       -> SELinux mount-pin / RPM postinstall regression  [result recorded]
 #       -> A2 docker socket micro-proof (dontaudit off, bounded evidence)
 #       -> Release-2 SELinux targeted regression groups 1-5 (collect-all runner)
+#       -> RPM/SELinux lifecycle                  [result recorded, collect-all]
+#       -> RuntimeDirectory socket replacement regression
+#          (real zypper upgrade + --force reinstall, long-lived bind-mount
+#          consumer)                             [result recorded, collect-all]
 #
 # The Tumbleweed cloud image ships SELinux-active by default (the filesystem
 # is already labeled for the targeted policy), so the harness keeps SELinux as
@@ -263,6 +269,24 @@ record_stage "RPM/SELinux lifecycle" "$LIFECYCLE_RESULT"
 
 
 # ---------------------------------------------------------------------------
+# 8e. RuntimeDirectory socket replacement regression (real zypper upgrade +
+#     candidate --force reinstall, observed by a long-lived container with a
+#     bind-mount of /run/docker-helper; the shipped RuntimeDirectoryPreserve
+#     contract)
+# ---------------------------------------------------------------------------
+log "== 8e. RuntimeDirectory socket replacement regression (zypper) =="
+RUNDIR_RESULT=FAIL
+if run_guest_capture "RuntimeDirectory socket replacement regression inside the guest" \
+  "cd /opt/uat && sudo -E env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin UAT_VERSION=$VERSION UAT_RPM=/opt/uat-import/docker-helper.rpm UAT_RPM_SHA256=$UAT_RPM_SHA256 UAT_BASELINE_RPM=/opt/uat-import/docker-helper-baseline.rpm scripts/uat-regression-runtime-dir-socket-replacement.sh"; then
+  RUNDIR_RESULT=PASS
+  log "RuntimeDirectory socket replacement regression passed inside the guest"
+else
+  log "RuntimeDirectory socket replacement regression reported a failure (recorded)"
+fi
+record_stage "RuntimeDirectory socket regression" "$RUNDIR_RESULT"
+
+
+# ---------------------------------------------------------------------------
 # 9. Summary
 # ---------------------------------------------------------------------------
 T1="$(date +%s)"
@@ -291,7 +315,7 @@ echo "============================="
 # is not acceptable for Release-2 — the historical docker socket blocker that
 # once justified treating BLOCKED as success is closed, so it must not remain
 # encoded as acceptance semantics.
-if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT"; then
+if selinux_stage_accept "$BB_RESULT" "$SELREG_RESULT" "$MP_RESULT" "$LIFECYCLE_RESULT" "$SELCHECK_RESULT" "$RUNDIR_RESULT"; then
   echo "RESULT: openSUSE/SELinux UAT stages PASSED inside Tumbleweed VM"
   echo "=============================================================="
   log "DONE"

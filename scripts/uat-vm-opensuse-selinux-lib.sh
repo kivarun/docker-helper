@@ -103,13 +103,15 @@ record_stage() { # name result
   SELINUX_STAGES="${SELINUX_STAGES}$(printf '%-28s %s\n' "$1" "$2")"
 }
 
-# selinux_stage_accept BB_RESULT SELREG_RESULT MP_RESULT LIFECYCLE_RESULT SELCHECK_RESULT:
+# selinux_stage_accept BB_RESULT SELREG_RESULT MP_RESULT LIFECYCLE_RESULT
+#                      SELCHECK_RESULT RUNDIR_RESULT:
 # overall acceptance of the normal SELinux UAT (fail-closed). Every gating
 # stage must be PASS: a BLOCKED stage means the required scenario was NOT
 # exercised, which is not acceptable for Release-2. Returns 0 only when all
-# five are PASS.
+# six are PASS.
 selinux_stage_accept() {
-  [ "$1" = "PASS" ] && [ "$2" = "PASS" ] && [ "$3" = "PASS" ] && [ "$4" = "PASS" ] && [ "$5" = "PASS" ]
+  [ "$1" = "PASS" ] && [ "$2" = "PASS" ] && [ "$3" = "PASS" ] && [ "$4" = "PASS" ] \
+    && [ "$5" = "PASS" ] && [ "$6" = "PASS" ]
 }
 
 # ---------------------------------------------------------------------------
