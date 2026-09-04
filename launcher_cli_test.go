@@ -701,7 +701,7 @@ func TestLauncherCredentialSecretPrintedOnce(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"launcher", "credential", "issue", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "dhl_1"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"launcher", "credential", "create", "--endpoint", endpoint, "--token-file", tokenPath, "--principal", "alice", "dhl_1"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
 	}
@@ -1176,7 +1176,7 @@ func TestLauncherIndividualCLIAllTargetScopedPath(t *testing.T) {
 		},
 		{
 			name:       "credential issue",
-			args:       []string{"launcher", "credential", "issue"},
+			args:       []string{"launcher", "credential", "create"},
 			wantPath:   "/principals/alice/launchers/default/credential",
 			wantMethod: http.MethodPut,
 		},
@@ -1306,7 +1306,7 @@ func TestLauncherCLIStructuredErrorPropagation(t *testing.T) {
 		},
 		{
 			name:   "credential issue launcher_credential_exists",
-			args:   []string{"launcher", "credential", "issue"},
+			args:   []string{"launcher", "credential", "create"},
 			status: http.StatusConflict,
 			code:   "launcher_credential_exists",
 		},

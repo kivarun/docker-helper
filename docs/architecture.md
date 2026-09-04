@@ -436,14 +436,18 @@ for full syntax:
 - `config` — Inspect and modify configuration. Subcommands: `show`, `set`,
   `unset`.
 - `principal` — Manage principals. Subcommands: `create`, `list`, `show`,
-  `set`, `delete`, `allowed-root`.
+  `set`, `delete`, `allowed-root`, `credential` (`create`, `list`, `revoke`,
+  `rotate`).
 - `launcher` — Manage launchers. Subcommands: `create`, `list`, `show`,
-  `set`, `delete`, `scope` (`set`), `credential` (`issue`, `rotate`,
+  `set`, `delete`, `scope` (`set`), `credential` (`create`, `show`, `rotate`,
   `delete`). See Launcher ownership above for the full contract.
-- `credential` — Manage Principal credentials. Subcommands: `create`, `list`,
-  `revoke`, `install`. `credential create --name` is optional and uses the
-  literal name `default` when omitted. The same `credential install` command
-  stores a Launcher credential token for a delegated agent.
+- `credential` — Install a non-admin credential token and host the Release
+  2.0 principal-credential aliases. Subcommands: `install` (canonical local
+  install command), `create`, `list`, `revoke` (compatibility aliases for the
+  canonical `principal credential` commands, sharing the same handlers).
+  `credential create --name` is optional and uses the literal name `default`
+  when omitted. The same `credential install` command stores a Principal or
+  Launcher credential token for the owning user.
 - `admin-token` — Manage the admin token. Subcommand: `rotate` (rotate the
   admin token; requires the current token, new token shown once, old token
   invalid immediately, no restart).
@@ -457,7 +461,13 @@ for full syntax:
 ### General commands
 
 - `version` — Print version.
-- `help` — Show help.
+- `help` — Show help for the full command tree. `help` is a top-level
+  navigation branch accepting an arbitrary-depth command path:
+  `docker-helper help [command [subcommand ...]]` (for example
+  `docker-helper help principal credential rotate`). It navigates the same
+  canonical command tree as the parser; each branch does not carry its own
+  `help` pseudo-subcommand (`docker-helper principal help` is an unknown
+  subcommand).
 - `completion bash` — Generate Bash completion.
 
 ### Signal cancellation (agent commands)
@@ -693,9 +703,35 @@ Three authentication classes provide different levels of access:
 - sent as `Authorization: Bearer <credential-token>`;
 - resolved through database lookup by token hash.
 
+Principal credentials are lifecycle resources of their owning Principal
+(`Principal └── credential (0..N, named)`). The canonical CLI is
+`principal credential create|list|revoke|rotate`:
+
+- `create` and `revoke` remain administrator-controlled in 2.1;
+- `GET /principals/{username}/credentials` is scope-aware: a Principal
+  credential lists its own principal's credentials with no explicit
+  selector, and any explicit selector is accepted only as a targeting
+  filter for callers with broader visibility (the admin token must name
+  the Principal; a Principal credential targeting another principal is the
+  same non-disclosing `404 principal_not_found` as any other principal
+  endpoint; a Launcher credential is `401`);
+- `POST /principals/{username}/credentials/{name}/rotate` rotates a named
+  credential in one atomic server-side operation: the token hash is
+  replaced in the same transaction (credential ID, name, ownership, and
+  created_at are unchanged, no second row is created), the old bearer is
+  rejected immediately, and the new bearer is returned exactly once.
+  Rotation of a revoked credential is `409 credential_revoked`; the name
+  is reused per principal credential semantics (a revoked credential's
+  name becomes available);
+- CLI target resolution is the same scope-aware rule as the Launcher
+  command family: the Principal defaults to the owner of the authenticated
+  Principal credential (`GET /auth`), an explicit selector is for
+  broader-visibility callers, and an admin caller must name the Principal
+  explicitly.
+
 ### Launcher credential
 
-- at most one credential exists per launcher; issued with
+- at most one credential exists per launcher; created with
   `PUT /principals/{username}/launchers/{launcher}/credential` (admin or
   owning-principal token required)
   and replaced by `POST /principals/{username}/launchers/{launcher}/credential/rotate`;
@@ -713,8 +749,10 @@ Three authentication classes provide different levels of access:
 
 #### Credential install
 
-The `credential install` command stores a credential token (Principal or
-Launcher) for the principal user. It is not run as root.
+The `credential install` command installs a non-admin credential token for
+`docker-helper --system`. The credential may belong to a Principal or a
+Launcher; the daemon resolves its owner and authorization scope when the
+token is used. It is not run as root.
 
 - Token format: `dhc_` + 64 lowercase hex characters (68 total).
 - Token stored at `${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token`
@@ -900,7 +938,8 @@ docker-helper launcher set [--principal USER] [--name NAME]
 docker-helper launcher delete [--principal USER] [LAUNCHER]
 docker-helper launcher scope set [--principal USER]
     [--inherit | --allowed-root PATH]... [LAUNCHER]
-docker-helper launcher credential issue [--principal USER] [LAUNCHER]
+docker-helper launcher credential create [--principal USER] [LAUNCHER]
+docker-helper launcher credential show [--principal USER] [LAUNCHER]
 docker-helper launcher credential rotate [--principal USER] [LAUNCHER]
 docker-helper launcher credential delete [--principal USER] [LAUNCHER]
 ```
@@ -912,7 +951,11 @@ credential infers its Principal from `GET /auth`; an admin token must
 name the Principal explicitly with `--principal` (omission fails; the
 CLI never searches for a `default` Launcher globally). Principal
 inference is target construction only — the daemon remains the
-authorization authority. `create` prompts for the credential choice on a
+authorization authority. `launcher credential create` is the canonical
+issuance verb (the Release 2.0 `issue` spelling is retired from the
+public CLI); because a Launcher holds at most one credential, a second
+create is the daemon's normal `409 credential_already_exists` conflict.
+`create` prompts for the credential choice on a
 TTY; non-interactive use must pass `--issue-credential` or
 `--no-credential` explicitly.
 
@@ -1019,6 +1062,13 @@ launchers). `credential_id` carries target-resource semantics: the issued,
 rotated, or revoked Launcher credential on issue/rotate/delete events, and
 the initiating credential on other launcher-control events.
 `credential_name` is recorded where the credential has a name.
+
+Principal credential events (`principal.credential_list`,
+`principal.credential_rotate`, and the create/revoke events) follow the
+same provenance rule: `principal_name` is the target Principal, and
+`initiator_credential_id` names the initiating Principal credential
+(absent for the admin token). The rotate/list events additionally project
+the target resource (`credential_id`, `credential_name`).
 
 ## Workspace isolation
 
@@ -1797,7 +1847,7 @@ Implemented event families are:
 | Sessions | `session.create`, `session.list`, `session.delete` |
 | Principals | `principal.create`, `principal.enabled_change`, `principal.allowed_root_add`, `principal.allowed_root_remove`, `principal.delete` |
 | Launchers | `launcher.create`, `launcher.list`, `launcher.update`, `launcher.scope_replace`, `launcher.delete`, `launcher.credential_issue`, `launcher.credential_rotate`, `launcher.credential_delete` |
-| Credentials/admin | `principal.credential_create`, `principal.credential_revoke`, `admin_token.rotate` |
+| Credentials/admin | `principal.credential_create`, `principal.credential_list`, `principal.credential_rotate`, `principal.credential_revoke`, `admin_token.rotate` |
 | Docker operations | `pull.start`, `pull.finish`, `pull.rejected`, `build.start`, `build.finish`, `build.rejected`, `run.start`, `run.finish`, `run.rejected`, `registry.login.start`, `registry.login.finish` |
 | Configuration | `config.reload` |
 

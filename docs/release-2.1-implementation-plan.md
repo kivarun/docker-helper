@@ -140,7 +140,12 @@ Constraint:
   new one may later be issued.
 - Existing Principal credentials are **not** silently reclassified as Launcher
   credentials.
-- Principal credential lifecycle remains administrator-controlled in 2.1.
+- Principal credential lifecycle remains administrator-controlled in 2.1
+  (create/revoke; the Release 2.1 CLI correction pass additionally makes
+  `principal credential list` and `principal credential rotate`
+  principal-accessible: a Principal credential may list and rotate its
+  **own** named credentials without an explicit selector, while
+  create/revoke and any cross-principal targeting stay admin-only).
 - A Principal credential may manage: its Launchers; those Launchers' optional
   credentials; Sessions under those Launchers. It does **not** issue/revoke
   arbitrary Principal credentials.

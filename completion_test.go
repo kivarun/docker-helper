@@ -1236,3 +1236,90 @@ func TestCompletionFlagEqualsValueDoesNotConsumeNext(t *testing.T) {
 		}
 	}
 }
+
+// ---- completion for the `help` navigation branch ----
+
+// TestCompletionAfterHelpRoot proves `docker-helper help <TAB>` offers the
+// top-level commands, walking the same canonical command tree (not a
+// separate hard-coded list).
+func TestCompletionAfterHelpRoot(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "help", ""})
+	for _, want := range []string{"principal", "launcher", "credential", "session", "config"} {
+		found := false
+		for _, r := range results {
+			if r == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("help <TAB> missing %q, got: %v", want, results)
+		}
+	}
+}
+
+// TestCompletionAfterHelpPrincipal proves second-level help navigation.
+func TestCompletionAfterHelpPrincipal(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "help", "principal", ""})
+	for _, want := range []string{"create", "list", "show", "set", "delete", "allowed-root", "credential"} {
+		found := false
+		for _, r := range results {
+			if r == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("help principal <TAB> missing %q, got: %v", want, results)
+		}
+	}
+}
+
+// TestCompletionAfterHelpPrincipalCredential proves third-level help
+// navigation into the canonical principal credential tree.
+func TestCompletionAfterHelpPrincipalCredential(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "help", "principal", "credential", ""})
+	for _, want := range []string{"create", "list", "revoke", "rotate"} {
+		found := false
+		for _, r := range results {
+			if r == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("help principal credential <TAB> missing %q, got: %v", want, results)
+		}
+	}
+}
+
+// TestCompletionAfterHelpLauncherCredential proves help navigation reaches
+// the launcher credential subtree.
+func TestCompletionAfterHelpLauncherCredential(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "help", "launcher", "credential", ""})
+	for _, want := range []string{"create", "show", "rotate", "delete"} {
+		found := false
+		for _, r := range results {
+			if r == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("help launcher credential <TAB> missing %q, got: %v", want, results)
+		}
+	}
+}
+
+// TestCompletionAfterHelpFlags proves flags complete under help navigation.
+func TestCompletionAfterHelpFlags(t *testing.T) {
+	script := completionScript(t)
+	results := runCompletion(t, script, []string{"docker-helper", "help", "-"})
+	if !slices.Contains(results, "-h") || !slices.Contains(results, "--help") {
+		t.Errorf("help - <TAB> must offer -h --help, got: %v", results)
+	}
+}

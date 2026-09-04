@@ -558,6 +558,29 @@ func (c *apiClient) listPrincipalCredentials(username string) (*listCredentialsR
 	return &result, nil
 }
 
+// rotatePrincipalCredential sends POST /principals/{username}/credentials/{name}/rotate,
+// the atomic one-call rotation of a named Principal credential. The credential
+// name is a caller-chosen string, so it is URL-escaped into the path.
+func (c *apiClient) rotatePrincipalCredential(username, name string) (*createCredentialResponse, error) {
+	resp, err := c.doAuthenticatedRequest("POST",
+		"/principals/"+url.PathEscape(username)+"/credentials/"+url.PathEscape(name)+"/rotate", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result createCredentialResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
+}
+
 func (c *apiClient) revokeCredential(id string) (*revokeCredentialResponse, error) {
 	resp, err := c.doAuthenticatedRequest("POST", "/credentials/"+url.PathEscape(id)+"/revoke", nil)
 	if err != nil {
@@ -767,6 +790,27 @@ func (c *apiClient) deleteLauncher(username, selector string) error {
 
 	_, err = c.readResponseBody(resp)
 	return err
+}
+
+// getLauncherCredential sends GET .../credential and returns the credential's
+// metadata (never a bearer secret).
+func (c *apiClient) getLauncherCredential(username, selector string) (*launcherCredentialResponse, error) {
+	resp, err := c.doAuthenticatedRequest("GET", launcherControlPath(username, selector, "/credential"), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := c.readResponseBody(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var result launcherCredentialResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("cannot decode response: %w", err)
+	}
+	return &result, nil
 }
 
 func (c *apiClient) issueLauncherCredential(username, selector string) (*launcherCredentialResponse, error) {

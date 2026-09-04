@@ -197,7 +197,7 @@ func TestBlackBoxServeServeUnexpected(t *testing.T) {
 // argument yields a semantic error plus the specific command's Usage, exit 2.
 func TestBlackBoxMissingPositionalArg(t *testing.T) {
 	for _, cmd := range [][]string{
-		{"credential", "list"},
+		{"principal", "credential", "revoke"},
 		{"principal", "show"},
 		{"pull"},
 	} {
@@ -695,5 +695,69 @@ func TestHelpConfigAllowedRootGlobalCeiling(t *testing.T) {
 	// Must NOT claim that allowed-root add prepares MAC state.
 	if strings.Contains(helpText, "prepares the active MAC backend") {
 		t.Error("config allowed-root help must not claim that allowed-root add prepares MAC state")
+	}
+}
+
+// TestHelpUsageReflectsArbitraryDepth pins the help usage line: the command
+// accepts an arbitrary-depth command path.
+func TestHelpUsageReflectsArbitraryDepth(t *testing.T) {
+	if !strings.Contains(helpCommand.Usage, "help [command [subcommand ...]]") {
+		t.Errorf("help usage = %q, want arbitrary-depth form", helpCommand.Usage)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("help exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "docker-helper help [<command> [<subcommand> ...]]") {
+		t.Errorf("printed help missing arbitrary-depth navigation hint: %s", stdout.String())
+	}
+}
+
+// TestHelpPseudoSubcommandRemainsInvalid pins that help is a top-level
+// navigation branch only: it must not become a pseudo-subcommand of deeper
+// branches.
+func TestHelpPseudoSubcommandRemainsInvalid(t *testing.T) {
+	for _, args := range [][]string{
+		{"principal", "help"},
+		{"launcher", "help"},
+		{"principal", "credential", "help"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters(args, &stdout, &stderr)
+		if code != 2 {
+			t.Errorf("%v: expected exit 2, got %d", args, code)
+		}
+		if !strings.Contains(stderr.String(), "unknown") {
+			t.Errorf("%v: expected unknown command error, got: %s", args, stderr.String())
+		}
+	}
+}
+
+// TestHelpCanonicalPathsAndPerCommandFlag pins the Release 2.1 help contract:
+// the canonical help paths and per-command --help all resolve, and the rotate
+// help explains the atomic rotation contract.
+func TestHelpCanonicalPathsAndPerCommandFlag(t *testing.T) {
+	for _, args := range [][]string{
+		{"help", "principal"},
+		{"help", "principal", "credential"},
+		{"help", "principal", "credential", "rotate"},
+		{"principal", "credential", "rotate", "--help"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runCommandWithWriters(args, &stdout, &stderr)
+		if code != 0 {
+			t.Errorf("%v: expected exit 0, got %d, stderr=%s", args, code, stderr.String())
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	code := runCommandWithWriters([]string{"principal", "credential", "rotate", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("rotate --help exit = %d", code)
+	}
+	for _, want := range []string{"atomic server-side operation", "exactly once"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("rotate help missing %q:\n%s", want, stdout.String())
+		}
 	}
 }

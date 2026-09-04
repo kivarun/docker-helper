@@ -330,8 +330,8 @@ func (c *Command) printHelp(w io.Writer, path []string) {
 
 	// Root command: add hint about help <command>
 	if c == rootCommand {
-		fmt.Fprintln(w, "Run 'docker-helper help <command>' or 'docker-helper <command> --help'")
-		fmt.Fprintln(w, "for command-specific help.")
+		fmt.Fprintln(w, "Run 'docker-helper help [<command> [<subcommand> ...]]' or")
+		fmt.Fprintln(w, "'docker-helper <command> --help' for command-specific help.")
 		fmt.Fprintln(w)
 	}
 }
@@ -586,12 +586,13 @@ configuration and this command returns an error.`,
 var helpCommand = &Command{
 	Name:       "help",
 	Summary:    "Show help",
-	Usage:      "docker-helper help [command]",
+	Usage:      "docker-helper help [command [subcommand ...]]",
 	MaxPosArgs: -1, // Allow unlimited positional args for nested commands
-	Help: `Show help for docker-helper or a specific command.
+	Help: `Show help for docker-helper or any command path.
 
-Run 'docker-helper help <command>' or 'docker-helper <command> --help'
-for command-specific help.`,
+Run 'docker-helper help <command> [<subcommand> ...]' to navigate the
+command tree, or 'docker-helper <command> --help' for command-specific
+help.`,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {

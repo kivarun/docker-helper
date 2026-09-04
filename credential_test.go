@@ -1266,17 +1266,18 @@ func TestCredentialCLIHelp(t *testing.T) {
 }
 
 // TestCredentialRevokeHelpExplainsCredentialID verifies the revoke help
-// explains CREDENTIAL_ID (dhcr_...) and how to obtain it via credential list.
+// explains CREDENTIAL_ID (dhcr_...) and how to obtain it via the canonical
+// principal credential list.
 func TestCredentialRevokeHelpExplainsCredentialID(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runCommandWithWriters([]string{"credential", "revoke", "--help"}, &stdout, &stderr)
+	code := runCommandWithWriters([]string{"principal", "credential", "revoke", "--help"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("credential revoke --help exited %d", code)
+		t.Fatalf("principal credential revoke --help exited %d", code)
 	}
 	out := stdout.String()
-	for _, want := range []string{"CREDENTIAL_ID", "dhcr_", "credential list USER"} {
+	for _, want := range []string{"CREDENTIAL_ID", "dhcr_", "principal credential list PRINCIPAL"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("credential revoke --help should mention %q, got:\n%s", want, out)
+			t.Errorf("principal credential revoke --help should mention %q, got:\n%s", want, out)
 		}
 	}
 }
@@ -1349,7 +1350,7 @@ func TestCredentialCLICreateSyntax(t *testing.T) {
 
 func TestCredentialCLICreateSyntaxRegression(t *testing.T) {
 	// Verify the Usage string matches what the parser actually accepts.
-	usage := credentialCreateCommand.Usage
+	usage := principalCredentialCreateCommand.Usage
 	if !strings.Contains(usage, "--name") {
 		t.Errorf("Usage should contain --name: %q", usage)
 	}

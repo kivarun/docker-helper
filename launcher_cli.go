@@ -86,12 +86,15 @@ func promptCredentialYesNo(question string, stdin io.Reader, stderr io.Writer) (
 	}
 }
 
-// resolveLauncherPrincipalForCLI returns the username to target on the canonical
-// nested /principals/{username}/launchers endpoint. When --principal is omitted
-// it infers the Principal from GET /auth; explicit --principal targets the
-// endpoint directly with no local pre-authorization (the daemon remains the
-// authorization authority).
-func resolveLauncherPrincipalForCLI(client *apiClient, explicitPrincipal string) (string, error) {
+// resolveTargetPrincipalForCLI is the shared scope-aware Principal selector
+// for ownership-scoped CLI commands: an explicit Principal selector wins;
+// otherwise the Principal is inferred from GET /auth for a Principal-credential
+// caller (the authenticated credential defines the effective visibility
+// scope). Admin authentication must name the target explicitly (it is never
+// inferred and never searched globally); a Launcher credential has no
+// control-plane authority. adminErr and launcherErr carry the calling command
+// family's rejection messages.
+func resolveTargetPrincipalForCLI(client *apiClient, explicitPrincipal string, adminErr, launcherErr error) (string, error) {
 	if explicitPrincipal != "" {
 		return explicitPrincipal, nil
 	}
@@ -106,12 +109,33 @@ func resolveLauncherPrincipalForCLI(client *apiClient, explicitPrincipal string)
 		}
 		return auth.Principal, nil
 	case "admin":
-		return "", errors.New("--principal is required for admin authentication")
+		return "", adminErr
 	case "launcher":
-		return "", errors.New("Launcher credentials do not manage Launchers")
+		return "", launcherErr
 	default:
 		return "", fmt.Errorf("unknown authority %q", auth.Authority)
 	}
+}
+
+// resolveLauncherPrincipalForCLI returns the username to target on the canonical
+// nested /principals/{username}/launchers endpoint. When --principal is omitted
+// it infers the Principal from GET /auth; explicit --principal targets the
+// endpoint directly with no local pre-authorization (the daemon remains the
+// authorization authority).
+func resolveLauncherPrincipalForCLI(client *apiClient, explicitPrincipal string) (string, error) {
+	return resolveTargetPrincipalForCLI(client, explicitPrincipal,
+		errors.New("--principal is required for admin authentication"),
+		errors.New("Launcher credentials do not manage Launchers"))
+}
+
+// resolvePrincipalTargetForCLI returns the Principal targeted by a Principal
+// credential command (list/rotate): the optional explicit selector, or the
+// authenticated Principal-credential owner. The same scope-aware rule as the
+// Launcher command family applies; only the rejection messages differ.
+func resolvePrincipalTargetForCLI(client *apiClient, explicitPrincipal string) (string, error) {
+	return resolveTargetPrincipalForCLI(client, explicitPrincipal,
+		errors.New("PRINCIPAL is required for admin authentication"),
+		errors.New("Launcher credentials do not manage Principal credentials"))
 }
 
 // launcherSelectorTarget resolves the CLI target for an individual Launcher
@@ -463,16 +487,21 @@ var launcherCredentialCommand = &Command{
 	Name:    "credential",
 	Summary: "Manage launcher credentials",
 	Subcommands: []*Command{
-		launcherCredentialIssueCommand,
+		launcherCredentialCreateCommand,
+		launcherCredentialShowCommand,
 		launcherCredentialRotateCommand,
 		launcherCredentialDeleteCommand,
 	},
 }
 
-var launcherCredentialIssueCommand = &Command{
-	Name:       "issue",
-	Summary:    "Issue a launcher credential",
-	Usage:      "docker-helper launcher credential issue [--principal USER] [LAUNCHER]",
+// launcherCredentialCreateCommand targets the canonical Launcher-credential
+// create endpoint (PUT .../credential). The public verb is create for both
+// credential kinds; the Launcher's 0..1 credential cardinality needs no
+// separate verb, and an existing credential is a normal conflict error.
+var launcherCredentialCreateCommand = &Command{
+	Name:       "create",
+	Summary:    "Create a launcher credential",
+	Usage:      "docker-helper launcher credential create [--principal USER] [LAUNCHER]",
 	MinPosArgs: 0,
 	MaxPosArgs: 1,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
@@ -491,6 +520,42 @@ var launcherCredentialIssueCommand = &Command{
 					return 1
 				}
 				result, err := client.issueLauncherCredential(username, selector)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				if err := encodeJSONOut(stdout, result); err != nil {
+					fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
+					return 1
+				}
+				return 0
+			},
+		}
+	},
+}
+
+var launcherCredentialShowCommand = &Command{
+	Name:       "show",
+	Summary:    "Show a launcher credential",
+	Usage:      "docker-helper launcher credential show [--principal USER] [LAUNCHER]",
+	MinPosArgs: 0,
+	MaxPosArgs: 1,
+	NewInvocation: func(fs *flag.FlagSet) Invocation {
+		system, endpoint, tokenFile := registerOperatorFlags(fs)
+		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		return Invocation{
+			Run: func(stdout, stderr io.Writer) int {
+				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				username, selector, err := launcherSelectorTarget(client, *principal, fs)
+				if err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+				result, err := client.getLauncherCredential(username, selector)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

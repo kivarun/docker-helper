@@ -50,7 +50,7 @@ Multi-user deployment. Requires root for initial setup.
 sudo docker-helper init
 sudo systemctl enable --now docker-helper
 sudo docker-helper principal create alice
-sudo docker-helper credential create alice
+sudo docker-helper principal credential create alice
 .fi
 .RE
 .PP
@@ -112,8 +112,9 @@ Reload configuration.
 Print version information. \fBdocker-helper --version\fR and
 \fBdocker-helper \-v\fR are aliases.
 .TP
-.B docker-helper help [COMMAND]
-Show help for a command.
+.B docker-helper help [COMMAND [SUBCOMMAND ...]]
+Show help for any command path, for example
+.BR "docker-helper help principal credential rotate" .
 .TP
 .B docker-helper completion bash
 Generate Bash completion.
@@ -185,6 +186,30 @@ Add an allowed root for a principal.
 .TP
 .B docker-helper principal allowed-root remove [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER PATH
 Remove an allowed root from a principal.
+.TP
+.B docker-helper principal credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER
+Create a new credential for a principal. If \-\-name is not specified, defaults to "default".
+.TP
+.B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [USER]
+List a principal's credentials as a table with the columns
+ID, NAME, CREATED, and REVOKED. The ID column contains each credential's
+\fBdhcr_\fR identifier, which is the value used by \fBcredential revoke\fR.
+With an authenticated principal credential, USER may be omitted: the
+principal is inferred from the credential. An explicit USER is a selector
+for callers with broader visibility (an admin token must name the
+principal).
+.TP
+.B docker-helper principal credential revoke [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] CREDENTIAL_ID
+Revoke a credential by its credential ID.
+.TP
+.B docker-helper principal credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] [USER]
+Rotate a principal credential in one atomic server-side operation.
+The old bearer token is invalidated immediately and the new token is
+printed exactly once on stdout; the credential ID, name, and ownership
+are unchanged. The credential name defaults to "default"; \-\-name
+selects another named credential. The principal defaults to the owner of
+the authenticated principal credential; with an admin token USER is
+required.
 .SS Launcher Commands
 .TP
 .B docker-helper launcher create [\-\-principal USER] [\-\-name NAME] [\-\-allowed-root PATH]... [\-\-issue-credential | \-\-no-credential]
@@ -219,8 +244,13 @@ Replace a launcher scope atomically. \fB\-\-inherit\fR and
 \fB\-\-allowed-root\fR are mutually exclusive; restricted scope requires at
 least one allowed root.
 .TP
-.B docker-helper launcher credential issue [\-\-principal USER] [LAUNCHER]
-Issue a launcher credential and print its bearer secret once.
+.B docker-helper launcher credential create [\-\-principal USER] [LAUNCHER]
+Create a launcher credential and print its bearer secret once.
+Because a launcher holds at most one credential, a second create returns
+the normal already-exists conflict error.
+.TP
+.B docker-helper launcher credential show [\-\-principal USER] [LAUNCHER]
+Show a launcher's credential metadata. No secret is printed.
 .TP
 .B docker-helper launcher credential rotate [\-\-principal USER] [LAUNCHER]
 Rotate a launcher credential and print the new bearer secret once.
@@ -234,22 +264,36 @@ from the authenticated principal credential; omitting it selects that
 principal's \fBdefault\fR launcher. With an admin token \fB\-\-principal\fR
 is required; the CLI never searches launchers globally by name.
 .SS Credential Commands
+The canonical credential lifecycle commands live under
+.BR "principal credential" ;
+the top-level
+.BR "credential create" ,
+.BR "credential list" ,
+and
+.B credential revoke
+spellings are Release 2.0 compatibility aliases that share the same
+implementations. The top-level
+.B credential install
+is canonical.
 .TP
-.B docker-helper credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER
-Create a new credential for a principal. If \-\-name is not specified, defaults to "default".
+.B docker-helper principal credential create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] USER
+Canonical form of \fBcredential create\fR. Create a new credential for a
+principal. If \-\-name is not specified, defaults to "default".
 .TP
-.B docker-helper credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] USER
-List credentials for a principal as a table with the columns
-ID, NAME, CREATED, and REVOKED. The ID column contains each credential's
-\fBdhcr_\fR identifier, which is the value used by \fBcredential revoke\fR.
+.B docker-helper principal credential list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [USER]
+Canonical form of \fBcredential list\fR. List a principal's credentials;
+USER may be omitted with an authenticated principal credential.
+.TP
+.B docker-helper principal credential rotate [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-name NAME] [USER]
+Canonical atomic credential rotation (see Principal Commands).
 .TP
 .B docker-helper credential revoke [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] CREDENTIAL_ID
 Revoke a credential by its credential ID.
 CREDENTIAL_ID is the credential's unique identifier, prefixed with
-\fBdhcr_\fR, printed by \fBcredential create\fR and listed by:
+\fBdhcr_\fR, printed by \fBprincipal credential create\fR and listed by:
 .RS 4
 .nf
-docker-helper credential list USER
+docker-helper principal credential list USER
 .fi
 .RE
 Revoking permanently invalidates the credential token. The credential
@@ -257,7 +301,9 @@ record remains in the database as history, and its name becomes available
 for reuse by a new credential.
 .TP
 .B docker-helper credential install [\-\-force]
-Install a credential token for system-mode authentication.
+Install a non-admin credential token for system-mode authentication.
+The credential may belong to a principal or a launcher; the daemon
+resolves its owner and authorization scope when the token is used.
 Reads the token from stdin (hidden input on terminal) and stores it
 at ${XDG_CONFIG_HOME:-$HOME/.config}/docker-helper/credential.token
 with mode 0600. Must not be run as root.

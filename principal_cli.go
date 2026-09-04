@@ -20,6 +20,7 @@ var principalCommand = &Command{
 		principalSetCommand,
 		principalDeleteCommand,
 		principalAllowedRootCommand,
+		principalCredentialCommand,
 	},
 }
 

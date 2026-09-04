@@ -194,11 +194,12 @@ Multi-user deployment. Requires root for initial setup.
 sudo docker-helper init
 sudo systemctl enable --now docker-helper
 sudo docker-helper principal create alice
-sudo docker-helper credential create alice
+sudo docker-helper principal credential create alice
 ```
 
-The `credential create` command uses the name `default` unless `--name` is
-provided and prints the token once. On alice's machine (not as root):
+The `principal credential create` command uses the name `default` unless
+`--name` is provided and prints the token once. On alice's machine (not as
+root):
 
 ```bash
 docker-helper credential install
@@ -1280,7 +1281,7 @@ sudo docker-helper principal allowed-root add \
     --system alice /srv/workspaces/alice
 
 # 5. Create a Principal credential for the principal.
-sudo docker-helper credential create \
+sudo docker-helper principal credential create \
     --system --name laptop alice
 ```
 
@@ -1316,7 +1317,8 @@ The separation is intentional:
   workspace policy;
 - `config allowed-root add` updates the system-wide authorization ceiling only;
 - `apparmor root add` is an advanced backend-specific operation;
-- `credential create` produces a Principal credential token for session creation.
+- `principal credential create` produces a Principal credential token for
+  session creation.
 
 If the operator does not want the default home root to remain usable,
 they may remove it:
@@ -1348,7 +1350,10 @@ the principal.
 
 ### Principal: install the credential
 
-The principal installs the token on their machine (not as root):
+The principal installs the token on their machine (not as root). The same
+`credential install` command handles Principal and Launcher credentials:
+the credential may belong to either, and the daemon resolves its owner and
+authorization scope when the token is used.
 
 ```bash
 # Interactive input (token is hidden on terminal):
@@ -1383,8 +1388,9 @@ derived through it. This enables one of two delegation patterns:
   Narrowest delegated capability; rotation revokes the old key
   immediately without touching the launcher's sessions.
 
-Both credentials install the same way (`docker-helper credential install`)
-and are rotatable authentication keys — never resource owners.
+Both credentials install the same way (`docker-helper credential install`,
+generic for a Principal or Launcher credential) and are rotatable
+authentication keys — never resource owners.
 
 ### Creating a launcher and delegating an agent
 

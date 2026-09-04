@@ -8,32 +8,35 @@ import (
 	"net/http"
 )
 
-// launcherControlAuthority is the authenticated authority for Launcher
-// management: create/list/show/update/scope/delete Launchers and manage their
-// optional credential. Only Admin and Principal credential are authorized; a
-// Launcher credential does NOT manage Launcher metadata or credentials.
-type launcherControlAuthority struct {
+// controlAuthority is the authenticated authority for Principal-owned resource
+// control planes (Launcher control and Principal credential control): an admin
+// token, or a Principal credential (which may only act on its own Principal).
+// A Launcher credential does NOT carry control-plane authority.
+type controlAuthority struct {
 	isAdmin             bool
 	principalCredential *PrincipalCredentialAuth
 }
 
-// authenticateLauncherControlRequest tries admin token first, then credential
-// authentication. It returns the authority context on success, or writes the
-// non-disclosing unauthorized response and returns nil.
-func (a *App) authenticateLauncherControlRequest(w http.ResponseWriter, r *http.Request) (*launcherControlAuthority, error) {
+// authenticateControlRequest tries admin token first, then credential
+// authentication. auditScope is the endpoint family's audit event prefix
+// ("launcher", "credential", ...); auth failures are audited as
+// <auditScope>.parse_failed / <auditScope>.unauthorized /
+// <auditScope>.database_error. It returns the authority context on success, or
+// writes the non-disclosing unauthorized response and returns nil.
+func (a *App) authenticateControlRequest(w http.ResponseWriter, r *http.Request, auditScope string) (*controlAuthority, error) {
 	ctx := r.Context()
 
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		writeAuthFailure(ctx, r, "launcher.parse_failed")
-		writeUnauthorizedLauncherControl(ctx, w)
+		writeAuthFailure(ctx, r, auditScope+".parse_failed")
+		writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
 		return nil, nil
 	}
 
 	token, ok := parseBearerToken(r)
 	if !ok || token == "" {
-		writeAuthFailure(ctx, r, "launcher.parse_failed")
-		writeUnauthorizedLauncherControl(ctx, w)
+		writeAuthFailure(ctx, r, auditScope+".parse_failed")
+		writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
 		return nil, nil
 	}
 
@@ -41,36 +44,46 @@ func (a *App) authenticateLauncherControlRequest(w http.ResponseWriter, r *http.
 	tokenHash := sha256.Sum256([]byte(token))
 	currentHash := a.getAdminTokenHash()
 	if subtle.ConstantTimeCompare(tokenHash[:], currentHash[:]) == 1 {
-		return &launcherControlAuthority{isAdmin: true}, nil
+		return &controlAuthority{isAdmin: true}, nil
 	}
 
 	// Try credential authentication.
 	authResult, err := authenticateCredential(a.DB, token)
 	if err == nil {
 		if authResult.Launcher != nil {
-			// A valid Launcher credential has no Launcher-management
-			// authority. Treat as unauthorized, non-disclosing.
-			writeAuthFailure(ctx, r, "launcher.unauthorized")
-			writeUnauthorizedLauncherControl(ctx, w)
+			// A valid Launcher credential has no control-plane authority.
+			// Treat as unauthorized, non-disclosing.
+			writeAuthFailure(ctx, r, auditScope+".unauthorized")
+			writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
 			return nil, nil
 		}
-		return &launcherControlAuthority{principalCredential: authResult.Principal}, nil
+		return &controlAuthority{principalCredential: authResult.Principal}, nil
 	}
 
 	if !errors.Is(err, ErrCredentialNotFound) &&
 		!errors.Is(err, ErrCredentialRevoked) &&
 		!errors.Is(err, ErrPrincipalDisabled) &&
 		!errors.Is(err, ErrLauncherDisabled) {
-		writeAuthFailure(ctx, r, "launcher.database_error")
-		opLog(ctx).Error("launcher control auth database error",
-			slog.String("operation", "launcher_auth"),
+		writeAuthFailure(ctx, r, auditScope+".database_error")
+		opLog(ctx).Error("control auth database error",
+			slog.String("operation", "control_auth"),
 			slog.String("error", err.Error()),
 		)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return nil, err
 	}
 
-	writeAuthFailure(ctx, r, "launcher.unauthorized")
-	writeUnauthorizedLauncherControl(ctx, w)
+	writeAuthFailure(ctx, r, auditScope+".unauthorized")
+	writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
 	return nil, nil
+}
+
+// controlUnauthorizedMessage returns the endpoint family's non-disclosing
+// unauthorized response message. Each control-plane family keeps its own
+// established message contract.
+func controlUnauthorizedMessage(auditScope string) string {
+	if auditScope == "launcher" {
+		return "Authentication required for launcher management."
+	}
+	return "Authentication required for credential management."
 }

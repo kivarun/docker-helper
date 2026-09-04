@@ -122,14 +122,15 @@ func writeUnauthorizedSessionControl(ctx context.Context, w http.ResponseWriter)
 	})
 }
 
-// writeUnauthorizedLauncherControl writes the non-disclosing unauthorized
-// response for the Launcher control plane.
-func writeUnauthorizedLauncherControl(ctx context.Context, w http.ResponseWriter) {
+// writeUnauthorizedControl writes the non-disclosing unauthorized response
+// for a Principal-owned resource control plane. Each family keeps its own
+// established message contract (launcher management, credential management).
+func writeUnauthorizedControl(ctx context.Context, w http.ResponseWriter, message string) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	writeJSON(ctx, w, http.StatusUnauthorized, response{
 		OK:      false,
 		Code:    "unauthorized",
-		Message: "Authentication required for launcher management.",
+		Message: message,
 	})
 }
 

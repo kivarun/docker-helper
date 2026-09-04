@@ -392,12 +392,17 @@ func effectiveLauncherClosed(db *sql.DB, launcherID string) (bool, error) {
 	return pEnabled == 0 || lEnabled == 0, nil
 }
 
-// syncLauncherAdmission sets the supervisor admission state for launcherID to
-// the effective hierarchical authorities (Principal.enabled && Launcher.enabled)
-// after a committed transition. Used by the enable paths so a Launcher is
-// reopened only when both authorities are enabled: a Launcher enabled while its
-// Principal is disabled, or a sibling already individually disabled, stays
-// quiesced.
+// syncLauncherAdmission re-reads the effective hierarchical authorities
+// (Principal.enabled && Launcher.enabled) from the database and sets the
+// supervisor admission state for launcherID accordingly. It is the fail-closed
+// recovery primitive for error/refusal paths: after a mutation failed before
+// committing, admission must mirror exactly what the durable authorities say
+// (a previously disabled Launcher stays quiesced; a committed-but-unreported
+// transition is not re-opened). A failed re-read keeps the Launcher quiesced —
+// never fail open — and the caller surfaces it through
+// logLifecycleAdmissionSyncError. Successful enable/disable paths no longer
+// use it: they apply the admission state decided transactionally as part of
+// the same serialized durable decision.
 func (a *App) syncLauncherAdmission(launcherID string) error {
 	closed, err := effectiveLauncherClosed(a.DB, launcherID)
 	if err != nil {

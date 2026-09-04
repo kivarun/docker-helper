@@ -274,6 +274,83 @@ func revokeCredential(db *sql.DB, id string) (bool, error) {
 	return true, nil
 }
 
+// rotatePrincipalCredential atomically replaces the bearer secret of the
+// named Principal credential: the credential ID, name, and Principal ownership
+// are unchanged, the old token is immediately invalid, and the new secret is
+// returned exactly once. No second credential row is created and there is no
+// overlapping validity window: the row's token hash is replaced within one
+// transaction. Fails with ErrCredentialNotFound when the principal has no
+// credential with that name, and ErrCredentialRevoked when the named
+// credential is already revoked (its token is already invalid; rotating it
+// would not resurrect it).
+func rotatePrincipalCredential(db *sql.DB, username, name string) (*CredentialWithPrincipal, string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var credID string
+	var principalID int
+	var principalName string
+	var createdAt int64
+	var revokedAt sql.NullInt64
+	err = tx.QueryRow(
+		`SELECT c.id, c.created_at, c.revoked_at, p.id, p.username
+		 FROM credentials c
+		 JOIN principals p ON p.id = c.principal_id
+		 WHERE p.username = ? AND c.name = ?
+		   AND c.principal_id IS NOT NULL AND c.launcher_id IS NULL`,
+		username, name,
+	).Scan(&credID, &createdAt, &revokedAt, &principalID, &principalName)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, "", fmt.Errorf("credential %q not found for principal %q: %w", name, username, ErrCredentialNotFound)
+		}
+		return nil, "", fmt.Errorf("cannot find credential: %w", err)
+	}
+	if revokedAt.Valid {
+		return nil, "", fmt.Errorf("credential %q is revoked: %w", name, ErrCredentialRevoked)
+	}
+
+	token, err := generateCredentialToken()
+	if err != nil {
+		return nil, "", err
+	}
+	newHash := hashCredentialToken(token)
+
+	// Update the SAME row: ID, name, and owner unchanged, token hash atomically
+	// replaced. The ownership predicate mirrors the lookup above.
+	result, err := tx.Exec(
+		`UPDATE credentials SET token_hash = ?
+		 WHERE id = ? AND principal_id = ? AND launcher_id IS NULL`,
+		newHash, credID, principalID,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot rotate credential: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, "", fmt.Errorf("cannot check rotate result: %w", err)
+	}
+	if affected == 0 {
+		return nil, "", fmt.Errorf("credential %q not found for principal %q: %w", name, username, ErrCredentialNotFound)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, "", fmt.Errorf("cannot commit credential rotation: %w", err)
+	}
+
+	return &CredentialWithPrincipal{
+		Credential: Credential{
+			ID:        credID,
+			Name:      name,
+			CreatedAt: time.Unix(createdAt, 0),
+		},
+		PrincipalName: principalName,
+	}, token, nil
+}
+
 // ErrPrincipalDisabled is returned when the credential's owning Principal is disabled.
 var ErrPrincipalDisabled = errors.New("principal disabled")
 

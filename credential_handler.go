@@ -152,7 +152,9 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
-	if !a.requireAdmin(w, r) {
+	started := time.Now()
+	auth, err := a.authenticateControlRequest(w, r, "credential")
+	if err != nil || auth == nil {
 		return
 	}
 
@@ -164,8 +166,25 @@ func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	creds, err := listCredentials(a.DB, username)
+	// The list is scope-aware: the authenticated credential defines the
+	// effective visibility scope. A Principal credential can only list its own
+	// Principal's credentials; an explicit foreign Principal is a
+	// non-disclosing 404 (it never expands visibility). An admin token must
+	// name the Principal explicitly.
+	p, ok := a.resolveControlPrincipal(w, r, auth, username)
+	if !ok {
+		return
+	}
+
+	creds, err := listCredentials(a.DB, p.Username)
+	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
+		writeControlAudit(ctx, auditRecord{
+			Event:         "principal.credential_list",
+			PrincipalName: p.Username,
+			Result:        "error",
+			Duration:      duration,
+		}, auth)
 		if isErrPrincipalNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		} else {
@@ -186,7 +205,100 @@ func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 		resp.Credentials = append(resp.Credentials, credentialToJSON(c))
 	}
 
+	writeControlAudit(ctx, auditRecord{
+		Event:         "principal.credential_list",
+		PrincipalName: p.Username,
+		Result:        "success",
+		Duration:      duration,
+	}, auth)
+
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
+}
+
+// handleRotatePrincipalCredential rotates the named Principal credential in
+// one atomic server-side operation: the old bearer token is invalidated and
+// the new one is returned exactly once. The credential ID, name, and ownership
+// are unchanged. Scope-aware: an admin token may rotate any principal's
+// credential; a Principal credential may rotate only its own principal's.
+func (a *App) handleRotatePrincipalCredential(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	auth, err := a.authenticateControlRequest(w, r, "credential")
+	if err != nil || auth == nil {
+		return
+	}
+
+	ctx := r.Context()
+
+	username := r.PathValue("username")
+	if username == "" {
+		writeControlAudit(ctx, auditRecord{
+			Event:    "principal.credential_rotate",
+			Result:   "missing_username",
+			Duration: time.Since(started).Round(time.Millisecond).String(),
+		}, auth)
+		writeError(ctx, w, http.StatusBadRequest, "missing_username", "username is required")
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		writeControlAudit(ctx, auditRecord{
+			Event:         "principal.credential_rotate",
+			PrincipalName: username,
+			Result:        "missing_credential_name",
+			Duration:      time.Since(started).Round(time.Millisecond).String(),
+		}, auth)
+		writeError(ctx, w, http.StatusBadRequest, "missing_credential_name", "credential name is required")
+		return
+	}
+
+	// The target Principal is resolved under the request authority before any
+	// mutation: a Principal credential can only target its own Principal and
+	// any other username is a non-disclosing 404.
+	p, ok := a.resolveControlPrincipal(w, r, auth, username)
+	if !ok {
+		return
+	}
+
+	cred, token, err := rotatePrincipalCredential(a.DB, p.Username, name)
+	duration := time.Since(started).Round(time.Millisecond).String()
+
+	if err != nil {
+		writeControlAudit(ctx, auditRecord{
+			Event:          "principal.credential_rotate",
+			PrincipalName:  p.Username,
+			CredentialName: name,
+			Result:         "error",
+			Duration:       duration,
+		}, auth)
+		switch {
+		case isErrCredentialNotFound(err):
+			writeError(ctx, w, http.StatusNotFound, "credential_not_found", "credential not found")
+		case errors.Is(err, ErrCredentialRevoked):
+			writeError(ctx, w, http.StatusConflict, "credential_revoked", "credential is revoked")
+		default:
+			opLog(ctx).Error("credential rotate failed",
+				slog.String("operation", "credential_rotate"),
+				slog.String("error", err.Error()),
+			)
+			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		}
+		return
+	}
+
+	writeControlAudit(ctx, auditRecord{
+		Event:          "principal.credential_rotate",
+		PrincipalName:  cred.PrincipalName,
+		CredentialID:   cred.ID,
+		CredentialName: cred.Name,
+		Result:         "success",
+		Duration:       duration,
+	}, auth)
+
+	writeJSONRaw(ctx, w, http.StatusOK, createCredentialResponse{
+		OK:         true,
+		Credential: credentialToJSON(*cred),
+		Token:      token,
+	})
 }
 
 func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
