@@ -130,6 +130,13 @@ The purpose is to constrain agent-controlled workloads, not to expose the comple
 
 Build resource control is outside this model. The exact supported limits, hierarchical aggregate ceilings, per-workload limits, and safe defaults are defined by `release-3-resource-constraints.md`. Root defaults are derived at initialization from Docker Engine-reported capacity. The hierarchy is enforced through workload cgroups; docker-helper does not reserve capacity for future containers or calculate a remaining allocation before admission. Ordinary quick-start workflows must remain valid without requiring explicit resource-policy flags.
 
+Session creation is separately bounded by simultaneous daemon, Root,
+Principal, and Launcher count quotas. These quotas prevent one Principal or
+Launcher from exhausting the daemon's Session capacity. They are admission
+limits rather than resource reservations and never cause existing Sessions to
+be removed when an administrator lowers a configured value. A `closed`
+observation tombstone does not consume Session quota.
+
 Every workload receives concrete CPU, memory, PIDs, shared-memory, and
 disabled-swap settings. CPU, memory, and PIDs are additionally constrained by
 aggregate Root, Principal, Launcher, and Session cgroups. Disk quotas and build

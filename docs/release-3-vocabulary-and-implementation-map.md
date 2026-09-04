@@ -10,15 +10,14 @@ This map is based on:
 
 - repository: `kivarun/docker-helper`;
 - branch: `main`;
-- commit: [`ed5c7963a055ab15696b68d7cbecc70ec5b79611`](https://github.com/kivarun/docker-helper/commit/ed5c7963a055ab15696b68d7cbecc70ec5b79611);
+- commit: [`694ca5944c87b17303b761c5f38e4afd390a7d89`](https://github.com/kivarun/docker-helper/commit/694ca5944c87b17303b761c5f38e4afd390a7d89);
 - Release 2.1 input: the implemented Release 2.1 Launcher Delegation contract
   (`docs/release-2.1-implementation-plan.md` at the same commit).
 
-Release 2.1 is implemented at this baseline. This commit is the final Release
-2.1 implementation state: commits after it on `main` are Release 2.1 Stage 1.6
-documentation, UAT, and plan-status work only, with no production Go changes.
-If further production changes land before Release 3 starts, re-verify the
-symbols below against the new final commit.
+Release 2.1 is implemented at this baseline, including the canonical Launcher
+name grammar and Principal-scoped name-or-ID locator. If further production
+changes land before Release 3 starts, re-verify the affected symbols below
+against the new final commit.
 
 ## Reading the map
 
@@ -48,8 +47,9 @@ Target names describe one logical responsibility. Exact Go visibility follows th
 | Docker backend name | Diagnostic host-visible Docker object name. | Docker CLI chooses or receives transient names. | Generate `dhmc-<name>-<full-session-id>`. Every named Docker resource owned directly by a Session uses a stable type prefix and the full Session ID; names are not authority or public identity. |
 | BackendContainerID | Docker Engine container identifier. | Transient value read through a `--cidfile` for `run` shutdown cleanup. | Persistent internal correlation, never normal public authority. Only the admin orphan surface may accept it directly; ownership-mismatch force removal targets ManagedContainerID and resolves the exact recorded backend internally. |
 | Session | Authorization, ownership, isolation, and lifetime boundary. | `Session`; SQLite `sessions` row with `launcher_id TEXT NOT NULL REFERENCES launchers(id)` and no `principal_id` column. | Retained and extended with Release 2.1 Launcher ownership and Release 3 teardown state. |
+| Session selection | Request-admission rule that resolves the one Session in which a Session-bound Command executes. | Agent Commands require a Session bearer and therefore take the Session directly from that token. | An optional `session_id` narrows token scope; omission succeeds only when the Session credential or documented Launcher/default-Launcher rule identifies exactly one usable Session. Administrator omission and every ambiguity fail. Selection never transfers ownership or expands authority. |
 | Principal | OS identity and maximum delegated policy. | `principals` table and Principal code. | Retained. It is not the direct owner of Release 3 containers or Operations. |
-| Launcher | Stable delegated Session owner. | `Launcher` (package-private `launcher` row type); `launchers` table (`id` with prefix `dhl_`, `principal_id`, `name` constrained to the launcher-name grammar `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$` and unique per principal, `enabled`, `scope_mode`, `created_at`); `launcher_allowed_roots` for `restricted` scope; default Launcher per principal (`ensureDefaultLauncher`/`findDefaultLauncher`); Principal-scoped control routes `/principals/{username}/launchers/{launcher}` (`{launcher}` = name or ID, no global name lookup); CLI `docker-helper launcher`. | Inherited from Release 2.1. Release 3 must not recreate it. |
+| Launcher | Stable delegated Session owner with a Principal-local path-safe name and global `dhl_...` identity. | `Launcher` (package-private `launcher` row type); `launchers` table (`id` with prefix `dhl_`, `principal_id`, `name` constrained to the launcher-name grammar `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$` and unique per principal, `enabled`, `scope_mode`, `created_at`); `launcher_allowed_roots` for `restricted` scope; default Launcher per principal (`ensureDefaultLauncher`/`findDefaultLauncher`); Principal-scoped control routes `/principals/{username}/launchers/{launcher}` (`{launcher}` = name or ID, no global name lookup); CLI `docker-helper launcher`. | Inherited from Release 2.1. Release 3 accepts either stable ID or scoped name as a Launcher selector and must not recreate the domain object. |
 | Credential | Rotatable bearer key owned by one Principal or Launcher. | Single `credentials` table with a concrete owner: Principal credentials (`principal_id NOT NULL`, `launcher_id NULL`, named) and Launcher credentials (`launcher_id NOT NULL`, `principal_id NULL`, unnamed; at most one per launcher). Bearer tokens are `dhc_`-prefixed; credential IDs are `dhcr_`-prefixed. | Inherited from Release 2.1. Credentials initiate work but do not own it. |
 | Owner | Domain object that controls resource lifetime and authorization. | Launcher owns Session (`sessions.launcher_id` non-null); principal identity is derived through the ownership JOIN. | Always concrete: Launcher owns Session; Session owns Operation and Managed Container. Do not add a generic Owner hierarchy. |
 | Initiator | Subject that started an Operation. | Not stored in `operation`; `operation` carries an in-memory `LauncherID` for shutdown quiescing, and finish audit retains `auditPrincipalName` (principal projection of the owning Session). | Internal Operation provenance: type plus authorized identifier. It is not ownership and is never part of the public Operation projection. |
@@ -60,6 +60,7 @@ Target names describe one logical responsibility. Exact Go visibility follows th
 | Management projection | Persistent non-secret data required to authorize, inspect, correlate, and clean up a Managed Container. | No Managed Container record exists. | Not a normalized Docker create request or desired state. It excludes environment values, registry credentials, and recreate-capable backend payloads. |
 | Session Network | User-defined bridge owned by one Session. | No per-Session network. | Lazily created, named with the full Session ID, explicitly repaired as a Session-wide invariant when missing with existing Managed Containers, and removed by Session cleanup; it is infrastructure, not a management plane. |
 | Resource ceiling | Aggregate maximum permitted to a Root, Principal, Launcher, or Session subtree. | No resource hierarchy. | CPU, memory, and PIDs narrow down the ownership hierarchy and are enforced by parent cgroups; a ceiling is authority, not a reservation ledger. |
+| Session quota | Maximum count of capacity-bearing Sessions admitted within a daemon, Root, Principal, or Launcher scope. | Session creation has no hierarchical count limit. | Creation must atomically pass every applicable count. Creation reservations plus `active`, `closing`, and `cleanup_failed` Sessions count; `closed` tombstones do not. |
 | Workload limit | Explicit Docker limit applied to one Managed Container or one-shot run. | Docker defaults are largely inherited. | Concrete CPU, memory, PIDs, shared-memory, and disabled-swap policy; it may be narrower than the Session ceiling, while ancestor cgroups cap aggregate actual use. |
 | Publishing grant | Inclusive contiguous host-port range a Root, Principal, Launcher, or Session subtree may use. | No publishing authorization model. | Inherits or narrows through the ownership hierarchy; it authorizes allocation but does not reserve every port in the range. |
 | Port lease | One `127.0.0.1` TCP host port assigned to a Managed Container publication. | No persistent allocation. | Persists for the Managed Container lifetime and prevents collisions only with leases in the same docker-helper state store. |
@@ -154,6 +155,19 @@ There are no persisted Release 2 Operation rows to migrate. Compatibility work c
 
 The current CLI polls status, fetches Operation logs, and can cancel both `run` and `build`. Release 3 must not leave compatibility shims that reproduce this workflow locally after the server contract changes.
 
+The synchronous `/run` migration retains its Release 2 `command` JSON field:
+run and Managed Container create use it as the Docker command vector combined
+with image or explicit Entrypoint. Both exec modes instead use `argv` for the
+complete executable-and-arguments vector. `/run` replaces `environment` with
+the common `env` field shared by run, Managed Container create, and both exec
+modes. The daemon does not accept both environment spellings. CLI argument
+syntax after `--` and the repeatable `--env` flag remain unchanged.
+
+The Release 2 `/run` request field `shm_size` is replaced by
+`limits.shared_memory_bytes`. The CLI retains `--shm-size` and adds the common
+`--cpus`, `--memory`, and `--pids-limit` workload-limit flags used by both
+one-shot run and Managed Container create.
+
 ## Session and ownership migration
 
 ### Implemented Release 2.1 baseline
@@ -171,9 +185,10 @@ The current CLI polls status, fetches Operation logs, and can cancel both `run` 
 The SQLite `sessions` table contains `id`, `token_hash`, `workspace`,
 timestamps, and `launcher_id TEXT NOT NULL REFERENCES launchers(id)`. The
 retired `principal_id` column no longer exists and startup never re-adds it.
-Authentication treats a row as active when `expires_at > now`. Session
-deletion immediately deletes the row and releases the MAC binding. Startup
-expiry cleanup directly deletes expired rows.
+Authentication treats a row as active when `expires_at > now` and both owning
+Launcher and Principal are enabled. Session deletion immediately deletes the
+row and releases the MAC binding. Startup expiry cleanup directly deletes
+expired rows.
 
 Session ownership and control authorities are implemented in
 `session_control.go` (`resolveCreateLauncher`, `resolveCreatePolicy`,

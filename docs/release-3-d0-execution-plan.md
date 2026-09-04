@@ -4,7 +4,10 @@
 
 This document fixes the D0 semantic contract and records an implementation plan against the inspected baseline for the cross-cutting Operation foundation defined by `release-3-operation-model.md`.
 
-The inspected baseline is `main` at `c840d4e197e86e1b7a190d4dcea7dd795975d8a5`. Release 2.1 Launcher delegation is still design-only at this commit. Symbol and schema references below describe that exact baseline and must be reconciled once the Release 2.1 implementation lands.
+The inspected baseline is `main` at
+`694ca5944c87b17303b761c5f38e4afd390a7d89`. Release 2.1 Launcher delegation,
+Launcher-owned Session persistence, the canonical Launcher-name grammar, and
+the Principal-scoped Launcher locator are implemented at this commit.
 
 The baseline implementation invokes the Docker CLI. Release 3 uses the official `github.com/moby/moby/client` Docker Engine API client, pinned to a reviewed version, behind a docker-helper-owned adapter. The client negotiates the daemon API version, while docker-helper documents and tests a minimum supported Engine API. The CLI-specific inventory remains evidence about code that must be retired. Before production migration begins, the operational architect must freeze the narrow adapter methods needed by build, pull, one-shot run, lifecycle, logs, and exec. No executor should introduce a new long-lived `exec.Cmd` abstraction solely to reproduce the baseline mechanics or expose Moby request types outside the adapter.
 
@@ -50,7 +53,7 @@ The following decisions are already binding:
 - no independent Operation retention configuration or delete API exists;
 - no hidden queue defers a conflicting lifecycle Command for later execution.
 
-Direct process results keep the existing flat response envelope. A started one-shot `run` or non-interactive exec returns HTTP `200` with `ok`, combined `output`, `truncated`, `duration`, and actual `exit_code`; a non-zero workload exit uses `ok: false` and `code: container_exit_nonzero` without changing the HTTP status. A backend-reported build failure returns HTTP `422` with `ok: false`, `code: build_failed`, sanitized `message`, combined `output`, `truncated`, and `duration`. Results are not nested under another object and never split stdout from stderr.
+Direct process results keep the existing flat response envelope. A started one-shot `run` or non-interactive exec returns HTTP `200` with `ok`, combined `output`, `truncated`, `duration`, and actual `exit_code`; a non-zero workload exit uses `ok: false` and `code: container_exit_nonzero`, but no redundant `message`, without changing the HTTP status. A backend-reported build failure returns HTTP `422` with `ok: false`, `code: build_failed`, sanitized `message`, combined `output`, `truncated`, and `duration`. Results are not nested under another object and never split stdout from stderr.
 
 ## Current implementation inventory
 
@@ -79,7 +82,7 @@ The current `operation` object owns five unrelated responsibilities:
 | `main.go` | Registers legacy Operation routes and terminates `OperationSupervisor` during shutdown. | Remove legacy routes; wire synchronous execution cancellation and backend cleanup separately from the durable dispatcher. Add durable lookup/list routes only with the new model. |
 | `app.go` | Stores `OperationSupervisor`; test seams use `operationID` as a runtime key. | Hold separate synchronous-execution and durable Operation owners. Rename runtime-key parameters so they do not imply public Operation identity. |
 | `config.go`, `config_cli.go`, `reload.go`, `cli.go` | Operation TTL/count and log-buffer configuration. | Remove TTL/count settings. Move the byte limit to direct Command output under the agreed compatibility rule. |
-| `database.go` | Session/Principal/MAC schema; immediate expired-Session deletion. | Add durable Operation/idempotency schema only after Release 2.1; Session cleanup replaces immediate deletion in the later integration step. |
+| `database.go` | Launcher-owned Session/Principal/MAC schema; immediate expired-Session deletion. | Add durable Operation/idempotency schema against the existing non-null Session `launcher_id`; Session cleanup replaces immediate deletion in the later integration step. |
 | `audit.go`, `logging.go` | Request-correlated audit and operational records. | Stop emitting Operation IDs for synchronous build/run. Durable events use the new Operation type/initiator/target vocabulary. |
 
 ### Shipped contract files
@@ -100,6 +103,48 @@ Historical roadmap sections may describe the old Release 1/2 implementation, but
 ### 1. Synchronous Command service
 
 The build and run services remain the owners of their domain validation, typed failure classification, audit metadata, and resource cleanup.
+
+The public build capability remains deliberately narrow: `context`,
+`dockerfile`, and `image` are required; optional `session_id` uses the common
+Session-selection contract; and optional `build_args` preserves the existing
+validated string map. D0 does not add platform, target, no-cache, BuildKit
+secret, SSH-forwarding, network, or generic Engine request fields while
+migrating the transport.
+
+Pull accepts only required `image` and optional Session-selected `session_id`.
+Its successful direct result contains `ok`, combined bounded `output`,
+`truncated`, and `duration`, with no redundant success message or repeated
+image field. The Engine API migration adds no platform, pull-policy, registry,
+credential, or generic Engine option to the request.
+
+Pull failure translation uses typed Engine stream results: absent image is
+`404 image_not_found`, registry credential rejection is
+`422 pull_access_denied`, and registry reachability failure is
+`502 registry_unavailable`. These expected execution failures preserve
+already captured bounded progress output. Helper authentication and authority
+remain the sole meanings of `401 unauthorized` and `403 forbidden`; the old
+`docker_pull_failed` code does not survive the adapter migration.
+
+One-shot run reuses the Managed Container create vocabulary for `image`,
+`entrypoint`, `command`, `workdir`, `env`, `mounts`, and `limits`, but creates
+no persistent resource and accepts no name, publication, stdin, or detach
+option. Only `image` is required; optional `session_id` uses the common
+selection contract. Omitted entrypoint and command preserve the image values,
+while explicit empty values are rejected.
+
+Registry login accepts required `registry`, `username`, and `password` plus
+optional Session-selected `session_id`, and returns only `{\"ok\":true}` on
+success. Username and password remain protected Session runtime secrets and
+never enter SQLite, argv, environment, audit, operational logs, or public
+errors. The Engine adapter persists only the credential material needed for
+later matching pull and build authorization and removes it with the Session.
+
+Registry authentication denial is `422 registry_auth_denied`, registry
+reachability failure is `502 registry_unavailable`, Engine unavailability is
+`503 backend_unavailable`, and an unexpected Engine interaction is
+`502 backend_failure`. None returns captured backend output. `401` remains
+reserved for docker-helper authentication, and the Release 2 generic
+`registry_login_failed` code is retired.
 
 They invoke one docker-helper-owned Docker Engine API adapter that:
 
@@ -141,9 +186,11 @@ Durable Operation is a separate control-plane owner:
 
 The daemon instance lock already prevents two docker-helper processes from using the same state directory. D0 must not add distributed leases or a second database-locking framework. Within one daemon, a single dispatcher plus an in-memory active-ID set prevents duplicate handler invocation; conditional SQL updates protect state transitions.
 
-## Persistent shape after Release 2.1
+## Persistent shape on the Release 2.1 baseline
 
-The final migration must use the actual Release 2.1 Session foreign key and ownership schema. The required logical shape is fixed even if exact column names change.
+The migration uses the existing non-null `sessions.launcher_id` foreign key and
+derives Principal ownership through Launcher. It must not restore a direct
+Session-to-Principal authority path.
 
 ### `operations`
 
@@ -210,7 +257,9 @@ Application and schema checks must reject impossible combinations:
 
 The architecture fixes this observable ordering but does not require holding a SQLite transaction across Docker Engine access. The operational architect chooses the exact transaction mechanics while preserving idempotency, conflict, and no-op races.
 
-If admission loses a conflict, it returns HTTP `409 Conflict` with the conflicting Operation ID. The stable error-code name belongs to the API design. No rejected or state-matching no-op Command is queued, and neither creates an Operation row.
+If admission loses a conflict, it returns `409 operation_in_progress` with the
+conflicting Operation ID. No rejected or state-matching no-op Command is
+queued, and neither creates an Operation row.
 
 ### New execution
 
@@ -330,7 +379,8 @@ Completion evidence:
 
 ### D0.5 — Add durable persistence and typed handler boundary
 
-This task starts only after the Release 2.1 implementation is merged and the vocabulary map is rebased to its actual Session/Launcher symbols.
+The Release 2.1 implementation and vocabulary-map rebaseline prerequisites for
+this task are satisfied.
 
 - add the Operation and idempotency tables through the repository's existing explicit SQLite migration style;
 - add bounded domain types for identity, type, status, initiator, target, terminal payload, and timestamps;
@@ -433,5 +483,5 @@ D0 is complete only when all of the following are true:
 - transient execution coordination is the only owner of synchronous cancellation and backend-resource cleanup;
 - durable Operation persistence, dispatcher, handler registration, recovery, idempotency, retention-by-Session, and read API have one owner each;
 - no fake build/run compatibility layer reproduces the deleted async workflow;
-- the final implementation map references the actual Release 2.1 symbols and schema;
+- the implementation map references the actual Release 2.1 symbols and schema;
 - documentation and shipped CLI/man/agent contracts match the new behavior.

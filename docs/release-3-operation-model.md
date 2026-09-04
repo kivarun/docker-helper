@@ -39,7 +39,7 @@ Release 3 durable work includes:
 
 Queries, synchronous `container.create`, `build`, the existing one-shot `run`, non-interactive exec, and interactive exec are not Operations. `container.create` returns the stopped resource directly. `build`, `run`, and non-interactive exec return one combined bounded `output` synchronously. Interactive exec uses WebSocket transport. None gains durable recovery, persisted output, or replay semantics.
 
-Synchronous process Commands use the existing flat response envelope rather than a nested result object. A started one-shot `run` or non-interactive exec returns HTTP `200` with `ok`, combined `output`, `truncated`, `duration`, and the actual `exit_code`; a non-zero workload exit sets `ok: false` and `code: container_exit_nonzero` without changing the HTTP status. A build failure reported by the backend returns HTTP `422` with `ok: false`, `code: build_failed`, sanitized `message`, combined `output`, `truncated`, and `duration`. Pull follows the same flat bounded-output convention. Transport, authorization, validation, and backend-availability errors retain their normal non-success HTTP statuses.
+Synchronous process Commands use the existing flat response envelope rather than a nested result object. A started one-shot `run` or non-interactive exec returns HTTP `200` with `ok`, combined `output`, `truncated`, `duration`, and the actual `exit_code`; a non-zero workload exit sets `ok: false` and `code: container_exit_nonzero`, but no redundant `message`, without changing the HTTP status. A build failure reported by the backend returns HTTP `422` with `ok: false`, `code: build_failed`, sanitized `message`, combined `output`, `truncated`, and `duration`. Pull follows the same flat bounded-output convention. Transport, authorization, validation, and backend-availability errors retain their normal non-success HTTP statuses.
 
 ## Core invariants
 
@@ -116,22 +116,34 @@ Authentication, authorization, request normalization, and target resolution happ
 
 For a fresh request, validation, resource-state checks, and conflict checks finish before an Operation enters `pending`. A start of an already running Managed Container and a stop of an already stopped one return the current container representation with HTTP `200 OK`, create no Operation, and create no idempotency record. Other admission failures are returned as HTTP errors and create no Operation.
 
-A lifecycle Command that requires mutation returns `202 Accepted`, the Operation identity, and its `Location`.
+A lifecycle Command that requires mutation returns `202 Accepted`, the direct
+public Operation representation, and `Location: /operations/{id}`. The
+Operation object uses `id`; `operation_id` is reserved for references from
+other public objects, errors, and audit.
 
 The API exposes:
 
 - lookup by Operation ID;
 - bounded listing within the authenticating administrator, Principal, Launcher,
   or Session ownership scope, with filters that may only narrow that scope;
-- simple `status`, `type`, and public-target filters.
+- `status`, `type`, and `target_id` filters plus the common Principal, Launcher,
+  and Session ownership filters.
 
 It exposes no generic progress percentage, log URL, replay cursor, or cancellation URL. A terminal public representation is immutable.
 
-The CLI waits for terminal status by default and may return after admission with `--detach`. A CLI wait timeout stops only local waiting; it does not cancel accepted work.
+The CLI waits for terminal status by default and may return after admission
+with `--detach`. `operation show`, `operation list`, and `operation wait`
+provide the read surface after detachment. A CLI wait timeout stops only local
+waiting; it does not cancel accepted work. There is no server-side wait route.
 
 ## Idempotency
 
-The HTTP API may accept an optional `Idempotency-Key` for a Command that creates an Operation.
+The HTTP API accepts an optional `Idempotency-Key` on public start, stop,
+restart, repair, and Session-repair Commands. Container removal deliberately
+does not accept the header: after the persistent container record is deleted,
+the Session-scoped key cannot be resolved through that target without a second
+tombstone mechanism, while an ordinary repeated `DELETE` already converges to
+`204 No Content`.
 
 The key is scoped to the owning Session. Its deduplication record contains a normalized request fingerprint and the resulting Operation ID and is created transactionally with the Operation. For the Release 3 lifecycle surface, the fingerprint is a versioned tuple of Operation type and public target identity; any later non-secret Command option must be added to the normalized tuple explicitly. Internal `session.cleanup` attempts do not use client idempotency keys.
 
@@ -226,6 +238,11 @@ Terminal Operations remain attached to their owning Session. Release 3 defines n
 
 A successfully closed Session remains for a fixed internal 10-minute observation grace period so authorized management callers can inspect the terminal `session.cleanup` result. `closing` and `cleanup_failed` Sessions are never removed by this timer. Physical Session deletion removes its Operations and idempotency records through foreign-key cascade.
 
+The public Session lookup exposes `last_cleanup_operation_id` during this
+observation grace so an owning Launcher, owning Principal, or administrator
+can retrieve that immutable terminal Operation. It does not copy the terminal
+error or result into the Session projection.
+
 One `session.cleanup` Operation represents exactly one immutable cleanup attempt. A transient failure such as backend unavailability or bounded timeout terminates that Operation as `failed`; the Session remains `closing` and stores the attempt count and `cleanup_retry_at`. When retry is due, the server creates a new `session.cleanup` Operation. An authorized Principal, owning Launcher, or administrator may request an immediate new attempt when none is active. Cleanup removes all Session resources whose ownership is proven, including resources in unusual runtime states or `policy_mismatch`. Ownership mismatch and other ambiguous authority failures move the Session to `cleanup_failed` and require administrator action. This Session-owned retry schedule does not add an Operation retry state or a generic retry framework and is not workload reconciliation.
 
 Operation records are working control-plane state. Permanent security history belongs to the structured audit stream.
@@ -267,13 +284,13 @@ The implementation must retire the current in-memory build/run Operation API and
 
 The canonical current-to-target symbol, API, configuration, and test migration is recorded in `release-3-vocabulary-and-implementation-map.md`. Ordered implementation tasks, the target ownership split, dispatcher mechanics, and test gates are defined in `release-3-d0-execution-plan.md`.
 
-## Decisions deferred to implementation designs
+## Details owned by implementation designs
 
-The D0 execution plan fixes the implementation ownership and sequence. The following contract details remain to be fixed in their owning designs before the affected executor tasks begin:
+The D0 execution plan fixes the implementation ownership and sequence. The
+remaining detail is deliberately internal to the affected implementation
+package:
 
-- final Release 2.1 Session foreign key and ownership symbols used by the Operation migration;
 - type-specific normalized Command input and recovery payloads used for idempotency and restart handling;
-- stable HTTP and CLI field names and error details for durable lookup and listing.
 
 Resource-specific Command preconditions, backend calls, and recovery observations are defined in their own detailed designs.
 

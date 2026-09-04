@@ -14,25 +14,26 @@ This revision freezes the D4 Container Logs and D5 common Exec contracts as
 implementation inputs. Interactive transport remains owned by
 `release-3-interactive-streaming.md`.
 
-Exact Go types, SQL DDL, Moby adapter calls, public JSON field spelling, and
-CLI flags are implementation decisions for the operational architect and
-`release-3-api-cli.md`. They must preserve the authorization, output, and
-failure contracts defined here.
+Exact Go types, SQL DDL, and Moby adapter calls are implementation decisions
+for the operational architect. Public JSON fields, routes, and CLI spelling
+are canonical in `release-3-api-cli.md` and must preserve the authorization,
+output, and failure contracts defined here.
 
 ## Container Logs boundary
 
 Release 3 provides one bounded snapshot of logs belonging to one Managed
 Container. It does not expose a general Docker logging interface.
 
-The public Query is conceptually:
+The public Query is:
 
 ```text
-GET /containers/{id}/logs?tail=200
+GET /containers/{container}/logs?tail=200
 ```
 
 It supports only:
 
-- the docker-helper ManagedContainerID target;
+- a ManagedContainerID or Session-local name resolved through the common
+  container-selector contract;
 - one `tail` line-count option;
 - combined output in Docker delivery order;
 - a bounded JSON response;
@@ -95,13 +96,13 @@ may still exceed the response byte limit and be truncated.
 
 ## Output contract
 
-The successful result contains:
+The successful direct JSON result contains:
 
 - one combined `output` string;
 - one `truncated` boolean.
 
-The final public response envelope is fixed by `release-3-api-cli.md`; it must
-not split the result into stdout and stderr fields.
+It must not split the result into stdout and stderr fields or wrap it in an
+`ok` result envelope.
 
 For a non-TTY container, the Engine's multiplexed stdout and stderr frames are
 decoded by the backend adapter and appended to the same bounded sink in the
@@ -223,16 +224,23 @@ cursor or a record that a particular byte range was consumed.
 
 ## CLI behavior
 
+The exact CLI form is:
+
+```text
+docker-helper container logs [--session SESSION_ID] [--tail N] [--json] NAME_OR_ID
+```
+
 The CLI requests one snapshot and writes combined `output` to its stdout. An
 empty result writes no placeholder text. If `truncated` is true, the CLI emits
 one concise warning to stderr after the output; it does not retry with a larger
-limit or paginate automatically.
+limit or paginate automatically. JSON mode prints the exact two-field direct
+result.
 
 Human and JSON modes use the same server Query. The CLI does not invoke
 `docker logs`, resolve BackendContainerID, combine streams, or apply its own
 tail and byte limits.
 
-Exact command spelling and JSON envelope remain owned by
+Target inference and explicit `--session` narrowing are owned by
 `release-3-api-cli.md`.
 
 ## Troubleshooting contract
@@ -304,9 +312,11 @@ The following D5 decisions are fixed:
 ## Exec request boundary
 
 Both exec modes address one Managed Container by ManagedContainerID and start
-one process from an argv array. The array must contain at least one non-empty
-element. docker-helper never joins argv into a shell command, interprets shell
-syntax, or inserts `/bin/sh -c`.
+one process from the public `argv` array defined in
+`release-3-api-cli.md`. Its first element names the executable and must be
+non-empty; later elements are individual arguments and may be empty.
+docker-helper never joins argv into a shell command, interprets shell syntax,
+or inserts `/bin/sh -c`.
 
 The common request may additionally contain:
 
@@ -477,10 +487,9 @@ start it, or obtain a trustworthy terminal observation. Those mechanism and
 dependency failures retain their normal non-success HTTP statuses and do not
 invent a workload exit code.
 
-Unexpected Engine interaction uses the common `502` backend-failure category;
+Unexpected Engine interaction uses `502 backend_failure`;
 Engine unavailability uses `503 backend_unavailable`. The integrated public
-error spelling is finalized in `release-3-api-cli.md` without collapsing either
-case into `container_exit_nonzero`.
+contract does not collapse either case into `container_exit_nonzero`.
 
 If the process started but its attachment fails before a trustworthy terminal
 observation, docker-helper returns a mechanism failure. It may include already

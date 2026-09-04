@@ -3,7 +3,8 @@
 ## Purpose
 
 This document is the canonical Release 3 design for resource constraints on
-Managed Containers and one-shot `run` workloads.
+Managed Containers and one-shot `run` workloads, and for Session-count
+admission quotas.
 
 It fixes the supported resource vocabulary, hierarchical authorization model,
 safe defaults, workload admission, runtime enforcement, policy updates,
@@ -26,6 +27,7 @@ Release 3 supports:
 - aggregate CPU ceilings;
 - aggregate memory ceilings;
 - aggregate process ceilings;
+- hierarchical Session-count admission quotas;
 - explicit per-workload CPU, memory, and process limits;
 - explicit per-workload shared-memory size;
 - disabled workload swap.
@@ -46,6 +48,7 @@ The following terms have distinct meanings:
 | Term | Meaning |
 | --- | --- |
 | Resource ceiling | Maximum aggregate use permitted to one ownership subtree. |
+| Session quota | Maximum number of capacity-bearing Sessions admitted within one policy scope. |
 | Workload limit | Concrete maximum applied to one Managed Container or one-shot `run`. |
 | Requested limit | Optional value supplied by a workload caller to narrow its authority. |
 | Effective ceiling | Intersection of one policy node with all ancestor ceilings and the deployment's enforceable system boundary. |
@@ -94,6 +97,36 @@ value from inheritance and must also show the resulting effective ceiling.
 Ordinary quick-start output may emphasize the effective value; automation must
 not have to infer policy from human text.
 
+The canonical JSON object is:
+
+```json
+{
+  "resource_ceiling": {
+    "cpu": {"mode": "inherit", "effective": 4.0},
+    "memory_bytes": {
+      "mode": "explicit",
+      "value": 2147483648,
+      "effective": 2147483648
+    },
+    "pids": {"mode": "inherit", "effective": 512}
+  }
+}
+```
+
+`value` is omitted for inheritance and required for an explicit policy;
+`effective` is always present. The same shape extends Principal, Launcher, and
+Session show responses. Root uses the same dimensions but always materializes
+an explicit value. It does not expose usage, remaining capacity, reservations,
+or an ancestor path.
+
+Principal, Launcher, and Session ceilings are replaced through one atomic
+`PUT /{owner}/{id}/resource-ceiling` subresource per owner kind. The complete
+request contains optional `cpu`, `memory_bytes`, and `pids` values; omission
+sets that dimension to inheritance, and `{}` resets all three. The successful
+response is the updated configured/effective `resource_ceiling` object. The
+CLI `principal|launcher|session resource-ceiling set` commands send exactly
+that complete replacement and never perform hidden read-modify-write.
+
 ## Default Root ceiling
 
 Initialization derives the default Root ceiling from Docker Engine-reported
@@ -118,6 +151,44 @@ The reserved memory and CPU remain available to Docker, the host, and unrelated
 workloads; docker-helper controls only its own subtree and does not claim to
 reserve host capacity against actors outside it.
 
+## Session-count admission quota
+
+Session creation is additionally bounded by a count quota. This is a
+control-plane admission rule, not a cgroup resource ceiling, scheduler, or
+capacity reservation.
+
+The defaults are:
+
+| Scope | Default maximum Sessions |
+| --- | ---: |
+| Daemon hard limit | 10,000 |
+| Root configured quota | 10,000 |
+| One Principal | 100 |
+| One Launcher | 20 |
+
+A Session counts simultaneously against the daemon, Root, owning Principal,
+and owning Launcher. Creation succeeds only when every applicable limit has
+capacity. Admission reserves the slot in the same transaction that establishes
+the Session identity, so concurrent creates cannot oversubscribe a quota.
+
+The count includes an in-progress creation reservation and Sessions in
+`active`, `closing`, or `cleanup_failed`. A `closed` Session is only a
+short-lived observation tombstone after owned resources have been removed and
+does not consume quota.
+
+An explicit value of zero forbids new Session creation in that scope. Reducing
+a quota below current use never closes or removes an existing Session; it only
+blocks further creation until the counted population falls below the new
+limit. The daemon hard limit cannot be widened. Administrators may narrow the
+Root quota and may raise or lower Principal and Launcher quotas without
+exceeding the applicable parent or daemon boundary.
+
+Principal and Launcher defaults deliberately do not divide an ancestor quota
+according to creation order. They provide predictable ordinary limits while
+leaving deliberate subdivision to an administrator on a shared deployment.
+The exact inspection and mutation spelling is owned by
+`release-3-api-cli.md` and will be frozen separately from these semantics.
+
 ## Workload defaults and validation
 
 A Managed Container create request and one-shot `run` may omit or explicitly
@@ -134,9 +205,9 @@ For CPU, memory, and PIDs:
 CPU is expressed as a fractional count of logical CPUs with 0.1-CPU
 granularity. Memory and shared memory normalize to integer bytes and are
 rendered to people using IEC units. PIDs is a positive integer and counts both
-processes and threads according to cgroup semantics. Exact JSON and CLI input
-spelling belongs to the public-surface design and must map to these single
-canonical units.
+processes and threads according to cgroup semantics. The exact JSON fields,
+CLI flags, and accepted CLI size suffixes are defined in
+`release-3-api-cli.md` and map to these single canonical units.
 
 Shared memory is a per-workload setting rather than a separate aggregate
 resource pool:
@@ -341,6 +412,9 @@ Operator documentation must explain that:
 
 Implementation is not complete without tests for:
 
+- atomic Session admission against simultaneous daemon, Root, Principal, and
+  Launcher quotas, including concurrent creates;
+- zero, lowered-below-use, cleanup-failed, and closed-tombstone quota cases;
 - Root default calculations and one-time materialization;
 - inheritance and effective-ceiling calculation at every hierarchy level;
 - cross-Principal and cross-Launcher policy denial without existence leaks;

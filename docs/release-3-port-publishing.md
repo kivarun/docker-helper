@@ -169,6 +169,34 @@ with the other Session grants. There is no separate endpoint or preliminary
 request for discovering available ports. A grant reports authority, not a live
 list of unused ports.
 
+Principal, Launcher, and Session show responses use the canonical JSON shape:
+
+```json
+{
+  "publishing_grant": {
+    "mode": "explicit",
+    "value": {"start": 24000, "end": 24999},
+    "effective": {"start": 24000, "end": 24999}
+  }
+}
+```
+
+`mode` is `inherit`, `explicit`, or `disabled`; Root uses only `explicit` or
+`disabled`. `value` appears only for an explicit stored policy. `effective`
+appears for every permitted grant and is omitted when disabled. No show
+projection reports free, occupied, leased, or remaining ports.
+
+Principal, Launcher, and Session policies are replaced through atomic
+`PUT /principals/{username}/publishing-grant`,
+`PUT /launchers/{launcher}/publishing-grant`, and
+`PUT /sessions/{session_id}/publishing-grant` subresources. A complete request
+selects exactly one of `inherit`, `disabled`, or an `explicit` nested
+`value.start`/`value.end` range. The response is the updated
+configured/effective `publishing_grant` object. CLI
+`principal|launcher|session publishing-grant set` commands expose mutually
+exclusive `--inherit`, `--disable`, and `--range START-END` modes and do not
+perform hidden read-modify-write.
+
 ## Grants are not reservations
 
 Sibling grants may overlap. In particular, the default Principal and Launcher
@@ -373,7 +401,7 @@ independent live leases left to clean.
 
 ## Public representation
 
-The exact JSON keys and CLI flags are finalized in `release-3-api-cli.md`. That
+The exact JSON keys and CLI flags are defined in `release-3-api-cli.md`. That
 surface must preserve these semantics:
 
 - create input gives one container port and an optional host port per mapping;

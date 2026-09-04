@@ -63,20 +63,25 @@ boundary.
 Ordinary Managed Container Commands accept either:
 
 - a globally unique ManagedContainerID; or
-- the immutable `name`, resolved only within one explicit or credential-implied
-  Session.
+- the immutable `name`, resolved only within one explicit or unambiguously
+  credential-implied Session.
 
-A Session bearer implies its Session. A Principal, Launcher, or administrator
-must identify the Session when using a Session-local name. The CLI form is:
+The common Session-selection algorithm is defined in
+`release-3-api-cli.md`. It allows a Launcher or Principal credential to omit
+the Session when its permitted default scope identifies exactly one usable
+Session; an administrator must select a Session explicitly when using a local
+name. The CLI form for an explicit selection is:
 
 ```text
 docker-helper container show --session dhs_... postgres
 ```
 
 ManagedContainerID needs no Session argument, but authorization is still
-checked against the credential scope. BackendContainerID is never accepted by
-ordinary container routes. The administrator-only orphan surface is the sole
-exception because an orphan has no persistent Managed Container identity.
+checked against the credential scope. Supplying a Session with an ID only
+narrows resolution, and a mismatch is indistinguishable from an absent
+container. BackendContainerID is never accepted by ordinary container routes.
+The administrator-only orphan surface is the sole exception because an orphan
+has no persistent Managed Container identity.
 
 ## Public resource surface
 
@@ -93,6 +98,14 @@ POST   /containers/{container}/repair
 DELETE /containers/{container}
 ```
 
+Start, stop, restart, and repair have empty request bodies and may accept the
+durable Operation `Idempotency-Key` header. Removal has no body and does not
+accept that header; its resource-level retry converges to `204 No Content`
+after deletion. The only request option is administrator-only
+`?force=true` for the narrow ownership-mismatch case defined below. Exact
+selector, query-validation, and CLI contracts are canonical in
+`release-3-api-cli.md`.
+
 The CLI hierarchy is:
 
 ```text
@@ -106,13 +119,18 @@ docker-helper container repair NAME_OR_ID
 docker-helper container remove NAME_OR_ID
 ```
 
+Every command that accepts a Session-local name also accepts optional
+`--session`. Lifecycle Commands that create an Operation accept `--detach` and
+otherwise wait for its terminal outcome.
+
 There is no `container inspect`. Operators who need raw Docker configuration
 use Docker's own inspection tools. docker-helper reports only identity,
 ownership, policy, runtime state, and recovery information that it owns.
 
 ### Container representation
 
-The direct `container.create` and `container.show` representation contains:
+The exact direct `container.create` and `container.show` representation is
+defined in `release-3-api-cli.md` and contains:
 
 - `id`;
 - `name`;
@@ -120,7 +138,8 @@ The direct `container.create` and `container.show` representation contains:
 - requested image reference;
 - `runtime_state`;
 - optional `condition`;
-- effective resource limits;
+- immutable workload limits, current effective ancestor-constrained limits,
+  and the disabled-swap policy;
 - effective port publications;
 - `created_at`;
 - optional `active_operation_id` while a lifecycle mutation is active.
@@ -130,7 +149,7 @@ It does not expose:
 - internal management state;
 - BackendContainerID;
 - raw Docker labels, HostConfig, network IDs, or endpoint IDs;
-- command argv, workdir, or environment names or values;
+- command or exec argv, workdir, or environment names or values;
 - immutable Docker image ID;
 - raw or complete mount configuration.
 
@@ -144,7 +163,7 @@ field merely to assert that the represented object exists.
 
 | Request result | HTTP result |
 | --- | --- |
-| Successful create | `201 Created` with the stopped Container. |
+| Successful create | `201 Created` with the stopped Container and `Location: /containers/{id}`. |
 | Show | `200 OK` with the Container. |
 | Start already running | `200 OK` with the current Container; no Operation. |
 | Stop already stopped | `200 OK` with the current Container; no Operation. |
@@ -155,7 +174,7 @@ field merely to assert that the represented object exists.
 ## Listing
 
 `container list` starts from credential scope and may narrow it by Principal,
-Launcher, or Session. The HTTP filters are `principal_id`, `launcher_id`, and
+Launcher, or Session. The HTTP filters are `principal`, `launcher_id`, and
 `session_id`; the CLI flags are `--principal`, `--launcher`, and `--session`.
 Combined filters must describe one valid ownership chain. A filter never grants
 visibility beyond the authenticating credential.
@@ -167,18 +186,17 @@ resource without an additional ownership walk:
 {
   "id": "dhmc_...",
   "name": "postgres",
-  "principal_id": "dhp_...",
+  "principal": "alice",
   "launcher_id": "dhl_...",
   "session_id": "dhs_...",
   "image": "postgres:17",
-  "runtime_state": "running",
-  "condition": null,
-  "active_operation_id": null
+  "runtime_state": "running"
 }
 ```
 
-Limits, publications, and timestamps are omitted from list items and remain
-available through `show`.
+`condition` and `active_operation_id` are included only when present. Limits,
+publications, and timestamps are omitted from list items and remain available
+through `show`.
 
 ### Pagination
 
@@ -340,7 +358,7 @@ Conditions override ordinary state handling:
   for `ownership_mismatch`.
 
 If a docker-helper lifecycle Operation is already active, every competing
-mutation returns `409 operation_in_progress` with `active_operation_id` and is
+mutation returns `409 operation_in_progress` with `details.operation_id` and is
 never queued. An idempotent replay that resolves to the existing Operation is
 handled before this conflict check. The error code is deliberately not
 `container_busy`.
@@ -448,10 +466,15 @@ docker-helper container orphan show BACKEND_CONTAINER_ID
 docker-helper container orphan remove BACKEND_CONTAINER_ID
 ```
 
+The canonical HTTP routes are the separate `/container-orphans` collection
+defined in `release-3-api-cli.md`. An orphan is not addressed under
+`/containers` because it has no persistent Managed Container resource.
+
 `orphan remove` accepts only an object with the complete valid docker-helper
 ownership-label set and no correlated persistent record. It deletes that exact
-backend object. Principal, Launcher, and Session credentials cannot inspect or
-operate on orphans.
+backend object synchronously, using the common graceful stop timeout when
+needed. Principal, Launcher, and Session credentials cannot inspect or operate
+on orphans.
 
 No orphan is adopted or removed automatically. `adopt` and `rebind` are outside
 Release 3. The supported Release 3 resolution is explicit administrator

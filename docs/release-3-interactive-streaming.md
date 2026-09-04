@@ -27,10 +27,10 @@ Release 3 interactive exec:
 
 ## Upgrade and start
 
-The conceptual endpoint is:
+The public endpoint is:
 
 ```text
-GET /containers/{managed_container_id}/exec/interactive
+GET /containers/{container}/exec/interactive
 ```
 
 The HTTP upgrade authenticates the bearer, applies the ordinary non-disclosing

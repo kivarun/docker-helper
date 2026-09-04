@@ -244,7 +244,7 @@ effective port publications, creation time, and optional active lifecycle
 Operation identity.
 
 Internal management state, BackendContainerID, raw backend labels and
-HostConfig, environment names and values, command argv, workdir, immutable
+HostConfig, environment names and values, command vector, workdir, immutable
 Docker image ID, full mount configuration, and Docker network or endpoint
 identifiers are omitted. The caller created the workload specification;
 docker-helper reports only the management, policy, and recovery information it
@@ -285,7 +285,13 @@ Before inserting `creating`, request cancellation ends the Command without a per
 
 If the requested image is absent locally, docker-helper performs the synchronous pull before the `creating` commit. An existing local image is used unchanged; callers that want to refresh a mutable tag invoke the existing explicit `pull` Command. The management projection retains the requested image reference and the immutable image ID actually used. Release 3 exposes no create-specific pull-policy flags.
 
-The create request keeps the existing 16 KiB HTTP body limit and the established `run` validation for command, workdir, environment names, and workspace-contained bind mounts. It adds the optional name, resource limits, and at most 16 loopback TCP publications. No caller-requested named volumes, arbitrary host paths, `volumes-from`, tmpfs surface, or general volume API is added. The writable layer and image-declared anonymous volumes survive stop/start/restart and are removed with the Managed Container.
+The create request keeps the existing 16 KiB HTTP body limit and the established
+`run` validation for entrypoint, command, workdir, environment names, and
+workspace-contained bind mounts. It adds the optional name, resource limits,
+and at most 16 loopback TCP publications. No caller-requested named volumes,
+arbitrary host paths, `volumes-from`, tmpfs surface, or general volume API is
+added. The writable layer and image-declared anonymous volumes survive
+stop/start/restart and are removed with the Managed Container.
 
 ## Restart recovery
 
@@ -345,7 +351,8 @@ Discovery of an orphaned backend object emits a structured warning containing it
 
 The warning does not include environment values, bearer material, or other secrets.
 
-Orphan decisions are exposed through an administrator-only CLI surface:
+Orphan decisions are exposed through an administrator-only surface. Its
+canonical HTTP collection is `/container-orphans`; the CLI forms are:
 
 ```text
 docker-helper container orphan list
@@ -353,7 +360,10 @@ docker-helper container orphan show <backend-id>
 docker-helper container orphan remove <backend-id>
 ```
 
-`show` presents the backend state and the policy-relevant image, mounts, network, limits, and publishing configuration. Environment values are not displayed.
+`show` presents only the BackendContainerID, complete valid helper ownership
+identities, helper-owned name, and normalized runtime state. Image, mounts,
+network details, limits, publications, environment, raw labels, and Docker
+inspect data remain Docker diagnostics and are not copied into the helper API.
 
 `remove` is limited to a verified docker-helper-labelled orphan so that the command cannot become a general Docker container deletion interface.
 
@@ -402,7 +412,12 @@ Persistent Managed Container data contains only information required for:
 - status and recovery;
 - audit attribution.
 
-The persistent record is a management projection, not a normalized copy of the Docker create request. It retains identity and ownership, ManagedContainerID and internal BackendContainerID correlation, name, image reference and immutable image ID, command argv and workdir, environment key names without values, mount descriptors, resource limits, port publications, management state, runtime-correlation data, and required timestamps.
+The persistent record is a management projection, not a normalized copy of the
+Docker create request. It retains identity and ownership, ManagedContainerID
+and internal BackendContainerID correlation, name, image reference and
+immutable image ID, entrypoint, command and workdir, environment key names without
+values, mount descriptors, resource limits, port publications, management
+state, runtime-correlation data, and required timestamps.
 
 It does not retain environment values, registry credentials, a secret-bearing Docker create payload, or enough configuration to recreate the container autonomously. Docker Engine remains authoritative for the complete runtime configuration.
 

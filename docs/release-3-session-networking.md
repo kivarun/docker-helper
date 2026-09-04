@@ -159,9 +159,14 @@ Backend unavailability is not network absence. It returns the common
 The public recovery capability is:
 
 ```text
-POST /sessions/{id}/repair
-docker-helper session repair --id SESSION_ID
+POST /sessions/{session_id}/repair
+docker-helper session repair --id SESSION_ID [--detach]
 ```
+
+The HTTP request body is empty, the Session ID is always explicit, and a
+direct protocol client may supply `Idempotency-Key`. The CLI requires `--id`,
+waits for accepted work by default, and may return after admission with
+`--detach`.
 
 An authorized Session bearer, owning Launcher, owning Principal, or
 administrator may request repair within its credential scope. Administrator
@@ -187,7 +192,8 @@ work. docker-helper never claims success for a partially restored Session.
 
 If the Session already has a valid network, or has no Managed Containers and
 therefore no broken network invariant, repair is a synchronous successful
-no-op and creates no Operation. It does not provision an unused network.
+no-op with HTTP `200` and `{\"ok\":true}` and creates no Operation or
+idempotency record. It does not provision an unused network.
 
 Only one Session network repair or cleanup mutation may be active. While repair
 is active, new network-dependent Commands return `409 operation_in_progress`

@@ -37,6 +37,14 @@ The canonical common contract is `release-3-operation-model.md`. The current-to-
 
 `build`, the existing one-shot `run`, `container.create`, and non-interactive exec are synchronous Commands. Process-like Commands return one combined bounded `output`; create returns the stopped Managed Container only after persistent ownership and backend correlation are complete. Interactive exec uses WebSocket. None creates an Operation or persistent output history.
 
+Every Session-bound public Command uses one common Session-selection contract.
+`pull`, `build`, `run`, `registry login`, and `container.create` accept an
+optional Session selector; Managed Container Queries and Commands use it when
+resolving a Session-local name. Session credentials imply their Session,
+Launcher and Principal credentials may omit the selector only when the
+documented default scope yields one usable Session, and administrators must
+select explicitly. Ambiguity is never resolved by ordering candidates.
+
 ## Work packages
 
 ### D0. Cross-cutting Operation foundation
@@ -68,6 +76,9 @@ Responsibilities:
 - stable `dhmc_` plus 32-lowercase-hex docker-helper container identity;
 - Session ownership;
 - one immutable, Session-unique, DNS-label-compatible `name` that is also the network alias, supplied explicitly or derived only from a valid unused image basename;
+- immutable image, optional entrypoint override, command, workdir, environment,
+  workspace-contained mounts, resource limits, and publications accepted at
+  create time;
 - persistent management projection required for authorization, inspection, policy, and backend correlation without environment values, registry credentials, or a recreate-capable Docker request;
 - lookup and ownership verification;
 - projection of backend runtime state into a bounded public status model;
@@ -283,6 +294,7 @@ This package defines a deliberately bounded resource policy for Managed Containe
 Responsibilities:
 
 - the supported CPU, memory, process, and related limit vocabulary;
+- daemon, Root, Principal, and Launcher Session-count admission quotas;
 - normalized units and validation;
 - safe defaults that keep ordinary quick-start workflows free of mandatory resource flags;
 - hierarchical root, Principal, Launcher, and Session ceilings;
@@ -306,9 +318,19 @@ An omitted Principal, Launcher, or Session ceiling inherits its effective parent
 
 Build resource control is outside this package.
 
+Session admission is checked atomically against a fixed daemon limit and
+configurable Root, Principal, and Launcher quotas. The defaults are 10,000 for
+the daemon and Root, 100 per Principal, and 20 per Launcher. Creation
+reservations plus `active`, `closing`, and `cleanup_failed` Sessions count;
+the observation-only `closed` tombstone does not. Lowering a quota never
+deletes existing Sessions.
+
 The canonical contract is `release-3-resource-constraints.md`.
 
-Completion criterion: a Session can start a Managed Container or execute `run` only within its authorized resource envelope, and the effective limits remain inspectable without exposing the full Docker resource surface.
+Completion criterion: Session creation cannot exceed any applicable count
+quota; a Session can start a Managed Container or execute `run` only within
+its authorized resource envelope; and effective policy remains inspectable
+without exposing the full Docker resource surface.
 
 ### D8. Host port publishing
 
@@ -345,7 +367,7 @@ This package integrates the completed domain capabilities into the product surfa
 
 Responsibilities:
 
-- HTTP resource layout and versioned request/response contracts;
+- HTTP resource layout, exact request/response contracts, and compatibility policy;
 - CLI command hierarchy and output behavior;
 - database migrations and upgrade behavior;
 - stable error codes;
