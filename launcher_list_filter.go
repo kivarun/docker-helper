@@ -47,8 +47,8 @@ func (a *App) serveLauncherFilteredList(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var (
-		launcher     *LauncherWithPrincipal
-		err          error
+		launcher      *LauncherWithPrincipal
+		err           error
 		principalName string
 	)
 
