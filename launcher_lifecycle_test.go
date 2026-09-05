@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1951,6 +1952,99 @@ func TestLauncherEnableCommitsWithoutPostCommitLookup(t *testing.T) {
 	}
 	if admitted := app.OperationSupervisor.admit(launcherRunningOp(t, lID)); admitted != admissionAccepted {
 		t.Fatal("expected operation admitted for launcher after committed enable")
+	}
+}
+
+// TestLauncherScopeReplaceCommitsWithoutPostCommitLookup proves a successful
+// scope replacement composes its result from the authoritative pre-change
+// projection: with exactly the pre-commit reads permitted (the Launcher
+// projection lookup, its stored-roots read, and the Principal-ceiling read)
+// and every later query rejected, the replacement succeeds and the returned
+// projection carries the pre-change Launcher metadata the mutation did not
+// touch plus the committed scope/roots. Under the former post-commit
+// findLauncherByID, that extra lookup would be rejected here after the
+// durable success, reporting the committed change as a failure.
+func TestLauncherScopeReplaceCommitsWithoutPostCommitLookup(t *testing.T) {
+	db, dbPath := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, home := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+	l, _, _, err := createLauncher(db, pid, "la", LauncherScopeInherit, nil, globalRoots, false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+
+	// Rename and disable for real first, so the returned projection must
+	// carry pre-change metadata the scope replacement did not touch.
+	renamed := "renamed"
+	disabled := false
+	if _, err := persistLauncherChange(db, l.ID, &renamed, &disabled); err != nil {
+		t.Fatalf("initial rename/disable: %v", err)
+	}
+
+	// Permit exactly the three pre-commit reads and fail every later query.
+	failDB := newFailQueryAfterDB(t, dbPath, 3, errMockQueryFail)
+	app := deleteLifecycleApp(t, failDB)
+	app.Config.AllowedRoots = globalRoots
+
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := app.replaceLauncherScopeWithLifecycle(l.ID, LauncherScopeRestricted, []string{proj})
+	if err != nil {
+		t.Fatalf("scope replace under post-commit query failure: %v", err)
+	}
+	if updated.ID != l.ID || updated.PrincipalID != pid || updated.PrincipalName != "owner" ||
+		updated.Name != renamed || updated.Enabled || !updated.CreatedAt.Equal(l.CreatedAt) {
+		t.Errorf("returned projection lost pre-change metadata: %+v", updated)
+	}
+	if updated.ScopeMode != LauncherScopeRestricted || !slices.Equal(updated.AllowedRoots, []string{proj}) {
+		t.Errorf("returned projection lost the committed scope/roots: %+v", updated)
+	}
+
+	var scope string
+	if err := db.QueryRow(`SELECT scope_mode FROM launchers WHERE id = ?`, l.ID).Scan(&scope); err != nil {
+		t.Fatal(err)
+	}
+	if scope != string(LauncherScopeRestricted) {
+		t.Errorf("committed scope = %q, want restricted", scope)
+	}
+}
+
+// TestLauncherScopeReplaceTransactionFailureKeepsOldState proves a failed
+// durable replacement reports failure without mutating the old state: the
+// scope UPDATE inside the transaction fails, the transaction rolls back, and
+// a fresh projection read still reports the pre-change scope/roots.
+func TestLauncherScopeReplaceTransactionFailureKeepsOldState(t *testing.T) {
+	db, dbPath := freshFileTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, home := setupPrincipalForLauncherTest(t, db, globalRoots, "owner")
+
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0755); err != nil {
+		t.Fatal(err)
+	}
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots), false)
+	if err != nil {
+		t.Fatalf("createLauncher: %v", err)
+	}
+
+	failDB := newFailExecMatchDB(t, dbPath, "UPDATE launchers SET scope_mode", errMockQueryFail)
+	cur, err := findLauncherByID(failDB, l.ID)
+	if err != nil {
+		t.Fatalf("findLauncherByID: %v", err)
+	}
+	if _, err := replaceLauncherScope(failDB, cur, LauncherScopeInherit, nil, globalRoots); err == nil {
+		t.Fatal("expected the failed scope UPDATE to abort the replacement, got success")
+	}
+
+	after, err := findLauncherByID(db, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ScopeMode != LauncherScopeRestricted || !slices.Equal(after.AllowedRoots, []string{proj}) {
+		t.Errorf("scope/roots changed after failed replacement: %+v", after)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -143,7 +144,7 @@ func TestLauncherScopeReplaceInheritRejectsRootsAtDomain(t *testing.T) {
 	}
 
 	// inherit + roots must be rejected at the domain boundary.
-	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeInherit, []string{proj}, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
+	if _, err := replaceLauncherScope(db, l, LauncherScopeInherit, []string{proj}, globalRoots); !errors.Is(err, ErrInvalidAllowedRoots) {
 		t.Fatalf("expected ErrInvalidAllowedRoots for inherit+roots, got: %v", err)
 	}
 	// Prior scope/roots unchanged.
@@ -156,7 +157,7 @@ func TestLauncherScopeReplaceInheritRejectsRootsAtDomain(t *testing.T) {
 	}
 
 	// Restricted with empty roots must also be rejected at the domain boundary.
-	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, nil, nil); !errors.Is(err, ErrInvalidAllowedRoots) {
+	if _, err := replaceLauncherScope(db, l, LauncherScopeRestricted, nil, nil); !errors.Is(err, ErrInvalidAllowedRoots) {
 		t.Fatalf("expected ErrInvalidAllowedRoots for restricted without roots, got: %v", err)
 	}
 	after2, err := findLauncherByID(db, l.ID)
@@ -537,12 +538,20 @@ func TestLauncherScopeReplaceInheritToRestricted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots))
+	updated, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []string{proj}, testEffectivePrincipalRoots(t, db, pid, globalRoots))
 	if err != nil {
 		t.Fatalf("replaceLauncherScope: %v", err)
 	}
 	if updated.ScopeMode != LauncherScopeRestricted || len(updated.AllowedRoots) != 1 {
 		t.Errorf("expected restricted with one root, got %+v", updated)
+	}
+	// The returned projection matches the committed state.
+	committed, err := findLauncherByID(db, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(updated, committed) {
+		t.Errorf("returned projection %+v does not match committed state %+v", updated, committed)
 	}
 }
 
@@ -560,12 +569,24 @@ func TestLauncherScopeReplaceRestrictedToInheritClearsRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updated, err := replaceLauncherScope(db, l.ID, LauncherScopeInherit, nil, globalRoots)
+	updated, err := replaceLauncherScope(db, l, LauncherScopeInherit, nil, globalRoots)
 	if err != nil {
 		t.Fatalf("replaceLauncherScope: %v", err)
 	}
 	if updated.ScopeMode != LauncherScopeInherit || len(updated.AllowedRoots) != 0 {
 		t.Errorf("expected inherit with cleared roots, got %+v", updated)
+	}
+	// The returned projection matches the committed state: inherit commits the
+	// canonical empty root set, and the public JSON contract renders it as [].
+	committed, err := findLauncherByID(db, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(updated, committed) {
+		t.Errorf("returned projection %+v does not match committed state %+v", updated, committed)
+	}
+	if got := launcherToJSON(*updated).AllowedRoots; len(got) != 0 || got == nil {
+		t.Errorf("inherit allowed_roots JSON = %v, want the empty canonical set", got)
 	}
 	// Stored rows cleared.
 	var count int
@@ -595,7 +616,7 @@ func TestLauncherScopeReplaceInvalidRootRejectedAtomically(t *testing.T) {
 	if err := os.MkdirAll(outside, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replaceLauncherScope(db, l.ID, LauncherScopeRestricted, []string{outside}, testEffectivePrincipalRoots(t, db, pid, globalRoots)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
+	if _, err := replaceLauncherScope(db, l, LauncherScopeRestricted, []string{outside}, testEffectivePrincipalRoots(t, db, pid, globalRoots)); !errors.Is(err, ErrLauncherRootOutsidePrincipal) {
 		t.Fatalf("expected ErrLauncherRootOutsidePrincipal, got: %v", err)
 	}
 	// Old scope/roots unchanged.

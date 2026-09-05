@@ -63,6 +63,7 @@ cleanup() {
   fi
   [ -n "$U_USER" ] && pkill -TERM -u "$U_USER" -f '/usr/bin/docker-helper serve' 2>/dev/null || true
   [ -n "$U_USER" ] && userdel -r "$U_USER" >/dev/null 2>&1 || true
+  [ -n "$U_USER" ] && rm -rf "/home/${U_USER}-outside" 2>/dev/null || true
   [ -n "$U_XDG" ] && rm -rf "$U_XDG" 2>/dev/null || true
   rm -rf "$TMPDIR_UER"
 }
@@ -188,8 +189,9 @@ C_OUT="$(dhx launcher create --principal "$OWNER" --name conv --no-credential 2>
 if [ -n "$(printf '%s' "$C_OUT" | uer_field id || true)" ]; then
   # `launcher scope set` always emits the launcher JSON document.
   if C_SHOW="$(dhx launcher scope set --principal "$OWNER" --allowed-root "$WORK" conv 2>&1)" \
-      && [ "$(printf '%s' "$C_SHOW" | uer_field scope)" = "restricted" ]; then
-    reg_ok "C: inherit -> restricted scope replacement under the global root succeeds"
+      && [ "$(printf '%s' "$C_SHOW" | uer_field scope)" = "restricted" ] \
+      && printf '%s' "$C_SHOW" | grep -q "\"allowed_roots\": \[\"$WORK\"\]"; then
+    reg_ok "C: inherit -> restricted scope replacement succeeds and returns the committed scope and root"
   else
     reg_fail "C: inherit -> restricted scope replacement failed: $(printf '%s' "$C_SHOW" | head -2 | tr '\n' ' ' | redact)"
   fi

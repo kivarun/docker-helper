@@ -490,24 +490,32 @@ func createLauncher(db *sql.DB, principalID int64, name string, scope LauncherSc
 }
 
 // replaceLauncherScope atomically replaces a Launcher's scope and complete
-// stored root set. For restricted scope all roots are canonicalized and
-// validated against the supplied effective Principal ceiling — resolved by
-// the App/lifecycle boundary through the canonical effective-Principal-root
-// policy owner — before any mutation; a failed replacement leaves the old
-// scope/roots unchanged.
-func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode, allowedRoots []string, effectivePrincipalRoots []string) (*LauncherWithPrincipal, error) {
-	// Existence check: the caller supplied the effective Principal ceiling, so
-	// the owner is not needed here — but a missing Launcher must still be the
-	// not-found contract rather than a silent zero-row update.
-	_, err := findLauncherByID(db, launcherID)
-	if err != nil {
-		return nil, err
+// stored root set. The caller supplies the authoritative pre-change
+// projection — resolved once by the App/lifecycle boundary under lifecycleMu
+// and shared with this persistence operation — so the replacement is performed
+// against the same serialized ownership state the result is composed from. For
+// restricted scope all roots are canonicalized and validated against the
+// supplied effective Principal ceiling — resolved by the App/lifecycle
+// boundary through the canonical effective-Principal-root policy owner —
+// before any mutation; a failed replacement leaves the old scope/roots
+// unchanged.
+//
+// The returned projection is composed from the authoritative pre-change
+// projection plus the values committed by this operation (ScopeMode and
+// AllowedRoots; inherit commits the canonical empty root set, represented as
+// no roots exactly like a projection read of the committed state). No DB read
+// is required after commit, so a successful commit cannot be followed by a
+// fallible lookup that would report a durable scope change as a failure.
+func replaceLauncherScope(db *sql.DB, current *LauncherWithPrincipal, scope LauncherScopeMode, allowedRoots []string, effectivePrincipalRoots []string) (*LauncherWithPrincipal, error) {
+	if current == nil {
+		return nil, ErrLauncherNotFound
 	}
 	if scope != LauncherScopeInherit && scope != LauncherScopeRestricted {
 		return nil, fmt.Errorf("unknown scope %q: %w", scope, ErrInvalidScope)
 	}
 
 	var canonicalRoots []string
+	var err error
 	if scope == LauncherScopeRestricted {
 		if len(allowedRoots) == 0 {
 			return nil, fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
@@ -529,16 +537,16 @@ func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`UPDATE launchers SET scope_mode = ? WHERE id = ?`, string(scope), launcherID); err != nil {
+	if _, err := tx.Exec(`UPDATE launchers SET scope_mode = ? WHERE id = ?`, string(scope), current.ID); err != nil {
 		return nil, fmt.Errorf("cannot update launcher scope: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM launcher_allowed_roots WHERE launcher_id = ?`, launcherID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM launcher_allowed_roots WHERE launcher_id = ?`, current.ID); err != nil {
 		return nil, fmt.Errorf("cannot clear launcher allowed roots: %w", err)
 	}
 	for _, root := range canonicalRoots {
 		if _, err := tx.Exec(
 			`INSERT INTO launcher_allowed_roots (launcher_id, root_path) VALUES (?, ?)`,
-			launcherID, root,
+			current.ID, root,
 		); err != nil {
 			return nil, fmt.Errorf("cannot add launcher allowed root: %w", err)
 		}
@@ -547,5 +555,13 @@ func replaceLauncherScope(db *sql.DB, launcherID string, scope LauncherScopeMode
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("cannot commit launcher scope replacement: %w", err)
 	}
-	return findLauncherByID(db, launcherID)
+
+	updated := *current
+	updated.ScopeMode = scope
+	if scope == LauncherScopeRestricted {
+		updated.AllowedRoots = canonicalRoots
+	} else {
+		updated.AllowedRoots = nil
+	}
+	return &updated, nil
 }
