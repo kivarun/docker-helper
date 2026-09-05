@@ -317,6 +317,74 @@ func TestLauncherHandlerRestrictedRootOutsidePrincipal(t *testing.T) {
 	}
 }
 
+// TestLauncherHandlerAllowedRootsDeterministicCanonicalOrder proves the
+// Launcher allowed-root set is one deterministic canonical representation:
+// allowed roots are a set, so a deliberately reverse-ordered restricted create
+// request and a reverse-ordered scope replacement return the lexical
+// canonical order in their mutation responses, and a fresh DB/show projection
+// of the same committed state returns the identical order — the mutation
+// projection and the stored projection can no longer disagree.
+func TestLauncherHandlerAllowedRootsDeterministicCanonicalOrder(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	home, _ := setupLauncherHandlerPrincipal(t, app, "alice")
+
+	// Explicit lexicographically unambiguous siblings under the Principal's
+	// effective ceiling.
+	rootA := filepath.Join(home, "a-zone")
+	rootB := filepath.Join(home, "b-zone")
+	for _, dir := range []string{rootA, rootB} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Reverse-ordered restricted create: the mutation response carries the
+	// canonical lexical order.
+	w := launcherRequest(t, app, http.MethodPost, "/principals/alice/launchers", testAdminToken,
+		fmt.Sprintf(`{"name":"ordered","scope":"restricted","allowed_roots":[%q,%q]}`, rootB, rootA))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("restricted create: expected 201, got %d body=%s", w.Code, w.Body.String())
+	}
+	var createdResp createLauncherResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &createdResp); err != nil {
+		t.Fatal(err)
+	}
+	created := createdResp.Launcher
+	if got := created.AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
+		t.Fatalf("create allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	}
+
+	// A fresh show projection of the committed state: identical order.
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+created.ID, testAdminToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("show after create: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := decodeLauncher(t, w).AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
+		t.Fatalf("show allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	}
+
+	// Reverse-ordered scope replacement on the same Launcher: the mutation
+	// response carries the canonical lexical order again.
+	w = launcherRequest(t, app, http.MethodPut, "/principals/alice/launchers/"+created.ID+"/allowed-roots", testAdminToken,
+		fmt.Sprintf(`{"scope":"restricted","allowed_roots":[%q,%q]}`, rootB, rootA))
+	if w.Code != http.StatusOK {
+		t.Fatalf("scope replace: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	replaced := decodeLauncher(t, w)
+	if got := replaced.AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
+		t.Fatalf("scope replace allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	}
+
+	// And the fresh projection after the replacement: identical order.
+	w = launcherRequest(t, app, http.MethodGet, "/principals/alice/launchers/"+created.ID, testAdminToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("show after replace: expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := decodeLauncher(t, w).AllowedRoots; len(got) != 2 || got[0] != rootA || got[1] != rootB {
+		t.Fatalf("show after replace allowed_roots = %v, want [%s %s]", got, rootA, rootB)
+	}
+}
+
 func TestLauncherHandlerPrincipalCredentialManagesOwn(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	_, credToken := setupLauncherHandlerPrincipal(t, app, "alice")

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -417,7 +418,11 @@ func (a *App) resolvePrincipalEffectiveRootsSnapshot(auth *operatorAuthority, us
 
 // validateLauncherAllowedRoots canonicalizes each root using the same canonical
 // path semantics as Principal roots and requires each to be under the current
-// effective Principal roots. Returns the deduplicated canonical set.
+// effective Principal roots. Returns the deduplicated canonical set in
+// deterministic lexical order, so the persisted root set and every projection
+// constructed from it (create and scope-replace responses) are one canonical
+// representation — the same order a fresh DB/show projection of the committed
+// state returns.
 func validateLauncherAllowedRoots(roots []string, effectivePrincipalRoots []string) ([]string, error) {
 	if len(roots) == 0 {
 		return nil, fmt.Errorf("restricted scope requires at least one allowed root: %w", ErrInvalidAllowedRoots)
@@ -437,6 +442,7 @@ func validateLauncherAllowedRoots(roots []string, effectivePrincipalRoots []stri
 			canonical = append(canonical, resolved)
 		}
 	}
+	sort.Strings(canonical)
 	return canonical, nil
 }
 
