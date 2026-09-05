@@ -2,6 +2,7 @@ package main
 
 import (
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -76,23 +77,31 @@ func TestCompletionNonPathFlagDoesNotForceFilenameSemantics(t *testing.T) {
 	}
 }
 
-func TestCompletionAuthorityHelperHiddenFromSuggestions(t *testing.T) {
-	if !completionAvailabilityByCommand[completionAuthorityCommand].Hidden {
-		t.Fatal("completion authority must be hidden UI metadata")
+// TestCompletionAuthorityQueryReusesExistingTree protects the structural
+// invariant that parser tree == help tree == completion tree. Authority
+// introspection reuses the existing machine-facing `completion roots
+// principal` surface with --authority-only; a hidden `completion authority`
+// node would violate the invariant and must never exist.
+func TestCompletionAuthorityQueryReusesExistingTree(t *testing.T) {
+	completion := completionCommandPath([]string{"completion"})
+	if completion == nil {
+		t.Fatal("completion command missing from parser tree")
+	}
+	for _, sub := range completion.Subcommands {
+		if sub.Name == "authority" {
+			t.Fatal("hidden completion authority node must not exist in the parser tree")
+		}
+	}
+	flags := collectFlagsForCommand(completionRootsPrincipalCommand)
+	if !slices.Contains(flags, "--authority-only") {
+		t.Fatalf("completion roots principal flags %v missing --authority-only", flags)
 	}
 	results := runCompletion(t, completionScript(t), []string{"docker-helper", "completion", ""})
 	if strings.Contains(" "+strings.Join(results, " ")+" ", " authority ") {
 		t.Fatalf("machine-facing authority helper leaked into completion: %v", results)
 	}
 	for _, want := range []string{"bash", "roots"} {
-		found := false
-		for _, got := range results {
-			if got == want {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(results, want) {
 			t.Fatalf("completion suggestions %v missing %q", results, want)
 		}
 	}

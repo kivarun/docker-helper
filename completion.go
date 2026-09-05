@@ -87,7 +87,7 @@ var completionRootsCommand = &Command{
 var completionRootsPrincipalCommand = &Command{
 	Name:       "principal",
 	Summary:    "Print a Principal's effective allowed roots",
-	Usage:      "docker-helper completion roots principal [--principal USER] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
+	Usage:      "docker-helper completion roots principal [--principal USER] [--authority-only] [--system] [--endpoint ENDPOINT] [--token-file PATH]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {

@@ -469,6 +469,15 @@ for full syntax:
   `help` pseudo-subcommand (`docker-helper principal help` is an unknown
   subcommand).
 - `completion bash` — Generate Bash completion.
+- `completion roots principal` — Machine-facing completion query: print the
+  target Principal's effective allowed roots (target from `--principal` or
+  inferred from the credential; the daemon authorizes the query). With
+  `--authority-only` it prints only the authenticated operator authority for
+  shell-completion introspection; completion authority introspection reuses
+  this surface so the parser tree, help tree, and completion tree remain
+  identical (no hidden command nodes).
+- `completion roots session` — Machine-facing completion query: print the
+  Session-create effective allowed roots for the current authority.
 
 ### Signal cancellation (agent commands)
 
