@@ -222,6 +222,49 @@ canonical, and document why the exception remains. Before adding or renaming a
 term, inventory its end-to-end surfaces. A rename is incomplete while an old
 synonym still names the same concept outside an explicit compatibility adapter.
 
+Names identify one domain entity or one semantic responsibility. Name the
+thing for what it is in the product model, not for its current caller, storage
+shape, backend mechanism, implementation history, or incidental topology.
+Prefer the project's accepted vocabulary; use an industry term only when its
+established meaning matches the project concept. Keep namespace grammars
+predictable and names no longer than clarity requires. Abbreviate only with an
+established, unambiguous project or industry abbreviation; do not invent a
+second short spelling merely to reduce identifier length.
+
+Express hierarchy and relationships structurally through ownership, typed
+references, fields, or resource paths. Do not concatenate the names of two
+domain entities into one separator-delimited pseudo-identity, and do not repeat
+an ancestor's name in a child identifier when the enclosing namespace already
+provides that scope. Separators and casing may express the grammar of one
+identifier; they must not conceal a composite key or create a second implicit
+ownership model.
+
+When a human-assigned naming scheme must distinguish several copies of one
+object in the same namespace, a qualifier must encode the real, proven
+dimension that distinguishes them. Do not add an ordinal merely because
+several resources of one type exist when stable IDs or independently meaningful
+user names already distinguish them:
+
+- genuinely interchangeable peers use one ordinal convention for every peer,
+  including the first; do not leave one peer unqualified as though it were a
+  different type;
+- peers with different semantic roles use canonical role terms rather than
+  ordinals; if a role can move between instances, keep stable instance identity
+  separate and expose the role as state or an alias;
+- add a location qualifier only when location is part of identity inside a
+  shared namespace, using one consistent placement and vocabulary. Do not
+  invent location, replica, or active/standby dimensions before the product
+  model requires them.
+
+In docker-helper, owner scope is already part of identity: for example, a
+Launcher name is Principal-scoped and a Session stores its Launcher reference.
+Keep that ancestry in the existing structured relationship instead of encoding
+it again in a name. A helper-generated backend object name used only for
+correlation should derive from the resource type and stable product ID. Backend
+labels may project canonical identity and provenance fields, but must not create
+another product identity. A conventional bare selector such as `default` is an
+alias/defaulting rule, not evidence of another resource type or role.
+
 Backend-native terminology is appropriate when the concept really is
 backend-specific (`AppArmor` profile, `SELinux` fcontext, distro trust anchor),
 but it must not replace the product-level concept it serves (for example,
