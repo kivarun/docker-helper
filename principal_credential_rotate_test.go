@@ -251,11 +251,12 @@ func TestPrincipalCredentialRotateErrors(t *testing.T) {
 func TestPrincipalCredentialRotateAtomicityOnFailure(t *testing.T) {
 	app, oldToken, _ := principalCredentialApp(t, "atomicrot")
 	rotateToken := createNamedCredential(t, app, "atomicrot", "default")
+	principalID := principalIDByName(t, app.DB, "atomicrot")
 	dbPath := app.Config.DatabasePath
 	app.DB.Close()
 
 	failDB := newFailExecMatchDB(t, dbPath, "UPDATE credentials", errMockRotateDB)
-	_, _, err := rotatePrincipalCredential(failDB, "atomicrot", "default")
+	_, _, err := rotatePrincipalCredential(failDB, principalID, "default")
 	failDB.Close()
 	if err == nil {
 		t.Fatal("rotate must fail under the injected UPDATE failure")
@@ -496,11 +497,12 @@ func TestPrincipalCredentialRotateAfterNameReuse(t *testing.T) {
 func TestPrincipalCredentialRotateFailsClosedOnStaleState(t *testing.T) {
 	app, _, _ := principalCredentialApp(t, "stalerot")
 	oldToken := createNamedCredential(t, app, "stalerot", "default")
+	principalID := principalIDByName(t, app.DB, "stalerot")
 	dbPath := app.Config.DatabasePath
 	app.DB.Close()
 
 	zeroDB := newZeroRowsExecMatchDB(t, dbPath, "UPDATE credentials")
-	_, _, err := rotatePrincipalCredential(zeroDB, "stalerot", "default")
+	_, _, err := rotatePrincipalCredential(zeroDB, principalID, "default")
 	zeroDB.Close()
 	if err == nil {
 		t.Fatal("guarded rotation must fail closed when the UPDATE matches no row")

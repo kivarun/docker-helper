@@ -260,10 +260,18 @@ func revokePrincipalCredential(db *sql.DB, id string) (bool, error) {
 }
 
 // rotatePrincipalCredential atomically replaces the bearer secret of the
-// CURRENT ACTIVE Principal credential with the given name: the credential ID,
-// name, and Principal ownership are unchanged, the old token is immediately
-// invalid, and the new secret is returned exactly once. No second credential
-// row is created and there is no overlapping validity window.
+// CURRENT ACTIVE Principal credential with the given name owned by the exact
+// principalID: the credential ID, name, and Principal ownership are
+// unchanged, the old token is immediately invalid, and the new secret is
+// returned exactly once. No second credential row is created and there is no
+// overlapping validity window.
+//
+// The mutation is scoped by the stable Principal ID, never by username: the
+// exact owner is part of the lookup and mutation predicates, so a Principal
+// deleted and recreated under the same username can never rebind a rotation
+// onto the replacement Principal's credential — a vanished owner fails closed
+// (no active credential row exists at the exact principal_id, so neither
+// branch mutates any row).
 //
 // The primary lookup targets only the active row (revoked_at IS NULL), so
 // revoked historical rows that share the name through documented name reuse
@@ -273,7 +281,7 @@ func revokePrincipalCredential(db *sql.DB, id string) (bool, error) {
 // exact active row under the same ownership and active-state predicates and
 // fails closed on a zero affected-row count (stale concurrent state), so a
 // rotation can never resurrect a revoked row.
-func rotatePrincipalCredential(db *sql.DB, username, name string) (*PrincipalCredential, string, error) {
+func rotatePrincipalCredential(db *sql.DB, principalID int64, name string) (*PrincipalCredential, string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
@@ -281,30 +289,30 @@ func rotatePrincipalCredential(db *sql.DB, username, name string) (*PrincipalCre
 	defer tx.Rollback()
 
 	var credID string
-	var principalID int
 	var principalName string
 	var createdAt int64
 	err = tx.QueryRow(
-		`SELECT c.id, c.created_at, p.id, p.username
+		`SELECT c.id, c.created_at, p.username
 		 FROM credentials c
 		 JOIN principals p ON p.id = c.principal_id
-		 WHERE p.username = ? AND c.name = ?
+		 WHERE c.principal_id = ? AND c.name = ?
 		   AND c.principal_id IS NOT NULL AND c.launcher_id IS NULL
 		   AND c.revoked_at IS NULL`,
-		username, name,
-	).Scan(&credID, &createdAt, &principalID, &principalName)
+		principalID, name,
+	).Scan(&credID, &createdAt, &principalName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// No active credential with this name: distinguish documented
-			// revoked history (conflict) from a name that never existed
-			// (not found). Neither branch mutates any row.
+			// No active credential with this name owned by this exact
+			// Principal: distinguish documented revoked history (conflict)
+			// from a name that never existed (not found). Neither branch
+			// mutates any row.
 			var history int
 			err = tx.QueryRow(
 				`SELECT COUNT(*) FROM credentials c
 				 JOIN principals p ON p.id = c.principal_id
-				 WHERE p.username = ? AND c.name = ?
+				 WHERE c.principal_id = ? AND c.name = ?
 				   AND c.principal_id IS NOT NULL AND c.launcher_id IS NULL`,
-				username, name,
+				principalID, name,
 			).Scan(&history)
 			if err != nil {
 				return nil, "", fmt.Errorf("cannot check credential history: %w", err)
@@ -312,7 +320,7 @@ func rotatePrincipalCredential(db *sql.DB, username, name string) (*PrincipalCre
 			if history > 0 {
 				return nil, "", fmt.Errorf("credential %q is revoked: %w", name, ErrCredentialRevoked)
 			}
-			return nil, "", fmt.Errorf("credential %q not found for principal %q: %w", name, username, ErrCredentialNotFound)
+			return nil, "", fmt.Errorf("credential %q not found for principal %d: %w", name, principalID, ErrCredentialNotFound)
 		}
 		return nil, "", fmt.Errorf("cannot find credential: %w", err)
 	}

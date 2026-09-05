@@ -198,9 +198,9 @@ func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Reques
 	var principalID *int64
 	principalName := ""
 	if !scope.allPrincipals {
-		id := int64(scope.principal.ID)
+		id := scope.principal.ID
 		principalID = &id
-		principalName = scope.principal.Username
+		principalName = scope.principal.Name
 	}
 
 	creds, err := listPrincipalCredentialsForScope(a.DB, principalID)
@@ -275,20 +275,25 @@ func (a *App) handleRotatePrincipalCredential(w http.ResponseWriter, r *http.Req
 	}
 
 	// The target Principal is resolved under the request authority before any
-	// mutation: a Principal credential can only target its own Principal and
-	// any other username is a non-disclosing 404.
-	p, ok := a.resolveControlPrincipal(w, r, auth, username)
+	// mutation through the stable control target owner: a Principal
+	// credential can only target its own Principal — by its exact
+	// authenticated Principal ID, never by re-resolving the username — and
+	// any other username, or a stale authority whose Principal was deleted
+	// (even if the same username was recreated), is a non-disclosing 404. The
+	// rotation itself is scoped by that exact ID, so it can never mutate a
+	// recreated same-username Principal's credential.
+	target, ok := a.resolveControlPrincipal(w, r, auth, username)
 	if !ok {
 		return
 	}
 
-	cred, token, err := rotatePrincipalCredential(a.DB, p.Username, name)
+	cred, token, err := rotatePrincipalCredential(a.DB, target.ID, name)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
 		writeControlAudit(ctx, auditRecord{
 			Event:          "principal.credential_rotate",
-			PrincipalName:  p.Username,
+			PrincipalName:  target.Name,
 			CredentialName: name,
 			Result:         "error",
 			Duration:       duration,

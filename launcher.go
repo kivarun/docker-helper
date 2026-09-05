@@ -352,7 +352,7 @@ func computeEffectivePrincipalRoots(globalRoots []string, storedPrincipalRoots [
 // from one coherent policy snapshot: mutation paths hold the boundary around
 // their own validation (the same lifecycleMu -> a.mu ordering as config
 // reload), and read-only introspection goes through
-// resolveEffectivePrincipalRootsSnapshot.
+// resolvePrincipalEffectiveRootsSnapshot.
 func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error) {
 	cfg := a.getConfig()
 	globalRoots, err := resolveAllowedRootPaths(cfg.AllowedRoots)
@@ -382,30 +382,35 @@ type principalEffectiveRootsSnapshot struct {
 
 // resolvePrincipalEffectiveRootsSnapshot is the lock-owning read form of the
 // canonical effective-Principal-root resolution for read-only policy
-// introspection. It re-resolves the CURRENT target Principal inside the
-// lifecycle serialization boundary, so a concurrent Principal lifecycle
-// mutation (checked delete, disable, recreate under the same username)
-// linearizes wholly before or wholly after the whole projection: the response
-// describes the pre-mutation incarnation with its pre-mutation roots, the
-// post-mutation state, or fails principal_not_found for a disappeared target —
-// never a pre-mutation identity with post-mutation roots. It observes the same
-// coherent policy state model as createSessionAuthorized and the ownership
-// mutations, and resolveEffectivePrincipalRoots remains the canonical
-// effective-root semantic owner.
-func (a *App) resolvePrincipalEffectiveRootsSnapshot(username string) (*principalEffectiveRootsSnapshot, error) {
+// introspection. It resolves the Principal-control target through the stable
+// target owner (resolvePrincipalControlTarget) inside the lifecycle
+// serialization boundary, so a concurrent Principal lifecycle mutation
+// (checked delete, disable, recreate under the same username) linearizes
+// wholly before or wholly after the whole projection: the response describes
+// the pre-mutation incarnation with its pre-mutation roots, the post-mutation
+// state, or fails principal_not_found for a disappeared target — never a
+// pre-mutation identity with post-mutation roots. Authority semantics follow
+// the control target owner: Admin introspection follows the current
+// same-username Principal, a Principal credential resolves its exact
+// authenticated PrincipalID, so a stale authority never observes a recreated
+// same-username Principal. It observes the same coherent policy state model
+// as createSessionAuthorized and the ownership mutations, and
+// resolveEffectivePrincipalRoots remains the canonical effective-root
+// semantic owner.
+func (a *App) resolvePrincipalEffectiveRootsSnapshot(auth *operatorAuthority, username string) (*principalEffectiveRootsSnapshot, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 
-	p, err := findPrincipalByUsername(a.DB, username)
+	target, err := resolvePrincipalControlTarget(a.DB, auth, username)
 	if err != nil {
 		return nil, err
 	}
-	roots, err := a.resolveEffectivePrincipalRoots(int64(p.ID))
+	roots, err := a.resolveEffectivePrincipalRoots(target.ID)
 	if err != nil {
 		return nil, err
 	}
 	return &principalEffectiveRootsSnapshot{
-		Principal:    p.Username,
+		Principal:    target.Name,
 		AllowedRoots: roots,
 	}, nil
 }

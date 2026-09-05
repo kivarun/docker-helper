@@ -249,7 +249,8 @@ func TestLauncherListQuerySharedErrorSeam(t *testing.T) {
 	// first database query (admin authentication is in-memory), so a fail-all
 	// driver hits exactly that seam for the unfiltered and the global-ID
 	// request. With a Principal filter the scope resolution runs first (and
-	// must succeed); allow=3 lets it complete and fails the Launcher lookup.
+	// must succeed); allow=1 lets the narrow Principal identity lookup
+	// complete and fails the Launcher lookup.
 	cases := []struct {
 		name      string
 		path      string
@@ -258,7 +259,7 @@ func TestLauncherListQuerySharedErrorSeam(t *testing.T) {
 	}{
 		{name: "unfiltered", path: "/launchers", failQuery: true},
 		{name: "filtered by launcher id", path: "/launchers?launcher=dhl_00000000000000000000000000000000", failQuery: true},
-		{name: "filtered after principal scope resolved", path: "/launchers?principal=alice&launcher=agent", allow: 3},
+		{name: "filtered after principal scope resolved", path: "/launchers?principal=alice&launcher=agent", allow: 1},
 	}
 
 	for _, tc := range cases {

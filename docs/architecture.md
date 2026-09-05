@@ -760,7 +760,13 @@ Principal credentials are lifecycle resources of their owning Principal
   are never the target, a name that only has revoked history is
   `409 credential_revoked`, and a name that never existed is
   `404 credential_not_found`; the guarded mutation fails closed against
-  stale concurrent state, so a rotation never resurrects a revoked row;
+  stale concurrent state, so a rotation never resurrects a revoked row.
+  The mutation is scoped by the exact owning Principal ID resolved under the
+  request authority (an admin resolves the current same-name Principal; a
+  Principal credential uses its exact authenticated Principal ID), never
+  re-keyed by username, so a Principal deleted and recreated under the same
+  username can never rebind a rotation onto the replacement Principal's
+  credential — a vanished owner fails closed without mutating any row;
 - list CLI resolution needs no auth introspection: the list command sends
   one server-authorized Query and the daemon applies the scope-first rule
   (targeting commands such as `show`, `set`, `rotate`, and `delete` keep
@@ -1006,7 +1012,15 @@ and a malformed, missing, or foreign selector is the same non-disclosing
 a name lookup, never a global name scan). A Principal credential reaches
 only its own Principal (any other username is `404 principal_not_found`);
 an admin token targets the explicitly selected Principal; a Launcher
-credential cannot manage launchers.
+credential cannot manage launchers. Principal-control targeting is
+one stable-identity owner shared by every Principal-owned resource family:
+a Principal credential targets the exact Principal ID it authenticated as —
+the nested username is an authorization selector only — so a stale
+in-flight authority whose Principal was deleted fails closed as
+`404 principal_not_found` and never rebinds to a Principal recreated under
+the same username (IDs are AUTOINCREMENT and never reused); an admin
+authority is name-oriented at the API selector boundary and legitimately
+targets the current same-name Principal.
 
 Launcher projection: `{"id", "principal", "name", "enabled", "scope",
 "allowed_roots", "created_at"}`. Create response carries the one-time

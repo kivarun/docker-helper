@@ -186,74 +186,37 @@ func isErrLauncherCredentialExists(err error) bool {
 	return errors.Is(err, ErrLauncherCredentialExists)
 }
 
-// authorizePrincipalControlTarget validates that the request's authority may
-// target the Principal selector username, applying the established control
-// selector rule: an Admin authority may target any Principal, a Principal
-// credential only its own (a foreign selector is the non-disclosing 404), and
-// a structurally invalid authority is an internal authentication anomaly: it
-// fails closed as an internal error — it is never treated as Admin and never
-// resolves a Principal. It resolves no state.
-func (a *App) authorizePrincipalControlTarget(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, username string) bool {
-	ctx := r.Context()
-	switch {
-	case auth != nil && auth.class == operatorAuthorityAdmin:
-		// Admin authority may target any Principal.
-	case auth != nil && auth.class == operatorAuthorityPrincipal:
-		if username != auth.principal.PrincipalName {
-			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-			return false
-		}
-	default:
-		// A nil, zero/invalid, or unknown-class authority never reaches a
-		// Principal resolution.
-		opLog(ctx).Error("launcher principal lookup failed",
-			slog.String("operation", "launcher_principal_lookup"),
-			slog.String("error", "invalid operator authority"),
-		)
-		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return false
-	}
-	return true
-}
-
 // resolveControlPrincipal resolves the target Principal for a nested
-// /principals/{username}/launchers route under the given authority: the
-// Principal-target selector rule is applied by
-// authorizePrincipalControlTarget, then the current Principal is resolved by
-// username. Any other username returns a non-disclosing 404.
-func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, username string) (*PrincipalWithRoots, bool) {
-	ctx := r.Context()
-	if !a.authorizePrincipalControlTarget(w, r, auth, username) {
-		return nil, false
-	}
-	p, err := findPrincipalByUsername(a.DB, username)
+// /principals/{username}/... route under the given authority through the
+// stable Principal-control target owner (resolvePrincipalControlTarget): an
+// Admin authority resolves the current Principal named username, while a
+// Principal credential targets the exact Principal ID it authenticated as —
+// the nested username is an authorization selector only, so a stale authority
+// whose Principal was deleted (even if the same username was recreated) fails
+// closed as the non-disclosing 404 and never rebinds to the replacement
+// Principal. A foreign selector is the same non-disclosing 404.
+func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, username string) (*principalControlTarget, bool) {
+	target, err := resolvePrincipalControlTarget(a.DB, auth, username)
 	if err != nil {
-		if isErrPrincipalNotFound(err) {
-			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		} else {
-			opLog(ctx).Error("launcher principal lookup failed",
-				slog.String("operation", "launcher_principal_lookup"),
-				slog.String("error", err.Error()),
-			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
-		}
+		writePrincipalControlLookupError(r.Context(), w, err)
 		return nil, false
 	}
-	return p, true
+	return target, true
 }
 
 // requireScopedLauncher resolves the target Launcher for a Principal-scoped
 // Launcher route (/principals/{username}/launchers/{launcher}): the Principal
-// is resolved under the request authority, then the Launcher selector (name or
-// ID) is resolved under that Principal. Malformed, missing, foreign, and
+// target is resolved under the request authority through the stable control
+// target owner, then the Launcher selector (name or ID) is resolved under
+// that exact Principal identity. Malformed, missing, foreign, and
 // nonexistent selectors are the same non-disclosing 404 launcher_not_found.
 func (a *App) requireScopedLauncher(w http.ResponseWriter, r *http.Request, auth *operatorAuthority) (*LauncherWithPrincipal, bool) {
 	ctx := r.Context()
-	p, ok := a.resolveControlPrincipal(w, r, auth, r.PathValue("username"))
+	target, ok := a.resolveControlPrincipal(w, r, auth, r.PathValue("username"))
 	if !ok {
 		return nil, false
 	}
-	l, err := findLauncherForPrincipal(a.DB, int64(p.ID), r.PathValue("launcher"))
+	l, err := findLauncherForPrincipal(a.DB, target.ID, r.PathValue("launcher"))
 	if err != nil {
 		if isErrLauncherNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
@@ -299,7 +262,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, ok := a.resolveControlPrincipal(w, r, auth, username)
+	target, ok := a.resolveControlPrincipal(w, r, auth, username)
 	if !ok {
 		return
 	}
@@ -340,7 +303,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 	// effective-Principal-root resolution inside it (the current global policy
 	// snapshot is read inside the boundary, the same lifecycleMu -> a.mu
 	// ordering as config reload).
-	l, cred, token, err := a.createLauncherWithLifecycle(int64(p.ID), name, scopeMode, req.AllowedRoots, req.IssueCredential)
+	l, cred, token, err := a.createLauncherWithLifecycle(target.ID, name, scopeMode, req.AllowedRoots, req.IssueCredential)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -441,9 +404,9 @@ func (a *App) serveLauncherListQuery(w http.ResponseWriter, r *http.Request, aut
 	var principalID *int64
 	principalName := ""
 	if !scope.allPrincipals {
-		id := int64(scope.principal.ID)
+		id := scope.principal.ID
 		principalID = &id
-		principalName = scope.principal.Username
+		principalName = scope.principal.Name
 	}
 
 	launchers, err := queryLaunchersForScope(a.DB, principalID, launcherFilter)

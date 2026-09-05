@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 )
@@ -21,13 +22,17 @@ type effectiveRootsResponse struct {
 // the global allowed roots, every other Principal intersects with them. The
 // whole projection — target Principal identity and effective roots — is
 // resolved under the lifecycle serialization boundary
-// (resolvePrincipalEffectiveRootsSnapshot), so the response describes one
-// coherent policy state of one Principal incarnation even while a config
-// reload or a Principal/ownership lifecycle mutation is concurrent; a target
-// that disappears before the snapshot linearizes is the established
-// non-disclosing 404. Authentication stays outside the boundary; the
-// Principal-target selector rule is applied before the snapshot resolves the
-// selector. It is a policy introspection Query for shell completion and
+// (resolvePrincipalEffectiveRootsSnapshot) through the stable Principal-control
+// target owner, so the response describes one coherent policy state of one
+// Principal incarnation even while a config reload or a Principal/ownership
+// lifecycle mutation is concurrent; a target that disappears before the
+// snapshot linearizes is the established non-disclosing 404. Authority
+// semantics follow the stable target owner: an Admin authority follows the
+// current same-username Principal, a Principal credential resolves its exact
+// authenticated Principal ID, so a stale authority whose Principal was deleted
+// (even if the same username was recreated) fails closed as 404 and never
+// observes the replacement incarnation. Authentication stays outside the
+// boundary. It is a policy introspection Query for shell completion and
 // read-only tooling, in the same spirit as GET /auth: identity introspection
 // stays separate from this policy introspection, and neither widens the
 // other. Authorization follows the Principal control plane: an admin token
@@ -44,21 +49,18 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	username := r.PathValue("username")
-	if !a.authorizePrincipalControlTarget(w, r, authCtx, username) {
-		return
-	}
-
-	snap, err := a.resolvePrincipalEffectiveRootsSnapshot(username)
+	snap, err := a.resolvePrincipalEffectiveRootsSnapshot(authCtx, r.PathValue("username"))
 	if err != nil {
 		if isErrPrincipalNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 			return
 		}
-		opLog(ctx).Error("principal effective roots introspection failed",
-			slog.String("operation", "policy_introspect"),
-			slog.String("error", err.Error()),
-		)
+		if !errors.Is(err, errInvalidControlAuthority) {
+			opLog(ctx).Error("principal effective roots introspection failed",
+				slog.String("operation", "policy_introspect"),
+				slog.String("error", err.Error()),
+			)
+		}
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
