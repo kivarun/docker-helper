@@ -164,7 +164,11 @@ both modes via `install.sh` (user) and `install-system.sh` (system).
 
 ### Quick start: user mode
 
-Single-user deployment. No root required after package installation.
+Single-user deployment. Normal docker-helper user-mode operation runs
+non-root, but initial host preparation for a rootful Docker installation
+may require root — notably adding your user to the `docker` group (see
+[Docker access](#docker-access)). After that preparation, no root is
+required for package installation and everyday docker-helper use.
 Uses the current user's home directory as the default allowed root.
 
 ```bash
@@ -1167,6 +1171,18 @@ The RPM contains `/usr/share/selinux/docker_helper.pp` and its lifecycle script
 loads the module on an enforcing SELinux host. The DEB does not install the
 SELinux module. See [docs/selinux-support-plan.md](docs/selinux-support-plan.md)
 for the policy contract and outstanding distribution UAT.
+
+#### Why SELinux has no `selinux root add/remove`
+
+The AppArmor and SELinux sections are intentionally asymmetric. AppArmor
+keeps persistent backend-specific managed-root rules
+(`apparmor root list/add/remove`), while SELinux MAC state is owned by the
+Session lifecycle (`sessionMACCoordinator`): concrete Session workspaces
+receive the necessary SELinux file-context coverage and labels at session
+creation time. Authorization roots (global, principal, launcher) are not a
+second persistent SELinux root-management API, so there is no
+`selinux root add/remove` command; `docker-helper selinux check` remains a
+read-only diagnostic.
 
 Diagnose the installed SELinux policy foundation (read-only, requires root):
 

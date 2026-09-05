@@ -20,7 +20,14 @@ Deployment mode is determined by effective UID:
 \fISystem mode\fR (root): System Unix socket + loopback HTTP, system-wide configuration
 .SH QUICK START
 .SS User mode
-Single-user deployment. No root required after package installation.
+Single-user deployment. Normal docker-helper user-mode operation runs
+non-root, but initial host preparation for a rootful Docker installation
+may require root — notably adding the user to the
+\fBdocker\fR group (`sudo usermod -aG docker "$USER"`, logout and login
+required). After that preparation, no root is needed for package
+installation and everyday docker-helper use. System-mode Principals do
+not need \fBdocker\fR group membership; the root daemon mediates Docker
+access for them.
 .PP
 .RS 4
 .nf
@@ -357,6 +364,14 @@ docker-helper-owned file contexts against the active policy defaults (the
 installed executable is required; optional config/state/runtime paths are
 checked only when present). The command is read-only and never mutates
 SELinux state. It requires root and uses the existing host MAC authority.
+.PP
+Unlike the AppArmor command family, there is no
+\fBselinux root list/add/remove\fR. The asymmetry is intentional: AppArmor
+keeps persistent backend-specific managed-root rules, while SELinux MAC
+state is owned by the Session lifecycle — concrete Session workspaces
+receive the necessary SELinux coverage and labels at session creation
+time, and authorization roots are not a second persistent SELinux
+root-management API. \fBselinux check\fR remains a read-only diagnostic.
 .SS Agent Commands
 .TP
 .B docker-helper pull [\-\-system] [\-\-endpoint ENDPOINT] IMAGE
