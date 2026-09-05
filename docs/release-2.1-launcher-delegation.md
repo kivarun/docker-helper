@@ -243,7 +243,11 @@ For `launcher create`, defaults are:
 - credential issuance: offered interactively and enabled by default.
 
 An admin caller names the target explicitly with `--principal USER`, because
-the global admin token does not itself encode a Principal.
+the global admin token does not itself encode a Principal. When the
+default name is kept and the Principal already has a `default` Launcher,
+the CLI checks for that conflict first and fails with an actionable hint
+to pass `--name NAME` before prompting for a credential or issuing the
+create request.
 
 Supplying `--name` selects another stable Launcher name. A Launcher name
 is a Principal-scoped, path-safe identifier with the canonical grammar

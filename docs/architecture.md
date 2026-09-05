@@ -320,7 +320,7 @@ Create a new session. Requires admin token, Principal credential, or
 Launcher credential.
 
 ```
-docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--json]
+docker-helper session create [--system] [--endpoint ENDPOINT] [--token-file PATH] --workspace PATH [--principal USER] [--launcher LAUNCHER] [--json]
 ```
 
 Flags:
@@ -328,6 +328,8 @@ Flags:
 | Flag | Description |
 |------|-------------|
 | `--workspace PATH` | Workspace directory (required) |
+| `--principal USER` | Admin only: target the Principal's default Launcher |
+| `--launcher LAUNCHER` | Target a specific Launcher instead of the default |
 | `--json` | Output in JSON format |
 
 Returns the session ID, token, workspace, creation time, and expiration
@@ -335,7 +337,22 @@ time. The token is shown only once and cannot be retrieved later.
 
 The HTTP API additionally accepts explicit ownership selectors in the
 request body (`launcher_id` or `principal`, mutually exclusive; see
-Session selectors above). The CLI relies on default resolution: a
+Session selectors below). The CLI maps its selectors onto those wire
+fields after authenticating (`GET /auth`): an admin token may send
+`--principal USER` (mapped to `principal`) or `--launcher LAUNCHER` —
+an ID-shaped selector is forwarded as `launcher_id` as-is, a Launcher
+name is resolved to its global ID through the scope-first launcher list
+query under the named Principal (`GET /launchers?principal=USER&launcher=NAME`;
+a name without `--principal` is rejected locally because Launcher names
+are never searched globally). A principal or launcher credential may pass
+`--launcher LAUNCHER` only: the name is resolved within the credential's
+own visible scope the same way (a foreign or missing Launcher is the
+daemon's non-disclosing `launcher not found`) and `--principal` is
+rejected locally. With no selectors the request body carries only the
+workspace and no auth introspection happens; the authority-specific
+default resolution below applies unchanged. The two selectors are mutually
+exclusive on the wire: the resolved target is sent as either `principal`
+or `launcher_id`, never both. Default resolution without selectors: a
 Principal credential resolves its principal's default launcher, a
 Launcher credential is forced to its own launcher, and a user-mode admin
 token resolves the local daemon-owner default. A system-mode admin token
@@ -963,7 +980,11 @@ Principal's `default` Launcher. `create` and every individual Launcher
 command resolve the target Principal the same way: a Principal credential
 infers its Principal from `GET /auth`; an admin token must name the
 Principal explicitly with `--principal` (omission fails; the CLI never
-searches for a `default` Launcher globally). Principal inference is target
+searches for a `default` Launcher globally) — the single exception is an
+admin targeting an individual Launcher by its globally-unique `dhl_` ID,
+where the owning Principal is resolved from the daemon's scope-first
+launcher list query (`GET /launchers?launcher=<ID>`) instead of being
+named. Principal inference is target
 construction only — the daemon remains the authorization authority.
 `launcher list` is the exception: it is a scope-first list Query where the
 authenticated authority establishes the visible Launchers (admin without a
@@ -985,7 +1006,15 @@ at most one credential, a second create is the daemon's normal
 `409 launcher_credential_exists` conflict.
 `create` prompts for the credential choice on a
 TTY; non-interactive use must pass `--issue-credential` or
-`--no-credential` explicitly.
+`--no-credential` explicitly. When `--name` is omitted, `create` first
+checks whether the resolved Principal already has a `default` Launcher
+(`launcher show default`): if it does, the CLI fails locally with
+`launcher "default" already exists for principal "<user>"` plus a hint to
+use `--name NAME`, before prompting for a credential and without issuing
+the doomed create request; any other pre-flight failure (for example a
+transient server error) does not block the create, which remains atomic on
+the daemon (`409 launcher_exists` on a real conflict, message naming the
+Launcher and its Principal).
 
 ### Session selectors and default resolution
 

@@ -133,8 +133,20 @@ Machine-facing completion query: print the target Principal's effective allowed 
 Machine-facing completion query: print the effective allowed roots of the Launcher a Session created right now with this authority would use, one path per line.
 .SS Session Commands
 .TP
-.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-json]
+.B docker-helper session create [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] \-\-workspace PATH [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
 Create a new session for a workspace. With \-\-json, output in JSON format.
+The target Launcher is chosen by the daemon: without selectors the
+authenticated authority's default Launcher is used. With an admin token,
+\fB\-\-principal USER\fR targets that Principal's default Launcher and
+\fB\-\-launcher LAUNCHER\fR a specific Launcher (a name requires
+\fB\-\-principal USER\fR because names are principal-scoped; a Launcher ID
+\fIdhl_...\fR is forwarded as-is). With a principal or launcher credential,
+\fB\-\-launcher\fR accepts a name or ID visible to that credential; the name
+is resolved to the Launcher's global ID through the daemon's scope-first
+launcher list query, so a foreign or missing Launcher is the non-disclosing
+\fBlauncher not found\fR. \fB\-\-principal\fR is only valid with an admin
+token. The two selectors are mutually exclusive on the wire: the resolved
+target is sent as either \fBprincipal\fR or \fBlauncher_id\fR, never both.
 .TP
 .B docker-helper session list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-json]
 List active sessions. With \-\-json, output in JSON format.
@@ -232,7 +244,13 @@ Create a launcher for a principal. If \fB\-\-principal\fR is omitted it is
 inferred from the authenticated credential via \fBGET /auth\fR. The launcher
 name defaults to \fBdefault\fR; every principal always has its \fBdefault\fR
 launcher (provisioned automatically at principal creation), so an omitted
-name conflicts if the principal is fresh. Launcher names are path-safe identifiers:
+name conflicts if the principal already has a launcher named \fBdefault\fR.
+Before prompting for a credential the CLI checks for an existing
+\fBdefault\fR launcher and, when one exists, fails with
+\fBlauncher "<name>" already exists for principal "<user>"\fR and a hint to
+use \fB\-\-name NAME\fR instead of issuing a doomed create request; a
+transient pre-flight failure does not block the create, which remains
+atomic on the daemon. Launcher names are path-safe identifiers:
 1..63 characters of lowercase letters, digits, and internal hyphens, with
 alphanumeric first and last characters; the exact supplied value is
 accepted or rejected. With no \fB\-\-allowed-root\fR the scope is

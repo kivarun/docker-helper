@@ -1431,6 +1431,10 @@ The agent can verify its delegated identity through the HTTP API
 (`GET /auth` with the installed credential): the response reports
 `{"authority": "launcher", "principal": "alice", "launcher_id": "dhl_..."}`.
 
+With multiple launchers, the agent can target one explicitly at session
+creation time with `--launcher` (name or `dhl_...` ID); without it the
+daemon uses the principal's `default` launcher.
+
 Launcher-scoped sessions use the launcher's effective roots:
 
 - `inherit` scope (the default): the principal's allowed roots apply
@@ -1463,7 +1467,11 @@ credential the principal is inferred; the admin token must pass
 `--principal USER` explicitly.
 
 `launcher create` infers the principal from the authenticated credential
-when `--principal` is omitted. Upgrading from v2.0.0: existing principal
+when `--principal` is omitted. Without `--name` it targets the implicit
+`default` launcher and refuses locally with an actionable hint to pass
+`--name NAME` when that principal already has one, instead of prompting
+for a credential and failing on the daemon. Upgrading from v2.0.0:
+existing principal
 credentials and attributable sessions migrate automatically at first
 2.1 daemon startup (credentials preserved byte-for-byte; sessions move to
 the principal's `default` launcher). See
