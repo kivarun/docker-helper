@@ -153,6 +153,25 @@ func writeAuthFailure(ctx context.Context, r *http.Request, result string) {
 	})
 }
 
+// writeInvalidOperatorAuthority reports an authenticated operator authority
+// that is structurally invalid: an internal authentication anomaly, never an
+// unauthorized credential. It is audited as <auditScope>.database_error and
+// answered with the HTTP 500 internal_error contract, and the returned error
+// stops the handler before any endpoint scope resolution. The operator
+// authenticator emits only structurally valid authorities, so this is the
+// fail-closed gate for an authority that reaches a request wrapper invalid
+// anyway.
+func writeInvalidOperatorAuthority(ctx context.Context, r *http.Request, w http.ResponseWriter, auditScope, operation string, authority *operatorAuthority) error {
+	err := authority.validate()
+	writeAuthFailure(ctx, r, auditScope+".database_error")
+	opLog(ctx).Error("invalid operator authority",
+		slog.String("operation", operation),
+		slog.String("error", err.Error()),
+	)
+	writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+	return err
+}
+
 func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	_, ok := a.requireAdminWithHash(w, r)
 	return ok

@@ -11,11 +11,14 @@ import (
 // operatorAuthorityClass is the concrete operator bearer class of one
 // authenticated request. There are exactly three operator authorities; the
 // Session capability (dht_...) is a data-plane token and is never one of
-// them.
+// them. Zero is reserved for the invalid/uninitialized class: the zero value
+// of operatorAuthority is never a valid authority, so a missing
+// initialization fails closed instead of naming a privileged authority.
 type operatorAuthorityClass int
 
 const (
-	operatorAuthorityAdmin operatorAuthorityClass = iota
+	operatorAuthorityInvalid operatorAuthorityClass = iota
+	operatorAuthorityAdmin
 	operatorAuthorityPrincipal
 	operatorAuthorityLauncher
 )
@@ -31,6 +34,42 @@ type operatorAuthority struct {
 	class     operatorAuthorityClass
 	principal *PrincipalCredentialAuth // set iff class == operatorAuthorityPrincipal
 	launcher  *LauncherCredentialAuth  // set iff class == operatorAuthorityLauncher
+}
+
+// validate reports whether the authority is structurally coherent: the class
+// discriminator names exactly one of the three valid authorities and the
+// matching owner projection is present while the others are nil. The zero
+// value, a nil authority, a class without its owner projection, an owner
+// projection under the wrong class, and any unknown class value are all
+// invalid: an invalid authority is an internal authentication anomaly, never
+// an authorized credential.
+func (a *operatorAuthority) validate() error {
+	if a == nil {
+		return errors.New("nil operator authority")
+	}
+	switch a.class {
+	case operatorAuthorityAdmin:
+		if a.principal != nil || a.launcher != nil {
+			return errors.New("admin authority carries an owner projection")
+		}
+	case operatorAuthorityPrincipal:
+		if a.principal == nil {
+			return errors.New("principal authority carries no principal owner")
+		}
+		if a.launcher != nil {
+			return errors.New("principal authority carries a launcher owner")
+		}
+	case operatorAuthorityLauncher:
+		if a.launcher == nil {
+			return errors.New("launcher authority carries no launcher owner")
+		}
+		if a.principal != nil {
+			return errors.New("launcher authority carries a principal owner")
+		}
+	default:
+		return fmt.Errorf("unknown operator authority class %d", int(a.class))
+	}
+	return nil
 }
 
 // matchAdminToken returns the SHA-256 hash of the supplied bearer token and
@@ -94,12 +133,17 @@ func (f credentialAuthFailure) isExpectedAuthFailure() bool {
 // writing HTTP responses or audit records: admin constant-time comparison
 // first, then the single credential-token lookup. The concrete owner is
 // determined from persistent state, so the result names exactly one
-// authority class. Authentication only — authorization (which authority
-// classes a family accepts) remains with the request wrappers and endpoint
-// families.
+// authority class, and every returned authority passes structural
+// validation — the producer never emits a structurally invalid authority.
+// Authentication only — authorization (which authority classes a family
+// accepts) remains with the request wrappers and endpoint families.
 func (a *App) authenticateOperatorToken(token string) (*operatorAuthority, error) {
 	if _, matched := a.matchAdminToken(token); matched {
-		return &operatorAuthority{class: operatorAuthorityAdmin}, nil
+		auth := &operatorAuthority{class: operatorAuthorityAdmin}
+		if err := auth.validate(); err != nil {
+			return nil, err
+		}
+		return auth, nil
 	}
 
 	result, err := authenticateCredential(a.DB, token)
@@ -108,9 +152,17 @@ func (a *App) authenticateOperatorToken(token string) (*operatorAuthority, error
 	}
 	switch {
 	case result.Principal != nil:
-		return &operatorAuthority{class: operatorAuthorityPrincipal, principal: result.Principal}, nil
+		auth := &operatorAuthority{class: operatorAuthorityPrincipal, principal: result.Principal}
+		if err := auth.validate(); err != nil {
+			return nil, err
+		}
+		return auth, nil
 	case result.Launcher != nil:
-		return &operatorAuthority{class: operatorAuthorityLauncher, launcher: result.Launcher}, nil
+		auth := &operatorAuthority{class: operatorAuthorityLauncher, launcher: result.Launcher}
+		if err := auth.validate(); err != nil {
+			return nil, err
+		}
+		return auth, nil
 	default:
 		// A successful lookup must name exactly one concrete owner (the
 		// schema's concrete-owner CHECK guarantees it); anything else is a

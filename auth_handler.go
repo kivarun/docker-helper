@@ -20,10 +20,13 @@ type authResponse struct {
 // handleAuth reports the authenticated authority for the request. It accepts
 // an admin token, a Principal credential, or a Launcher credential through the
 // one canonical operator authenticator and only projects the result into the
-// wire response; it performs no owner resolution of its own. A Session token
-// does not authenticate this endpoint. Invalid/revoked/disabled credentials
-// follow the existing non-disclosing authentication semantics and receive no
-// identity information.
+// wire response; it performs no owner resolution of its own, and it switches
+// explicitly over the three valid authority classes. A structurally invalid
+// authority is an internal authentication anomaly, never an empty or default
+// projection: it is audited auth.database_error and answered with HTTP 500.
+// A Session token does not authenticate this endpoint. Invalid/revoked/
+// disabled credentials follow the existing non-disclosing authentication
+// semantics and receive no identity information.
 func (a *App) handleAuth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -50,6 +53,8 @@ func (a *App) handleAuth(w http.ResponseWriter, r *http.Request) {
 				LauncherID: authority.launcher.LauncherID,
 				Principal:  authority.launcher.PrincipalName,
 			})
+		default:
+			writeInvalidOperatorAuthority(ctx, r, w, "auth", "auth_introspect", authority)
 		}
 		return
 	}

@@ -122,11 +122,13 @@ func sessionToJSON(s Session) sessionJSON {
 
 // authenticateSessionControlRequest authenticates the Session-control request
 // authority (Session create/list/delete): an admin token, a Principal
-// credential, or a Launcher credential. It returns the common authenticated
-// operator authority on success; expected credential-authentication failures
-// are audited with the canonical Session-control classification and answered
-// with the non-disclosing 401 contract, and a database failure stays an
-// internal error.
+// credential, or a Launcher credential — the explicit Session-control
+// authority allow-list. It returns the common authenticated operator
+// authority on success; expected credential-authentication failures are
+// audited with the canonical Session-control classification and answered
+// with the non-disclosing 401 contract, and a structurally invalid authority
+// (an internal authentication anomaly, never an authorized credential) and a
+// database failure stay an internal error.
 func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.Request) (*operatorAuthority, error) {
 	ctx := r.Context()
 
@@ -141,7 +143,12 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 	// authorized for Session control within their ownership scope.
 	authority, err := a.authenticateOperatorToken(token)
 	if err == nil {
-		return authority, nil
+		switch authority.class {
+		case operatorAuthorityAdmin, operatorAuthorityPrincipal, operatorAuthorityLauncher:
+			return authority, nil
+		default:
+			return nil, writeInvalidOperatorAuthority(ctx, r, w, "credential", "session_auth", authority)
+		}
 	}
 
 	outcome := classifyCredentialAuthFailure(err)
@@ -331,7 +338,9 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 // populateSessionAudit adds credential provenance fields to a session-control
 // audit record from a non-admin operator authority: a Principal credential
 // names its Principal and credential, a Launcher credential additionally
-// names its Launcher. Admin carries no credential provenance.
+// names its Launcher. Admin carries no credential provenance, and a
+// structurally invalid authority fabricates none: only the three valid
+// classes contribute provenance.
 func (a *App) populateSessionAudit(rec *auditRecord, auth *operatorAuthority) {
 	switch {
 	case auth == nil || auth.class == operatorAuthorityAdmin:

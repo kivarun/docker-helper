@@ -8,12 +8,15 @@ import (
 // authenticatePrincipalControlRequest authenticates a Principal-owned
 // resource control request: Launcher management, Principal-credential
 // management, and Principal effective-roots introspection. The authority
-// ceiling is an admin token or a Principal credential; a valid Launcher
-// credential is authenticated but carries no control-plane authority, so it
-// is rejected with the family's non-disclosing unauthorized contract —
-// authentication success and authorization rejection remain distinct states
-// (never a credential.not_found). Expected credential-auth failures are
-// audited as <auditScope>.unauthorized and a database failure as
+// ceiling is an explicit allow-list: an admin token or a Principal credential
+// is authorized, a valid Launcher credential is authenticated but carries no
+// control-plane authority and is rejected with the family's non-disclosing
+// unauthorized contract — authentication success and authorization rejection
+// remain distinct states (never a credential.not_found) — and a structurally
+// invalid authority is an internal authentication anomaly, never an
+// unauthorized credential, so it maps to the family's
+// <auditScope>.database_error contract (HTTP 500). Expected credential-auth
+// failures are audited as <auditScope>.unauthorized and a database failure as
 // <auditScope>.database_error (HTTP 500); auditScope is the endpoint family's
 // audit event prefix ("launcher", "credential", ...).
 func (a *App) authenticatePrincipalControlRequest(w http.ResponseWriter, r *http.Request, auditScope string) (*operatorAuthority, error) {
@@ -28,12 +31,16 @@ func (a *App) authenticatePrincipalControlRequest(w http.ResponseWriter, r *http
 
 	authority, err := a.authenticateOperatorToken(token)
 	if err == nil {
-		if authority.class == operatorAuthorityLauncher {
+		switch authority.class {
+		case operatorAuthorityAdmin, operatorAuthorityPrincipal:
+			return authority, nil
+		case operatorAuthorityLauncher:
 			writeAuthFailure(ctx, r, auditScope+".unauthorized")
 			writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
 			return nil, nil
+		default:
+			return nil, writeInvalidOperatorAuthority(ctx, r, w, auditScope, "control_auth", authority)
 		}
-		return authority, nil
 	}
 
 	if !classifyCredentialAuthFailure(err).isExpectedAuthFailure() {
@@ -81,10 +88,13 @@ type listQueryScope struct {
 // visible scope. A foreign selector under a Principal credential and an
 // unknown selector are both the established non-disclosing 404 (a foreign
 // selector is rejected without any lookup). A Launcher credential never
-// reaches this resolver: authenticatePrincipalControlRequest rejects it.
+// reaches this resolver: authenticatePrincipalControlRequest rejects it. A
+// structurally invalid authority fails closed as an internal error: it is
+// never an all-Principals scope and never resolves to a Principal.
 func (a *App) resolveListScope(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, filter string) (listQueryScope, bool) {
 	ctx := r.Context()
-	if auth.class == operatorAuthorityAdmin {
+	switch {
+	case auth != nil && auth.class == operatorAuthorityAdmin:
 		if filter == "" {
 			return listQueryScope{allPrincipals: true}, true
 		}
@@ -102,25 +112,35 @@ func (a *App) resolveListScope(w http.ResponseWriter, r *http.Request, auth *ope
 			return listQueryScope{}, false
 		}
 		return listQueryScope{principal: p}, true
-	}
-
-	// Principal credential: its own Principal is the whole visible scope.
-	if filter != "" && filter != auth.principal.PrincipalName {
-		writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		return listQueryScope{}, false
-	}
-	p, err := findPrincipalByUsername(a.DB, auth.principal.PrincipalName)
-	if err != nil {
-		if isErrPrincipalNotFound(err) {
+	case auth != nil && auth.class == operatorAuthorityPrincipal:
+		// Principal credential: its own Principal is the whole visible scope.
+		if filter != "" && filter != auth.principal.PrincipalName {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		} else {
-			opLog(ctx).Error("launcher principal lookup failed",
-				slog.String("operation", "launcher_principal_lookup"),
-				slog.String("error", err.Error()),
-			)
-			writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return listQueryScope{}, false
 		}
+		p, err := findPrincipalByUsername(a.DB, auth.principal.PrincipalName)
+		if err != nil {
+			if isErrPrincipalNotFound(err) {
+				writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+			} else {
+				opLog(ctx).Error("launcher principal lookup failed",
+					slog.String("operation", "launcher_principal_lookup"),
+					slog.String("error", err.Error()),
+				)
+				writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+			}
+			return listQueryScope{}, false
+		}
+		return listQueryScope{principal: p}, true
+	default:
+		// A nil, zero/invalid, or unknown-class authority is an internal
+		// authentication anomaly: fail closed as an internal error — never
+		// an all-Principals scope, never a resolved Principal.
+		opLog(ctx).Error("list scope invalid operator authority",
+			slog.String("operation", "launcher_principal_lookup"),
+			slog.String("error", "invalid operator authority"),
+		)
+		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return listQueryScope{}, false
 	}
-	return listQueryScope{principal: p}, true
 }

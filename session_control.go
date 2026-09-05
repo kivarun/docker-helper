@@ -234,12 +234,16 @@ func (a *App) appResolvedGlobalRoots() ([]string, error) {
 
 // resolveCreateLauncher maps an authenticated authority and create selectors
 // to the target Launcher ID, implementing the create-selector matrix. It never
-// mutates state and never discloses foreign-ownership existence.
+// mutates state and never discloses foreign-ownership existence. A structurally
+// invalid authority fails closed as an invalid selector: it never gains Admin
+// selector reach.
 func (a *App) resolveCreateLauncher(auth *operatorAuthority, sel createSelector) (string, error) {
 	if sel.launcherID != "" && sel.principal != "" {
 		return "", ErrConflictingSelectors
 	}
 	switch {
+	case auth == nil:
+		return "", ErrInvalidSelector
 	case auth.class == operatorAuthorityAdmin:
 		userMode := a.getConfig().Mode == ModeUser
 		switch {
