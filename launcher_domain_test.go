@@ -716,6 +716,42 @@ func TestLauncherCredentialMetadataNoSecret(t *testing.T) {
 	}
 }
 
+// TestLauncherCredentialIssueTokenFailureUsesCanonicalSeam proves issuance
+// generates the bearer through the shared generateCredentialTokenFn seam. A
+// forced token-generation failure fails the issuance, creates no credential
+// row, and returns no bearer.
+func TestLauncherCredentialIssueTokenFailureUsesCanonicalSeam(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "quinn")
+
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig := generateCredentialTokenFn
+	generateCredentialTokenFn = func() (string, error) {
+		return "", errors.New("forced token failure")
+	}
+	defer func() { generateCredentialTokenFn = orig }()
+
+	cred, token, err := issueLauncherCredential(db, l.ID)
+	if err == nil {
+		t.Fatal("expected token-generation failure to fail issuance")
+	}
+	if cred != nil || token != "" {
+		t.Errorf("failed issuance must not return a projection or bearer, got cred=%v token=%q", cred, token)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM credentials WHERE launcher_id=?`, l.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected no credential row after token failure, got %d", count)
+	}
+}
+
 func TestLauncherCredentialRotate(t *testing.T) {
 	db := openFreshTestDB(t)
 	globalRoots := []string{testAllowedRootDir(t)}
@@ -758,6 +794,53 @@ func TestLauncherCredentialRotate(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected 1 credential row, got %d", count)
+	}
+}
+
+// TestLauncherCredentialRotateTokenFailureUsesCanonicalSeam proves rotation
+// generates the replacement bearer through the shared generateCredentialTokenFn
+// seam. A forced token-generation failure fails the rotation, leaves the old
+// credential ID and its bearer valid, and returns no new bearer — the old
+// token hash is unchanged because nothing commits.
+func TestLauncherCredentialRotateTokenFailureUsesCanonicalSeam(t *testing.T) {
+	db := openFreshTestDB(t)
+	globalRoots := []string{testAllowedRootDir(t)}
+	pid, _ := setupPrincipalForLauncherTest(t, db, globalRoots, "rena")
+
+	l, _, _, err := createLauncher(db, pid, "work", LauncherScopeInherit, nil, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, oldToken, err := issueLauncherCredential(db, l.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig := generateCredentialTokenFn
+	generateCredentialTokenFn = func() (string, error) {
+		return "", errors.New("forced token failure")
+	}
+	defer func() { generateCredentialTokenFn = orig }()
+
+	newCred, newToken, err := rotateLauncherCredential(db, l.ID)
+	if err == nil {
+		t.Fatal("expected token-generation failure to fail rotation")
+	}
+	if newCred != nil || newToken != "" {
+		t.Errorf("failed rotation must not return a projection or bearer, got cred=%v token=%q", newCred, newToken)
+	}
+
+	// The old credential row is unchanged (same ID) and its bearer remains
+	// valid.
+	if _, err := authenticateCredential(db, oldToken); err != nil {
+		t.Errorf("old bearer must still authenticate after failed rotation: %v", err)
+	}
+	var id string
+	if err := db.QueryRow(`SELECT id FROM credentials WHERE launcher_id=?`, l.ID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if id != cred.ID {
+		t.Errorf("credential ID changed on failed rotation: %s -> %s", cred.ID, id)
 	}
 }
 

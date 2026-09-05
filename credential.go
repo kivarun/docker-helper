@@ -51,9 +51,15 @@ func generateCredentialToken() (string, error) {
 	return credentialTokenPrefix + hex.EncodeToString(b), nil
 }
 
-// generateCredentialTokenFn is a narrow test seam for credential token
-// generation, matching the package's existing seam style (for example
-// OSUserLookup). Production always calls generateCredentialToken.
+// generateCredentialTokenFn is the single test seam for credential bearer
+// generation: every credential bearer issuance and rotation — Principal
+// credential insertion, Principal credential rotation, Launcher credential
+// issuance, and Launcher credential rotation — generates its bearer through
+// this seam, so token-generation failure is testable uniformly across every
+// credential lifecycle operation. The production default is
+// generateCredentialToken (matching the package's existing seam style, for
+// example OSUserLookup). There is one bearer format and one generator
+// implementation.
 var generateCredentialTokenFn = generateCredentialToken
 
 // insertPrincipalCredentialInTx inserts a Principal credential within the given
@@ -325,7 +331,7 @@ func rotatePrincipalCredential(db *sql.DB, principalID int64, name string) (*Pri
 		return nil, "", fmt.Errorf("cannot find credential: %w", err)
 	}
 
-	token, err := generateCredentialToken()
+	token, err := generateCredentialTokenFn()
 	if err != nil {
 		return nil, "", err
 	}

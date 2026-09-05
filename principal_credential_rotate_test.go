@@ -245,6 +245,41 @@ func TestPrincipalCredentialRotateErrors(t *testing.T) {
 	}
 }
 
+// TestPrincipalCredentialRotateTokenFailureUsesCanonicalSeam proves
+// rotation generates the replacement bearer through the shared
+// generateCredentialTokenFn seam, the same primitive credential creation
+// uses. A forced token-generation failure fails the rotation, returns no new
+// bearer, leaves the old token hash unchanged, and the old bearer keeps
+// authenticating — a rotation either atomically replaces the secret or does
+// nothing.
+func TestPrincipalCredentialRotateTokenFailureUsesCanonicalSeam(t *testing.T) {
+	app, callerToken, _ := principalCredentialApp(t, "seamrot")
+	rotateToken := createNamedCredential(t, app, "seamrot", "default")
+
+	orig := generateCredentialTokenFn
+	generateCredentialTokenFn = func() (string, error) {
+		return "", errors.New("forced token failure")
+	}
+	defer func() { generateCredentialTokenFn = orig }()
+
+	cred, token, err := rotatePrincipalCredential(app.DB, principalIDByName(t, app.DB, "seamrot"), "default")
+	if err == nil {
+		t.Fatal("expected token-generation failure to fail rotation")
+	}
+	if cred != nil || token != "" {
+		t.Errorf("failed rotation must not return a projection or bearer, got cred=%v token=%q", cred, token)
+	}
+
+	// No new bearer was returned (the call returned empty), the old token
+	// hash is unchanged, and the old bearer still authenticates.
+	if _, err := authenticateCredential(app.DB, rotateToken); err != nil {
+		t.Errorf("rotate credential bearer must still authenticate after failed rotation: %v", err)
+	}
+	if _, err := authenticateCredential(app.DB, callerToken); err != nil {
+		t.Errorf("caller bearer must still authenticate after failed rotation: %v", err)
+	}
+}
+
 // TestPrincipalCredentialRotateAtomicityOnFailure proves a rotation whose
 // durable UPDATE fails leaves the old bearer working and creates no second
 // credential row: the operation commits or does nothing.

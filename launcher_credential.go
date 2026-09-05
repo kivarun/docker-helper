@@ -27,7 +27,7 @@ type launcherCredential struct {
 // launcher_id, name NULL, principal_id NULL) within the given transaction and
 // returns its metadata and bearer secret exactly once.
 func issueLauncherCredentialInTx(tx *sql.Tx, launcherID string) (*launcherCredential, string, error) {
-	token, err := generateCredentialToken()
+	token, err := generateCredentialTokenFn()
 	if err != nil {
 		return nil, "", err
 	}
@@ -137,7 +137,7 @@ func rotateLauncherCredential(db *sql.DB, launcherID string) (*launcherCredentia
 		return nil, "", fmt.Errorf("cannot find launcher credential: %w", err)
 	}
 
-	token, err := generateCredentialToken()
+	token, err := generateCredentialTokenFn()
 	if err != nil {
 		return nil, "", err
 	}
