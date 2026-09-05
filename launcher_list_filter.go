@@ -25,14 +25,14 @@ func (a *App) handleListLaunchersQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
 	a.serveLauncherFilteredList(w, r, auth, r.URL.Query().Get("principal"), launcherFilter)
 }
 
-func (a *App) serveLauncherFilteredList(w http.ResponseWriter, r *http.Request, auth *controlAuthority, principalFilter, launcherFilter string) {
+func (a *App) serveLauncherFilteredList(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, principalFilter, launcherFilter string) {
 	started := time.Now()
 	ctx := r.Context()
 

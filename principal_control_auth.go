@@ -1,69 +1,42 @@
 package main
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
-	"errors"
 	"log/slog"
 	"net/http"
 )
 
-// controlAuthority is the authenticated authority for Principal-owned resource
-// control planes (Launcher control and Principal credential control): an admin
-// token, or a Principal credential (which may only act on its own Principal).
-// A Launcher credential does NOT carry control-plane authority.
-type controlAuthority struct {
-	isAdmin             bool
-	principalCredential *PrincipalCredentialAuth
-}
-
-// authenticateControlRequest tries admin token first, then credential
-// authentication. auditScope is the endpoint family's audit event prefix
-// ("launcher", "credential", ...); auth failures are audited as
-// <auditScope>.parse_failed / <auditScope>.unauthorized /
-// <auditScope>.database_error. It returns the authority context on success, or
-// writes the non-disclosing unauthorized response and returns nil.
-func (a *App) authenticateControlRequest(w http.ResponseWriter, r *http.Request, auditScope string) (*controlAuthority, error) {
+// authenticatePrincipalControlRequest authenticates a Principal-owned
+// resource control request: Launcher management, Principal-credential
+// management, and Principal effective-roots introspection. The authority
+// ceiling is an admin token or a Principal credential; a valid Launcher
+// credential is authenticated but carries no control-plane authority, so it
+// is rejected with the family's non-disclosing unauthorized contract —
+// authentication success and authorization rejection remain distinct states
+// (never a credential.not_found). Expected credential-auth failures are
+// audited as <auditScope>.unauthorized and a database failure as
+// <auditScope>.database_error (HTTP 500); auditScope is the endpoint family's
+// audit event prefix ("launcher", "credential", ...).
+func (a *App) authenticatePrincipalControlRequest(w http.ResponseWriter, r *http.Request, auditScope string) (*operatorAuthority, error) {
 	ctx := r.Context()
 
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		writeAuthFailure(ctx, r, auditScope+".parse_failed")
-		writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
-		return nil, nil
-	}
-
 	token, ok := parseBearerToken(r)
-	if !ok || token == "" {
+	if !ok {
 		writeAuthFailure(ctx, r, auditScope+".parse_failed")
 		writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
 		return nil, nil
 	}
 
-	// Check admin token.
-	tokenHash := sha256.Sum256([]byte(token))
-	currentHash := a.getAdminTokenHash()
-	if subtle.ConstantTimeCompare(tokenHash[:], currentHash[:]) == 1 {
-		return &controlAuthority{isAdmin: true}, nil
-	}
-
-	// Try credential authentication.
-	authResult, err := authenticateCredential(a.DB, token)
+	authority, err := a.authenticateOperatorToken(token)
 	if err == nil {
-		if authResult.Launcher != nil {
-			// A valid Launcher credential has no control-plane authority.
-			// Treat as unauthorized, non-disclosing.
+		if authority.class == operatorAuthorityLauncher {
 			writeAuthFailure(ctx, r, auditScope+".unauthorized")
 			writeUnauthorizedControl(ctx, w, controlUnauthorizedMessage(auditScope))
 			return nil, nil
 		}
-		return &controlAuthority{principalCredential: authResult.Principal}, nil
+		return authority, nil
 	}
 
-	if !errors.Is(err, ErrCredentialNotFound) &&
-		!errors.Is(err, ErrCredentialRevoked) &&
-		!errors.Is(err, ErrPrincipalDisabled) &&
-		!errors.Is(err, ErrLauncherDisabled) {
+	if !classifyCredentialAuthFailure(err).isExpectedAuthFailure() {
 		writeAuthFailure(ctx, r, auditScope+".database_error")
 		opLog(ctx).Error("control auth database error",
 			slog.String("operation", "control_auth"),
@@ -108,10 +81,10 @@ type listQueryScope struct {
 // visible scope. A foreign selector under a Principal credential and an
 // unknown selector are both the established non-disclosing 404 (a foreign
 // selector is rejected without any lookup). A Launcher credential never
-// reaches this resolver: authenticateControlRequest rejects it.
-func (a *App) resolveListScope(w http.ResponseWriter, r *http.Request, auth *controlAuthority, filter string) (listQueryScope, bool) {
+// reaches this resolver: authenticatePrincipalControlRequest rejects it.
+func (a *App) resolveListScope(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, filter string) (listQueryScope, bool) {
 	ctx := r.Context()
-	if auth.isAdmin {
+	if auth.class == operatorAuthorityAdmin {
 		if filter == "" {
 			return listQueryScope{allPrincipals: true}, true
 		}
@@ -132,11 +105,11 @@ func (a *App) resolveListScope(w http.ResponseWriter, r *http.Request, auth *con
 	}
 
 	// Principal credential: its own Principal is the whole visible scope.
-	if filter != "" && filter != auth.principalCredential.PrincipalName {
+	if filter != "" && filter != auth.principal.PrincipalName {
 		writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return listQueryScope{}, false
 	}
-	p, err := findPrincipalByUsername(a.DB, auth.principalCredential.PrincipalName)
+	p, err := findPrincipalByUsername(a.DB, auth.principal.PrincipalName)
 	if err != nil {
 		if isErrPrincipalNotFound(err) {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")

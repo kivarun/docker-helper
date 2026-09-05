@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -122,26 +120,15 @@ func sessionToJSON(s Session) sessionJSON {
 	}
 }
 
-// sessionControlAuthority represents the authenticated authority for session
-// control operations: create, list, and delete sessions.
-type sessionControlAuthority struct {
-	isAdmin             bool
-	principalCredential *PrincipalCredentialAuth
-	launcherCredential  *LauncherCredentialAuth
-}
-
-// authenticateSessionControlRequest tries admin token first, then Principal or
-// Launcher credential. It returns the authority context on success.
-func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.Request) (*sessionControlAuthority, error) {
+// authenticateSessionControlRequest authenticates the Session-control request
+// authority (Session create/list/delete): an admin token, a Principal
+// credential, or a Launcher credential. It returns the common authenticated
+// operator authority on success; expected credential-authentication failures
+// are audited with the canonical Session-control classification and answered
+// with the non-disclosing 401 contract, and a database failure stays an
+// internal error.
+func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.Request) (*operatorAuthority, error) {
 	ctx := r.Context()
-
-	// Parse the Authorization header.
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		writeAuthFailure(ctx, r, "parse_failed")
-		writeUnauthorizedSessionControl(ctx, w)
-		return nil, nil
-	}
 
 	token, ok := parseBearerToken(r)
 	if !ok {
@@ -150,35 +137,15 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 		return nil, nil
 	}
 
-	if token == "" {
-		writeAuthFailure(ctx, r, "parse_failed")
-		writeUnauthorizedSessionControl(ctx, w)
-		return nil, nil
-	}
-
-	// Check admin token.
-	tokenHash := sha256.Sum256([]byte(token))
-	currentHash := a.getAdminTokenHash()
-	if subtle.ConstantTimeCompare(tokenHash[:], currentHash[:]) == 1 {
-		return &sessionControlAuthority{isAdmin: true}, nil
-	}
-
-	// Try credential authentication. A valid credential is Principal-owned or
-	// Launcher-owned; both are authorized for Session control within their
-	// ownership scope.
-	authResult, err := authenticateCredential(a.DB, token)
+	// A valid credential is Principal-owned or Launcher-owned; both are
+	// authorized for Session control within their ownership scope.
+	authority, err := a.authenticateOperatorToken(token)
 	if err == nil {
-		if authResult.Launcher != nil {
-			return &sessionControlAuthority{launcherCredential: authResult.Launcher}, nil
-		}
-		return &sessionControlAuthority{principalCredential: authResult.Principal}, nil
+		return authority, nil
 	}
 
-	// Credential auth failed. Check if it's a database error.
-	if !errors.Is(err, ErrCredentialNotFound) &&
-		!errors.Is(err, ErrCredentialRevoked) &&
-		!errors.Is(err, ErrPrincipalDisabled) &&
-		!errors.Is(err, ErrLauncherDisabled) {
+	outcome := classifyCredentialAuthFailure(err)
+	if !outcome.isExpectedAuthFailure() {
 		writeAuthFailure(ctx, r, "credential.database_error")
 		opLog(ctx).Error("session control auth database error",
 			slog.String("operation", "session_auth"),
@@ -188,16 +155,19 @@ func (a *App) authenticateSessionControlRequest(w http.ResponseWriter, r *http.R
 		return nil, err
 	}
 
-	// Single auth failure for any credential reason. Launcher-disabled and
-	// principal-disabled map to the same non-disclosing codes already used for
-	// principal credentials.
-	resultCode := "credential.not_found"
-	if errors.Is(err, ErrCredentialRevoked) {
-		resultCode = "credential.revoked"
-	} else if errors.Is(err, ErrPrincipalDisabled) {
-		resultCode = "principal.disabled"
+	// Canonical Session-control audit classification for expected failures.
+	var result string
+	switch outcome {
+	case credentialAuthRevoked:
+		result = "credential.revoked"
+	case credentialAuthPrincipalDisabled:
+		result = "principal.disabled"
+	case credentialAuthLauncherDisabled:
+		result = "launcher.disabled"
+	default:
+		result = "credential.not_found"
 	}
-	writeAuthFailure(ctx, r, resultCode)
+	writeAuthFailure(ctx, r, result)
 	writeUnauthorizedSessionControl(ctx, w)
 	return nil, err
 }
@@ -359,19 +329,21 @@ func (a *App) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // populateSessionAudit adds credential provenance fields to a session-control
-// audit record from a non-admin authority.
-func (a *App) populateSessionAudit(rec *auditRecord, auth *sessionControlAuthority) {
+// audit record from a non-admin operator authority: a Principal credential
+// names its Principal and credential, a Launcher credential additionally
+// names its Launcher. Admin carries no credential provenance.
+func (a *App) populateSessionAudit(rec *auditRecord, auth *operatorAuthority) {
 	switch {
-	case auth == nil || auth.isAdmin:
+	case auth == nil || auth.class == operatorAuthorityAdmin:
 		return
-	case auth.launcherCredential != nil:
-		rec.PrincipalName = auth.launcherCredential.PrincipalName
-		rec.LauncherID = auth.launcherCredential.LauncherID
-		rec.LauncherName = auth.launcherCredential.LauncherName
-		rec.CredentialID = auth.launcherCredential.CredentialID
-	case auth.principalCredential != nil:
-		rec.PrincipalName = auth.principalCredential.PrincipalName
-		rec.CredentialID = auth.principalCredential.CredentialID
+	case auth.class == operatorAuthorityLauncher:
+		rec.PrincipalName = auth.launcher.PrincipalName
+		rec.LauncherID = auth.launcher.LauncherID
+		rec.LauncherName = auth.launcher.LauncherName
+		rec.CredentialID = auth.launcher.CredentialID
+	case auth.class == operatorAuthorityPrincipal:
+		rec.PrincipalName = auth.principal.PrincipalName
+		rec.CredentialID = auth.principal.CredentialID
 	}
 }
 

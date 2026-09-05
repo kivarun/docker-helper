@@ -31,7 +31,7 @@ type effectiveRootsResponse struct {
 func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	authCtx, err := a.authenticateControlRequest(w, r, "principal")
+	authCtx, err := a.authenticatePrincipalControlRequest(w, r, "principal")
 	if err != nil || authCtx == nil {
 		return
 	}

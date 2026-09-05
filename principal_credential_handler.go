@@ -153,7 +153,7 @@ func (a *App) handleCreatePrincipalCredential(w http.ResponseWriter, r *http.Req
 // list of one Principal's credentials. The path Principal is a required
 // single-Principal filter of the shared scope-first list rule.
 func (a *App) handleListPrincipalCredentials(w http.ResponseWriter, r *http.Request) {
-	auth, err := a.authenticateControlRequest(w, r, "credential")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "credential")
 	if err != nil || auth == nil {
 		return
 	}
@@ -170,7 +170,7 @@ func (a *App) handleListPrincipalCredentials(w http.ResponseWriter, r *http.Requ
 // maximum visibility and the optional ?principal= filter can only narrow it;
 // the daemon remains the authorization authority.
 func (a *App) handleListPrincipalCredentialsForAuthority(w http.ResponseWriter, r *http.Request) {
-	auth, err := a.authenticateControlRequest(w, r, "credential")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "credential")
 	if err != nil || auth == nil {
 		return
 	}
@@ -182,7 +182,7 @@ func (a *App) handleListPrincipalCredentialsForAuthority(w http.ResponseWriter, 
 // Principal filter resolve into one authorized query predicate. A filtered or
 // single-Principal list audits the target Principal; the unfiltered admin
 // list covers every Principal.
-func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Request, auth *controlAuthority, principalFilter string) {
+func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, principalFilter string) {
 	started := time.Now()
 
 	ctx := r.Context()
@@ -190,7 +190,7 @@ func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Reques
 	// The list is scope-first: the authenticated authority defines the
 	// effective visibility and the optional Principal filter can only narrow
 	// it — never expand it (a foreign Principal filter is a non-disclosing
-	// 404). A Launcher credential is rejected by authentication.
+	// 404). A Launcher credential is rejected by authorization.
 	scope, ok := a.resolveListScope(w, r, auth, principalFilter)
 	if !ok {
 		return
@@ -245,7 +245,7 @@ func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Reques
 // credential; a Principal credential may rotate only its own principal's.
 func (a *App) handleRotatePrincipalCredential(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "credential")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "credential")
 	if err != nil || auth == nil {
 		return
 	}

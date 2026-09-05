@@ -307,7 +307,7 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 // existence/ownership) that linearizes before the create commits prevents that
 // Session, and one that linearizes after leaves the created Session intact.
 // It never mutates policy; it only consumes it.
-func (a *App) createSessionAuthorized(auth *sessionControlAuthority, sel createSelector, workspace string) (*CreatedSession, error) {
+func (a *App) createSessionAuthorized(auth *operatorAuthority, sel createSelector, workspace string) (*CreatedSession, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
 
@@ -319,7 +319,7 @@ func (a *App) createSessionAuthorized(auth *sessionControlAuthority, sel createS
 }
 
 func (a *App) createSession(workspace string) (*CreatedSession, error) {
-	return a.createSessionAuthorized(&sessionControlAuthority{isAdmin: true}, createSelector{}, workspace)
+	return a.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace)
 }
 
 // listSessions returns all active sessions in admin scope.

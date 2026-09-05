@@ -52,8 +52,50 @@ func TestCredentialAuthValid(t *testing.T) {
 	if auth.Principal.CredentialID != cred.ID {
 		t.Errorf("credential ID = %q, want %q", auth.Principal.CredentialID, cred.ID)
 	}
-	if len(auth.Principal.PrincipalAllowedRoots) == 0 {
-		t.Error("expected at least one allowed root")
+}
+
+// TestCredentialAuthSkipsAllowedRootsQuery proves Principal credential
+// authentication carries identity/provenance only: the authentication issues
+// exactly the two owner-resolution queries (credential lookup, Principal
+// lookup) and never reads principal_allowed_roots — policy stays owned by the
+// session/policy paths. Under the removed PrincipalAllowedRoots flow a third
+// query (principal_allowed_roots) would fail this throttled driver.
+func TestCredentialAuthSkipsAllowedRootsQuery(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test.db"
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := initializeDatabase(db); err != nil {
+		t.Fatal(err)
+	}
+	globalRoots := []string{testAllowedRootDir(t)}
+	home := filepath.Join(globalRoots[0], "home", "rootskipuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"rootskipuser": home})
+	if _, err := createPrincipal(db, "rootskipuser", globalRoots); err != nil {
+		t.Fatalf("createPrincipal() error: %v", err)
+	}
+	_, token, err := createPrincipalCredential(db, "rootskipuser", "oc")
+	if err != nil {
+		t.Fatalf("createPrincipalCredential() error: %v", err)
+	}
+
+	// Permit exactly the two authentication owner-resolution queries; the
+	// removed principal_allowed_roots read would be query three.
+	fq := newFailQueryAfterDB(t, path, 2, errMockQueryFail)
+	defer fq.Close()
+
+	res, err := authenticateCredential(fq, token)
+	if err != nil {
+		t.Fatalf("authenticateCredential under throttled queries: %v", err)
+	}
+	if res.Principal == nil || res.Principal.PrincipalName != "rootskipuser" {
+		t.Fatalf("expected Principal auth result for rootskipuser, got %+v", res)
 	}
 }
 

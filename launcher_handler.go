@@ -34,18 +34,18 @@ func applyLauncherTargetProvenance(rec *auditRecord, l *LauncherWithPrincipal) {
 // and credential_id; target provenance from a resolved Launcher or target
 // credential always wins. Admin callers carry no credential provenance, and
 // Launcher credentials cannot perform control-plane operations.
-func applyControlAuditProvenance(rec *auditRecord, auth *controlAuthority) {
-	if auth == nil || auth.principalCredential == nil {
+func applyControlAuditProvenance(rec *auditRecord, auth *operatorAuthority) {
+	if auth == nil || auth.class != operatorAuthorityPrincipal {
 		return
 	}
 	if rec.PrincipalName == "" {
-		rec.PrincipalName = auth.principalCredential.PrincipalName
+		rec.PrincipalName = auth.principal.PrincipalName
 	}
 	if rec.InitiatorCredentialID == "" {
-		rec.InitiatorCredentialID = auth.principalCredential.CredentialID
+		rec.InitiatorCredentialID = auth.principal.CredentialID
 	}
 	if rec.CredentialID == "" {
-		rec.CredentialID = auth.principalCredential.CredentialID
+		rec.CredentialID = auth.principal.CredentialID
 	}
 }
 
@@ -53,7 +53,7 @@ func applyControlAuditProvenance(rec *auditRecord, auth *controlAuthority) {
 // target provenance of the resolved or resulting Launcher (when one was
 // resolved or created) and the initiating provenance of the authenticated
 // control authority applied.
-func writeLauncherControlAudit(ctx context.Context, rec auditRecord, auth *controlAuthority, l *LauncherWithPrincipal) {
+func writeLauncherControlAudit(ctx context.Context, rec auditRecord, auth *operatorAuthority, l *LauncherWithPrincipal) {
 	applyLauncherTargetProvenance(&rec, l)
 	applyControlAuditProvenance(&rec, auth)
 	writeRequestContextAudit(ctx, rec)
@@ -62,7 +62,7 @@ func writeLauncherControlAudit(ctx context.Context, rec auditRecord, auth *contr
 // writeControlAudit writes a Principal-owned resource control audit record
 // with the initiating provenance of the authenticated control authority
 // applied (target provenance is carried by the record itself).
-func writeControlAudit(ctx context.Context, rec auditRecord, auth *controlAuthority) {
+func writeControlAudit(ctx context.Context, rec auditRecord, auth *operatorAuthority) {
 	applyControlAuditProvenance(&rec, auth)
 	writeRequestContextAudit(ctx, rec)
 }
@@ -190,10 +190,10 @@ func isErrLauncherCredentialExists(err error) bool {
 // /principals/{username}/launchers route under the given authority. For a
 // Principal credential only its own Principal is reachable; any other username
 // returns a non-disclosing 404.
-func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, auth *controlAuthority, username string) (*PrincipalWithRoots, bool) {
+func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, username string) (*PrincipalWithRoots, bool) {
 	ctx := r.Context()
-	if !auth.isAdmin {
-		if username != auth.principalCredential.PrincipalName {
+	if auth.class != operatorAuthorityAdmin {
+		if username != auth.principal.PrincipalName {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
 			return nil, false
 		}
@@ -219,7 +219,7 @@ func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, au
 // is resolved under the request authority, then the Launcher selector (name or
 // ID) is resolved under that Principal. Malformed, missing, foreign, and
 // nonexistent selectors are the same non-disclosing 404 launcher_not_found.
-func (a *App) requireScopedLauncher(w http.ResponseWriter, r *http.Request, auth *controlAuthority) (*LauncherWithPrincipal, bool) {
+func (a *App) requireScopedLauncher(w http.ResponseWriter, r *http.Request, auth *operatorAuthority) (*LauncherWithPrincipal, bool) {
 	ctx := r.Context()
 	p, ok := a.resolveControlPrincipal(w, r, auth, r.PathValue("username"))
 	if !ok {
@@ -243,7 +243,7 @@ func (a *App) requireScopedLauncher(w http.ResponseWriter, r *http.Request, auth
 
 func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -370,7 +370,7 @@ func (a *App) handleCreateLauncher(w http.ResponseWriter, r *http.Request) {
 // one Principal's Launchers. The path Principal is a required single-Principal
 // filter of the shared scope-first list rule.
 func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -387,7 +387,7 @@ func (a *App) handleListLaunchers(w http.ResponseWriter, r *http.Request) {
 // visibility and the optional ?principal= filter can only narrow it; the
 // daemon remains the authorization authority.
 func (a *App) handleListLaunchersForAuthority(w http.ResponseWriter, r *http.Request) {
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -398,7 +398,7 @@ func (a *App) handleListLaunchersForAuthority(w http.ResponseWriter, r *http.Req
 // rule: the authority scope plus the optional Principal filter resolve into
 // one authorized query predicate. A filtered or single-Principal list audits
 // the target Principal; the unfiltered admin list covers every Principal.
-func (a *App) serveLauncherList(w http.ResponseWriter, r *http.Request, auth *controlAuthority, principalFilter string) {
+func (a *App) serveLauncherList(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, principalFilter string) {
 	started := time.Now()
 	ctx := r.Context()
 
@@ -447,7 +447,7 @@ func (a *App) serveLauncherList(w http.ResponseWriter, r *http.Request, auth *co
 }
 
 func (a *App) handleShowLauncher(w http.ResponseWriter, r *http.Request) {
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -460,7 +460,7 @@ func (a *App) handleShowLauncher(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -560,7 +560,7 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -668,7 +668,7 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 
 func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -733,7 +733,7 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleIssueLauncherCredential(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -784,7 +784,7 @@ func (a *App) handleIssueLauncherCredential(w http.ResponseWriter, r *http.Reque
 }
 
 func (a *App) handleGetLauncherCredential(w http.ResponseWriter, r *http.Request) {
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -815,7 +815,7 @@ func (a *App) handleGetLauncherCredential(w http.ResponseWriter, r *http.Request
 
 func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}
@@ -864,7 +864,7 @@ func (a *App) handleRotateLauncherCredential(w http.ResponseWriter, r *http.Requ
 
 func (a *App) handleDeleteLauncherCredential(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
-	auth, err := a.authenticateControlRequest(w, r, "launcher")
+	auth, err := a.authenticatePrincipalControlRequest(w, r, "launcher")
 	if err != nil || auth == nil {
 		return
 	}

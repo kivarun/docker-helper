@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -161,7 +160,10 @@ func (a *App) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 
 // requireAdminWithHash authenticates the request and returns the hash of the
 // authorizing token on success. The caller can use this hash to verify the
-// token is still current at a later commit point (e.g., rotation).
+// token is still current at a later commit point (e.g., rotation). It is the
+// dedicated admin-only request wrapper over the shared matchAdminToken
+// primitive: a non-admin bearer is answered from the token comparison alone
+// and never causes a credential database lookup.
 func (a *App) requireAdminWithHash(w http.ResponseWriter, r *http.Request) ([sha256.Size]byte, bool) {
 	ctx := r.Context()
 	token, ok := parseBearerToken(r)
@@ -171,9 +173,8 @@ func (a *App) requireAdminWithHash(w http.ResponseWriter, r *http.Request) ([sha
 		return [sha256.Size]byte{}, false
 	}
 
-	tokenHash := sha256.Sum256([]byte(token))
-	currentHash := a.getAdminTokenHash()
-	if subtle.ConstantTimeCompare(tokenHash[:], currentHash[:]) != 1 {
+	tokenHash, matched := a.matchAdminToken(token)
+	if !matched {
 		writeAuthFailure(ctx, r, "admin.wrong_token")
 		writeUnauthorizedAdmin(ctx, w)
 		return [sha256.Size]byte{}, false

@@ -2840,7 +2840,13 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 		t.Fatal("expected a Principal credential auth result")
 	}
 	stalePrincipalID := auth.Principal.PrincipalID
-	staleAllowedRoots := auth.Principal.PrincipalAllowedRoots
+	// Stale policy snapshot, read from the persisted policy owner: this
+	// regression pins that a stale policy snapshot must not survive through
+	// persistence even when the earlier authentication observed it.
+	staleAllowedRoots, err := readPrincipalAllowedRoots(app.DB, stalePrincipalID)
+	if err != nil {
+		t.Fatalf("readPrincipalAllowedRoots: %v", err)
+	}
 
 	// Provision the principal's default Launcher (the Session-creation owner in
 	// the cutover model).

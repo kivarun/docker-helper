@@ -27,19 +27,19 @@ type sessionControlScope struct {
 // scope it may manage. It never queries or preloads Launcher IDs: Principal and
 // Launcher scopes are expressed directly as SQL predicates at use time. Query
 // failures are therefore never swallowed into an empty set here.
-func (a *App) resolveSessionControlScope(auth *sessionControlAuthority) (sessionControlScope, error) {
+func (a *App) resolveSessionControlScope(auth *operatorAuthority) (sessionControlScope, error) {
 	switch {
 	case auth == nil:
 		return sessionControlScope{}, errors.New("session control authorization missing")
-	case auth.isAdmin:
+	case auth.class == operatorAuthorityAdmin:
 		// Admin manages all Launcher-owned Sessions.
 		return sessionControlScope{admin: true}, nil
-	case auth.launcherCredential != nil:
+	case auth.class == operatorAuthorityLauncher:
 		// A Launcher credential controls exactly itself.
-		return sessionControlScope{launcherID: auth.launcherCredential.LauncherID}, nil
-	case auth.principalCredential != nil:
+		return sessionControlScope{launcherID: auth.launcher.LauncherID}, nil
+	case auth.class == operatorAuthorityPrincipal:
 		// A Principal credential controls the Sessions owned by its Launchers.
-		return sessionControlScope{principalID: auth.principalCredential.PrincipalID}, nil
+		return sessionControlScope{principalID: auth.principal.PrincipalID}, nil
 	default:
 		return sessionControlScope{}, errors.New("session control authorization has no scope")
 	}
@@ -235,12 +235,12 @@ func (a *App) appResolvedGlobalRoots() ([]string, error) {
 // resolveCreateLauncher maps an authenticated authority and create selectors
 // to the target Launcher ID, implementing the create-selector matrix. It never
 // mutates state and never discloses foreign-ownership existence.
-func (a *App) resolveCreateLauncher(auth *sessionControlAuthority, sel createSelector) (string, error) {
+func (a *App) resolveCreateLauncher(auth *operatorAuthority, sel createSelector) (string, error) {
 	if sel.launcherID != "" && sel.principal != "" {
 		return "", ErrConflictingSelectors
 	}
 	switch {
-	case auth.isAdmin:
+	case auth.class == operatorAuthorityAdmin:
 		userMode := a.getConfig().Mode == ModeUser
 		switch {
 		case sel.launcherID != "":
@@ -263,22 +263,22 @@ func (a *App) resolveCreateLauncher(auth *sessionControlAuthority, sel createSel
 		default:
 			return "", ErrMissingLauncherSelector
 		}
-	case auth.launcherCredential != nil:
+	case auth.class == operatorAuthorityLauncher:
 		if sel.principal != "" {
 			return "", ErrInvalidSelector
 		}
-		if sel.launcherID != "" && sel.launcherID != auth.launcherCredential.LauncherID {
+		if sel.launcherID != "" && sel.launcherID != auth.launcher.LauncherID {
 			return "", ErrLauncherNotFound
 		}
-		return auth.launcherCredential.LauncherID, nil
-	case auth.principalCredential != nil:
+		return auth.launcher.LauncherID, nil
+	case auth.class == operatorAuthorityPrincipal:
 		if sel.principal != "" {
 			return "", ErrInvalidSelector
 		}
 		if sel.launcherID != "" {
-			return a.resolveLauncherWithinPrincipal(sel.launcherID, auth.principalCredential.PrincipalID)
+			return a.resolveLauncherWithinPrincipal(sel.launcherID, auth.principal.PrincipalID)
 		}
-		return findDefaultLauncher(a.DB, auth.principalCredential.PrincipalID)
+		return findDefaultLauncher(a.DB, auth.principal.PrincipalID)
 	default:
 		return "", ErrInvalidSelector
 	}
@@ -305,7 +305,7 @@ func (a *App) resolveLauncherWithinPrincipal(launcherID string, principalID int6
 // resolveCreatePolicy resolves the complete Session-creation context (Launcher
 // target, ownership names, and three-level effective root scope) for an
 // authenticated authority and create request. It never mutates state.
-func (a *App) resolveCreatePolicy(auth *sessionControlAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
+func (a *App) resolveCreatePolicy(auth *operatorAuthority, sel createSelector, workspace string) (*sessionCreatePolicy, error) {
 	launcherID, err := a.resolveCreateLauncher(auth, sel)
 	if err != nil {
 		return nil, err

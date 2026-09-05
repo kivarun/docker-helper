@@ -366,12 +366,15 @@ var ErrCredentialRevoked = errors.New("credential revoked")
 // is disabled.
 var ErrLauncherDisabled = errors.New("launcher disabled")
 
-// PrincipalCredentialAuth contains the information needed to authorize a principal request.
+// PrincipalCredentialAuth carries the authentication provenance of one
+// Principal credential: the credential, its owning Principal, and the
+// Principal's internal ID. It is identity only — policy (allowed roots) is
+// never carried through authentication; the session/policy paths read
+// current policy from the canonical owners.
 type PrincipalCredentialAuth struct {
-	PrincipalID           int64
-	PrincipalName         string
-	CredentialID          string
-	PrincipalAllowedRoots []string
+	PrincipalID   int64
+	PrincipalName string
+	CredentialID  string
 }
 
 // LauncherCredentialAuth contains the information needed to authorize a
@@ -443,8 +446,7 @@ func authenticateCredential(db *sql.DB, token string) (*credentialAuthResult, er
 }
 
 // authenticatePrincipalCredentialOwner completes authentication for a
-// Principal-owned credential, preserving the existing Principal credential
-// semantics including allowed roots.
+// Principal-owned credential, carrying identity/provenance only.
 func authenticatePrincipalCredentialOwner(db *sql.DB, credID string, principalID int64) (*credentialAuthResult, error) {
 	var principalName string
 	var enabled int
@@ -462,36 +464,11 @@ func authenticatePrincipalCredentialOwner(db *sql.DB, credID string, principalID
 		return nil, ErrPrincipalDisabled
 	}
 
-	// Fetch allowed roots for the principal.
-	rows, err := db.Query(
-		`SELECT root_path FROM principal_allowed_roots
-		 WHERE principal_id = ?
-		 ORDER BY root_path`,
-		principalID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("cannot query allowed roots: %w", err)
-	}
-	defer rows.Close()
-
-	principalAllowedRoots := []string{}
-	for rows.Next() {
-		var rootPath string
-		if err := rows.Scan(&rootPath); err != nil {
-			return nil, fmt.Errorf("cannot scan allowed root: %w", err)
-		}
-		principalAllowedRoots = append(principalAllowedRoots, rootPath)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate allowed roots: %w", err)
-	}
-
 	return &credentialAuthResult{
 		Principal: &PrincipalCredentialAuth{
-			PrincipalID:           principalID,
-			PrincipalName:         principalName,
-			CredentialID:          credID,
-			PrincipalAllowedRoots: principalAllowedRoots,
+			PrincipalID:   principalID,
+			PrincipalName: principalName,
+			CredentialID:  credID,
 		},
 	}, nil
 }
