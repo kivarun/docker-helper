@@ -65,7 +65,7 @@ func TestPrincipalCredentialRotateAtomicReplacement(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var resp createCredentialResponse
+	var resp principalCredentialTokenResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -105,9 +105,9 @@ func TestPrincipalCredentialRotateAtomicReplacement(t *testing.T) {
 	}
 
 	// Exactly one credential row named default remains for the principal.
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "rotuser"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "rotuser"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope: %v", err)
 	}
 	active := 0
 	for _, c := range creds {
@@ -130,7 +130,7 @@ func TestPrincipalCredentialRotateSelfRotation(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var resp createCredentialResponse
+	var resp principalCredentialTokenResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -202,9 +202,9 @@ func TestPrincipalCredentialRotateErrors(t *testing.T) {
 	// uses the still-valid caller credential.
 	deadToken := createNamedCredential(t, app, "alice", "dead")
 	revokedID := ""
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "alice"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "alice"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope: %v", err)
 	}
 	for _, c := range creds {
 		if c.Name == "dead" {
@@ -214,7 +214,7 @@ func TestPrincipalCredentialRotateErrors(t *testing.T) {
 	if revokedID == "" {
 		t.Fatal("fixture error: dead credential not found")
 	}
-	if _, err := revokeCredential(app.DB, revokedID); err != nil {
+	if _, err := revokePrincipalCredential(app.DB, revokedID); err != nil {
 		t.Fatalf("revokeCredential: %v", err)
 	}
 	// Precondition: the revoked bearer can no longer authenticate at all.
@@ -276,9 +276,9 @@ func TestPrincipalCredentialRotateAtomicityOnFailure(t *testing.T) {
 	if _, err := authenticateCredential(realDB, rotateToken); err != nil {
 		t.Errorf("unrotated credential bearer must still authenticate: %v", err)
 	}
-	creds, err := listCredentialsForScope(realDB, principalIDPtr(t, realDB, "atomicrot"))
+	creds, err := listPrincipalCredentialsForScope(realDB, principalIDPtr(t, realDB, "atomicrot"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope: %v", err)
 	}
 	active := 0
 	for _, c := range creds {
@@ -318,7 +318,7 @@ func TestPrincipalCredentialListScope(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("own list: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var own listCredentialsResponse
+	var own listPrincipalCredentialsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &own); err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestPrincipalCredentialListScope(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin list: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var admin listCredentialsResponse
+	var admin listPrincipalCredentialsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &admin); err != nil {
 		t.Fatal(err)
 	}
@@ -387,8 +387,8 @@ func TestPrincipalCredentialRotateAfterNameReuse(t *testing.T) {
 	).Scan(&aID, &aHash); err != nil {
 		t.Fatalf("read credential A: %v", err)
 	}
-	if _, err := revokeCredential(app.DB, aID); err != nil {
-		t.Fatalf("revokeCredential(A): %v", err)
+	if _, err := revokePrincipalCredential(app.DB, aID); err != nil {
+		t.Fatalf("revokePrincipalCredential(A): %v", err)
 	}
 	// The historical state that must survive the rotation of B is A's
 	// post-revoke row (revoked token hash and revoked_at timestamp).
@@ -404,9 +404,9 @@ func TestPrincipalCredentialRotateAfterNameReuse(t *testing.T) {
 
 	// Name reuse: B is the new active 'default' next to revoked historical A.
 	bOldToken := createNamedCredential(t, app, "reuserot", "default")
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuserot"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuserot"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope: %v", err)
 	}
 	if len(creds) != 3 { // caller + revoked A + active B
 		t.Fatalf("fixture: expected 3 credential rows, got %d", len(creds))
@@ -426,7 +426,7 @@ func TestPrincipalCredentialRotateAfterNameReuse(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate after name reuse: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var resp createCredentialResponse
+	var resp principalCredentialTokenResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -467,9 +467,9 @@ func TestPrincipalCredentialRotateAfterNameReuse(t *testing.T) {
 
 	// Exactly one active 'default' remains and no additional credential row
 	// was created (still caller + A + B).
-	creds, err = listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuserot"))
+	creds, err = listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuserot"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope after rotate: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope after rotate: %v", err)
 	}
 	active := 0
 	for _, c := range creds {
@@ -520,9 +520,9 @@ func TestPrincipalCredentialRotateFailsClosedOnStaleState(t *testing.T) {
 	if _, err := authenticateCredential(realDB, oldToken); err != nil {
 		t.Errorf("old bearer must still authenticate after fail-closed rotation: %v", err)
 	}
-	creds, err := listCredentialsForScope(realDB, principalIDPtr(t, realDB, "stalerot"))
+	creds, err := listPrincipalCredentialsForScope(realDB, principalIDPtr(t, realDB, "stalerot"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope: %v", err)
 	}
 	activeDefault := 0
 	for _, c := range creds {
@@ -548,7 +548,7 @@ func TestPrincipalCredentialRotateAuditProvenance(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("rotate: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var resp createCredentialResponse
+	var resp principalCredentialTokenResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +596,7 @@ func TestPrincipalCredentialRotateAdminAuditNoInitiator(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin rotate: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var resp createCredentialResponse
+	var resp principalCredentialTokenResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}

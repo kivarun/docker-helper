@@ -1005,7 +1005,7 @@ func TestLauncherCredentialNotRevocableByPrincipalPath(t *testing.T) {
 	}
 
 	// Attempting to revoke the Launcher credential behaves as unknown.
-	changed, err := revokeCredential(db, launcherCred.ID)
+	changed, err := revokePrincipalCredential(db, launcherCred.ID)
 	if err == nil || !isErrCredentialNotFound(err) {
 		t.Fatalf("expected ErrCredentialNotFound for launcher credential revoke, got changed=%v err=%v", changed, err)
 	}
@@ -1050,7 +1050,7 @@ func TestPrincipalRevokeUnchanged(t *testing.T) {
 		t.Fatalf("token should authenticate before revoke: %v", err)
 	}
 
-	changed, err := revokeCredential(db, pc.ID)
+	changed, err := revokePrincipalCredential(db, pc.ID)
 	if err != nil || !changed {
 		t.Fatalf("principal revoke should succeed with changed=true, got changed=%v err=%v", changed, err)
 	}
@@ -1059,7 +1059,7 @@ func TestPrincipalRevokeUnchanged(t *testing.T) {
 		t.Fatalf("revoked credential should not authenticate, got err=%v", err)
 	}
 	// Idempotent second revoke returns changed=false.
-	changed2, err := revokeCredential(db, pc.ID)
+	changed2, err := revokePrincipalCredential(db, pc.ID)
 	if err != nil || changed2 {
 		t.Fatalf("second revoke should be idempotent changed=false, got changed=%v err=%v", changed2, err)
 	}

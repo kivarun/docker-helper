@@ -11,15 +11,15 @@ func isErrCredentialNotFound(err error) bool {
 	return errors.Is(err, ErrCredentialNotFound)
 }
 
-func isErrCredentialExists(err error) bool {
-	return errors.Is(err, ErrCredentialExists)
+func isErrPrincipalCredentialExists(err error) bool {
+	return errors.Is(err, ErrPrincipalCredentialExists)
 }
 
-type createCredentialRequest struct {
+type createPrincipalCredentialRequest struct {
 	Name string `json:"name"`
 }
 
-type credentialJSON struct {
+type principalCredentialJSON struct {
 	ID        string  `json:"id"`
 	Principal string  `json:"principal"`
 	Name      string  `json:"name"`
@@ -27,31 +27,31 @@ type credentialJSON struct {
 	RevokedAt *string `json:"revoked_at"`
 }
 
-type createCredentialResponse struct {
-	OK         bool           `json:"ok"`
-	Credential credentialJSON `json:"credential"`
-	Token      string         `json:"token"`
+type principalCredentialTokenResponse struct {
+	OK         bool                    `json:"ok"`
+	Credential principalCredentialJSON `json:"credential"`
+	Token      string                  `json:"token"`
 }
 
-type listCredentialsResponse struct {
-	OK          bool             `json:"ok"`
-	Credentials []credentialJSON `json:"credentials"`
+type listPrincipalCredentialsResponse struct {
+	OK          bool                      `json:"ok"`
+	Credentials []principalCredentialJSON `json:"credentials"`
 }
 
-type revokeCredentialResponse struct {
+type revokePrincipalCredentialResponse struct {
 	OK      bool   `json:"ok"`
 	ID      string `json:"id"`
 	Changed bool   `json:"changed"`
 	Message string `json:"message,omitempty"`
 }
 
-func credentialToJSON(c CredentialWithPrincipal) credentialJSON {
+func principalCredentialToJSON(c PrincipalCredential) principalCredentialJSON {
 	revokedAt := (*string)(nil)
 	if c.RevokedAt != nil {
 		s := c.RevokedAt.Format(time.RFC3339)
 		revokedAt = &s
 	}
-	return credentialJSON{
+	return principalCredentialJSON{
 		ID:        c.ID,
 		Principal: c.PrincipalName,
 		Name:      c.Name,
@@ -60,7 +60,7 @@ func credentialToJSON(c CredentialWithPrincipal) credentialJSON {
 	}
 }
 
-func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleCreatePrincipalCredential(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if !a.requireAdmin(w, r) {
@@ -81,7 +81,7 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req createCredentialRequest
+	var req createPrincipalCredentialRequest
 	if err := decodeJSONRequest(w, r, &req); err != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		writeRequestContextAudit(ctx, auditRecord{
@@ -121,10 +121,8 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isErrPrincipalNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-		case isErrCredentialExists(err):
+		case isErrPrincipalCredentialExists(err):
 			writeError(ctx, w, http.StatusConflict, "credential_exists", "credential already exists")
-		case isErrInvalidAllowedRoot(err):
-			writeError(ctx, w, http.StatusBadRequest, "invalid_allowed_root", "invalid allowed root")
 		default:
 			opLog(ctx).Error("credential create failed",
 				slog.String("operation", "credential_create"),
@@ -144,17 +142,17 @@ func (a *App) handleCreateCredential(w http.ResponseWriter, r *http.Request) {
 		Duration:       duration,
 	})
 
-	writeJSONRaw(ctx, w, http.StatusCreated, createCredentialResponse{
+	writeJSONRaw(ctx, w, http.StatusCreated, principalCredentialTokenResponse{
 		OK:         true,
-		Credential: credentialToJSON(*result),
+		Credential: principalCredentialToJSON(*result),
 		Token:      token,
 	})
 }
 
-// handleListCredentials serves GET /principals/{username}/credentials: the
+// handleListPrincipalCredentials serves GET /principals/{username}/credentials: the
 // list of one Principal's credentials. The path Principal is a required
 // single-Principal filter of the shared scope-first list rule.
-func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleListPrincipalCredentials(w http.ResponseWriter, r *http.Request) {
 	auth, err := a.authenticateControlRequest(w, r, "credential")
 	if err != nil || auth == nil {
 		return
@@ -167,11 +165,11 @@ func (a *App) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 	a.servePrincipalCredentialList(w, r, auth, username)
 }
 
-// handleListCredentialsForAuthority serves GET /credentials: the scope-first
+// handleListPrincipalCredentialsForAuthority serves GET /credentials: the scope-first
 // principal credential list. The authenticated authority establishes the
 // maximum visibility and the optional ?principal= filter can only narrow it;
 // the daemon remains the authorization authority.
-func (a *App) handleListCredentialsForAuthority(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleListPrincipalCredentialsForAuthority(w http.ResponseWriter, r *http.Request) {
 	auth, err := a.authenticateControlRequest(w, r, "credential")
 	if err != nil || auth == nil {
 		return
@@ -205,7 +203,7 @@ func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Reques
 		principalName = scope.principal.Username
 	}
 
-	creds, err := listCredentialsForScope(a.DB, principalID)
+	creds, err := listPrincipalCredentialsForScope(a.DB, principalID)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
 		writeControlAudit(ctx, auditRecord{
@@ -222,12 +220,12 @@ func (a *App) servePrincipalCredentialList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp := listCredentialsResponse{
+	resp := listPrincipalCredentialsResponse{
 		OK:          true,
-		Credentials: make([]credentialJSON, 0, len(creds)),
+		Credentials: make([]principalCredentialJSON, 0, len(creds)),
 	}
 	for _, c := range creds {
-		resp.Credentials = append(resp.Credentials, credentialToJSON(c))
+		resp.Credentials = append(resp.Credentials, principalCredentialToJSON(c))
 	}
 
 	writeControlAudit(ctx, auditRecord{
@@ -319,14 +317,14 @@ func (a *App) handleRotatePrincipalCredential(w http.ResponseWriter, r *http.Req
 		Duration:       duration,
 	}, auth)
 
-	writeJSONRaw(ctx, w, http.StatusOK, createCredentialResponse{
+	writeJSONRaw(ctx, w, http.StatusOK, principalCredentialTokenResponse{
 		OK:         true,
-		Credential: credentialToJSON(*cred),
+		Credential: principalCredentialToJSON(*cred),
 		Token:      token,
 	})
 }
 
-func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleRevokePrincipalCredential(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 
 	if !a.requireAdmin(w, r) {
@@ -349,7 +347,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 
 	// Pre-read credential metadata before any mutation so that audit
 	// always has full context even if the mutation fails.
-	cred, preReadErr := findCredentialByID(a.DB, id)
+	cred, preReadErr := findPrincipalCredentialByID(a.DB, id)
 	if preReadErr != nil {
 		duration := time.Since(started).Round(time.Millisecond).String()
 		if isErrCredentialNotFound(preReadErr) {
@@ -374,7 +372,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changed, err := revokeCredential(a.DB, id)
+	changed, err := revokePrincipalCredential(a.DB, id)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {
@@ -394,7 +392,7 @@ func (a *App) handleRevokeCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := revokeCredentialResponse{
+	resp := revokePrincipalCredentialResponse{
 		OK:      true,
 		ID:      id,
 		Changed: changed,

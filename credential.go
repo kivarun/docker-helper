@@ -11,22 +11,22 @@ import (
 )
 
 var (
-	ErrCredentialNotFound    = errors.New("credential not found")
-	ErrCredentialExists      = errors.New("credential already exists")
-	ErrInvalidCredentialName = errors.New("invalid credential name")
+	ErrCredentialNotFound             = errors.New("credential not found")
+	ErrPrincipalCredentialExists      = errors.New("credential already exists")
+	ErrInvalidPrincipalCredentialName = errors.New("invalid credential name")
 )
 
-type Credential struct {
-	ID        string
-	Name      string
-	CreatedAt time.Time
-	RevokedAt *time.Time
-}
-
-// CredentialWithPrincipal is a Credential with its principal username.
-type CredentialWithPrincipal struct {
-	Credential
+// PrincipalCredential is the complete metadata projection of one Principal
+// credential: its stable identity, business name, owning Principal, and
+// lifecycle state. A Launcher credential has its own model
+// (launcherCredential); the shared bearer format does not make the two
+// projections one business entity.
+type PrincipalCredential struct {
+	ID            string
 	PrincipalName string
+	Name          string
+	CreatedAt     time.Time
+	RevokedAt     *time.Time
 }
 
 // credentialToken* define the single internal credential token format: a
@@ -59,9 +59,9 @@ var generateCredentialTokenFn = generateCredentialToken
 // insertPrincipalCredentialInTx inserts a Principal credential within the given
 // transaction, participating in an atomic multi-row operation. It returns the
 // credential metadata and its bearer secret exactly once.
-func insertPrincipalCredentialInTx(tx *sql.Tx, principalID int64, principalName, name string) (*CredentialWithPrincipal, string, error) {
+func insertPrincipalCredentialInTx(tx *sql.Tx, principalID int64, principalName, name string) (*PrincipalCredential, string, error) {
 	if name == "" {
-		return nil, "", fmt.Errorf("credential name is required: %w", ErrInvalidCredentialName)
+		return nil, "", fmt.Errorf("credential name is required: %w", ErrInvalidPrincipalCredentialName)
 	}
 	token, err := generateCredentialTokenFn()
 	if err != nil {
@@ -81,18 +81,16 @@ func insertPrincipalCredentialInTx(tx *sql.Tx, principalID int64, principalName,
 	)
 	if err != nil {
 		if isSQLiteUniqueError(err) {
-			return nil, "", fmt.Errorf("credential %q already exists for principal %q: %w", name, principalName, ErrCredentialExists)
+			return nil, "", fmt.Errorf("credential %q already exists for principal %q: %w", name, principalName, ErrPrincipalCredentialExists)
 		}
 		return nil, "", fmt.Errorf("cannot create credential: %w", err)
 	}
 
-	return &CredentialWithPrincipal{
-		Credential: Credential{
-			ID:        credID,
-			Name:      name,
-			CreatedAt: time.Unix(now, 0),
-		},
+	return &PrincipalCredential{
+		ID:            credID,
 		PrincipalName: principalName,
+		Name:          name,
+		CreatedAt:     time.Unix(now, 0),
 	}, token, nil
 }
 
@@ -118,8 +116,8 @@ func generateCredentialID() (string, error) {
 // ID, timestamps, and row. The returned projection and one-time bearer secret
 // are the values that insertion owner produced; no DB read follows the
 // commit. A missing Principal fails with ErrPrincipalNotFound and an active
-// duplicate name with ErrCredentialExists.
-func createPrincipalCredential(db *sql.DB, username string, name string) (*CredentialWithPrincipal, string, error) {
+// duplicate name with ErrPrincipalCredentialExists.
+func createPrincipalCredential(db *sql.DB, username string, name string) (*PrincipalCredential, string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
@@ -142,13 +140,13 @@ func createPrincipalCredential(db *sql.DB, username string, name string) (*Crede
 	return cred, token, nil
 }
 
-// listCredentialsForScope returns the Principal credentials of one authorized
+// listPrincipalCredentialsForScope returns the Principal credentials of one authorized
 // list scope: every Principal's credentials when principalID is nil, otherwise
 // only that Principal's, each row carrying its owning Principal's username.
 // Launcher credentials are excluded by the Principal-ownership predicate: they
 // are managed through the Launcher credential commands, never through a
 // Principal credential list.
-func listCredentialsForScope(db *sql.DB, principalID *int64) ([]CredentialWithPrincipal, error) {
+func listPrincipalCredentialsForScope(db *sql.DB, principalID *int64) ([]PrincipalCredential, error) {
 	var ownerID any
 	if principalID != nil {
 		ownerID = *principalID
@@ -166,13 +164,12 @@ func listCredentialsForScope(db *sql.DB, principalID *int64) ([]CredentialWithPr
 	}
 	defer rows.Close()
 
-	creds := []CredentialWithPrincipal{}
+	creds := []PrincipalCredential{}
 	for rows.Next() {
-		var c Credential
+		var c PrincipalCredential
 		var revokedAt sql.NullInt64
 		var createdAt int64
-		var username string
-		if err := rows.Scan(&c.ID, &c.Name, &createdAt, &revokedAt, &username); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &createdAt, &revokedAt, &c.PrincipalName); err != nil {
 			return nil, fmt.Errorf("cannot scan credential: %w", err)
 		}
 		c.CreatedAt = time.Unix(createdAt, 0)
@@ -180,10 +177,7 @@ func listCredentialsForScope(db *sql.DB, principalID *int64) ([]CredentialWithPr
 			t := time.Unix(revokedAt.Int64, 0)
 			c.RevokedAt = &t
 		}
-		creds = append(creds, CredentialWithPrincipal{
-			Credential:    c,
-			PrincipalName: username,
-		})
+		creds = append(creds, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate credentials: %w", err)
@@ -192,13 +186,12 @@ func listCredentialsForScope(db *sql.DB, principalID *int64) ([]CredentialWithPr
 	return creds, nil
 }
 
-func findCredentialByID(db *sql.DB, id string) (*CredentialWithPrincipal, error) {
+func findPrincipalCredentialByID(db *sql.DB, id string) (*PrincipalCredential, error) {
 	if id == "" {
 		return nil, fmt.Errorf("credential id is required: %w", ErrCredentialNotFound)
 	}
 
-	var c Credential
-	var username string
+	var c PrincipalCredential
 	var createdAt int64
 	var revokedAt sql.NullInt64
 	row := db.QueryRow(
@@ -208,7 +201,7 @@ func findCredentialByID(db *sql.DB, id string) (*CredentialWithPrincipal, error)
 		 WHERE c.id = ?`,
 		id,
 	)
-	err := row.Scan(&c.ID, &c.Name, &createdAt, &revokedAt, &username)
+	err := row.Scan(&c.ID, &c.Name, &createdAt, &revokedAt, &c.PrincipalName)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("credential %q not found: %w", id, ErrCredentialNotFound)
@@ -221,13 +214,10 @@ func findCredentialByID(db *sql.DB, id string) (*CredentialWithPrincipal, error)
 		c.RevokedAt = &t
 	}
 
-	return &CredentialWithPrincipal{
-		Credential:    c,
-		PrincipalName: username,
-	}, nil
+	return &c, nil
 }
 
-func revokeCredential(db *sql.DB, id string) (bool, error) {
+func revokePrincipalCredential(db *sql.DB, id string) (bool, error) {
 	if id == "" {
 		return false, fmt.Errorf("credential id is required: %w", ErrCredentialNotFound)
 	}
@@ -283,7 +273,7 @@ func revokeCredential(db *sql.DB, id string) (bool, error) {
 // exact active row under the same ownership and active-state predicates and
 // fails closed on a zero affected-row count (stale concurrent state), so a
 // rotation can never resurrect a revoked row.
-func rotatePrincipalCredential(db *sql.DB, username, name string) (*CredentialWithPrincipal, string, error) {
+func rotatePrincipalCredential(db *sql.DB, username, name string) (*PrincipalCredential, string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, "", fmt.Errorf("cannot begin transaction: %w", err)
@@ -358,13 +348,11 @@ func rotatePrincipalCredential(db *sql.DB, username, name string) (*CredentialWi
 		return nil, "", fmt.Errorf("cannot commit credential rotation: %w", err)
 	}
 
-	return &CredentialWithPrincipal{
-		Credential: Credential{
-			ID:        credID,
-			Name:      name,
-			CreatedAt: time.Unix(createdAt, 0),
-		},
+	return &PrincipalCredential{
+		ID:            credID,
 		PrincipalName: principalName,
+		Name:          name,
+		CreatedAt:     time.Unix(createdAt, 0),
 	}, token, nil
 }
 

@@ -296,7 +296,7 @@ func TestRevokeCredentialPreReadBeforeMutation(t *testing.T) {
 	req.SetPathValue("id", cred.ID)
 	withAdminToken(req)
 	w := httptest.NewRecorder()
-	app.handleRevokeCredential(w, req)
+	app.handleRevokePrincipalCredential(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -319,7 +319,7 @@ func TestRevokeCredentialNotFoundNoMutation(t *testing.T) {
 	req.SetPathValue("id", "dhcr_nonexistent")
 	withAdminToken(req)
 	w := httptest.NewRecorder()
-	app.handleRevokeCredential(w, req)
+	app.handleRevokePrincipalCredential(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
 	}
@@ -362,7 +362,7 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	req.SetPathValue("id", cred.ID)
 	withAdminToken(req)
 	w := httptest.NewRecorder()
-	app.handleRevokeCredential(w, req)
+	app.handleRevokePrincipalCredential(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("first revoke: expected 200, got %d", w.Code)
 	}
@@ -373,12 +373,12 @@ func TestRevokeCredentialIdempotentHandler(t *testing.T) {
 	req.SetPathValue("id", cred.ID)
 	withAdminToken(req)
 	w = httptest.NewRecorder()
-	app.handleRevokeCredential(w, req)
+	app.handleRevokePrincipalCredential(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("second revoke: expected 200, got %d", w.Code)
 	}
 
-	var resp revokeCredentialResponse
+	var resp revokePrincipalCredentialResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestRevokeCredentialPreReadErrorNoMutation(t *testing.T) {
 	req.SetPathValue("id", cred.ID)
 	withAdminToken(req)
 	w := httptest.NewRecorder()
-	app.handleRevokeCredential(w, req)
+	app.handleRevokePrincipalCredential(w, req)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}

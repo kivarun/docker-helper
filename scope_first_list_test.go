@@ -180,7 +180,7 @@ func TestPrincipalCredentialListScopeFirstMatrix(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin unfiltered list: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 	}
-	var all listCredentialsResponse
+	var all listPrincipalCredentialsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &all); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestPrincipalCredentialListScopeFirstMatrix(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("admin filtered list: expected 200, got %d", w.Code)
 	}
-	var bobOnly listCredentialsResponse
+	var bobOnly listPrincipalCredentialsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &bobOnly); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestPrincipalCredentialListScopeFirstMatrix(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("principal unfiltered list: expected 200, got %d", w.Code)
 	}
-	var own listCredentialsResponse
+	var own listPrincipalCredentialsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &own); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestPrincipalCredentialListScopeFirstMatrix(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("principal own-filter list: expected 200, got %d", w.Code)
 	}
-	var ownFiltered listCredentialsResponse
+	var ownFiltered listPrincipalCredentialsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &ownFiltered); err != nil {
 		t.Fatal(err)
 	}

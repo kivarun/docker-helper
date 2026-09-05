@@ -24,9 +24,9 @@ func TestPrincipalCredentialListCLIScopeFirstNoFilter(t *testing.T) {
 			if r.URL.RawQuery != "" {
 				t.Errorf("unfiltered list must not carry a query, got %q", r.URL.RawQuery)
 			}
-			writeJSONResponse(w, http.StatusOK, listCredentialsResponse{
+			writeJSONResponse(w, http.StatusOK, listPrincipalCredentialsResponse{
 				OK: true,
-				Credentials: []credentialJSON{
+				Credentials: []principalCredentialJSON{
 					{ID: "dhcr_1", Name: "default", Principal: "alice", CreatedAt: "2026-01-01T00:00:00Z"},
 				},
 			})
@@ -59,7 +59,7 @@ func TestPrincipalCredentialListCLIPrincipalFilter(t *testing.T) {
 			if got := r.URL.Query().Get("principal"); got != "bob" {
 				t.Errorf("principal filter = %q, want bob", got)
 			}
-			writeJSONResponse(w, http.StatusOK, listCredentialsResponse{OK: true})
+			writeJSONResponse(w, http.StatusOK, listPrincipalCredentialsResponse{OK: true})
 			return
 		}
 		http.NotFound(w, r)
@@ -120,15 +120,15 @@ func TestPrincipalCredentialRotateCLIDefaultAndNameSelector(t *testing.T) {
 		case r.URL.Path == "/auth" && r.Method == http.MethodGet:
 			writeJSONResponse(w, http.StatusOK, authResponse{Authority: "principal", Principal: "alice"})
 		case r.URL.Path == "/principals/alice/credentials/default/rotate" && r.Method == http.MethodPost:
-			writeJSONResponse(w, http.StatusOK, createCredentialResponse{
+			writeJSONResponse(w, http.StatusOK, principalCredentialTokenResponse{
 				OK:         true,
-				Credential: credentialJSON{ID: "dhcr_1", Name: "default", Principal: "alice"},
+				Credential: principalCredentialJSON{ID: "dhcr_1", Name: "default", Principal: "alice"},
 				Token:      "new-dhc-token",
 			})
 		case r.URL.Path == "/principals/alice/credentials/laptop/rotate" && r.Method == http.MethodPost:
-			writeJSONResponse(w, http.StatusOK, createCredentialResponse{
+			writeJSONResponse(w, http.StatusOK, principalCredentialTokenResponse{
 				OK:         true,
-				Credential: credentialJSON{ID: "dhcr_2", Name: "laptop", Principal: "alice"},
+				Credential: principalCredentialJSON{ID: "dhcr_2", Name: "laptop", Principal: "alice"},
 				Token:      "new-dhc-token-2",
 			})
 		default:
@@ -147,7 +147,7 @@ func TestPrincipalCredentialRotateCLIDefaultAndNameSelector(t *testing.T) {
 	if len(*requests) != 2 || (*requests)[0].path != "/auth" || (*requests)[1].path != "/principals/alice/credentials/default/rotate" {
 		t.Fatalf("requests = %+v, want /auth then default rotate", *requests)
 	}
-	var resp createCredentialResponse
+	var resp principalCredentialTokenResponse
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
 		t.Fatalf("stdout not JSON: %v (%s)", err, stdout.String())
 	}
@@ -181,9 +181,9 @@ func TestPrincipalCredentialRotateCLIAdminExplicit(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/principals/bob/credentials/default/rotate" && r.Method == http.MethodPost:
-			writeJSONResponse(w, http.StatusOK, createCredentialResponse{
+			writeJSONResponse(w, http.StatusOK, principalCredentialTokenResponse{
 				OK:         true,
-				Credential: credentialJSON{ID: "dhcr_3", Name: "default", Principal: "bob"},
+				Credential: principalCredentialJSON{ID: "dhcr_3", Name: "default", Principal: "bob"},
 				Token:      "new-dhc-token-3",
 			})
 		default:
@@ -209,9 +209,9 @@ func TestPrincipalCredentialCreateCLIProvesSingleCreateRequest(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/principals/alice/credentials" && r.Method == http.MethodPost:
-			writeJSONResponse(w, http.StatusCreated, createCredentialResponse{
+			writeJSONResponse(w, http.StatusCreated, principalCredentialTokenResponse{
 				OK:         true,
-				Credential: credentialJSON{ID: "dhcr_7", Name: "default", Principal: "alice"},
+				Credential: principalCredentialJSON{ID: "dhcr_7", Name: "default", Principal: "alice"},
 				Token:      "create-secret-42",
 			})
 		default:
@@ -229,7 +229,7 @@ func TestPrincipalCredentialCreateCLIProvesSingleCreateRequest(t *testing.T) {
 	if len(*requests) != 1 || (*requests)[0].path != "/principals/alice/credentials" {
 		t.Fatalf("requests = %+v, want single create POST", *requests)
 	}
-	var req createCredentialRequest
+	var req createPrincipalCredentialRequest
 	if err := json.Unmarshal([]byte((*requests)[0].body), &req); err != nil {
 		t.Fatalf("decode create body %q: %v", (*requests)[0].body, err)
 	}
@@ -250,7 +250,7 @@ func TestPrincipalCredentialRevokeCLIProvesSingleRevokeRequest(t *testing.T) {
 	endpoint, tokenPath, requests := startRecordingLauncherCLIServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/credentials/dhcr_1/revoke" && r.Method == http.MethodPost:
-			writeJSONResponse(w, http.StatusOK, revokeCredentialResponse{OK: true, Message: "unchanged"})
+			writeJSONResponse(w, http.StatusOK, revokePrincipalCredentialResponse{OK: true, Message: "unchanged"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -361,9 +361,9 @@ func TestCredentialAliasesShareCanonicalImplementations(t *testing.T) {
 			alias: []string{"credential", "create", "--endpoint", "EP", "--token-file", "TP", "alice"},
 			canon: []string{"principal", "credential", "create", "--endpoint", "EP", "--token-file", "TP", "alice"},
 			respond: func(w http.ResponseWriter, r *http.Request) {
-				writeJSONResponse(w, http.StatusCreated, createCredentialResponse{
+				writeJSONResponse(w, http.StatusCreated, principalCredentialTokenResponse{
 					OK:         true,
-					Credential: credentialJSON{ID: "dhcr_7", Name: "default", Principal: "alice"},
+					Credential: principalCredentialJSON{ID: "dhcr_7", Name: "default", Principal: "alice"},
 					Token:      "alias-secret-42",
 				})
 			},
@@ -373,9 +373,9 @@ func TestCredentialAliasesShareCanonicalImplementations(t *testing.T) {
 			alias: []string{"credential", "list", "--endpoint", "EP", "--token-file", "TP", "alice"},
 			canon: []string{"principal", "credential", "list", "--endpoint", "EP", "--token-file", "TP", "alice"},
 			respond: func(w http.ResponseWriter, r *http.Request) {
-				writeJSONResponse(w, http.StatusOK, listCredentialsResponse{
+				writeJSONResponse(w, http.StatusOK, listPrincipalCredentialsResponse{
 					OK: true,
-					Credentials: []credentialJSON{
+					Credentials: []principalCredentialJSON{
 						{ID: "dhcr_1", Name: "default", CreatedAt: "2026-01-01T00:00:00Z"},
 					},
 				})
@@ -386,7 +386,7 @@ func TestCredentialAliasesShareCanonicalImplementations(t *testing.T) {
 			alias: []string{"credential", "revoke", "--endpoint", "EP", "--token-file", "TP", "dhcr_1"},
 			canon: []string{"principal", "credential", "revoke", "--endpoint", "EP", "--token-file", "TP", "dhcr_1"},
 			respond: func(w http.ResponseWriter, r *http.Request) {
-				writeJSONResponse(w, http.StatusOK, revokeCredentialResponse{OK: true, Message: "revoked"})
+				writeJSONResponse(w, http.StatusOK, revokePrincipalCredentialResponse{OK: true, Message: "revoked"})
 			},
 		},
 	}
@@ -466,7 +466,7 @@ func TestCredentialAliasListScopeFirstFilter(t *testing.T) {
 			if got := r.URL.Query().Get("principal"); got != "alice" {
 				t.Errorf("principal filter = %q, want alice", got)
 			}
-			writeJSONResponse(w, http.StatusOK, listCredentialsResponse{OK: true})
+			writeJSONResponse(w, http.StatusOK, listPrincipalCredentialsResponse{OK: true})
 			return
 		}
 		http.NotFound(w, r)

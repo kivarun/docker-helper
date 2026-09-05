@@ -312,9 +312,9 @@ func TestCredentialCreateShowsNextStep(t *testing.T) {
 	mux.HandleFunc("POST /principals/alice/credentials", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(createCredentialResponse{
+		json.NewEncoder(w).Encode(principalCredentialTokenResponse{
 			OK: true,
-			Credential: credentialJSON{
+			Credential: principalCredentialJSON{
 				ID:        "dhcr_test123",
 				Principal: "alice",
 				Name:      "laptop",

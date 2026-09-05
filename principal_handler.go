@@ -21,15 +21,15 @@ type allowedRootRequest struct {
 }
 
 type principalResponse struct {
-	OK           bool            `json:"ok"`
-	Username     string          `json:"username"`
-	UID          int             `json:"uid"`
-	GID          int             `json:"gid"`
-	Home         string          `json:"home"`
-	Enabled      bool            `json:"enabled"`
-	AllowedRoots []string        `json:"allowed_roots"`
-	Credential   *credentialJSON `json:"credential,omitempty"`
-	Token        string          `json:"token,omitempty"`
+	OK           bool                     `json:"ok"`
+	Username     string                   `json:"username"`
+	UID          int                      `json:"uid"`
+	GID          int                      `json:"gid"`
+	Home         string                   `json:"home"`
+	Enabled      bool                     `json:"enabled"`
+	AllowedRoots []string                 `json:"allowed_roots"`
+	Credential   *principalCredentialJSON `json:"credential,omitempty"`
+	Token        string                   `json:"token,omitempty"`
 }
 
 type principalChangedResponse struct {
@@ -130,7 +130,7 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 
 	resp := principalToResponse(result)
 	if cred != nil {
-		cj := credentialToJSON(*cred)
+		cj := principalCredentialToJSON(*cred)
 		resp.Credential = &cj
 		resp.Token = token
 	}

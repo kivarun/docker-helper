@@ -1010,7 +1010,7 @@ func TestPrincipalCredentialClientRequests(t *testing.T) {
 		},
 		{
 			name:       "revokeCredential",
-			call:       func(c *apiClient) error { _, err := c.revokeCredential("dhcr_a/bc"); return err },
+			call:       func(c *apiClient) error { _, err := c.revokePrincipalCredential("dhcr_a/bc"); return err },
 			wantMethod: "POST",
 			wantURI:    "/credentials/dhcr_a%2Fbc/revoke",
 		},
@@ -1076,9 +1076,9 @@ func TestPrincipalCredentialClientDecoding(t *testing.T) {
 	})
 
 	t.Run("credentialResponse", func(t *testing.T) {
-		body, _ := json.Marshal(createCredentialResponse{
+		body, _ := json.Marshal(principalCredentialTokenResponse{
 			OK: true,
-			Credential: credentialJSON{
+			Credential: principalCredentialJSON{
 				ID:        "dhcr_abc123",
 				Principal: "alice",
 				Name:      "laptop",

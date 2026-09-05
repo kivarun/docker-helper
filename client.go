@@ -566,8 +566,8 @@ func (c *apiClient) removePrincipalAllowedRoot(username, path string) (*principa
 	return &result, nil
 }
 
-func (c *apiClient) createPrincipalCredential(username, name string) (*createCredentialResponse, error) {
-	body, err := json.Marshal(createCredentialRequest{Name: name})
+func (c *apiClient) createPrincipalCredential(username, name string) (*principalCredentialTokenResponse, error) {
+	body, err := json.Marshal(createPrincipalCredentialRequest{Name: name})
 	if err != nil {
 		return nil, fmt.Errorf("cannot encode request: %w", err)
 	}
@@ -583,7 +583,7 @@ func (c *apiClient) createPrincipalCredential(username, name string) (*createCre
 		return nil, err
 	}
 
-	var result createCredentialResponse
+	var result principalCredentialTokenResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
@@ -594,7 +594,7 @@ func (c *apiClient) createPrincipalCredential(username, name string) (*createCre
 // Query: the daemon authorizes the query against the authenticated bearer and
 // the optional Principal filter can only narrow visibility. An empty filter
 // lists everything visible to the caller.
-func (c *apiClient) listPrincipalCredentials(principalFilter string) (*listCredentialsResponse, error) {
+func (c *apiClient) listPrincipalCredentials(principalFilter string) (*listPrincipalCredentialsResponse, error) {
 	path := "/credentials"
 	if principalFilter != "" {
 		path += "?principal=" + url.QueryEscape(principalFilter)
@@ -610,7 +610,7 @@ func (c *apiClient) listPrincipalCredentials(principalFilter string) (*listCrede
 		return nil, err
 	}
 
-	var result listCredentialsResponse
+	var result listPrincipalCredentialsResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
@@ -620,7 +620,7 @@ func (c *apiClient) listPrincipalCredentials(principalFilter string) (*listCrede
 // rotatePrincipalCredential sends POST /principals/{username}/credentials/{name}/rotate,
 // the atomic one-call rotation of a named Principal credential. The credential
 // name is a caller-chosen string, so it is URL-escaped into the path.
-func (c *apiClient) rotatePrincipalCredential(username, name string) (*createCredentialResponse, error) {
+func (c *apiClient) rotatePrincipalCredential(username, name string) (*principalCredentialTokenResponse, error) {
 	resp, err := c.doAuthenticatedRequest("POST",
 		"/principals/"+url.PathEscape(username)+"/credentials/"+url.PathEscape(name)+"/rotate", nil)
 	if err != nil {
@@ -633,14 +633,14 @@ func (c *apiClient) rotatePrincipalCredential(username, name string) (*createCre
 		return nil, err
 	}
 
-	var result createCredentialResponse
+	var result principalCredentialTokenResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}
 	return &result, nil
 }
 
-func (c *apiClient) revokeCredential(id string) (*revokeCredentialResponse, error) {
+func (c *apiClient) revokePrincipalCredential(id string) (*revokePrincipalCredentialResponse, error) {
 	resp, err := c.doAuthenticatedRequest("POST", "/credentials/"+url.PathEscape(id)+"/revoke", nil)
 	if err != nil {
 		return nil, err
@@ -652,7 +652,7 @@ func (c *apiClient) revokeCredential(id string) (*revokeCredentialResponse, erro
 		return nil, err
 	}
 
-	var result revokeCredentialResponse
+	var result revokePrincipalCredentialResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("cannot decode response: %w", err)
 	}

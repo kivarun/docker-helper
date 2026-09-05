@@ -93,12 +93,12 @@ func TestCredentialAuthRevoked(t *testing.T) {
 	}
 
 	// Revoke the credential.
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "revokeduser"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "revokeduser"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope() error: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope() error: %v", err)
 	}
-	if _, err := revokeCredential(app.DB, creds[0].ID); err != nil {
-		t.Fatalf("revokeCredential() error: %v", err)
+	if _, err := revokePrincipalCredential(app.DB, creds[0].ID); err != nil {
+		t.Fatalf("revokePrincipalCredential() error: %v", err)
 	}
 
 	_, err = authenticateCredential(app.DB, token)
@@ -912,8 +912,8 @@ func TestSessionTokenSurvivesCredentialRevoke(t *testing.T) {
 	sessionToken := resp.Token
 
 	// Revoke the credential.
-	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
-		t.Fatalf("revokeCredential() error: %v", err)
+	if _, err := revokePrincipalCredential(app.DB, cred.ID); err != nil {
+		t.Fatalf("revokePrincipalCredential() error: %v", err)
 	}
 
 	// Session token should still work.
@@ -959,7 +959,7 @@ func TestConcurrentRevokeOnlyOneChanged(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			changed, err := revokeCredential(app.DB, cred.ID)
+			changed, err := revokePrincipalCredential(app.DB, cred.ID)
 			if err != nil {
 				mu.Lock()
 				errs = append(errs, err)

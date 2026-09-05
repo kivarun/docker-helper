@@ -138,7 +138,7 @@ func createPrincipal(db *sql.DB, username string, globalAllowedRoots []string) (
 // launcher allowed roots, no credential): every Principal exists only through
 // the Launcher-owned Session model, so a freshly created Principal must never
 // lack its default ownership anchor.
-func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []string, issueCredential bool) (*PrincipalWithRoots, *CredentialWithPrincipal, string, error) {
+func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAllowedRoots []string, issueCredential bool) (*PrincipalWithRoots, *PrincipalCredential, string, error) {
 	if username == "" {
 		return nil, nil, "", fmt.Errorf("username is required: %w", ErrPrincipalNotFound)
 	}
@@ -198,7 +198,7 @@ func createPrincipalWithOptionalCredential(db *sql.DB, username string, globalAl
 		return nil, nil, "", fmt.Errorf("cannot provision default Launcher: %w", err)
 	}
 
-	var cred *CredentialWithPrincipal
+	var cred *PrincipalCredential
 	var token string
 	if issueCredential {
 		cred, token, err = insertPrincipalCredentialInTx(tx, principalID, username, "default")

@@ -177,7 +177,7 @@ for reuse by a new credential.`,
 					return 1
 				}
 
-				result, err := client.revokeCredential(id)
+				result, err := client.revokePrincipalCredential(id)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1

@@ -104,8 +104,8 @@ func TestCreateCredentialDuplicateName(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for duplicate name")
 	}
-	if !isErrCredentialExists(err) {
-		t.Errorf("expected ErrCredentialExists, got: %v", err)
+	if !isErrPrincipalCredentialExists(err) {
+		t.Errorf("expected ErrPrincipalCredentialExists, got: %v", err)
 	}
 
 	// The duplicate attempt must not add an additional active credential.
@@ -231,9 +231,9 @@ func TestListCredentials(t *testing.T) {
 		t.Fatalf("createPrincipalCredential(laptop) error: %v", err)
 	}
 
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "listuser"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "listuser"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope() error: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope() error: %v", err)
 	}
 
 	if len(creds) != 2 {
@@ -291,18 +291,18 @@ func TestRevokeCredential(t *testing.T) {
 		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
-	changed, err := revokeCredential(app.DB, cred.ID)
+	changed, err := revokePrincipalCredential(app.DB, cred.ID)
 	if err != nil {
-		t.Fatalf("revokeCredential() error: %v", err)
+		t.Fatalf("revokePrincipalCredential() error: %v", err)
 	}
 	if !changed {
 		t.Error("expected changed to be true")
 	}
 
 	// Verify revoked_at is set.
-	fetched, err := findCredentialByID(app.DB, cred.ID)
+	fetched, err := findPrincipalCredentialByID(app.DB, cred.ID)
 	if err != nil {
-		t.Fatalf("findCredentialByID() error: %v", err)
+		t.Fatalf("findPrincipalCredentialByID() error: %v", err)
 	}
 	if fetched.RevokedAt == nil {
 		t.Error("expected RevokedAt to be set")
@@ -332,13 +332,13 @@ func TestRevokeCredentialIdempotent(t *testing.T) {
 		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
-	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
-		t.Fatalf("first revokeCredential() error: %v", err)
+	if _, err := revokePrincipalCredential(app.DB, cred.ID); err != nil {
+		t.Fatalf("first revokePrincipalCredential() error: %v", err)
 	}
 
-	changed, err := revokeCredential(app.DB, cred.ID)
+	changed, err := revokePrincipalCredential(app.DB, cred.ID)
 	if err != nil {
-		t.Fatalf("second revokeCredential() error: %v", err)
+		t.Fatalf("second revokePrincipalCredential() error: %v", err)
 	}
 	if changed {
 		t.Error("expected changed to be false (idempotent)")
@@ -348,7 +348,7 @@ func TestRevokeCredentialIdempotent(t *testing.T) {
 func TestRevokeCredentialNotFound(t *testing.T) {
 	app := newTestApp(t)
 
-	_, err := revokeCredential(app.DB, "dhcr_nonexistent")
+	_, err := revokePrincipalCredential(app.DB, "dhcr_nonexistent")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -380,13 +380,13 @@ func TestRevokedCredentialRemainsInList(t *testing.T) {
 		t.Fatalf("createPrincipalCredential() error: %v", err)
 	}
 
-	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
-		t.Fatalf("revokeCredential() error: %v", err)
+	if _, err := revokePrincipalCredential(app.DB, cred.ID); err != nil {
+		t.Fatalf("revokePrincipalCredential() error: %v", err)
 	}
 
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "revlistuser"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "revlistuser"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope() error: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope() error: %v", err)
 	}
 
 	if len(creds) != 1 {
@@ -423,8 +423,8 @@ func TestCredentialNameReusableAfterRevoke(t *testing.T) {
 		t.Fatalf("first createPrincipalCredential() error: %v", err)
 	}
 
-	if _, err := revokeCredential(app.DB, cred1.ID); err != nil {
-		t.Fatalf("revokeCredential() error: %v", err)
+	if _, err := revokePrincipalCredential(app.DB, cred1.ID); err != nil {
+		t.Fatalf("revokePrincipalCredential() error: %v", err)
 	}
 
 	cred2, token2, err := createPrincipalCredential(app.DB, "reuseuser", "oc")
@@ -440,9 +440,9 @@ func TestCredentialNameReusableAfterRevoke(t *testing.T) {
 	}
 
 	// The revoked record remains as history; the new active record also present.
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuseuser"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "reuseuser"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope() error: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope() error: %v", err)
 	}
 	if len(creds) != 2 {
 		t.Fatalf("expected 2 credentials (revoked + active), got %d", len(creds))
@@ -721,7 +721,7 @@ func TestCredentialHTTPCreate(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
+	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreatePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/httpcreduser/credentials", bytes.NewReader(body))
 	withAdminToken(req)
@@ -733,7 +733,7 @@ func TestCredentialHTTPCreate(t *testing.T) {
 		t.Errorf("expected status %d, got %d, body: %s", http.StatusCreated, w.Code, w.Body.String())
 	}
 
-	var resp createCredentialResponse
+	var resp principalCredentialTokenResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
 	}
@@ -761,7 +761,7 @@ func TestCredentialHTTPCreatePrincipalNotFound(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
+	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreatePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/nonexistent/credentials", bytes.NewReader(body))
 	withAdminToken(req)
@@ -800,7 +800,7 @@ func TestCredentialHTTPCreateDuplicateName(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
+	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreatePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/dupnamehttpuser/credentials", bytes.NewReader(body))
 	withAdminToken(req)
@@ -836,7 +836,7 @@ func TestCredentialHTTPList(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListCredentials)
+	mux.HandleFunc("GET /principals/{username}/credentials", app.handleListPrincipalCredentials)
 
 	req := httptest.NewRequest(http.MethodGet, "/principals/listhttpuser/credentials", nil)
 	withAdminToken(req)
@@ -848,7 +848,7 @@ func TestCredentialHTTPList(t *testing.T) {
 		t.Errorf("expected status %d, got %d, body: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 
-	var resp listCredentialsResponse
+	var resp listPrincipalCredentialsResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
 	}
@@ -886,7 +886,7 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
+	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/credentials/"+cred.ID+"/revoke", nil)
 	withAdminToken(req)
@@ -898,7 +898,7 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 		t.Errorf("expected status %d, got %d, body: %s", http.StatusOK, w.Code, w.Body.String())
 	}
 
-	var resp revokeCredentialResponse
+	var resp revokePrincipalCredentialResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("cannot decode response: %v", err)
 	}
@@ -917,7 +917,7 @@ func TestCredentialHTTPRevoke(t *testing.T) {
 		t.Errorf("second revoke: expected status %d, got %d, body: %s", http.StatusOK, w2.Code, w2.Body.String())
 	}
 
-	var resp2 revokeCredentialResponse
+	var resp2 revokePrincipalCredentialResponse
 	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
 		t.Fatalf("cannot decode second response: %v", err)
 	}
@@ -932,7 +932,7 @@ func TestCredentialHTTPRevokeNotFound(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
+	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/credentials/dhcr_nonexistent/revoke", nil)
 	withAdminToken(req)
@@ -954,7 +954,7 @@ func TestCredentialHTTPAdminAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/principals/user/credentials", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 
-	app.handleCreateCredential(w, req)
+	app.handleCreatePrincipalCredential(w, req)
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
@@ -1130,7 +1130,7 @@ func TestCredentialHTTPCreateMissingName(t *testing.T) {
 	body, _ := json.Marshal(reqBody)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
+	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreatePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/missingnameuser/credentials", bytes.NewReader(body))
 	withAdminToken(req)
@@ -1147,7 +1147,7 @@ func TestCredentialHTTPCreateInvalidJSON(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreateCredential)
+	mux.HandleFunc("POST /principals/{username}/credentials", app.handleCreatePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/principals/user/credentials", bytes.NewReader([]byte("not json")))
 	withAdminToken(req)
@@ -1185,9 +1185,9 @@ func TestCredentialMultipleForOnePrincipal(t *testing.T) {
 		}
 	}
 
-	creds, err := listCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "multiuser"))
+	creds, err := listPrincipalCredentialsForScope(app.DB, principalIDPtr(t, app.DB, "multiuser"))
 	if err != nil {
-		t.Fatalf("listCredentialsForScope() error: %v", err)
+		t.Fatalf("listPrincipalCredentialsForScope() error: %v", err)
 	}
 
 	if len(creds) != 3 {
@@ -1325,9 +1325,9 @@ func TestCredentialListHumanOutput(t *testing.T) {
 			t.Errorf("principal filter = %q, want alice", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(listCredentialsResponse{
+		json.NewEncoder(w).Encode(listPrincipalCredentialsResponse{
 			OK: true,
-			Credentials: []credentialJSON{
+			Credentials: []principalCredentialJSON{
 				{ID: "dhcr_active", Principal: "alice", Name: "oc", CreatedAt: activeCreated},
 				{ID: "dhcr_revoked", Principal: "alice", Name: "laptop", CreatedAt: revokedCreated, RevokedAt: &revokedAt},
 			},
@@ -1436,7 +1436,7 @@ func TestCredentialHTTPRevokeDBError(t *testing.T) {
 	app.DB.Close()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokeCredential)
+	mux.HandleFunc("POST /credentials/{id}/revoke", app.handleRevokePrincipalCredential)
 
 	req := httptest.NewRequest(http.MethodPost, "/credentials/"+cred.ID+"/revoke", nil)
 	withAdminToken(req)

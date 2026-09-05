@@ -786,7 +786,7 @@ func TestHandleAuthRevokedCredential(t *testing.T) {
 		t.Fatalf("pre-revoke status = %d, want 200 (body=%s)", w.Code, w.Body.String())
 	}
 
-	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
+	if _, err := revokePrincipalCredential(app.DB, cred.ID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	w := launcherRequest(t, app, "GET", "/auth", token, "")
@@ -1585,7 +1585,7 @@ func TestPrincipalCreateCLIIssueCredentialSendsTrueAndPrintsSecretOnce(t *testin
 			writeJSONResponse(w, http.StatusCreated, principalResponse{
 				OK:         true,
 				Username:   "bob",
-				Credential: &credentialJSON{ID: "dhcr_1", Principal: "bob", Name: "default"},
+				Credential: &principalCredentialJSON{ID: "dhcr_1", Principal: "bob", Name: "default"},
 				Token:      "secret-principal-77",
 			})
 			return

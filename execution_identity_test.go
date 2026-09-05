@@ -326,8 +326,8 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 	}
 
 	// Revoke the credential.
-	if _, err := revokeCredential(app.DB, cred.ID); err != nil {
-		t.Fatalf("revokeCredential() error: %v", err)
+	if _, err := revokePrincipalCredential(app.DB, cred.ID); err != nil {
+		t.Fatalf("revokePrincipalCredential() error: %v", err)
 	}
 
 	// Session should still be usable.
