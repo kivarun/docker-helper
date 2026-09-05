@@ -807,3 +807,202 @@ func TestUserModeOwnerReservationLookupFailureFailsClosed(t *testing.T) {
 		t.Errorf("expected internal_error, got %q", code)
 	}
 }
+
+// TestRaceReloadSerializesPrincipalCreate proves the reload boundary owns the
+// policy snapshot of a Principal creation: a reload that narrows the global
+// roots and linearizes before the creation commits prevents it, so the
+// creation can never store a Principal whose home is allowed only by the
+// pre-reload configuration. The creation linearizes strictly after the
+// reload's setConfig commit (the reload parks inside its lifecycleMu critical
+// section while the request is pinned in its handler prologue), so its
+// ceiling is resolved inside the boundary and the out-of-ceiling home is
+// rejected with 400 outside_global_root and no partial state: no Principal
+// row, no default Launcher, no initial credential.
+func TestRaceReloadSerializesPrincipalCreate(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0]
+	narrow := filepath.Join(root, "narrow")
+	if err := os.MkdirAll(narrow, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The create target's home is inside the pre-reload ceiling but outside
+	// the narrowed one.
+	home := filepath.Join(root, "home", "newuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"newuser": home})
+
+	rec, reloadCode := raceNarrowingReload(t, app, narrow, func(started, opened chan struct{}) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/principals",
+			newGatedJSONBody(`{"username":"newuser","issue_credential":true}`, started, opened))
+		req.Header.Set("Authorization", "Bearer "+testAdminToken)
+		return req
+	})
+
+	if reloadCode != http.StatusOK {
+		t.Fatalf("reload: expected 200, got %d", reloadCode)
+	}
+	if got := app.getConfig().AllowedRoots; len(got) != 1 || got[0] != narrow {
+		t.Fatalf("reload did not narrow the global roots: %v", got)
+	}
+	// The creation linearized after the narrowed commit: the home is outside
+	// the new ceiling and must be refused with the established contract.
+	expectOutsideGlobalRoot(t, rec, "principal create")
+	// No partial state from the refused creation.
+	if _, err := findPrincipalByUsername(app.DB, "newuser"); !errors.Is(err, ErrPrincipalNotFound) {
+		t.Fatalf("principal row exists after refused creation: %v", err)
+	}
+	var launchers int
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM launchers l JOIN principals p ON p.id = l.principal_id WHERE p.username = ?`,
+		"newuser").Scan(&launchers); err != nil {
+		t.Fatalf("count launchers: %v", err)
+	}
+	if launchers != 0 {
+		t.Fatalf("default Launcher persisted for refused creation: %d rows", launchers)
+	}
+	var creds int
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
+		 WHERE p.username = ? AND c.launcher_id IS NULL`,
+		"newuser").Scan(&creds); err != nil {
+		t.Fatalf("count credentials: %v", err)
+	}
+	if creds != 0 {
+		t.Fatalf("initial credential persisted for refused creation: %d rows", creds)
+	}
+}
+
+// TestPrincipalCreateLinearizesBeforeReload proves the opposite linearization
+// rule: a Principal creation that completes before a narrowing reload commits
+// atomically under the policy it validated against — Principal, stored home
+// root, default Launcher, and initial credential all present — and the later
+// reload is the subsequent policy transition: the stored home root survives
+// the narrowing (never silently truncated) while the narrowed ceiling takes
+// effect at session time (the stale root no longer yields an effective
+// session ceiling).
+func TestPrincipalCreateLinearizesBeforeReload(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0]
+	narrow := filepath.Join(root, "narrow")
+	home := filepath.Join(root, "home", "newuser")
+	proj := filepath.Join(home, "proj")
+	for _, d := range []string{narrow, proj} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installOSUserMock(t, map[string]string{"newuser": home})
+
+	// The creation completes first, through the real public handler.
+	w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken,
+		`{"username":"newuser","issue_credential":true}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("principal create: expected 201, got %d (body=%s)", w.Code, w.Body.String())
+	}
+
+	// The reload then narrows the global roots: the next policy transition.
+	deps := reloadDeps{
+		loadAndPrepareRuntimeConfig: func() (*Config, error) {
+			return narrowCfg(t, app, narrow), nil
+		},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/reload", nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	app.handleReloadWithDeps(rec, req, deps)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reload: expected 200, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	// The committed creation survives atomically: Principal with its stored
+	// home root, default Launcher, and initial credential.
+	p, err := findPrincipalByUsername(app.DB, "newuser")
+	if err != nil {
+		t.Fatalf("find principal newuser: %v", err)
+	}
+	if !slices.Equal(p.AllowedRoots, []string{home}) {
+		t.Fatalf("stored home root not intact after the later reload: %v, want [%s]", p.AllowedRoots, home)
+	}
+	if _, err := findDefaultLauncher(app.DB, int64(p.ID)); err != nil {
+		t.Fatalf("default Launcher not intact after the later reload: %v", err)
+	}
+	var creds int
+	if err := app.DB.QueryRow(
+		`SELECT COUNT(*) FROM credentials WHERE principal_id = ? AND launcher_id IS NULL`,
+		p.ID).Scan(&creds); err != nil {
+		t.Fatalf("count credentials: %v", err)
+	}
+	if creds != 1 {
+		t.Fatalf("initial credential not intact after the later reload: %d rows", creds)
+	}
+
+	// The narrowed ceiling takes effect at session time: the stored home root
+	// is stale under the new global roots, so a session through that
+	// Principal is rejected, not silently widened.
+	sess := launcherRequest(t, app, http.MethodPost, "/sessions", testAdminToken,
+		`{"principal":"newuser","workspace":"`+proj+`"}`)
+	if sess.Code != http.StatusBadRequest {
+		t.Fatalf("session under the stale root after narrowing: expected 400, got %d (body=%s)", sess.Code, sess.Body.String())
+	}
+	if code := decodeAPIError(t, sess.Body.Bytes()).Code; code != "invalid_workspace" {
+		t.Errorf("expected invalid_workspace, got %q", code)
+	}
+}
+
+// TestPrincipalAllowedRootAddUsesResolvedGlobalCeiling proves the Principal
+// allowed-root add consumes the same symlink-resolved global ceiling as the
+// other root-policy surfaces: with the global root configured through a
+// symlink, a candidate under the symlink's target is accepted (and its stored
+// canonical form is the real path), not misjudged against the raw configured
+// symlink path. The Principal creation in the setup doubles as proof that the
+// creation path resolves the ceiling the same way.
+func TestPrincipalAllowedRootAddUsesResolvedGlobalCeiling(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app.Config.AllowedRoots[0]
+
+	// Configure the global ceiling through a symlink to the real root.
+	symlink := filepath.Join(filepath.Dir(root), ".dh-symlink-ceiling")
+	if err := os.Symlink(root, symlink); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(symlink) })
+	cfg := app.getConfig()
+	cfg.AllowedRoots = []string{symlink}
+	app.setConfig(&cfg)
+
+	// The Principal is created through the real public handler against the
+	// resolved ceiling: its home lives under the symlink's target.
+	home := filepath.Join(root, "home", "resuser")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"resuser": home})
+	w := launcherRequest(t, app, http.MethodPost, "/principals", testAdminToken, `{"username":"resuser"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("principal create under the resolved ceiling: expected 201, got %d (body=%s)", w.Code, w.Body.String())
+	}
+
+	// The add candidate is under the real root, not under the symlink path:
+	// only the resolved ceiling can accept it.
+	proj := filepath.Join(root, "proj")
+	if err := os.MkdirAll(proj, 0755); err != nil {
+		t.Fatal(err)
+	}
+	add := launcherRequest(t, app, http.MethodPost, "/principals/resuser/allowed-roots", testAdminToken,
+		`{"path":"`+proj+`"}`)
+	if add.Code != http.StatusOK {
+		t.Fatalf("allowed-root add under the resolved ceiling: expected 200, got %d (body=%s)", add.Code, add.Body.String())
+	}
+	p, err := findPrincipalByUsername(app.DB, "resuser")
+	if err != nil {
+		t.Fatalf("find principal resuser: %v", err)
+	}
+	if !slices.Equal(p.AllowedRoots, []string{home, proj}) {
+		t.Fatalf("stored roots = %v, want the canonical real paths [%s %s]", p.AllowedRoots, home, proj)
+	}
+}

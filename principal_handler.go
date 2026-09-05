@@ -85,7 +85,15 @@ func (a *App) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, cred, token, err := createPrincipalWithOptionalCredential(a.DB, req.Username, a.getConfig().AllowedRoots, req.IssueCredential)
+	// The Principal creation is a policy-authority mutation: it shares the
+	// lifecycle serialization with Session creation so a concurrent create
+	// observes either the pre-creation or post-creation ownership, never a
+	// mix. createPrincipalWithLifecycle owns that boundary and resolves the
+	// current global ceiling inside it (the current global policy snapshot is
+	// read inside the boundary, the same lifecycleMu -> a.mu ordering as
+	// config reload), so a Principal home outside a ceiling committed by a
+	// reload that linearized first is rejected before any durable change.
+	result, cred, token, err := a.createPrincipalWithLifecycle(req.Username, req.IssueCredential)
 	duration := time.Since(started).Round(time.Millisecond).String()
 
 	if err != nil {

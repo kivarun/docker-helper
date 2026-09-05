@@ -17,15 +17,19 @@
 #   B. restricted Launcher create under the daemon-owner Principal — a second,
 #      differently named Launcher created restricted with a root inside the
 #      global user-mode allowed root succeeds; `launcher show` reports the
-#      restricted scope and stored root.
+#      restricted scope and stored root. A restricted root OUTSIDE the global
+#      ceiling — a real, policy-legal directory in a permitted namespace — is
+#      refused specifically with the stable 400 outside_principal_root code.
 #   C. restricted-scope conversion — a second inherit-scope Launcher converted
 #      to restricted through the atomic scope replacement succeeds.
 #   D. Session under the restricted Launcher — a workspace inside the
 #      restricted root creates a Session and runs a trivial container; a
 #      workspace inside the global root but outside the Launcher restriction
-#      is rejected with 400 invalid_workspace.
+#      is rejected specifically with the stable 400 invalid_workspace code.
 #   E. reservation intact — the reserved 'default' Launcher still refuses a
-#      restricted scope with the stable 409 user_mode_owner_reserved code.
+#      restricted scope specifically with the stable
+#      409 user_mode_owner_reserved code (group 11 owns the full
+#      reservation-code contract).
 #
 # Requires: installed docker-helper binary, root (user/XDG-runtime setup),
 # Docker (trivial container run). The system service is NOT required and is
@@ -165,11 +169,17 @@ else
 fi
 
 # A restricted root outside the global user-mode ceiling is still refused.
-B_OUTSIDE="/etc/uat-reg12-outside"
-if dhx launcher create --principal "$OWNER" --name bad --allowed-root "$B_OUTSIDE" --no-credential >/dev/null 2>&1; then
-  reg_fail "B: restricted Launcher create outside the global ceiling unexpectedly succeeded"
+# The candidate is a REAL, policy-legal directory (a sibling of the global
+# root under the permitted /home namespace, owned by the UAT user), so the
+# rejection proves the effective-ceiling check rather than a workspace-path
+# policy rejection or a nonexistent path.
+B_OUTSIDE="/home/${U_USER}-outside"
+mkdir -p "$B_OUTSIDE" && chown "$U_USER:$U_USER" "$B_OUTSIDE"
+B_OUT="$(dhx launcher create --principal "$OWNER" --name bad --allowed-root "$B_OUTSIDE" --no-credential 2>&1)"
+if [ "$?" -ne 0 ] && printf '%s' "$B_OUT" | grep -q 'code outside_principal_root'; then
+  reg_ok "B: restricted Launcher create outside the global ceiling is refused with outside_principal_root"
 else
-  reg_ok "B: restricted Launcher create outside the global ceiling is refused"
+  reg_fail "B: restricted Launcher create outside the global ceiling not refused with outside_principal_root: $(printf '%s' "$B_OUT" | head -2 | tr '\n' ' ' | redact)"
 fi
 
 # --- C. restricted-scope conversion of an inherit Launcher -------------------
@@ -216,20 +226,22 @@ if [ -n "$WORK_ID" ]; then
   uer_session_run "D inside restriction" "$WORK/proj"
 
   # A workspace inside the global root but outside the Launcher restriction
-  # is rejected.
-  if dhx session create --workspace "$WS" --launcher "$WORK_ID" --json >/dev/null 2>&1; then
-    reg_fail "D: workspace outside the Launcher restriction but inside the global root was accepted"
+  # is rejected with the stable workspace code.
+  D_OUT="$(dhx session create --workspace "$WS" --launcher "$WORK_ID" --json 2>&1)"
+  if [ "$?" -ne 0 ] && printf '%s' "$D_OUT" | grep -q 'code invalid_workspace'; then
+    reg_ok "D: workspace outside the Launcher restriction (inside the global root) is rejected with invalid_workspace"
   else
-    reg_ok "D: workspace outside the Launcher restriction (inside the global root) is rejected"
+    reg_fail "D: workspace outside the Launcher restriction not rejected with invalid_workspace: $(printf '%s' "$D_OUT" | head -2 | tr '\n' ' ' | redact)"
   fi
 fi
 
 # --- E. the reserved default Launcher is still not restrictable --------------
 
-if dhx launcher scope set --principal "$OWNER" --allowed-root "$WORK" default >/dev/null 2>&1; then
-  reg_fail "E: the reserved default Launcher accepted a restricted scope"
+E_OUT="$(dhx launcher scope set --principal "$OWNER" --allowed-root "$WORK" default 2>&1)"
+if [ "$?" -ne 0 ] && printf '%s' "$E_OUT" | grep -q 'code user_mode_owner_reserved'; then
+  reg_ok "E: the reserved default Launcher still refuses a restricted scope (user_mode_owner_reserved)"
 else
-  reg_ok "E: the reserved default Launcher still refuses a restricted scope"
+  reg_fail "E: the reserved default Launcher not refused with user_mode_owner_reserved: $(printf '%s' "$E_OUT" | head -2 | tr '\n' ' ' | redact)"
 fi
 
 rm -rf "$TMPDIR_UER"

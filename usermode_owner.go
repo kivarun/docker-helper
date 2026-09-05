@@ -108,9 +108,13 @@ func (a *App) rejectReservedLauncherScopeReplace(launcherID string, scope Launch
 }
 
 // addPrincipalAllowedRootWithLifecycle is the lock-owning App-level Principal
-// allowed-root add. It holds lifecycleMu across the reservation check and the
-// durable mutation (the same serialization boundary as Session creation and
-// the other ownership lifecycle mutations) and refuses the reserved
+// allowed-root add. It holds lifecycleMu across the reservation check, the
+// current-policy resolution, and the durable mutation (the same serialization
+// boundary as Session creation, the other ownership lifecycle mutations, and
+// the reload's config-resolution+setConfig critical section), and resolves the
+// global ceiling through the same shared symlink-resolution path as the other
+// root-policy surfaces, so the mutation is validated against the ceiling
+// committed by any reload that linearized before it. It refuses the reserved
 // daemon-owner Principal before any change.
 func (a *App) addPrincipalAllowedRootWithLifecycle(username, rootPath string) (changed bool, canonicalPath string, err error) {
 	a.lifecycleMu.Lock()
@@ -118,7 +122,10 @@ func (a *App) addPrincipalAllowedRootWithLifecycle(username, rootPath string) (c
 	if err := a.rejectReservedPrincipalMutation(username); err != nil {
 		return false, "", err
 	}
-	globalRoots := a.getConfig().AllowedRoots
+	globalRoots, err := a.appResolvedGlobalRoots()
+	if err != nil {
+		return false, "", err
+	}
 	return addPrincipalAllowedRoot(a.DB, username, rootPath, globalRoots)
 }
 

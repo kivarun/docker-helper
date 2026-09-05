@@ -229,6 +229,26 @@ func (a *App) applyLauncherEnabledChange(launcherID string, enabled bool) (launc
 	return result, nil
 }
 
+// createPrincipalWithLifecycle is the lock-owning App-level Principal
+// creation. It holds lifecycleMu across the current global-root resolution
+// (the same symlink-resolved representation as the canonical root-policy
+// surfaces — the lifecycleMu -> a.mu ordering shared with config reload), the
+// Principal home/allowed-root validation against that ceiling, and the
+// durable Principal/default-Launcher/credential transaction, so a Principal
+// whose home is outside the ceiling committed by any reload that linearized
+// before it is rejected before any durable change, and a creation that
+// linearizes first completes atomically under the policy it validated
+// against.
+func (a *App) createPrincipalWithLifecycle(username string, issueCredential bool) (*PrincipalWithRoots, *CredentialWithPrincipal, string, error) {
+	a.lifecycleMu.Lock()
+	defer a.lifecycleMu.Unlock()
+	globalRoots, err := a.appResolvedGlobalRoots()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return createPrincipalWithOptionalCredential(a.DB, username, globalRoots, issueCredential)
+}
+
 // createLauncherWithLifecycle is the lock-owning App-level Launcher creation.
 // It holds lifecycleMu across the canonical effective-Principal-root
 // resolution (which reads the current global policy snapshot — the same
