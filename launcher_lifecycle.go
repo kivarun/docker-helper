@@ -259,6 +259,14 @@ func (a *App) updateLauncherWithLifecycle(launcherID string, name *string, enabl
 // updateLauncherWithLifecycle. It is used internally by lifecycle mutators
 // that already hold lifecycleMu.
 func (a *App) updateLauncherWithLifecycleLocked(launcherID string, name *string, enabled *bool) (*LauncherWithPrincipal, []string, error) {
+	// The reserved user-mode daemon-owner default Launcher refuses disable and
+	// rename-away-from-default here, inside the lifecycle serialization
+	// boundary and before any quiesce or durable change; invariant-preserving
+	// no-ops pass.
+	if err := a.rejectReservedLauncherPatch(launcherID, name, enabled); err != nil {
+		return nil, nil, err
+	}
+
 	cur, err := findLauncherByID(a.DB, launcherID)
 	if err != nil {
 		return nil, nil, err
@@ -597,6 +605,13 @@ func (a *App) disableLauncher(launcherID string) ([]string, error) {
 // disableLauncherLocked is the lock-already-held form of disableLauncher. It is
 // used internally by lifecycle mutators that already hold lifecycleMu.
 func (a *App) disableLauncherLocked(launcherID string) ([]string, error) {
+	// The reserved user-mode daemon-owner default Launcher refuses disable at
+	// its durable-transition owner. For the checked-delete paths this is
+	// unreachable (their reservation guard already refused before the
+	// prologue quiesce); it guards the direct disable transition.
+	if err := a.rejectReservedLauncherOwnerMutation(launcherID); err != nil {
+		return nil, err
+	}
 	a.OperationSupervisor.quiesceLauncher(launcherID)
 	result, err := a.applyLauncherEnabledChange(launcherID, false)
 	if err != nil {
@@ -695,6 +710,13 @@ func (a *App) deleteLauncherChecked(ctx context.Context, launcherID string) ([]s
 // deleteLauncherChecked. It is used internally by lifecycle mutators that
 // already hold lifecycleMu.
 func (a *App) deleteLauncherCheckedLocked(ctx context.Context, launcherID string) ([]string, error) {
+	// The reserved user-mode daemon-owner default Launcher is never deletable:
+	// refuse before the admission-closing prologue so a rejected delete leaves
+	// no quiesce, runtime inspection, or durable change behind.
+	if err := a.rejectReservedLauncherOwnerMutation(launcherID); err != nil {
+		return nil, err
+	}
+
 	// Step 1: quiesce Operation admission. In-memory only: the quiesce is the
 	// operation-admission closing point, set before the runtime check so every
 	// Operation admitted before it is visible to that check and no Operation
@@ -788,6 +810,13 @@ func (a *App) deletePrincipalChecked(ctx context.Context, username string) ([]st
 // deletePrincipalChecked. It is used internally by lifecycle mutators that
 // already hold lifecycleMu.
 func (a *App) deletePrincipalCheckedLocked(ctx context.Context, username string) ([]string, error) {
+	// The reserved user-mode daemon-owner Principal is never deletable: refuse
+	// before the admission-closing prologue so a rejected delete leaves no
+	// quiesce, runtime inspection, or durable change behind.
+	if err := a.rejectReservedPrincipalMutation(username); err != nil {
+		return nil, err
+	}
+
 	principalID, err := findPrincipalIDByUsername(a.DB, username)
 	if err != nil {
 		return nil, err
@@ -906,6 +935,12 @@ func (a *App) disablePrincipalLaunchers(username string) (principalEnabledChange
 // disablePrincipalLaunchers. It is used internally by lifecycle mutators that
 // already hold lifecycleMu.
 func (a *App) disablePrincipalLaunchersLocked(username string) (principalEnabledChangeResult, error) {
+	// The reserved user-mode daemon-owner Principal is never disableable:
+	// refuse inside the lifecycle serialization boundary and before the
+	// child-Launcher quiesce prologue.
+	if err := a.rejectReservedPrincipalMutation(username); err != nil {
+		return principalEnabledChangeResult{}, err
+	}
 	launchers, err := a.principalLaunchersByUsername(username)
 	if err != nil {
 		return principalEnabledChangeResult{}, err

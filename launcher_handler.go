@@ -497,10 +497,14 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 	// mutation on the same ownership.
 	updated, revoked, err := a.updateLauncherWithLifecycle(l.ID, req.Name, req.Enabled)
 	if err != nil {
+		result := "error"
+		if isErrUserModeOwnerReserved(err) {
+			result = "user_mode_owner_reserved"
+		}
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.update",
 			LauncherID: l.ID,
-			Result:     "error",
+			Result:     result,
 			Duration:   duration,
 		}, auth, nil)
 		switch {
@@ -511,6 +515,9 @@ func (a *App) handlePatchLauncher(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("launcher %q already exists for principal %q", *req.Name, l.PrincipalName))
 		case isErrInvalidLauncherName(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_launcher_name", "invalid launcher name")
+		case isErrUserModeOwnerReserved(err):
+			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
+				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		default:
 			opLog(ctx).Error("launcher update failed",
 				slog.String("operation", "launcher_update"),
@@ -607,20 +614,28 @@ func (a *App) handleReplaceLauncherAllowedRoots(w http.ResponseWriter, r *http.R
 	// the lifecycle serialization with Session creation so a concurrent create
 	// observes either the pre-replacement or post-replacement scope, never a
 	// mix, and a narrowing that linearizes first prevents the Session.
-	a.lifecycleMu.Lock()
-	updated, err := replaceLauncherScope(a.DB, l.ID, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots)
-	a.lifecycleMu.Unlock()
+	// replaceLauncherScopeWithLifecycle owns that boundary and refuses any
+	// narrowing or rooting of the reserved user-mode daemon-owner default
+	// Launcher before any change.
+	updated, err := a.replaceLauncherScopeWithLifecycle(l.ID, scopeMode, req.AllowedRoots, a.getConfig().AllowedRoots)
 	duration := time.Since(started).Round(time.Millisecond).String()
 	if err != nil {
+		result := "error"
+		if isErrUserModeOwnerReserved(err) {
+			result = "user_mode_owner_reserved"
+		}
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.scope_replace",
 			LauncherID: l.ID,
-			Result:     "error",
+			Result:     result,
 			Duration:   duration,
 		}, auth, nil)
 		switch {
 		case isErrLauncherNotFound(err):
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
+		case isErrUserModeOwnerReserved(err):
+			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
+				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		case isErrInvalidScope(err):
 			writeError(ctx, w, http.StatusBadRequest, "invalid_scope", "invalid scope")
 		case isErrInvalidAllowedRoots(err):
@@ -671,10 +686,14 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 	cleanupSessionRuntimeDirsBestEffort(ctx, "launcher_delete", cfg.RuntimeDir, sessionIDs)
 
 	if err != nil {
+		result := "error"
+		if isErrUserModeOwnerReserved(err) {
+			result = "user_mode_owner_reserved"
+		}
 		writeLauncherControlAudit(ctx, auditRecord{
 			Event:      "launcher.delete",
 			LauncherID: l.ID,
-			Result:     "error",
+			Result:     result,
 			Duration:   duration,
 		}, auth, nil)
 		switch {
@@ -682,6 +701,9 @@ func (a *App) handleDeleteLauncher(w http.ResponseWriter, r *http.Request) {
 			writeError(ctx, w, http.StatusNotFound, "launcher_not_found", "launcher not found")
 		case isErrLauncherRuntimeActive(err):
 			writeError(ctx, w, http.StatusConflict, "launcher_runtime_active", "launcher has active runtime")
+		case isErrUserModeOwnerReserved(err):
+			writeError(ctx, w, http.StatusConflict, "user_mode_owner_reserved",
+				"this launcher is managed by transparent user mode and cannot be mutated in this way")
 		default:
 			opLog(ctx).Error("launcher delete failed",
 				slog.String("operation", "launcher_delete"),

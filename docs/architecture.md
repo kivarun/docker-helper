@@ -906,6 +906,37 @@ Every principal has an implicit default Launcher named `default`:
 - system mode requires explicit ownership: an authenticated Principal
   resolves its own default Launcher when no explicit selector is supplied.
 
+#### Transparent user-mode owner reservation
+
+In user mode the daemon-owner Principal (resolved at startup by
+`ensureUserModeOwnership`, identified by the cached
+`App.userModeDefault.principalID`) and its `default` Launcher (identified by
+`App.userModeDefault.launcherID`) are reserved: the transparent ownership
+chain is exactly the state the startup contract requires (Principal enabled
+with zero stored roots, deferring completely to the global user-mode roots;
+default Launcher enabled, named `default`, `inherit` scope, zero roots).
+Public control-plane mutations that would corrupt that chain are rejected
+with the stable `409 user_mode_owner_reserved` conflict before any durable
+or runtime change:
+
+- daemon-owner Principal: disable, delete, allowed-root add, allowed-root
+  remove (re-enabling an already-enabled Principal is the natural no-op);
+- daemon-owner `default` Launcher: disable, delete, rename away from
+  `default`, restricted scope, and any non-empty inherit replacement
+  (re-enable, rename to `default`, and `inherit` with zero roots are
+  no-ops; inherit with roots is `400 invalid_allowed_roots` for every
+  launcher).
+
+The reservation is owned by one App-aware policy owner
+(`usermode_owner.go`); identity is the startup-resolved chain state, never
+a username or Launcher name, so system mode and other Principals' `default`
+Launchers (and any additional Launchers under the daemon-owner Principal)
+remain fully mutable. Each guard runs inside the same `lifecycleMu`
+serialization boundary as the mutation it protects, before any quiesce or
+durable change, so a rejected mutation cannot strand the running daemon or
+turn the next startup into a fail-closed rejection. Audit records of a
+rejected mutation carry the `user_mode_owner_reserved` result.
+
 ### Launcher scope and effective roots
 
 Launcher scope narrows the Principal authorization ceiling for sessions
@@ -1726,6 +1757,7 @@ Current error codes (non-exhaustive):
 | `registry_auth_denied` | `POST /registry/login` | docker login: authentication/authorization denied |
 | `registry_login_failed` | `POST /registry/login` | docker login failed and the failure is not classified |
 | `operation_not_found` | `GET /operations/{id}`, `GET /operations/{id}/logs`, `POST /operations/{id}/cancel` | operation not found or foreign session |
+| `user_mode_owner_reserved` | Principal/Launcher mutation endpoints (user mode) | the target is the reserved transparent user-mode owner chain (daemon-owner Principal or its `default` Launcher) and the mutation would violate the startup contract |
 
 `GET /sessions` emits `session.list`. `GET /health` intentionally emits no
 audit event because it is an unauthenticated liveness endpoint.
