@@ -36,7 +36,7 @@ permissions:
 #   platform  install   MAC       runner
 #   ubuntu    deb       apparmor  ubuntu-24.04                 (hosted, full)
 #   ubuntu    tarball   apparmor  ubuntu-24.04                 (hosted, full)
-#   ubuntu    deb       apparmor  ubuntu-24.04 regressions 3-9 (hosted, full)
+#   ubuntu    deb       apparmor  ubuntu-24.04 regressions 3-10 (hosted, full)
 #   opensuse  rpm       apparmor  ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full)
 #   opensuse  rpm       selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full/selinux)
 #   opensuse  tarball   selinux   ubuntu-24.04 -> QEMU/KVM Tumbleweed VM (full)

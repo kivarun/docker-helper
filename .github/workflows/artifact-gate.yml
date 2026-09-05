@@ -243,7 +243,7 @@ jobs:
             UAT_ARTIFACT_PATH="$UAT_ARTIFACT_PATH" \
             UAT_ARTIFACT_SHA256="$UAT_ARTIFACT_SHA256" scripts/uat-blackbox.sh
 
-  # Ubuntu targeted regressions 3-9 (DEB/AppArmor). Exact candidate DEB; the
+  # Ubuntu targeted regressions 3-10 (DEB/AppArmor). Exact candidate DEB; the
   # runner never rebuilds when the candidate DEB is supplied.
   uat-regressions-ubuntu:
     if: inputs.scope == 'full'
@@ -271,7 +271,7 @@ jobs:
           echo "UAT_ARTIFACT_PATH=$path" >> "$GITHUB_ENV"
           echo "UAT_ARTIFACT_SHA256=$sha" >> "$GITHUB_ENV"
 
-      - name: Run targeted Release-2 regressions (3-9, collect-all, exact candidate DEB)
+      - name: Run targeted Release-2 regressions (3-10, collect-all, exact candidate DEB)
         run: |
           sudo -E env "PATH=$PATH" UAT_VERSION="${{ inputs.uat_version }}" \
             UAT_ALLOWED_ROOT=/home \

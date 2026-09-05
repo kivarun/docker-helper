@@ -351,10 +351,11 @@ subcase_d() {
     reg_fail "D: unexpected default Launcher count after pre-flight rejection"
   fi
 
-  # Explicit duplicate name keeps the stable daemon conflict, naming the
+  # Explicit duplicate name keeps the stable daemon conflict code, naming the
   # Launcher and its Principal.
   dup_err="$(dh launcher create --system --principal "$user" --name default --no-credential 2>&1)"; dup_rc=$?
   if [ "$dup_rc" -ne 0 ] \
+      && printf '%s' "$dup_err" | grep -q 'launcher_exists' \
       && printf '%s' "$dup_err" | grep -q 'already exists for principal' \
       && printf '%s' "$dup_err" | grep -q 'default' \
       && printf '%s' "$dup_err" | grep -q "$user"; then
