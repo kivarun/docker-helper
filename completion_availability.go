@@ -1,13 +1,10 @@
 package main
 
 import (
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
-	"time"
 )
 
 // completionLocalPrivilege is local execution-identity metadata used only to
@@ -42,8 +39,6 @@ type completionAvailability struct {
 // completionAvailabilityByCommand is keyed by command nodes, not command-name
 // strings, so availability metadata follows the parser tree structurally.
 var completionAvailabilityByCommand = map[*Command]completionAvailability{}
-
-const completionAuthorityQueryTimeout = 250 * time.Millisecond
 
 func setCompletionLocal(local completionLocalPrivilege, commands ...*Command) {
 	for _, cmd := range commands {
@@ -205,74 +200,18 @@ func completionAuthorityWords(mask completionAuthorityMask) string {
 	return strings.Join(words, " ")
 }
 
-// configureCompletionAuthorityQuery extends the existing machine-facing
-// `completion roots principal` query with an authority-only mode. Reusing the
-// existing leaf preserves the structural invariant that parser, help and
-// completion expose the same command tree: no hidden command is introduced
-// solely for Bash implementation plumbing.
-func configureCompletionAuthorityQuery() {
-	completionRootsPrincipalCommand.NewInvocation = func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
-		authorityOnly := fs.Bool("authority-only", false, "Print authenticated operator authority for shell completion")
-		return Invocation{
-			Run: func(stdout, stderr io.Writer) int {
-				timeout := completionQueryTimeout
-				if *authorityOnly {
-					timeout = completionAuthorityQueryTimeout
-				}
-				client, err := resolveOperatorClient(operatorClientOptions{
-					System:    *system,
-					Endpoint:  *endpoint,
-					TokenFile: *tokenFile,
-					Timeout:   timeout,
-				})
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				if *authorityOnly {
-					auth, err := client.auth()
-					if err != nil {
-						fmt.Fprintf(stderr, "error: %v\n", err)
-						return 1
-					}
-					switch auth.Authority {
-					case "admin", "principal", "launcher":
-						fmt.Fprintln(stdout, auth.Authority)
-						return 0
-					default:
-						fmt.Fprintf(stderr, "error: unknown authority %q\n", auth.Authority)
-						return 1
-					}
-				}
-
-				username, err := resolveTargetPrincipalForCLI(client, *principal,
-					errors.New("--principal is required for admin authentication"),
-					errors.New("Launcher credentials cannot query Principal policy"), nil)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				result, err := client.principalEffectiveRoots(username)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				for _, root := range result.AllowedRoots {
-					fmt.Fprintln(stdout, root)
-				}
-				return 0
-			},
-		}
-	}
-}
-
-func generateCapabilityAwareBashCompletion(w io.Writer) {
-	generateBashCompletion(w)
-	generateCompletionAvailabilityBash(w)
-}
-
+// generateCompletionAvailabilityBash emits the availability-driven segment of
+// the canonical completion script: the local-privilege and authority tables,
+// the evaluation helpers, and the single capability-aware
+// _docker_helper_complete_subcommands implementation. This is metadata-driven
+// generation, not command behavior: the pruning stays advisory and nothing
+// emitted here redefines a function from the tree-driven segment.
+//
+// The suggestion layer is the only pruned surface: _docker_helper_is_command
+// remains the complete parser tree so manually typed commands continue to
+// parse normally, and help keeps the full tree navigable. An authority query
+// failure fails open to the full static parser tree, and local EUID pruning
+// is advisory as today — completion is not an authorization boundary.
 func generateCompletionAvailabilityBash(w io.Writer) {
 	paths := completionAvailabilityPaths()
 	var sortedPaths []string
@@ -281,9 +220,8 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	}
 	sort.Strings(sortedPaths)
 
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "# Capability-aware availability overlay. Explicit command paths and help")
-	fmt.Fprintln(w, "# keep the full parser tree; only ordinary subcommand suggestions are pruned.")
+	fmt.Fprintln(w, "# Capability-aware availability. Explicit command paths and help keep the")
+	fmt.Fprintln(w, "# full parser tree; only ordinary subcommand suggestions are pruned.")
 	fmt.Fprintln(w, "_docker_helper_completion_local_requirement() {")
 	fmt.Fprintln(w, "    case \"$1\" in")
 	for _, path := range sortedPaths {
@@ -343,10 +281,14 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
 
-	fmt.Fprintln(w, "# Override only the suggestion layer. _docker_helper_is_command remains the")
-	fmt.Fprintln(w, "# complete parser tree so manually typed commands continue to parse normally.")
+	fmt.Fprintln(w, "# Complete subcommands for the given command path: the single canonical")
+	fmt.Fprintln(w, "# implementation, consulting the availability evaluation above. Help")
+	fmt.Fprintln(w, "# navigation and an authority-query failure return the full static")
+	fmt.Fprintln(w, "# parser tree (fail open); a successful query prunes only the ordinary")
+	fmt.Fprintln(w, "# suggestions, never the manually typed parser surface.")
 	fmt.Fprintln(w, "_docker_helper_complete_subcommands() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "    local subcmds=($(_docker_helper_subcommands \"$cmd_path\"))")
 	fmt.Fprintln(w, "    local comp_cmds=() c child_path")
 	fmt.Fprintln(w, "    if [ \"${in_help:-0}\" -eq 1 ]; then")
@@ -372,44 +314,8 @@ func generateCompletionAvailabilityBash(w io.Writer) {
 	fmt.Fprintln(w, "    COMPREPLY=(\"${comp_cmds[@]}\")")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
-
-	// The base generator correctly uses `compopt -o filenames` for generic
-	// filesystem completion, but daemon-backed policy roots can return a
-	// directory anchor before that fallback is reached. Register a tiny
-	// entrypoint that enables filename semantics whenever the current value
-	// belongs to a path-valued flag. Readline then keeps a trailing directory
-	// slash open for continued completion instead of appending a space.
-	fmt.Fprintln(w, "_docker_helper_completion_path_flag() {")
-	fmt.Fprintln(w, "    case \"$1\" in")
-	for _, flagName := range pathValuedFlags {
-		fmt.Fprintf(w, "        --%s) return 0 ;;\n", flagName)
-	}
-	fmt.Fprintln(w, "        *) return 1 ;;")
-	fmt.Fprintln(w, "    esac")
-	fmt.Fprintln(w, "}")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "_docker_helper_completion_entrypoint() {")
-	fmt.Fprintln(w, "    local current=\"${COMP_WORDS[COMP_CWORD]}\"")
-	fmt.Fprintln(w, "    local previous=\"${COMP_WORDS[COMP_CWORD-1]:-}\"")
-	fmt.Fprintln(w, "    local inline_flag=\"\"")
-	fmt.Fprintln(w, "    if [[ \"$current\" == --*=* ]]; then inline_flag=\"${current%%=*}\"; fi")
-	fmt.Fprintln(w, "    if _docker_helper_completion_path_flag \"$previous\" || { [ -n \"$inline_flag\" ] && _docker_helper_completion_path_flag \"$inline_flag\"; }; then")
-	fmt.Fprintln(w, "        compopt -o filenames 2>/dev/null || true")
-	fmt.Fprintln(w, "    fi")
-	fmt.Fprintln(w, "    _docker_helper_completion")
-	fmt.Fprintln(w, "}")
-	fmt.Fprintln(w, "complete -F _docker_helper_completion_entrypoint docker-helper")
 }
 
 func init() {
-	configureCompletionAuthorityQuery()
 	configureCompletionAvailability()
-	completionBashCommand.NewInvocation = func(fs *flag.FlagSet) Invocation {
-		return Invocation{
-			Run: func(stdout, stderr io.Writer) int {
-				generateCapabilityAwareBashCompletion(stdout)
-				return 0
-			},
-		}
-	}
 }

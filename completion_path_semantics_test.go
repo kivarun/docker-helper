@@ -11,10 +11,11 @@ import (
 	"testing"
 )
 
-// runCompletionEntrypoint invokes the actually registered completion entrypoint
-// with a shell-function compopt seam. This observes whether the compspec enables
-// Readline filename semantics; COMPREPLY alone cannot expose Bash's automatic
-// trailing-space decision.
+// runCompletionEntrypoint invokes the registered completion entry function
+// (_docker_helper_completion, the function the generated script registers for
+// docker-helper) with a shell-function compopt seam. This observes whether the
+// compspec enables Readline filename semantics; COMPREPLY alone cannot expose
+// Bash's automatic trailing-space decision.
 func runCompletionEntrypoint(t *testing.T, script string, compWords []string) (reply []string, filenameMode bool) {
 	t.Helper()
 	cword := len(compWords) - 1
@@ -31,7 +32,7 @@ func runCompletionEntrypoint(t *testing.T, script string, compWords []string) (r
 	sb.WriteString(")\n")
 	sb.WriteString("COMP_CWORD=" + strconv.Itoa(cword) + "\n")
 	sb.WriteString("COMPREPLY=()\n")
-	sb.WriteString("_docker_helper_completion_entrypoint\n")
+	sb.WriteString("_docker_helper_completion\n")
 	sb.WriteString("printf 'MODE=%s\\n' \"$DH_FILENAME_MODE\"\n")
 	sb.WriteString("printf 'REPLY=%s\\n' \"${COMPREPLY[*]}\"\n")
 

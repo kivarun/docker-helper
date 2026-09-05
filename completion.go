@@ -45,6 +45,10 @@ Or install persistently:
 	Subcommands: []*Command{completionBashCommand, completionRootsCommand},
 }
 
+// completionBashCommand generates the canonical capability-aware Bash
+// completion script: one generator produces the whole script, so the
+// emitted definitions and the single `complete` registration are the
+// final behavior at declaration time.
 var completionBashCommand = &Command{
 	Name:    "bash",
 	Summary: "Generate Bash completion script",
@@ -72,6 +76,10 @@ var completionBashCommand = &Command{
 // commands keep the unbounded operator client.
 const completionQueryTimeout = 750 * time.Millisecond
 
+// completionAuthorityQueryTimeout bounds the --authority-only exchange: the
+// short timeout of the shell-completion authority probe.
+const completionAuthorityQueryTimeout = 250 * time.Millisecond
+
 var completionRootsCommand = &Command{
 	Name:        "roots",
 	Summary:     "Query effective policy roots for shell completion",
@@ -84,6 +92,12 @@ var completionRootsCommand = &Command{
 // when given; otherwise it is inferred from the authenticated credential with
 // the same scope-aware rule the launcher command family uses. The daemon
 // authorizes the query; this command performs no local policy computation.
+//
+// With --authority-only it instead prints exactly one of admin, principal,
+// launcher — the authenticated operator authority for shell-completion
+// introspection — under the short authority probe timeout; an unknown
+// authority or a query failure exits non-zero. The declared invocation is the
+// final behavior: no later rewrite patches this command.
 var completionRootsPrincipalCommand = &Command{
 	Name:       "principal",
 	Summary:    "Print a Principal's effective allowed roots",
@@ -93,17 +107,37 @@ var completionRootsPrincipalCommand = &Command{
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username (inferred from credential when omitted)")
+		authorityOnly := fs.Bool("authority-only", false, "Print authenticated operator authority for shell completion")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
+				timeout := completionQueryTimeout
+				if *authorityOnly {
+					timeout = completionAuthorityQueryTimeout
+				}
 				client, err := resolveOperatorClient(operatorClientOptions{
 					System:    *system,
 					Endpoint:  *endpoint,
 					TokenFile: *tokenFile,
-					Timeout:   completionQueryTimeout,
+					Timeout:   timeout,
 				})
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
+				}
+				if *authorityOnly {
+					auth, err := client.auth()
+					if err != nil {
+						fmt.Fprintf(stderr, "error: %v\n", err)
+						return 1
+					}
+					switch auth.Authority {
+					case "admin", "principal", "launcher":
+						fmt.Fprintln(stdout, auth.Authority)
+						return 0
+					default:
+						fmt.Fprintf(stderr, "error: unknown authority %q\n", auth.Authority)
+						return 1
+					}
 				}
 				username, err := resolveTargetPrincipalForCLI(client, *principal,
 					errors.New("--principal is required for admin authentication"),
@@ -268,7 +302,12 @@ var policyValueCompletions = []policyValueCompletion{
 	{commandPath: "session create", flag: "workspace", query: "session"},
 }
 
-// generateBashCompletion generates a Bash completion script for the docker-helper CLI.
+// generateBashCompletion generates the canonical Bash completion script for
+// the docker-helper CLI: one generator emits the whole script — the
+// tree-driven helpers, the availability-driven tables and evaluation helpers
+// (completion_availability.go), the single capability-aware
+// _docker_helper_complete_subcommands, and the single `complete`
+// registration. No emitted function is redefined later in the script.
 func generateBashCompletion(w io.Writer) {
 	// Collect all command paths.
 	allPaths := collectAllCommandPaths(rootCommand, nil)
@@ -315,11 +354,33 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "# Bash completion for docker-helper")
 	fmt.Fprintln(w, "# Generated automatically - do not edit")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "# Report whether a flag takes a filesystem path value, so the")
+	fmt.Fprintln(w, "# completion entry can enable Readline filename semantics for it.")
+	fmt.Fprintln(w, "_docker_helper_completion_path_flag() {")
+	fmt.Fprintln(w, "    case \"$1\" in")
+	for _, flagName := range pathValuedFlags {
+		fmt.Fprintf(w, "        --%s) return 0 ;;\n", flagName)
+	}
+	fmt.Fprintln(w, "        *) return 1 ;;")
+	fmt.Fprintln(w, "    esac")
+	fmt.Fprintln(w, "}")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "_docker_helper_completion() {")
 	fmt.Fprintln(w, "    local cur=\"${COMP_WORDS[COMP_CWORD]}\"")
 	fmt.Fprintln(w, "    local prev=\"${COMP_WORDS[COMP_CWORD-1]:-}\"")
 	fmt.Fprintln(w, "    local words=(\"${COMP_WORDS[@]}\")")
 	fmt.Fprintln(w, "    local cword=${COMP_CWORD}")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "    # Enable filename semantics up front when the value being completed")
+	fmt.Fprintln(w, "    # belongs to a path-valued flag — the previous word is the flag, or")
+	fmt.Fprintln(w, "    # the current word is --flag=VALUE — so a daemon-backed directory")
+	fmt.Fprintln(w, "    # anchor keeps its trailing slash open for continued completion")
+	fmt.Fprintln(w, "    # instead of appending a space.")
+	fmt.Fprintln(w, "    local inline_flag=\"\"")
+	fmt.Fprintln(w, "    if [[ \"$cur\" == --*=* ]]; then inline_flag=\"${cur%%=*}\"; fi")
+	fmt.Fprintln(w, "    if _docker_helper_completion_path_flag \"$prev\" || { [ -n \"$inline_flag\" ] && _docker_helper_completion_path_flag \"$inline_flag\"; }; then")
+	fmt.Fprintln(w, "        compopt -o filenames 2>/dev/null || true")
+	fmt.Fprintln(w, "    fi")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "    # Build the command path by walking the Command tree")
 	fmt.Fprintln(w, "    local cmds=()")
@@ -601,20 +662,6 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    _docker_helper_complete_subcommands \"$cmd_path\"")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "# Complete subcommands for the given command path")
-	fmt.Fprintln(w, "_docker_helper_complete_subcommands() {")
-	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "    local subcmds=($(_docker_helper_subcommands \"$cmd_path\"))")
-	fmt.Fprintln(w, "    local comp_cmds=()")
-	fmt.Fprintln(w, "    for c in \"${subcmds[@]}\"; do")
-	fmt.Fprintln(w, "        case \"$c\" in")
-	fmt.Fprintln(w, "            \"$cur\"*) comp_cmds+=(\"$c\") ;;")
-	fmt.Fprintln(w, "        esac")
-	fmt.Fprintln(w, "    done")
-	fmt.Fprintln(w, "    COMPREPLY=(\"${comp_cmds[@]}\")")
-	fmt.Fprintln(w, "}")
-	fmt.Fprintln(w)
 	fmt.Fprintln(w, "# Return subcommands for a given command path")
 	fmt.Fprintln(w, "_docker_helper_subcommands() {")
 	fmt.Fprintln(w, "    local cmd_path=\"$1\"")
@@ -890,6 +937,12 @@ func generateBashCompletion(w io.Writer) {
 	fmt.Fprintln(w, "    _docker_helper_normalize_path_candidates")
 	fmt.Fprintln(w, "}")
 	fmt.Fprintln(w)
+
+	// The availability-driven tables, evaluation helpers, and the single
+	// capability-aware subcommand-completion implementation (no redefinition
+	// of any earlier emission).
+	generateCompletionAvailabilityBash(w)
+
 	fmt.Fprintln(w, "complete -F _docker_helper_completion docker-helper")
 }
 

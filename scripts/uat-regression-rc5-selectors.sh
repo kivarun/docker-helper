@@ -30,8 +30,9 @@
 #      name keeps the stable launcher_exists conflict naming the Launcher
 #      and Principal.
 #   E. Bash path completion '//' — the generated completion script sourced
-#      in a real Bash exercises the actual completion entrypoint so a
-#      directory continuation after '.../work/' yields '.../work/child'
+#      in a real Bash drives the function Bash actually registered for
+#      docker-helper (discovered through `complete -p`, one -F registration)
+#      so a directory continuation after '.../work/' yields '.../work/child'
 #      and never '.../work//child'.
 #
 # Each subcase uses its own OS user/Principal so results are independent.
@@ -396,20 +397,50 @@ subcase_e() {
     return
   fi
 
-  # Drive the actual completion entrypoint in a real Bash the way Bash does:
-  # source the script, set COMP_WORDS/COMP_CWORD for a directory continuation
-  # after '.../work/', call the completion function, print COMPREPLY.
+  # Drive the function Bash actually registered for docker-helper, the way
+  # Bash does: source the script, discover the registered compspec through
+  # `complete -p` (asserting exactly one registration and a -F function),
+  # invoke the registered function with COMP_WORDS/COMP_CWORD, and inspect
+  # COMPREPLY. The test never assumes an internal helper name.
+  local e_err="$TMPDIR_RC5/e.err"
   out="$(bash -c '
     set -u
     source "$1" || exit 3
+    # Exactly one registration for docker-helper, discovered from Bash.
+    mapfile -t specs < <(complete -p docker-helper)
+    if [ ${#specs[@]} -ne 1 ]; then
+      echo "registrations: ${specs[*]:-none}" >&2
+      exit 5
+    fi
+    # Parse/assert the registered -F FUNCTION.
+    func="${specs[0]#*-F }"
+    if [ "$func" = "${specs[0]}" ]; then
+      echo "no -F function in compspec: ${specs[0]}" >&2
+      exit 6
+    fi
+    func="${func%% *}"
+    if [ -z "$func" ]; then
+      echo "empty -F function in compspec: ${specs[0]}" >&2
+      exit 6
+    fi
     COMP_WORDS=(/usr/bin/docker-helper session create --system --token-file "$2" --workspace "$3")
     COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
-    _docker_helper_completion || exit 4
+    "$func" || exit 4
     printf "%s\n" "${COMPREPLY[@]}"
-  ' _ "$script" "$cred" "$work/")"
+  ' _ "$script" "$cred" "$work/" 2>"$e_err")"
   local rc=$?
+  local diag
+  diag="$(head -3 "$e_err" 2>/dev/null | tr '\n' ' ')"
+  if [ "$rc" -eq 5 ]; then
+    reg_fail "E: docker-helper is not registered exactly once by the generated script: $diag"
+    return
+  fi
+  if [ "$rc" -eq 6 ]; then
+    reg_fail "E: docker-helper completion is not registered with a -F function: $diag"
+    return
+  fi
   if [ "$rc" -ne 0 ]; then
-    reg_fail "E: completion entrypoint failed (rc=$rc)"
+    reg_fail "E: registered completion function failed (rc=$rc): $diag"
     return
   fi
 
