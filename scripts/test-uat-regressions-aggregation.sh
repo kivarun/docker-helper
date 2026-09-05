@@ -193,7 +193,7 @@ run_runner_all() { # runner rc
            mount-pin-replacement concurrent-mount-pins secret-containment \
            daemon-stale-runtime selinux-workspace-lifecycle \
            selinux-operator-boundary selinux-fs-boundary selinux-mount-guard \
-           selinux-relabel-avc; do
+           selinux-relabel-avc rc5-selectors; do
     printf '%s\n' "$rc" > "$WORK/rc/uat-regression-$g.sh"
   done
   local out

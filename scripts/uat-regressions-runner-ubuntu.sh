@@ -144,6 +144,7 @@ REGRESSIONS=(
   "7:Concurrent mount pins:uat-regression-concurrent-mount-pins.sh"
   "8:Secret containment:uat-regression-secret-containment.sh"
   "9:Daemon stale-runtime recovery:uat-regression-daemon-stale-runtime.sh"
+  "10:RC5 selector and completion acceptance:uat-regression-rc5-selectors.sh"
 )
 
 declare -A RESULT
