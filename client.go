@@ -742,14 +742,22 @@ func (c *apiClient) createLauncher(username string, req createLauncherClientRequ
 	return &result, nil
 }
 
-// listLaunchers runs the scope-first launcher list Query: the daemon
+// listLaunchersFiltered runs the scope-first launcher list Query: the daemon
 // authorizes the query against the authenticated bearer and the optional
-// Principal filter can only narrow visibility. An empty filter lists
-// everything visible to the caller.
-func (c *apiClient) listLaunchers(principalFilter string) (*listLaunchersResponse, error) {
-	path := "/launchers"
+// Principal and Launcher selectors can only narrow visibility server-side. An
+// empty selector lists everything visible to the caller; filtering is never
+// performed client-side.
+func (c *apiClient) listLaunchersFiltered(principalFilter, launcherFilter string) (*listLaunchersResponse, error) {
+	values := url.Values{}
 	if principalFilter != "" {
-		path += "?principal=" + url.QueryEscape(principalFilter)
+		values.Set("principal", principalFilter)
+	}
+	if launcherFilter != "" {
+		values.Set("launcher", launcherFilter)
+	}
+	path := "/launchers"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
 	}
 	resp, err := c.doAuthenticatedRequest("GET", path, nil)
 	if err != nil {

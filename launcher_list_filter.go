@@ -1,14 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
-	"flag"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"time"
 )
 
@@ -110,84 +105,4 @@ func (a *App) serveLauncherFilteredList(w http.ResponseWriter, r *http.Request, 
 		Duration: duration,
 	}, auth, launcher)
 	writeJSONRaw(ctx, w, http.StatusOK, resp)
-}
-
-// listLaunchersFiltered is the scope-first Launcher collection client. Both
-// selectors are sent to the daemon; an empty selector is omitted. Filtering is
-// never performed client-side.
-func (c *apiClient) listLaunchersFiltered(principalFilter, launcherFilter string) (*listLaunchersResponse, error) {
-	values := url.Values{}
-	if principalFilter != "" {
-		values.Set("principal", principalFilter)
-	}
-	if launcherFilter != "" {
-		values.Set("launcher", launcherFilter)
-	}
-	path := "/launchers"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-
-	resp, err := c.doAuthenticatedRequest("GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := c.readResponseBody(resp)
-	if err != nil {
-		return nil, err
-	}
-	var result listLaunchersResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("cannot decode response: %w", err)
-	}
-	return &result, nil
-}
-
-// configureLauncherListFilter extends the existing command node in place so
-// every structural consumer (parser, help and completion) keeps the same
-// *Command identity while gaining the Launcher narrowing selector.
-func configureLauncherListFilter() {
-	launcherListCommand.Usage = "docker-helper launcher list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]"
-	launcherListCommand.NewInvocation = func(fs *flag.FlagSet) Invocation {
-		system, endpoint, tokenFile := registerOperatorFlags(fs)
-		principal := fs.String("principal", "", "Principal username filter (narrowing only; the daemon authorizes visibility)")
-		launcher := fs.String("launcher", "", "Launcher name or ID filter (admin without --principal must use an ID)")
-		jsonOut := fs.Bool("json", false, "Output in JSON format")
-		return Invocation{
-			Run: func(stdout, stderr io.Writer) int {
-				client, err := launcherOpClient(*system, *endpoint, *tokenFile)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				result, err := client.listLaunchersFiltered(*principal, *launcher)
-				if err != nil {
-					fmt.Fprintf(stderr, "error: %v\n", err)
-					return 1
-				}
-				if *jsonOut {
-					if err := encodeJSONOut(stdout, result); err != nil {
-						fmt.Fprintf(stderr, "error: cannot encode output: %v\n", err)
-						return 1
-					}
-					return 0
-				}
-				fmt.Fprintf(stdout, "%-40s %-10s %-30s %-10s %s\n", "ID", "NAME", "SCOPE", "ENABLED", "PRINCIPAL")
-				for _, l := range result.Launchers {
-					enabled := "no"
-					if l.Enabled {
-						enabled = "yes"
-					}
-					fmt.Fprintf(stdout, "%-40s %-10s %-30s %-10s %s\n", l.ID, l.Name, l.Scope, enabled, l.Principal)
-				}
-				return 0
-			},
-		}
-	}
-}
-
-func init() {
-	configureLauncherListFilter()
 }

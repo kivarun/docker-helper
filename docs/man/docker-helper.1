@@ -234,13 +234,20 @@ to issue a launcher credential unless \fB\-\-issue-credential\fR or
 \fB\-\-no-credential\fR is given; in non-interactive use one of these flags is
 required.
 .TP
-.B docker-helper launcher list [\-\-principal USER] [\-\-json]
+.B docker-helper launcher list [\-\-system] [\-\-endpoint ENDPOINT] [\-\-token-file FILE] [\-\-principal USER] [\-\-launcher LAUNCHER] [\-\-json]
 List launchers with the columns ID, NAME, SCOPE, ENABLED, and PRINCIPAL.
 This is a scope-first list Query: the authenticated authority establishes
 the visible launchers (an admin token without \fB\-\-principal\fR sees every
 principal's launchers; a principal credential sees its own), and the
-optional \fB\-\-principal\fR flag is only a filter that can narrow that
-visibility, never expand it. No principal inference happens in the CLI.
+optional \fB\-\-principal\fR and \fB\-\-launcher\fR flags are only filters
+that can narrow that visibility, never expand it. Narrowing happens
+server-side: under a resolved Principal scope the Launcher selector accepts
+a launcher name or ID; an unfiltered admin must use a launcher ID because
+launcher names are principal-scoped and are never searched globally
+(\fB\-\-launcher\fR with a name and no \fB\-\-principal\fR is rejected with
+\fBlauncher_name_requires_principal\fR). A missing launcher match is a
+non-disclosing \fB404 launcher_not_found\fR. No principal inference happens
+in the CLI.
 .TP
 .B docker-helper launcher show [\-\-principal USER] [LAUNCHER]
 Show launcher details.

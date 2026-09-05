@@ -912,7 +912,7 @@ credential cannot manage launchers):
 |---|---|
 | `POST /principals/{username}/launchers` | create launcher (optional one-time credential issuance) |
 | `GET /principals/{username}/launchers` | list that principal's launchers |
-| `GET /launchers` | scope-first launcher list (authority visibility + optional `?principal=` narrowing filter) |
+| `GET /launchers` | scope-first launcher list (authority visibility + optional `?principal=` and `?launcher=` narrowing filters) |
 | `GET /principals/{username}/launchers/{launcher}` | show launcher |
 | `PATCH /principals/{username}/launchers/{launcher}` | rename / enable / disable |
 | `PUT /principals/{username}/launchers/{launcher}/allowed-roots` | atomic scope replacement |
@@ -945,7 +945,7 @@ CLI surface:
 ```
 docker-helper launcher create [--principal USER] [--name NAME]
     [--allowed-root PATH]... [--issue-credential | --no-credential]
-docker-helper launcher list [--principal USER]
+docker-helper launcher list [--principal USER] [--launcher LAUNCHER]
 docker-helper launcher show [--principal USER] [LAUNCHER]
 docker-helper launcher set [--principal USER] [--name NAME]
     [--enabled true|false] [LAUNCHER]
@@ -971,7 +971,14 @@ filter: every Principal; a Principal credential without a filter: its own)
 and the optional `--principal` selector is only a filter that can narrow
 visibility, never expand it — a foreign filter is the same non-disclosing
 `404 principal_not_found` as the nested list, a Launcher credential is
-`401`, and no auth introspection happens in the CLI.
+`401`, and no auth introspection happens in the CLI. The `--launcher`
+selector narrows server-side inside the resolved scope: under a resolved
+Principal scope (Principal credential, or admin with `--principal`) a
+Launcher name or ID is accepted; for an unfiltered admin scope only a
+globally-unique Launcher ID is accepted and a name is rejected with
+`400 launcher_name_requires_principal` because Launcher names are
+Principal-scoped and are never searched globally. A missing selector match
+is the same non-disclosing `404 launcher_not_found`.
 `launcher credential create` is the canonical issuance verb (the Release 2.0
 `issue` spelling is retired from the public CLI); because a Launcher holds
 at most one credential, a second create is the daemon's normal

@@ -249,12 +249,13 @@ var launcherCreateCommand = &Command{
 var launcherListCommand = &Command{
 	Name:       "list",
 	Summary:    "List launchers",
-	Usage:      "docker-helper launcher list [--principal USER] [--json]",
+	Usage:      "docker-helper launcher list [--system] [--endpoint ENDPOINT] [--token-file PATH] [--principal USER] [--launcher LAUNCHER] [--json]",
 	MinPosArgs: 0,
 	MaxPosArgs: 0,
 	NewInvocation: func(fs *flag.FlagSet) Invocation {
 		system, endpoint, tokenFile := registerOperatorFlags(fs)
 		principal := fs.String("principal", "", "Principal username filter (narrowing only; the daemon authorizes visibility)")
+		launcher := fs.String("launcher", "", "Launcher name or ID filter (admin without --principal must use an ID)")
 		jsonOut := fs.Bool("json", false, "Output in JSON format")
 		return Invocation{
 			Run: func(stdout, stderr io.Writer) int {
@@ -264,10 +265,10 @@ var launcherListCommand = &Command{
 					return 1
 				}
 				// Scope-first list: the daemon authorizes the query against the
-				// authenticated bearer; the optional Principal filter can only
-				// narrow visibility. No Principal inference and no local
-				// pre-authorization happens in the CLI.
-				result, err := client.listLaunchers(*principal)
+				// authenticated bearer and performs the narrowing server-side;
+				// both selectors are sent as-is and the CLI never filters a
+				// broader collection locally.
+				result, err := client.listLaunchersFiltered(*principal, *launcher)
 				if err != nil {
 					fmt.Fprintf(stderr, "error: %v\n", err)
 					return 1
