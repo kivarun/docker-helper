@@ -236,7 +236,7 @@ func (a *App) resolveListScope(w http.ResponseWriter, r *http.Request, auth *ope
 		// authentication anomaly: fail closed as an internal error — never
 		// an all-Principals scope, never a resolved Principal.
 		opLog(ctx).Error("list scope invalid operator authority",
-			slog.String("operation", "launcher_principal_lookup"),
+			slog.String("operation", "principal_control_target_lookup"),
 			slog.String("error", "invalid operator authority"),
 		)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
