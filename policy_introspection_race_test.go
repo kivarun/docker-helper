@@ -130,31 +130,56 @@ func openParkedQueryDB(t *testing.T, dbPath string, points ...*parkedQueryPoint)
 // under the lifecycle serialization boundary. The reload parks inside its
 // lifecycleMu critical section (the injected runtime-config barrier) before
 // committing the narrowed global roots; the introspection is pinned at its
-// last pre-boundary read and released into the held boundary, so its policy
-// read can only run after the reload's setConfig commit and must observe the
-// narrowed roots wholly. An unserialized read would resolve while the parked
-// reload is still pre-commit and answer with the pre-reload roots.
+// last pre-boundary read (its credential authentication) and released into
+// the held boundary, so its whole projection — identity and roots — can only
+// resolve after the reload's setConfig commit and must observe the narrowed
+// roots wholly. An unserialized read would resolve while the parked reload is
+// still pre-commit and answer with the pre-reload roots.
 func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) {
 	app1 := newTestAppWithAdminToken(t)
 	setupTestLoggingDiscard(t)
 	rootA := app1.Config.AllowedRoots[0]
-	rootB := testAllowedRootDir(t)
 
-	// Baseline: the daemon-owner Principal collapses onto the global roots A.
-	w := launcherRequest(t, app1, http.MethodGet, "/principals/dhtestowner/effective-allowed-roots", testAdminToken, "")
+	// Principal rootview with stored roots [home, stale]: home sits under the
+	// narrowed global root, stale only under the wider pre-reload root A, so
+	// the effective projection distinguishes the pre-reload state
+	// ([home, stale]) from the narrowed one ([home]).
+	narrow := filepath.Join(rootA, "narrow")
+	stale := filepath.Join(rootA, "stale")
+	home := filepath.Join(narrow, "rootview")
+	for _, d := range []string{narrow, stale, home} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installOSUserMock(t, map[string]string{"rootview": home})
+	if _, err := createPrincipal(app1.DB, "rootview", app1.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal(rootview): %v", err)
+	}
+	w := launcherRequest(t, app1, http.MethodPost, "/principals/rootview/allowed-roots", testAdminToken, fmt.Sprintf(`{"path":%q}`, stale))
+	if w.Code != http.StatusOK {
+		t.Fatalf("add stale root: %d %s", w.Code, w.Body.String())
+	}
+	_, token, err := createPrincipalCredential(app1.DB, "rootview", "oc")
+	if err != nil {
+		t.Fatalf("createPrincipalCredential(rootview): %v", err)
+	}
+
+	// Baseline: the effective projection is the full stored-root scope under A.
+	w = launcherRequest(t, app1, http.MethodGet, "/principals/rootview/effective-allowed-roots", testAdminToken, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("baseline introspection: %d %s", w.Code, w.Body.String())
 	}
-	if got := decodePolicyRoots(t, w.Body.String()); len(got.AllowedRoots) != 1 || got.AllowedRoots[0] != rootA {
-		t.Fatalf("baseline allowed_roots = %v, want [%s]", got.AllowedRoots, rootA)
+	if got := decodePolicyRoots(t, w.Body.String()); len(got.AllowedRoots) != 2 {
+		t.Fatalf("baseline allowed_roots = %v, want [%s %s]", got.AllowedRoots, home, stale)
 	}
 
-	// Park the introspection at its last pre-boundary read (the control
-	// Principal identity lookup): after this release the only step before the
-	// boundary in the serialized implementation is the lifecycleMu acquire
-	// the parked reload still holds. The pattern is distinct from every other
-	// query in the race phase.
-	doorPoint := newParkedQueryPoint("SELECT id, username, uid, gid, home, enabled FROM principals WHERE id")
+	// Park the introspection at its last pre-boundary read (the credential
+	// authentication's principal read): after this release the only step
+	// before the boundary in the serialized implementation is the lifecycleMu
+	// acquire the parked reload still holds. The pattern is distinct from
+	// every other query in the race phase.
+	doorPoint := newParkedQueryPoint("SELECT username, enabled FROM principals WHERE id")
 	app := &App{
 		Config:          app1.Config,
 		DB:              openParkedQueryDB(t, app1.Config.DatabasePath, doorPoint),
@@ -175,7 +200,7 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 			loadAndPrepareRuntimeConfig: func() (*Config, error) {
 				close(holding)
 				<-gate
-				return narrowCfg(t, app, rootB), nil
+				return narrowCfg(t, app, narrow), nil
 			},
 		}
 		reloadDone := make(chan int, 1)
@@ -190,15 +215,15 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 
 		// The introspection is served through the real mux (the {username}
 		// path value) while the reload holds the boundary.
-		introspectionDone := make(chan string, 1)
+		introspectionDone := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
 			mux := http.NewServeMux()
 			registerRoutes(mux, app)
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/principals/dhtestowner/effective-allowed-roots", nil)
-			req.Header.Set("Authorization", "Bearer "+testAdminToken)
+			req := httptest.NewRequest(http.MethodGet, "/principals/rootview/effective-allowed-roots", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
 			mux.ServeHTTP(rec, req)
-			introspectionDone <- rec.Body.String()
+			introspectionDone <- rec
 		}()
 		<-doorPoint.parked
 		close(doorPoint.release)
@@ -210,12 +235,12 @@ func TestRaceReloadSerializesPrincipalEffectiveRootsIntrospection(t *testing.T) 
 		if code := <-reloadDone; code != http.StatusOK {
 			t.Fatalf("reload: expected 200, got %d", code)
 		}
-		resp := decodePolicyRoots(t, <-introspectionDone)
-		if !resp.OK || resp.Principal != "dhtestowner" {
+		resp := decodePolicyRoots(t, (<-introspectionDone).Body.String())
+		if !resp.OK || resp.Principal != "rootview" {
 			t.Fatalf("introspection response = %+v", resp)
 		}
-		if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0] != rootB {
-			t.Fatalf("introspection observed a pre-reload or mixed policy state: allowed_roots = %v, want [%s]", resp.AllowedRoots, rootB)
+		if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0] != home {
+			t.Fatalf("introspection observed a pre-reload or mixed policy state: allowed_roots = %v, want [%s]", resp.AllowedRoots, home)
 		}
 	})
 }
@@ -346,6 +371,204 @@ func TestRacePrincipalRootNarrowingSerializesCreatePolicyIntrospection(t *testin
 type narrowingResult struct {
 	changed bool
 	err     error
+}
+
+// TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection proves the
+// effective-roots introspection resolves the CURRENT target Principal inside
+// the lifecycle boundary. The checked Principal deletion parks inside its
+// lifecycleMu critical section before its durable commit; the introspection
+// is pinned at its last pre-boundary read (its credential authentication) and
+// released into the held boundary, so the deletion commits first and the
+// in-boundary re-resolution finds no Principal: the endpoint answers
+// 404 principal_not_found, never a successful projection for a disappeared
+// incarnation (the pre-boundary identity resolution regression). After the
+// race, recreating the same username resolves a wholly new-incarnation
+// projection.
+func TestRacePrincipalDeleteSerializesEffectiveRootsIntrospection(t *testing.T) {
+	app1 := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app1.Config.AllowedRoots[0]
+
+	// Principal victim with stored roots [home, extra] and a credential.
+	home := filepath.Join(root, "home", "victim")
+	extra := filepath.Join(home, "extra")
+	if err := os.MkdirAll(extra, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"victim": home})
+	if _, err := createPrincipal(app1.DB, "victim", app1.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal(victim): %v", err)
+	}
+	w := launcherRequest(t, app1, http.MethodPost, "/principals/victim/allowed-roots", testAdminToken, fmt.Sprintf(`{"path":%q}`, extra))
+	if w.Code != http.StatusOK {
+		t.Fatalf("add extra root: %d %s", w.Code, w.Body.String())
+	}
+
+	// Park the deletion at its launcher inventory read (SELECT id FROM
+	// launchers WHERE principal_id = ?), reached inside its lifecycleMu
+	// boundary after its own non-destructive Principal lookups: while parked,
+	// the Principal incarnation and its credential rows are still intact.
+	// The introspection below uses the admin authority, whose in-memory
+	// authentication cannot be affected by the concurrent deletion, so the
+	// 404-after-disappearance outcome is deterministic under every
+	// scheduling. The pattern is distinct from every other query in the race
+	// phase.
+	deletionPoint := newParkedQueryPoint("SELECT id FROM launchers WHERE principal_id")
+	app := &App{
+		Config:                  app1.Config,
+		DB:                      openParkedQueryDB(t, app1.Config.DatabasePath, deletionPoint),
+		AdminTokenHash:          app1.AdminTokenHash,
+		userModeDefault:         app1.userModeDefault,
+		InspectHelperContainers: app1.InspectHelperContainers,
+	}
+	app.OperationSupervisor = newOperationSupervisor()
+
+	// The race phase runs on a single P: the deletion and the introspection
+	// are ordered purely by their synchronization points, in release order.
+	runSinglePinnedP(t, func() {
+		// 1. The checked deletion parks inside its lifecycleMu boundary,
+		//    after its own lookups, before its durable commit.
+		deletionDone := make(chan error, 1)
+		go func() {
+			_, err := app.deletePrincipalChecked(context.Background(), "victim")
+			deletionDone <- err
+		}()
+		<-deletionPoint.parked
+
+		// 2. The introspection is started while the deletion owns the
+		//    boundary; its in-boundary re-resolution can only run after the
+		//    deletion's commit.
+		introspectionDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			mux := http.NewServeMux()
+			registerRoutes(mux, app)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/principals/victim/effective-allowed-roots", nil)
+			req.Header.Set("Authorization", "Bearer "+testAdminToken)
+			mux.ServeHTTP(rec, req)
+			introspectionDone <- rec
+		}()
+
+		// 3. The deletion commits and releases the boundary.
+		close(deletionPoint.release)
+		if err := <-deletionDone; err != nil {
+			t.Fatalf("deletePrincipalChecked(victim): %v", err)
+		}
+
+		// 4. The introspection re-resolves the disappeared target inside the
+		//    boundary: 404 principal_not_found, never a successful projection.
+		rec := <-introspectionDone
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("introspection after deletion: expected 404, got %d (body=%s)", rec.Code, rec.Body.String())
+		}
+		if code := decodeAPIError(t, rec.Body.Bytes()).Code; code != "principal_not_found" {
+			t.Fatalf("introspection after deletion: expected principal_not_found, got %q", code)
+		}
+	})
+
+	// 5. Recreating the same username: the projection belongs wholly to the
+	//    newly resolved incarnation (its seeded home root, not the deleted
+	//    incarnation's [home, extra] set).
+	if _, err := createPrincipal(app.DB, "victim", app.Config.AllowedRoots); err != nil {
+		t.Fatalf("recreate victim: %v", err)
+	}
+	w = launcherRequest(t, app, http.MethodGet, "/principals/victim/effective-allowed-roots", testAdminToken, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("introspection after recreation: %d %s", w.Code, w.Body.String())
+	}
+	resp := decodePolicyRoots(t, w.Body.String())
+	if !resp.OK || resp.Principal != "victim" {
+		t.Fatalf("introspection after recreation: response = %+v", resp)
+	}
+	if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0] != home {
+		t.Fatalf("introspection after recreation: allowed_roots = %v, want the new incarnation's [%s]", resp.AllowedRoots, home)
+	}
+}
+
+// TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete proves
+// the inverse legal linearization: the introspection acquires lifecycleMu
+// first — parked inside its in-boundary resolution at the Principal-roots
+// read — and answers the complete old-incarnation projection (identity and
+// effective roots) while the checked deletion waits on the held boundary; the
+// deletion commits only afterwards.
+func TestRaceEffectiveRootsIntrospectionLinearizesBeforePrincipalDelete(t *testing.T) {
+	app1 := newTestAppWithAdminToken(t)
+	setupTestLoggingDiscard(t)
+	root := app1.Config.AllowedRoots[0]
+
+	home := filepath.Join(root, "home", "victim")
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	installOSUserMock(t, map[string]string{"victim": home})
+	if _, err := createPrincipal(app1.DB, "victim", app1.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal(victim): %v", err)
+	}
+	_, token, err := createPrincipalCredential(app1.DB, "victim", "oc")
+	if err != nil {
+		t.Fatalf("createPrincipalCredential(victim): %v", err)
+	}
+
+	// Park the introspection at its first in-boundary Principal-roots read
+	// (SELECT root_path FROM principal_allowed_roots WHERE principal_id = ?),
+	// reached while it holds lifecycleMu. The pattern is distinct from every
+	// other query in the race phase.
+	introspectionPoint := newParkedQueryPoint("SELECT root_path FROM principal_allowed_roots WHERE principal_id")
+	app := &App{
+		Config:                  app1.Config,
+		DB:                      openParkedQueryDB(t, app1.Config.DatabasePath, introspectionPoint),
+		AdminTokenHash:          app1.AdminTokenHash,
+		userModeDefault:         app1.userModeDefault,
+		InspectHelperContainers: app1.InspectHelperContainers,
+	}
+	app.OperationSupervisor = newOperationSupervisor()
+
+	// The race phase runs on a single P: the introspection and the deletion
+	// are ordered purely by their synchronization points, in release order.
+	runSinglePinnedP(t, func() {
+		// 1. The introspection resolves into its boundary and parks at its
+		//    in-boundary Principal-roots read, holding lifecycleMu.
+		introspectionDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			mux := http.NewServeMux()
+			registerRoutes(mux, app)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/principals/victim/effective-allowed-roots", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			mux.ServeHTTP(rec, req)
+			introspectionDone <- rec
+		}()
+		<-introspectionPoint.parked
+
+		// 2. The checked deletion is started while the introspection owns
+		//    the boundary.
+		deletionDone := make(chan error, 1)
+		go func() {
+			_, err := app.deletePrincipalChecked(context.Background(), "victim")
+			deletionDone <- err
+		}()
+
+		// 3. The introspection completes with the wholly old-incarnation
+		//    projection: the deletion cannot commit while the boundary is
+		//    held.
+		close(introspectionPoint.release)
+		rec := <-introspectionDone
+		if rec.Code != http.StatusOK {
+			t.Fatalf("introspection before deletion: expected 200, got %d (body=%s)", rec.Code, rec.Body.String())
+		}
+		resp := decodePolicyRoots(t, rec.Body.String())
+		if !resp.OK || resp.Principal != "victim" {
+			t.Fatalf("introspection before deletion: response = %+v", resp)
+		}
+		if len(resp.AllowedRoots) != 1 || resp.AllowedRoots[0] != home {
+			t.Fatalf("introspection before deletion: allowed_roots = %v, want the old incarnation's [%s]", resp.AllowedRoots, home)
+		}
+
+		// 4. The deletion then acquires the boundary and commits.
+		if err := <-deletionDone; err != nil {
+			t.Fatalf("deletePrincipalChecked(victim): %v", err)
+		}
+	})
 }
 
 // TestRaceCreatePolicyIntrospectionLinearizesBeforeRootNarrowing proves the

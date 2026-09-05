@@ -19,10 +19,15 @@ type effectiveRootsResponse struct {
 // effective-Principal-root policy owner (computeEffectivePrincipalRoots): in
 // user mode the daemon-owner Principal with zero stored roots collapses onto
 // the global allowed roots, every other Principal intersects with them. The
-// policy projection is resolved under the lifecycle serialization boundary
-// (resolveEffectivePrincipalRootsSnapshot), so the response describes one
-// coherent policy state even while a config reload or ownership mutation is
-// concurrent. It is a policy introspection Query for shell completion and
+// whole projection — target Principal identity and effective roots — is
+// resolved under the lifecycle serialization boundary
+// (resolvePrincipalEffectiveRootsSnapshot), so the response describes one
+// coherent policy state of one Principal incarnation even while a config
+// reload or a Principal/ownership lifecycle mutation is concurrent; a target
+// that disappears before the snapshot linearizes is the established
+// non-disclosing 404. Authentication stays outside the boundary; the
+// Principal-target selector rule is applied before the snapshot resolves the
+// selector. It is a policy introspection Query for shell completion and
 // read-only tooling, in the same spirit as GET /auth: identity introspection
 // stays separate from this policy introspection, and neither widens the
 // other. Authorization follows the Principal control plane: an admin token
@@ -39,13 +44,17 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	p, ok := a.resolveControlPrincipal(w, r, authCtx, r.PathValue("username"))
-	if !ok {
+	username := r.PathValue("username")
+	if !a.authorizePrincipalControlTarget(w, r, authCtx, username) {
 		return
 	}
 
-	roots, err := a.resolveEffectivePrincipalRootsSnapshot(int64(p.ID))
+	snap, err := a.resolvePrincipalEffectiveRootsSnapshot(username)
 	if err != nil {
+		if isErrPrincipalNotFound(err) {
+			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
+			return
+		}
 		opLog(ctx).Error("principal effective roots introspection failed",
 			slog.String("operation", "policy_introspect"),
 			slog.String("error", err.Error()),
@@ -53,13 +62,14 @@ func (a *App) handlePrincipalEffectiveRoots(w http.ResponseWriter, r *http.Reque
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	roots := snap.AllowedRoots
 	if roots == nil {
 		roots = []string{}
 	}
 
 	writeJSONRaw(ctx, w, http.StatusOK, effectiveRootsResponse{
 		OK:           true,
-		Principal:    p.Username,
+		Principal:    snap.Principal,
 		AllowedRoots: roots,
 	})
 }

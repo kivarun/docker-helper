@@ -186,13 +186,14 @@ func isErrLauncherCredentialExists(err error) bool {
 	return errors.Is(err, ErrLauncherCredentialExists)
 }
 
-// resolveControlPrincipal resolves the target Principal for a nested
-// /principals/{username}/launchers route under the given authority. For a
-// Principal credential only its own Principal is reachable; any other username
-// returns a non-disclosing 404. A structurally invalid authority is an
-// internal authentication anomaly: it fails closed as an internal error — it
-// is never treated as Admin and never resolves a Principal.
-func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, username string) (*PrincipalWithRoots, bool) {
+// authorizePrincipalControlTarget validates that the request's authority may
+// target the Principal selector username, applying the established control
+// selector rule: an Admin authority may target any Principal, a Principal
+// credential only its own (a foreign selector is the non-disclosing 404), and
+// a structurally invalid authority is an internal authentication anomaly: it
+// fails closed as an internal error — it is never treated as Admin and never
+// resolves a Principal. It resolves no state.
+func (a *App) authorizePrincipalControlTarget(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, username string) bool {
 	ctx := r.Context()
 	switch {
 	case auth != nil && auth.class == operatorAuthorityAdmin:
@@ -200,7 +201,7 @@ func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, au
 	case auth != nil && auth.class == operatorAuthorityPrincipal:
 		if username != auth.principal.PrincipalName {
 			writeError(ctx, w, http.StatusNotFound, "principal_not_found", "principal not found")
-			return nil, false
+			return false
 		}
 	default:
 		// A nil, zero/invalid, or unknown-class authority never reaches a
@@ -210,6 +211,19 @@ func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, au
 			slog.String("error", "invalid operator authority"),
 		)
 		writeError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return false
+	}
+	return true
+}
+
+// resolveControlPrincipal resolves the target Principal for a nested
+// /principals/{username}/launchers route under the given authority: the
+// Principal-target selector rule is applied by
+// authorizePrincipalControlTarget, then the current Principal is resolved by
+// username. Any other username returns a non-disclosing 404.
+func (a *App) resolveControlPrincipal(w http.ResponseWriter, r *http.Request, auth *operatorAuthority, username string) (*PrincipalWithRoots, bool) {
+	ctx := r.Context()
+	if !a.authorizePrincipalControlTarget(w, r, auth, username) {
 		return nil, false
 	}
 	p, err := findPrincipalByUsername(a.DB, username)

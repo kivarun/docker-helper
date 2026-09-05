@@ -371,16 +371,43 @@ func (a *App) resolveEffectivePrincipalRoots(principalID int64) ([]string, error
 	return computeEffectivePrincipalRoots(globalRoots, stored, principalID, daemonOwnerPrincipalID, userMode), nil
 }
 
-// resolveEffectivePrincipalRootsSnapshot is the lock-owning read form of
-// resolveEffectivePrincipalRoots for read-only policy introspection: it
-// observes the same coherent ownership-policy state as createSessionAuthorized
-// and the ownership mutations, so a concurrent config reload, Principal-root
-// mutation, or Launcher/Principal lifecycle mutation linearizes wholly before
-// or wholly after the read instead of between its component reads.
-func (a *App) resolveEffectivePrincipalRootsSnapshot(principalID int64) ([]string, error) {
+// principalEffectiveRootsSnapshot is the immutable read-only projection of one
+// coherent Principal effective-root policy state: the resolved Principal
+// identity and its canonical effective roots, both resolved under the same
+// lifecycle serialization boundary.
+type principalEffectiveRootsSnapshot struct {
+	Principal    string
+	AllowedRoots []string
+}
+
+// resolvePrincipalEffectiveRootsSnapshot is the lock-owning read form of the
+// canonical effective-Principal-root resolution for read-only policy
+// introspection. It re-resolves the CURRENT target Principal inside the
+// lifecycle serialization boundary, so a concurrent Principal lifecycle
+// mutation (checked delete, disable, recreate under the same username)
+// linearizes wholly before or wholly after the whole projection: the response
+// describes the pre-mutation incarnation with its pre-mutation roots, the
+// post-mutation state, or fails principal_not_found for a disappeared target —
+// never a pre-mutation identity with post-mutation roots. It observes the same
+// coherent policy state model as createSessionAuthorized and the ownership
+// mutations, and resolveEffectivePrincipalRoots remains the canonical
+// effective-root semantic owner.
+func (a *App) resolvePrincipalEffectiveRootsSnapshot(username string) (*principalEffectiveRootsSnapshot, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
-	return a.resolveEffectivePrincipalRoots(principalID)
+
+	p, err := findPrincipalByUsername(a.DB, username)
+	if err != nil {
+		return nil, err
+	}
+	roots, err := a.resolveEffectivePrincipalRoots(int64(p.ID))
+	if err != nil {
+		return nil, err
+	}
+	return &principalEffectiveRootsSnapshot{
+		Principal:    p.Username,
+		AllowedRoots: roots,
+	}, nil
 }
 
 // validateLauncherAllowedRoots canonicalizes each root using the same canonical
