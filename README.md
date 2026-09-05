@@ -1431,9 +1431,11 @@ The agent can verify its delegated identity through the HTTP API
 (`GET /auth` with the installed credential): the response reports
 `{"authority": "launcher", "principal": "alice", "launcher_id": "dhl_..."}`.
 
-With multiple launchers, the agent can target one explicitly at session
-creation time with `--launcher` (name or `dhl_...` ID); without it the
-daemon uses the principal's `default` launcher.
+With multiple launchers, a Principal credential can target one explicitly
+at session creation time with `--launcher` (name or `dhl_...` ID); a
+Launcher credential targets launchers with its `dhl_...` ID only (`GET
+/auth` reports it). Without the flag the daemon uses the authority's
+default launcher.
 
 Launcher-scoped sessions use the launcher's effective roots:
 

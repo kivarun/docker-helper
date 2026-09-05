@@ -344,11 +344,18 @@ an ID-shaped selector is forwarded as `launcher_id` as-is, a Launcher
 name is resolved to its global ID through the scope-first launcher list
 query under the named Principal (`GET /launchers?principal=USER&launcher=NAME`;
 a name without `--principal` is rejected locally because Launcher names
-are never searched globally). A principal or launcher credential may pass
+are never searched globally). A Principal credential may pass
 `--launcher LAUNCHER` only: the name is resolved within the credential's
 own visible scope the same way (a foreign or missing Launcher is the
-daemon's non-disclosing `launcher not found`) and `--principal` is
-rejected locally. With no selectors the request body carries only the
+daemon's non-disclosing `launcher not found`). A Launcher credential has
+no Launcher control-plane authority, so its selector is never resolved
+through the launcher list: an ID-shaped `--launcher` is forwarded as
+`launcher_id` as-is and the daemon's create admission stays the authority
+(own -> self, foreign -> non-disclosing `launcher not found`), and a
+name-shaped `--launcher` is rejected locally with an actionable hint to
+use the Launcher's `dhl_` ID (reported for the credential by `GET /auth`).
+For both credential authorities `--principal` is rejected locally. With no
+selectors the request body carries only the
 workspace and no auth introspection happens; the authority-specific
 default resolution below applies unchanged. The two selectors are mutually
 exclusive on the wire: the resolved target is sent as either `principal`

@@ -140,11 +140,16 @@ authenticated authority's default Launcher is used. With an admin token,
 \fB\-\-principal USER\fR targets that Principal's default Launcher and
 \fB\-\-launcher LAUNCHER\fR a specific Launcher (a name requires
 \fB\-\-principal USER\fR because names are principal-scoped; a Launcher ID
-\fIdhl_...\fR is forwarded as-is). With a principal or launcher credential,
+\fIdhl_...\fR is forwarded as-is). With a principal credential,
 \fB\-\-launcher\fR accepts a name or ID visible to that credential; the name
 is resolved to the Launcher's global ID through the daemon's scope-first
 launcher list query, so a foreign or missing Launcher is the non-disclosing
-\fBlauncher not found\fR. \fB\-\-principal\fR is only valid with an admin
+\fBlauncher not found\fR. A launcher credential has no Launcher
+control-plane authority: its \fB\-\-launcher\fR must be the Launcher's
+\fIdhl_...\fR ID (reported for the credential by \fBGET /auth\fR) and is
+forwarded as-is, so a foreign ID is the non-disclosing \fBlauncher not
+found\fR, while a name is rejected locally with a hint to use the
+\fIdhl_...\fR ID. \fB\-\-principal\fR is only valid with an admin
 token. The two selectors are mutually exclusive on the wire: the resolved
 target is sent as either \fBprincipal\fR or \fBlauncher_id\fR, never both.
 .TP

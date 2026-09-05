@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"strings"
 
@@ -234,19 +233,12 @@ var launcherCommand = &Command{
 const launcherDefaultConflictHint = "; use --name NAME to create a differently named launcher"
 
 // launcherDefaultExists reports whether the target Principal's 'default'
-// Launcher already exists. A 404 means it does not and creation may proceed;
-// any other pre-flight failure is ignored so the daemon's create response
-// remains the authority (a transient read failure must not block creation).
-func launcherDefaultExists(client *apiClient, username string) (bool, error) {
+// Launcher already exists. The check is advisory pre-flight: any query
+// failure, including a transient server error, reports false so the create
+// request remains the authoritative conflict boundary.
+func launcherDefaultExists(client *apiClient, username string) bool {
 	_, err := client.showLauncher(username, defaultLauncherName)
-	if err == nil {
-		return true, nil
-	}
-	var apiErr *apiError
-	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-		return false, nil
-	}
-	return false, nil
+	return err == nil
 }
 
 var launcherCreateCommand = &Command{
@@ -286,17 +278,10 @@ var launcherCreateCommand = &Command{
 				// into the daemon's guaranteed conflict. With --name the
 				// create stays atomic and the daemon's conflict response
 				// names the colliding Launcher and Principal.
-				if !name.set {
-					exists, err := launcherDefaultExists(client, username)
-					if err != nil {
-						fmt.Fprintf(stderr, "error: %v\n", err)
-						return 1
-					}
-					if exists {
-						fmt.Fprintf(stderr, "error: launcher %q already exists for principal %q%s\n",
-							defaultLauncherName, username, launcherDefaultConflictHint)
-						return 1
-					}
+				if !name.set && launcherDefaultExists(client, username) {
+					fmt.Fprintf(stderr, "error: launcher %q already exists for principal %q%s\n",
+						defaultLauncherName, username, launcherDefaultConflictHint)
+					return 1
 				}
 				issue, err := resolveIssueCredential(*issueCredential, *noCredential,
 					"Create launcher credential now? [Y/n]", os.Stdin, stderr, term.IsTerminal(int(os.Stdin.Fd())))

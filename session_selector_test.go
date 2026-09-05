@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -62,16 +65,21 @@ func TestCreateSessionSelectorMatrix(t *testing.T) {
 }
 
 // TestSessionCreateCLISelectorMatrix proves the CLI-side selector mapping for
-// session create: name-shaped --launcher selectors resolve to the global ID
-// through the daemon's scope-first list query (one query; a foreign or missing
-// Launcher is the daemon's non-disclosing launcher-not-found and no create is
-// issued), admin may target a Principal directly or resolve a Launcher name
-// only under an explicitly named Principal, an admin Launcher ID selector is
-// forwarded as-is without a list query, --principal is admin-only, explicit
-// empty values are rejected locally before any request, and the no-selector
-// path is unchanged (no /auth introspection, workspace-only body).
+// session create: authorities with Launcher control-plane access resolve
+// name-shaped --launcher selectors to the global ID through the daemon's
+// scope-first list query (one query; a foreign or missing Launcher is the
+// daemon's non-disclosing launcher-not-found and no create is issued), an
+// admin may target a Principal directly or resolve a Launcher name only under
+// an explicitly named Principal, an ID-shaped selector is forwarded as-is
+// without a list query, a Launcher credential never queries the launcher
+// control plane (its ID selector is forwarded as-is and the daemon's create
+// admission stays the authority; a name is rejected locally), --principal is
+// admin-only, explicit empty values are rejected locally before any request,
+// and the no-selector path is unchanged (no /auth introspection,
+// workspace-only body).
 func TestSessionCreateCLISelectorMatrix(t *testing.T) {
 	id := "dhl_" + strings.Repeat("ab", 16)
+	foreignID := "dhl_" + strings.Repeat("cd", 16)
 	ws := t.TempDir()
 
 	cases := []struct {
@@ -81,6 +89,8 @@ func TestSessionCreateCLISelectorMatrix(t *testing.T) {
 		listStatus    int
 		listBody      string
 		wantListQuery string
+		postStatus    int
+		postStub      string
 		wantPOST      string
 		wantErr       string
 		wantExit      int
@@ -104,22 +114,25 @@ func TestSessionCreateCLISelectorMatrix(t *testing.T) {
 			wantErr:       "launcher not found",
 		},
 		{
-			name:          "launcher credential resolves self launcher name",
-			args:          []string{"--launcher", "agent"},
-			authBody:      `{"authority":"launcher","principal":"alice","launcher_id":"` + id + `"}`,
-			listStatus:    http.StatusOK,
-			listBody:      `{"ok":true,"launchers":[{"id":"` + id + `","principal":"alice","name":"agent","enabled":true}]}`,
-			wantListQuery: "launcher=agent",
-			wantPOST:      `{"workspace":"` + ws + `","launcher_id":"` + id + `"}`,
+			name:     "launcher credential forwards its own ID without a list query",
+			args:     []string{"--launcher", id},
+			authBody: `{"authority":"launcher","principal":"alice","launcher_id":"` + id + `"}`,
+			wantPOST: `{"workspace":"` + ws + `","launcher_id":"` + id + `"}`,
 		},
 		{
-			name:          "launcher credential foreign launcher name stays non-disclosing",
-			args:          []string{"--launcher", "foreign"},
-			authBody:      `{"authority":"launcher","principal":"alice","launcher_id":"` + id + `"}`,
-			listStatus:    http.StatusNotFound,
-			listBody:      `{"code":"launcher_not_found","message":"launcher not found"}`,
-			wantListQuery: "launcher=foreign",
-			wantErr:       "launcher not found",
+			name:       "launcher credential foreign ID is daemon-authorized without a list query",
+			args:       []string{"--launcher", foreignID},
+			authBody:   `{"authority":"launcher","principal":"alice","launcher_id":"` + id + `"}`,
+			postStatus: http.StatusNotFound,
+			postStub:   `{"code":"launcher_not_found","message":"launcher not found"}`,
+			wantPOST:   `{"workspace":"` + ws + `","launcher_id":"` + foreignID + `"}`,
+			wantErr:    "launcher not found",
+		},
+		{
+			name:     "launcher credential name selector is rejected locally",
+			args:     []string{"--launcher", "agent"},
+			authBody: `{"authority":"launcher","principal":"alice","launcher_id":"` + id + `"}`,
+			wantErr:  "Launcher authentication requires the Launcher's dhl_ ID",
 		},
 		{
 			name:     "admin principal-only selector maps to principal field",
@@ -186,8 +199,13 @@ func TestSessionCreateCLISelectorMatrix(t *testing.T) {
 					_, _ = io.WriteString(w, tc.listBody)
 				case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
 					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusCreated)
-					_, _ = io.WriteString(w, `{"ok":true,"session":{"id":"dhs_1","workspace":"`+ws+`","created_at":"now","expires_at":"later"},"token":"tok"}`)
+					if tc.postStatus != 0 {
+						w.WriteHeader(tc.postStatus)
+						_, _ = io.WriteString(w, tc.postStub)
+					} else {
+						w.WriteHeader(http.StatusCreated)
+						_, _ = io.WriteString(w, `{"ok":true,"session":{"id":"dhs_1","workspace":"`+ws+`","created_at":"now","expires_at":"later"},"token":"tok"}`)
+					}
 				default:
 					http.NotFound(w, r)
 				}
@@ -221,7 +239,7 @@ func TestSessionCreateCLISelectorMatrix(t *testing.T) {
 			if tc.listStatus != 0 {
 				wantSeq = append(wantSeq, "/launchers")
 			}
-			if tc.wantPOST != "" {
+			if tc.wantPOST != "" || tc.postStatus != 0 {
 				wantSeq = append(wantSeq, "/sessions")
 			}
 			if len(*requests) != len(wantSeq) {
@@ -245,4 +263,102 @@ func TestSessionCreateCLISelectorMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSessionCreateLauncherCredentialAuthorityMatrix proves the daemon-side
+// create contract for a Launcher credential through the real handler path:
+// an explicit own-ID selector selects self, the no-selector path still
+// resolves self, a foreign or unknown ID is the daemon's non-disclosing
+// launcher_not_found, and the launcher control plane the CLI's resolution
+// must never depend on is not available to this authority.
+func TestSessionCreateLauncherCredentialAuthorityMatrix(t *testing.T) {
+	app := newTestAppWithAdminToken(t)
+	aliceHome, _ := setupLauncherHandlerPrincipal(t, app, "alice")
+	bobHome, _ := setupLauncherHandlerPrincipal(t, app, "bob")
+
+	ws := filepath.Join(aliceHome, "project")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agentID, agentToken := createRestrictedLauncherWithCredential(t, app, "alice", "agent", aliceHome)
+	foreignID, _ := createRestrictedLauncherWithCredential(t, app, "bob", "bagent", bobHome)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		return launcherRequest(t, app, http.MethodPost, "/sessions", agentToken, body)
+	}
+
+	t.Run("own explicit ID selects self", func(t *testing.T) {
+		w := post(`{"workspace":"` + ws + `","launcher_id":"` + agentID + `"}`)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 (body=%s)", w.Code, w.Body.String())
+		}
+		var resp createSessionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Session.LauncherID != agentID || resp.Token == "" {
+			t.Errorf("session = %+v, want launcher_id %s and a token", resp.Session, agentID)
+		}
+		if resp.Session.Launcher == nil || *resp.Session.Launcher != "agent" {
+			t.Errorf("session launcher = %v, want agent", resp.Session.Launcher)
+		}
+		if resp.Session.Principal == nil || *resp.Session.Principal != "alice" {
+			t.Errorf("session principal = %v, want alice", resp.Session.Principal)
+		}
+	})
+
+	t.Run("no selector still resolves self", func(t *testing.T) {
+		w := post(`{"workspace":"` + ws + `"}`)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 (body=%s)", w.Code, w.Body.String())
+		}
+		var resp createSessionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Session.LauncherID != agentID {
+			t.Errorf("session launcher_id = %q, want self %s", resp.Session.LauncherID, agentID)
+		}
+	})
+
+	t.Run("foreign ID is non-disclosing launcher_not_found", func(t *testing.T) {
+		w := post(`{"workspace":"` + ws + `","launcher_id":"` + foreignID + `"}`)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (body=%s)", w.Code, w.Body.String())
+		}
+		if !bytes.Contains(w.Body.Bytes(), []byte("launcher_not_found")) {
+			t.Errorf("body missing launcher_not_found: %s", w.Body.String())
+		}
+		if bytes.Contains(w.Body.Bytes(), []byte(foreignID)) || bytes.Contains(w.Body.Bytes(), []byte("bagent")) {
+			t.Errorf("error body discloses the foreign launcher: %s", w.Body.String())
+		}
+	})
+
+	t.Run("unknown well-formed ID is non-disclosing launcher_not_found", func(t *testing.T) {
+		w := post(`{"workspace":"` + ws + `","launcher_id":"dhl_` + strings.Repeat("ef", 16) + `"}`)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (body=%s)", w.Code, w.Body.String())
+		}
+		if !bytes.Contains(w.Body.Bytes(), []byte("launcher_not_found")) {
+			t.Errorf("body missing launcher_not_found: %s", w.Body.String())
+		}
+	})
+
+	t.Run("name-shaped wire selector is non-disclosing launcher_not_found", func(t *testing.T) {
+		w := post(`{"workspace":"` + ws + `","launcher_id":"agent"}`)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (body=%s)", w.Code, w.Body.String())
+		}
+		if !bytes.Contains(w.Body.Bytes(), []byte("launcher_not_found")) {
+			t.Errorf("body missing launcher_not_found: %s", w.Body.String())
+		}
+	})
+
+	t.Run("launcher control plane stays unavailable to the credential", func(t *testing.T) {
+		w := launcherRequest(t, app, http.MethodGet, "/launchers?launcher=agent", agentToken, "")
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401 (body=%s)", w.Code, w.Body.String())
+		}
+	})
 }

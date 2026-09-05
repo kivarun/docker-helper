@@ -14,13 +14,17 @@ import (
 
 // resolveSessionCreateSelectors maps the session-create --principal/--launcher
 // selectors onto the daemon's mutually exclusive create selectors for the
-// authenticated authority. Name-shaped Launcher selectors are resolved to
-// their global ID through the daemon's scope-first launcher list query (the
-// typed selectors are sent as-is and the daemon authorizes visibility), so a
-// name only ever resolves within the caller's visible scope and a foreign or
-// missing Launcher is the daemon's non-disclosing not-found. ID-shaped
-// selectors are sent as-is; the daemon's create policy resolves ownership.
-// The daemon remains the selector-resolution and authorization authority.
+// authenticated authority. Authorities with Launcher control-plane access
+// resolve name-shaped selectors to the global ID through the daemon's
+// scope-first launcher list query (an admin only under an explicitly named
+// Principal, a Principal credential within its own scope), so a name only
+// ever resolves within the caller's visible scope and a foreign or missing
+// Launcher is the daemon's non-disclosing not-found. A Launcher credential has
+// no Launcher control-plane authority: its ID-shaped selector is forwarded
+// as-is and the daemon's create admission stays the authority (own -> self,
+// foreign -> non-disclosing launcher-not-found), and a name-shaped selector is
+// rejected locally because no resolvable representation exists. The daemon
+// remains the selector-resolution and authorization authority.
 func resolveSessionCreateSelectors(client *apiClient, principal, launcher string, req *createSessionClientRequest) error {
 	auth, err := client.auth()
 	if err != nil {
@@ -60,11 +64,17 @@ func resolveSessionCreateSelectors(client *apiClient, principal, launcher string
 			return errors.New("--principal is only valid with admin authentication")
 		}
 		if launcher != "" {
-			id, err := resolveLauncherIDBySelector(client, "", launcher)
-			if err != nil {
-				return err
+			// A Launcher credential has no Launcher control-plane authority,
+			// so a selector must not be resolved through the launcher list.
+			// The ID-shaped selector is forwarded as-is and the daemon's
+			// create admission stays the authority (own -> self, foreign ->
+			// non-disclosing launcher-not-found); a name has no resolvable
+			// representation for this authority and is rejected locally.
+			if isLauncherIDSelector(launcher) {
+				req.LauncherID = launcher
+				return nil
 			}
-			req.LauncherID = id
+			return errors.New("Launcher authentication requires the Launcher's dhl_ ID for --launcher; Launcher names cannot be resolved without Launcher control-plane authority (GET /auth reports your Launcher's dhl_ ID)")
 		}
 	default:
 		return fmt.Errorf("unknown authority %q", auth.Authority)
