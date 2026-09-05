@@ -577,9 +577,9 @@ func TestPrincipalDoesNotSeeLegacySessions(t *testing.T) {
 	}
 
 	// Create a legacy session (principal_id = NULL) via admin.
-	adminResult, err := app.createSession(home)
+	adminResult, err := createDefaultAdminSessionForTest(app, home)
 	if err != nil {
-		t.Fatalf("admin createSession() error: %v", err)
+		t.Fatalf("admin createSessionAuthorized() error: %v", err)
 	}
 	_ = adminResult
 
@@ -630,9 +630,9 @@ func TestAdminSeesAllSessions(t *testing.T) {
 	mustAddDefaultLauncher(t, app.DB, int64(p.ID))
 
 	// Create admin session.
-	adminResult, err := app.createSession(home)
+	adminResult, err := createDefaultAdminSessionForTest(app, home)
 	if err != nil {
-		t.Fatalf("admin createSession() error: %v", err)
+		t.Fatalf("admin createSessionAuthorized() error: %v", err)
 	}
 	_ = adminResult
 
@@ -827,9 +827,9 @@ func TestPrincipalDeletingLegacySessionReturns404(t *testing.T) {
 	}
 
 	// Create a legacy session (principal_id = NULL) via admin.
-	adminResult, err := app.createSession(home)
+	adminResult, err := createDefaultAdminSessionForTest(app, home)
 	if err != nil {
-		t.Fatalf("admin createSession() error: %v", err)
+		t.Fatalf("admin createSessionAuthorized() error: %v", err)
 	}
 
 	_, token, err := createPrincipalCredential(app.DB, "dellegacyuser", "oc")

@@ -193,7 +193,7 @@ func TestPrincipalDeleteAdminSessionUnaffected(t *testing.T) {
 		return "1053", "1053", home, nil
 	}
 
-	adminResult, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	adminResult, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

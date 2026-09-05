@@ -9,7 +9,7 @@ import (
 func TestSessionDeleteRemovesRuntimeDir(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestSessionDeleteRemovesRuntimeDir(t *testing.T) {
 	}
 
 	// Delete the session and clean up runtime
-	_, err = app.deleteSession(result.Session.ID)
+	_, err = app.deleteSessionScoped(result.Session.ID, sessionControlScope{admin: true})
 	if err != nil {
 		t.Fatalf("deleteSession: %v", err)
 	}
@@ -47,12 +47,12 @@ func TestCleanupStaleSessionRuntimeDirs(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Create two sessions
-	result1, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result1, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
 
-	result2, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result2, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestCleanupStaleSessionRuntimeDirs(t *testing.T) {
 	}
 
 	// Delete session2 from DB
-	_, err = app.deleteSession(result2.Session.ID)
+	_, err = app.deleteSessionScoped(result2.Session.ID, sessionControlScope{admin: true})
 	if err != nil {
 		t.Fatalf("deleteSession: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCleanupStaleSessionRuntimeDirsPreservesActive(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Create a session
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

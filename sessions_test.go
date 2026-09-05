@@ -76,9 +76,9 @@ func TestHTTPCreateSessionMissingWorkspace(t *testing.T) {
 func TestHTTPListSessions(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	_, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	_, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
@@ -107,9 +107,9 @@ func TestHTTPListSessions(t *testing.T) {
 func TestHTTPDeleteSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	mux := http.NewServeMux()

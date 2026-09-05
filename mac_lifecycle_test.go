@@ -2402,10 +2402,10 @@ func TestPrincipalDisableReleasesMACBindings(t *testing.T) {
 		t.Fatal("session binding should exist")
 	}
 
-	// Disable principal via App-level lifecycle.
-	result, err := app.applyPrincipalEnabledChange("macdisuser", false)
+	// Disable principal via the production Principal lifecycle owner.
+	result, err := app.disablePrincipalLaunchers("macdisuser")
 	if err != nil {
-		t.Fatalf("applyPrincipalEnabledChange: %v", err)
+		t.Fatalf("disablePrincipalLaunchers: %v", err)
 	}
 	if !result.Changed {
 		t.Fatal("expected Changed=true")
@@ -2574,10 +2574,11 @@ func TestPrincipalDisableLeasePreserved(t *testing.T) {
 		t.Fatalf("expected boundaryConsumerCounts=2, got %d", count)
 	}
 
-	// Disable principal — removes session binding.
-	result, err := app.applyPrincipalEnabledChange("leaseuser", false)
+	// Disable principal via the production Principal lifecycle owner — removes
+	// the session binding while the workspace-use lease keeps holding.
+	result, err := app.disablePrincipalLaunchers("leaseuser")
 	if err != nil {
-		t.Fatalf("applyPrincipalEnabledChange: %v", err)
+		t.Fatalf("disablePrincipalLaunchers: %v", err)
 	}
 	if !result.Changed {
 		t.Fatal("expected Changed=true")
@@ -2799,11 +2800,15 @@ func TestSharedBoundaryAccounting(t *testing.T) {
 // =============================================================================
 
 func TestStaleAuthSessionCreationRace(t *testing.T) {
-	// Regression test: Principal credential authenticated while enabled,
-	// Principal disabled, then session creation attempt using stale authority
-	// through the real production path (createSessionWithPolicy).
-	// Session creation MUST fail; no Session row; no MAC binding;
-	// any helper-owned boundary must be rolled back.
+	// Regression test: a Principal credential is authenticated while the
+	// Principal is enabled, the Principal is then disabled, and a Session
+	// creation attempt is made with the previously authenticated authority.
+	// Authentication identity may be stale, but policy is never supplied by
+	// the caller: createSessionAuthorized resolves it through the current
+	// production owner (resolveCreatePolicy), so the canonical resolver
+	// observes the current durable enabled state and refuses with the
+	// established typed result. No Session row; no MAC binding; no
+	// helper-owned boundary.
 	app, mac, driver := setupTestMACCoordinator(t)
 
 	allowedRoot := app.Config.AllowedRoots[0]
@@ -2831,7 +2836,8 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 		t.Fatalf("createCredential: %v", err)
 	}
 
-	// Authenticate the credential while the principal is enabled.
+	// Authenticate the credential while the principal is enabled: the resulting
+	// authority is authentication identity only and may go stale.
 	auth, err := authenticateCredential(app.DB, token)
 	if err != nil {
 		t.Fatalf("authenticateCredential: %v", err)
@@ -2839,26 +2845,12 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	if auth.Principal == nil {
 		t.Fatal("expected a Principal credential auth result")
 	}
-	stalePrincipalID := auth.Principal.PrincipalID
-	// Stale policy snapshot, read from the persisted policy owner: this
-	// regression pins that a stale policy snapshot must not survive through
-	// persistence even when the earlier authentication observed it.
-	staleAllowedRoots, err := readPrincipalAllowedRoots(app.DB, stalePrincipalID)
-	if err != nil {
-		t.Fatalf("readPrincipalAllowedRoots: %v", err)
-	}
 
-	// Provision the principal's default Launcher (the Session-creation owner in
-	// the cutover model).
-	launcher, _, _, err := createLauncher(app.DB, stalePrincipalID, "stale", LauncherScopeInherit, nil, nil, false)
+	// Disable the principal through the production Principal lifecycle owner
+	// (simulates a concurrent disable after authentication).
+	result, err := app.disablePrincipalLaunchers("staleauthuser")
 	if err != nil {
-		t.Fatalf("createLauncher: %v", err)
-	}
-
-	// Disable the principal (simulates concurrent disable).
-	result, err := persistPrincipalEnabledChange(app.DB, "staleauthuser", false)
-	if err != nil {
-		t.Fatalf("persistPrincipalEnabledChange: %v", err)
+		t.Fatalf("disablePrincipalLaunchers: %v", err)
 	}
 	if !result.Changed {
 		t.Fatal("expected Changed=true")
@@ -2869,25 +2861,25 @@ func TestStaleAuthSessionCreationRace(t *testing.T) {
 	bindingsBefore := len(mac.sessionBindings)
 	mac.mu.Unlock()
 
-	// Attempt session creation through the real production path
-	// using the stale authenticated authority.
-	effectiveRoots := intersectAllowedRootScopes(app.getConfig().AllowedRoots, staleAllowedRoots)
-	_, err = app.createSessionWithPolicy(&sessionCreatePolicy{
-		Workspace:             projDir,
-		EffectiveAllowedRoots: effectiveRoots,
-		LauncherID:            launcher.ID,
-	})
-
-	// createSessionWithPolicy must fail because the principal is disabled.
-	if err == nil {
-		t.Fatal("expected error from createSessionWithPolicy for stale principal")
+	// Attempt Session creation with the stale authenticated authority through
+	// the canonical production owner. No policy is supplied: the current
+	// production resolver observes the disabled Principal and refuses with the
+	// typed stale-owner contract instead of accepting a precomputed root
+	// scope that no longer matches durable policy.
+	_, err = app.createSessionAuthorized(
+		&operatorAuthority{class: operatorAuthorityPrincipal, principal: auth.Principal},
+		createSelector{},
+		projDir,
+	)
+	if !errors.Is(err, ErrLauncherUnavailable) {
+		t.Fatalf("expected ErrLauncherUnavailable for stale disabled principal, got %v", err)
 	}
 
 	// Verify no Session row was created.
 	var count int
 	err = app.DB.QueryRow(
-		`SELECT COUNT(*) FROM sessions WHERE launcher_id = ?`,
-		launcher.ID,
+		`SELECT COUNT(*) FROM sessions WHERE workspace = ?`,
+		projDir,
 	).Scan(&count)
 	if err != nil {
 		t.Fatalf("query session: %v", err)

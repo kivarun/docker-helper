@@ -357,6 +357,15 @@ func testWorkspaceDir(t *testing.T, allowedRoot string) string {
 	return dir
 }
 
+// createDefaultAdminSessionForTest creates a Session fixture through the
+// canonical production owner: a valid Admin authority with omitted selectors,
+// so policy resolution stays with resolveCreatePolicy (the daemon-owner
+// 'default' Launcher under the collapsed global roots). It never computes
+// effective roots or manufactures a sessionCreatePolicy.
+func createDefaultAdminSessionForTest(app *App, workspace string) (*CreatedSession, error) {
+	return app.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace)
+}
+
 // mockStandaloneUserInit mocks systemSocketExists and checkDockerAccess so
 // that runInit takes the "standalone user init" path (no system daemon,
 // Docker accessible). Returns a restore function that should be deferred.

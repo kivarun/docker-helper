@@ -21,7 +21,7 @@ func TestRunMountUserModeAcceptsWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestRunMountUserModeAcceptsSymlinkToWorkspaceRoot(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRunMountUserModeRejectsSubdirectory(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRunMountUserModeRejectsFile(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeUser
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestRunMountSystemModeAcceptsSubdirectory(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestRunMountUserModeRejectionDoesNotCreateOperation(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRunSecondPinError(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestRunSupervisorShuttingDown(t *testing.T) {
 	supervisor.beginShutdown()
 	app.OperationSupervisor = supervisor
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestRunSystemModeEmptyRuntimeDir(t *testing.T) {
 	app.Config.RuntimeDir = ""
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestRunSystemModeArgvContainsStablePaths(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestRunUserModeUsesResolvedMountSourceWithoutPinning(t *testing.T) {
 	app.Config.Mode = ModeUser
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestRunStartErrorCleansPinsOnce(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestRunNormalCompletionCleansPinsOnce(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestRunCleanupReverseOrder(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -730,7 +730,7 @@ func TestRunCleanupErrorDoesNotChangeResult(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -792,7 +792,7 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	app.Config.Mode = ModeSystem
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -851,28 +851,28 @@ func TestRunAuditContainsUserSourcePaths(t *testing.T) {
 	}
 }
 
-// createSystemSession creates a Session in system mode through the production
-// createSessionWithPolicy path. System mode has no implicit user-mode default
-// launcher, so the owning Launcher must be supplied explicitly; it is
-// provisioned on a dedicated enabled Principal (with the app's global allowed
-// roots) whose 'default' Launcher owns the Session.
-func createSystemSession(t *testing.T, app *App, workspace string) (*CreatedSession, error) {
+// createSystemSession creates a Session in system mode through the canonical
+// production owner (createSessionAuthorized): the owning 'default' Launcher is
+// provisioned with its Principal via the production Principal-create path (the
+// Principal's stored root is its home under the app's global allowed roots),
+// the Admin authority selects it with the established principal selector, and
+// policy resolution stays with resolveCreatePolicy. The workspace is created
+// under the owner's home so it lies inside the resolved effective roots.
+func createSystemSession(t *testing.T, app *App) (*CreatedSession, error) {
 	t.Helper()
 	const username = "runsysowner"
 	home := filepath.Join(app.Config.AllowedRoots[0], "runsysowner-home")
 	if err := os.MkdirAll(home, 0700); err != nil {
 		t.Fatalf("cannot create system-owner home: %v", err)
 	}
-	pid, err := insertDaemonOwnerPrincipal(app.DB, username, 1000, 1000, home)
-	if err != nil {
-		t.Fatalf("insertDaemonOwnerPrincipal(%s): %v", username, err)
+	installOSUserMock(t, map[string]string{username: home})
+	if _, err := createPrincipal(app.DB, username, app.Config.AllowedRoots); err != nil {
+		t.Fatalf("createPrincipal(%s): %v", username, err)
 	}
-	launcherID := mustAddDefaultLauncher(t, app.DB, pid)
-	return app.createSessionWithPolicy(&sessionCreatePolicy{
-		Workspace:             workspace,
-		EffectiveAllowedRoots: app.Config.AllowedRoots,
-		LauncherID:            launcherID,
-		LauncherName:          "default",
-		PrincipalName:         username,
-	})
+	workspace := testWorkspaceDir(t, home)
+	return app.createSessionAuthorized(
+		&operatorAuthority{class: operatorAuthorityAdmin},
+		createSelector{principal: username},
+		workspace,
+	)
 }

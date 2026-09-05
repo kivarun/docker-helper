@@ -39,8 +39,8 @@ func dropTableBreakFK(t *testing.T, db *sql.DB, table string) {
 // result or a 404.
 func TestListSessionsDBFailureIs500(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
-	if _, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0])); err != nil {
-		t.Fatalf("createSession() error: %v", err)
+	if _, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0])); err != nil {
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	dropTableBreakFK(t, app.DB, "launchers")

@@ -74,7 +74,7 @@ func TestBuildEnsureSessionDockerDirFails(t *testing.T) {
 
 	// Create a session.
 	workspace := testWorkspaceDir(t, allowedRoot)
-	result, err := app.createSession(workspace)
+	result, err := createDefaultAdminSessionForTest(app, workspace)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestRunEnsureSessionDockerDirFails(t *testing.T) {
 
 	// Create a session.
 	workspace2 := testWorkspaceDir(t, allowedRoot)
-	result, err := app.createSession(workspace2)
+	result, err := createDefaultAdminSessionForTest(app, workspace2)
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestPullEnsureSessionDockerDirFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

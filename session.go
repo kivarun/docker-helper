@@ -136,14 +136,8 @@ type sessionCreatePolicy struct {
 	PrincipalName         string
 }
 
-func (a *App) createSessionWithPolicy(p *sessionCreatePolicy) (*CreatedSession, error) {
-	a.lifecycleMu.Lock()
-	defer a.lifecycleMu.Unlock()
-	return a.createSessionWithPolicyLocked(p)
-}
-
-// createSessionWithPolicyLocked is the lock-already-held form of
-// createSessionWithPolicy: the lifecycle serialization is already held, so
+// createSessionWithPolicyLocked is the internal persistence/MAC stage beneath
+// createSessionAuthorized: the lifecycle serialization is already held, so
 // policy resolution and persistence cannot interleave with an authority
 // mutation. It performs one lifecycle critical section from workspace
 // validation through MAC preparation and the conditional final persistence.
@@ -292,21 +286,14 @@ func (a *App) createSessionWithPolicyLocked(p *sessionCreatePolicy) (*CreatedSes
 	}, nil
 }
 
-// createSession is the thin default-launcher wrapper over
-// createSessionWithPolicy. It leaves all policy resolution to the single
-// authoritative resolveCreatePolicy path (admin authority, omitted selectors)
-// so Session creation has exactly one policy owner: in user mode this resolves
-// the daemon-owner 'default' Launcher under the collapsed global roots; system
-// mode has no implicit default and resolves a missing-selector error. It is
-// the request-time-equivalent used by tests and any non-selector caller.
 // createSessionAuthorized is the single linearized Session-create owner for an
 // authenticated authority: it holds the lifecycle serialization across
-// current-policy resolution through final Session persistence, so a concurrent
-// narrowing of any policy authority (global allowed roots, Principal allowed
-// roots, Launcher scope, Launcher/Principal enabled state, Launcher
-// existence/ownership) that linearizes before the create commits prevents that
-// Session, and one that linearizes after leaves the created Session intact.
-// It never mutates policy; it only consumes it.
+// current-policy resolution (resolveCreatePolicy) through final Session
+// persistence, so a concurrent narrowing of any policy authority (global
+// allowed roots, Principal allowed roots, Launcher scope, Launcher/Principal
+// enabled state, Launcher existence/ownership) that linearizes before the
+// create commits prevents that Session, and one that linearizes after leaves
+// the created Session intact. It never mutates policy; it only consumes it.
 func (a *App) createSessionAuthorized(auth *operatorAuthority, sel createSelector, workspace string) (*CreatedSession, error) {
 	a.lifecycleMu.Lock()
 	defer a.lifecycleMu.Unlock()
@@ -316,15 +303,6 @@ func (a *App) createSessionAuthorized(auth *operatorAuthority, sel createSelecto
 		return nil, err
 	}
 	return a.createSessionWithPolicyLocked(policy)
-}
-
-func (a *App) createSession(workspace string) (*CreatedSession, error) {
-	return a.createSessionAuthorized(&operatorAuthority{class: operatorAuthorityAdmin}, createSelector{}, workspace)
-}
-
-// listSessions returns all active sessions in admin scope.
-func (a *App) listSessions() ([]Session, error) {
-	return a.listSessionsInScope(sessionControlScope{admin: true})
 }
 
 // listSessionsInScope returns active sessions owned within the given
@@ -467,10 +445,6 @@ func resolveSessionExecutionIdentity(db *sql.DB, session *Session) (uid, gid int
 	}
 
 	return pUID, pGID, nil
-}
-
-func (a *App) deleteSession(id string) (*Session, error) {
-	return a.deleteSessionScoped(id, sessionControlScope{admin: true})
 }
 
 func (a *App) findSessionByToken(token string) (*Session, error) {

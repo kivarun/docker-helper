@@ -28,9 +28,9 @@ func TestUserModeSessionUsesDaemonOwnerUIDGID(t *testing.T) {
 
 	// Create the Session through the daemon-owner default Launcher (the same
 	// transparent user-mode path an unauthenticated user-mode client uses).
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	uid, gid, err := resolveSessionExecutionIdentity(app.DB, &result.Session)
@@ -352,9 +352,9 @@ func TestRevokedCredentialSessionStillRuns(t *testing.T) {
 func TestRunRequestRejectsUserField(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	mux := http.NewServeMux()

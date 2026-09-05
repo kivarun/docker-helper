@@ -18,7 +18,7 @@ func TestCreateSessionGoesThroughResolveCreatePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := app.createSession(ws)
+	_, err := createDefaultAdminSessionForTest(app, ws)
 	if !errors.Is(err, ErrLauncherUnavailable) {
 		t.Fatalf("expected ErrLauncherUnavailable from resolveCreatePolicy, got %v", err)
 	}
@@ -31,9 +31,9 @@ func TestCreateSessionResolvesDaemonOwnerDefault(t *testing.T) {
 	app := newTestApp(t)
 	ws := testWorkspaceDir(t, app.Config.AllowedRoots[0])
 
-	result, err := app.createSession(ws)
+	result, err := createDefaultAdminSessionForTest(app, ws)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 	if result.Session.LauncherID != app.userModeDefault.launcherID {
 		t.Errorf("LauncherID = %q, want daemon-owner default %q", result.Session.LauncherID, app.userModeDefault.launcherID)

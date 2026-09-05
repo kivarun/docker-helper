@@ -1558,9 +1558,9 @@ func TestPrincipalListAuth(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Session token (legacy admin session).
-	sessionResult, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	sessionResult, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 	sessionToken := sessionResult.Token
 

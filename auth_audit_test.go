@@ -481,7 +481,7 @@ func TestAuthAuditSessionCapabilityDatabaseError_Run(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
 	// Create a real session so the token is known.
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -540,7 +540,7 @@ func TestAuthAuditNoFailureOnValidSessionCapabilityAuth_Run(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

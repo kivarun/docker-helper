@@ -17,9 +17,9 @@ import (
 func TestMountSourceDotMountsWorkspace(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -73,17 +73,12 @@ func TestMountRelativeSubdir(t *testing.T) {
 		}, nil
 	}
 
-	subdir := filepath.Join(app.Config.AllowedRoots[0], "subdir")
-	if err := os.MkdirAll(subdir, 0755); err != nil {
-		t.Fatalf("cannot create subdir: %v", err)
-	}
-
-	result, err := createSystemSession(t, app, subdir)
+	result, err := createSystemSession(t, app)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	inner := filepath.Join(subdir, "inner")
+	inner := filepath.Join(result.Session.Workspace, "inner")
 	if err := os.MkdirAll(inner, 0755); err != nil {
 		t.Fatalf("cannot create inner: %v", err)
 	}
@@ -123,9 +118,9 @@ func TestMountRegularFile(t *testing.T) {
 		}, nil
 	}
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	testFile := filepath.Join(result.Session.Workspace, "test.txt")
@@ -159,9 +154,9 @@ func TestMountRegularFile(t *testing.T) {
 func TestMountReadOnly(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -206,9 +201,9 @@ func TestMountReadOnly(t *testing.T) {
 func TestMountSameSourceDifferentTargets(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -251,9 +246,9 @@ func TestMountSameSourceDifferentTargets(t *testing.T) {
 func TestMountDuplicateTarget(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	reqBody := map[string]any{
@@ -288,9 +283,9 @@ func TestMountDuplicateTarget(t *testing.T) {
 func TestMountAbsoluteSource(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	reqBody := map[string]any{
@@ -315,9 +310,9 @@ func TestMountAbsoluteSource(t *testing.T) {
 func TestMountEmptySource(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	reqBody := map[string]any{
@@ -342,9 +337,9 @@ func TestMountEmptySource(t *testing.T) {
 func TestMountNonExistentSource(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	reqBody := map[string]any{
@@ -376,9 +371,9 @@ func TestMountSymlinkEscape(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	reqBody := map[string]any{
@@ -403,9 +398,9 @@ func TestMountSymlinkEscape(t *testing.T) {
 func TestMountRelativeTarget(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	reqBody := map[string]any{
@@ -430,9 +425,9 @@ func TestMountRelativeTarget(t *testing.T) {
 func TestMountEmptyTarget(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	reqBody := map[string]any{
@@ -457,9 +452,9 @@ func TestMountEmptyTarget(t *testing.T) {
 func TestMountTargetRoot(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -505,9 +500,9 @@ func TestMountTargetRoot(t *testing.T) {
 func TestDockerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -546,9 +541,9 @@ func TestRunSELinuxSystemModeCustomLabel(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -597,9 +592,9 @@ func TestRunAppArmorContainerSecurityOpt(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -648,9 +643,9 @@ func TestRunLSMDetectionErrorFailsClosed(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	// Set up supervisor to prove it remains unchanged.
@@ -704,9 +699,9 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.Config.Mode = ModeSystem
 
-	result, err := createSystemSession(t, app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createSystemSession(t, app)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	app.OperationSupervisor = newOperationSupervisor()
@@ -756,9 +751,9 @@ func TestRunLSMNoneFailsClosed(t *testing.T) {
 func TestDockerUser(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -805,9 +800,9 @@ func TestDockerUser(t *testing.T) {
 func TestMountValidationPreventsRunCommand(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	called := false
@@ -842,9 +837,9 @@ func TestMountValidationPreventsRunCommand(t *testing.T) {
 func TestMountCommaInTarget(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	called := false
@@ -893,9 +888,9 @@ func TestMountCommaInSource(t *testing.T) {
 		t.Fatalf("cannot create comma dir: %v", err)
 	}
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	called := false
@@ -939,9 +934,9 @@ func TestMountCommaInSource(t *testing.T) {
 func TestMountDuplicateTargetAfterClean(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	called := false
@@ -986,9 +981,9 @@ func TestMountDuplicateTargetAfterClean(t *testing.T) {
 func TestMountNormalizedTargetInDockerArgs(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string

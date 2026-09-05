@@ -20,9 +20,9 @@ import (
 func TestPullSessionAuthValidToken(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -113,9 +113,9 @@ func TestPullSessionAuthInvalidToken(t *testing.T) {
 func TestPullSessionAuthExpiredSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	_, err = app.DB.Exec("UPDATE sessions SET expires_at = ? WHERE id = ?", time.Now().Add(-time.Hour).Unix(), result.Session.ID)
@@ -144,14 +144,14 @@ func TestPullSessionAuthExpiredSession(t *testing.T) {
 func TestPullSessionAuthDeletedSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	deleted, err := app.deleteSession(result.Session.ID)
+	deleted, err := app.deleteSessionScoped(result.Session.ID, sessionControlScope{admin: true})
 	if err != nil {
-		t.Fatalf("deleteSession() error: %v", err)
+		t.Fatalf("deleteSessionScoped() error: %v", err)
 	}
 	if deleted == nil {
 		t.Fatal("expected session to be deleted")
@@ -263,9 +263,9 @@ func TestPullSessionAuthAdminTokenRejected(t *testing.T) {
 func TestPullImageRequired(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -298,9 +298,9 @@ func TestPullImageRequired(t *testing.T) {
 func TestPullInvalidJSON(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/pull", bytes.NewReader([]byte("not-json")))
@@ -317,9 +317,9 @@ func TestPullInvalidJSON(t *testing.T) {
 func TestPullUnknownFieldsRejected(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -343,9 +343,9 @@ func TestPullUnknownFieldsRejected(t *testing.T) {
 func TestPullSuccessResponse(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -425,9 +425,9 @@ func TestPullFailureClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newTestAppWithAdminToken(t)
 
-			result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+			result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 			if err != nil {
-				t.Fatalf("createSession() error: %v", err)
+				t.Fatalf("createSessionAuthorized() error: %v", err)
 			}
 
 			out := tc.dockerOut
@@ -493,9 +493,9 @@ func TestClassifyDockerError(t *testing.T) {
 func TestPullErrorResponse(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -531,9 +531,9 @@ func TestPullErrorResponse(t *testing.T) {
 func TestPullDockerArgs(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	var capturedArgs []string
@@ -571,9 +571,9 @@ func TestPullDockerArgs(t *testing.T) {
 func TestPullRequestCancellation(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
@@ -667,9 +667,9 @@ func TestPullRequestCancellation(t *testing.T) {
 func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	dockerDir := sessionDockerDir(app.Config.RuntimeDir, result.Session.ID)
@@ -828,9 +828,9 @@ func TestPullTerminatedByDaemonShutdown(t *testing.T) {
 func TestPullBoundedOutputTruncatedSuccess(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	// Set a very small operation log limit.
@@ -884,9 +884,9 @@ func TestPullBoundedOutputTruncatedSuccess(t *testing.T) {
 func TestPullBoundedOutputTruncatedFailure(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	// Set a very small operation log limit.
@@ -944,9 +944,9 @@ func TestPullBoundedOutputTruncatedFailure(t *testing.T) {
 func TestPullBoundedOutputNoTruncation(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	// Set a generous operation log limit.

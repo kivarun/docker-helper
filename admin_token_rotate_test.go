@@ -249,9 +249,9 @@ func TestHandleRotateAdminTokenAuth(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	// Actual session token.
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 	sessionToken := result.Token
 

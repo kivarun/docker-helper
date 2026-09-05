@@ -16,9 +16,9 @@ func TestRunSessionCapabilityAuthValidToken(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 	app.OperationSupervisor = newOperationSupervisor()
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	app.ExecCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -109,9 +109,9 @@ func TestRunSessionCapabilityAuthInvalidToken(t *testing.T) {
 func TestRunSessionCapabilityAuthExpiredSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	_, err = app.DB.Exec("UPDATE sessions SET expires_at = ? WHERE id = ?", time.Now().Add(-time.Hour).Unix(), result.Session.ID)
@@ -136,14 +136,14 @@ func TestRunSessionCapabilityAuthExpiredSession(t *testing.T) {
 func TestRunSessionCapabilityAuthDeletedSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
-	deleted, err := app.deleteSession(result.Session.ID)
+	deleted, err := app.deleteSessionScoped(result.Session.ID, sessionControlScope{admin: true})
 	if err != nil {
-		t.Fatalf("deleteSession() error: %v", err)
+		t.Fatalf("deleteSessionScoped() error: %v", err)
 	}
 	if deleted == nil {
 		t.Fatal("expected session to be deleted")
@@ -245,9 +245,9 @@ func TestRunSessionCapabilityAuthHashIsComputed(t *testing.T) {
 	app := newTestApp(t)
 	app.AdminTokenHash = hash
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	session, err := app.findSessionByToken(result.Token)

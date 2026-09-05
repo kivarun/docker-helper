@@ -22,9 +22,9 @@ func TestUserModeRestartKeepsPersistedSessionsUsable(t *testing.T) {
 	first := newTestAppWithAdminToken(t)
 	first.OperationSupervisor = newOperationSupervisor()
 	workspace := testWorkspaceDir(t, first.Config.AllowedRoots[0])
-	result, err := first.createSession(workspace)
+	result, err := createDefaultAdminSessionForTest(first, workspace)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 	db := first.DB
 

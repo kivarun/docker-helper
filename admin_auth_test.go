@@ -42,9 +42,9 @@ func TestAdminAuthValidTokenListSessions(t *testing.T) {
 func TestAdminAuthValidTokenDeleteSession(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -176,9 +176,9 @@ func TestAdminAuthInvalidTokenDoesNotCreateSession(t *testing.T) {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, w.Code)
 	}
 
-	sessions, err := app.listSessions()
+	sessions, err := app.listSessionsInScope(sessionControlScope{admin: true})
 	if err != nil {
-		t.Fatalf("listSessions() error: %v", err)
+		t.Fatalf("listSessionsInScope() error: %v", err)
 	}
 
 	if len(sessions) != 0 {

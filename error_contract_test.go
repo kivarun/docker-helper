@@ -22,7 +22,7 @@ import (
 // "invalid_json", message "invalid JSON request".
 func TestErrorContractInvalidJSON(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestErrorContractInvalidJSON(t *testing.T) {
 
 func TestErrorContractInvalidImage(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestErrorContractInvalidImage(t *testing.T) {
 
 func TestErrorContractInvalidEnvName(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestErrorContractInvalidEnvName(t *testing.T) {
 
 func TestErrorContractBuildErrorNoPathLeak(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestErrorContractBuildErrorNoPathLeak(t *testing.T) {
 
 func TestErrorContractMountErrorNoPathLeak(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestErrorContractDeleteSessionNotFound(t *testing.T) {
 func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestErrorContractDeleteSessionInternalError(t *testing.T) {
 func TestErrorContractRequireSessionDBError(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestErrorContractRequireSessionNotFoundStill401(t *testing.T) {
 func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestErrorContractContainerExitNonzeroUnchanged(t *testing.T) {
 
 func TestErrorContractAllFalseResponsesHaveCode(t *testing.T) {
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -679,7 +679,7 @@ func TestDockerErrorLogBuild(t *testing.T) {
 
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -785,7 +785,7 @@ func TestDockerErrorLogPull(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -845,7 +845,7 @@ func TestDockerErrorLogRun(t *testing.T) {
 
 	app := newTestAppWithAdminTokenAndStaging(t)
 	app.OperationSupervisor = newOperationSupervisor()
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}
@@ -952,7 +952,7 @@ func TestImageReferenceNotRejectedByHelper(t *testing.T) {
 	defer logging.reset()
 
 	app := newTestAppWithAdminTokenAndStaging(t)
-	result, err := app.createSession(testWorkspaceDir(t, app.Config.AllowedRoots[0]))
+	result, err := createDefaultAdminSessionForTest(app, testWorkspaceDir(t, app.Config.AllowedRoots[0]))
 	if err != nil {
 		t.Fatalf("createSession: %v", err)
 	}

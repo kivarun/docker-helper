@@ -441,9 +441,9 @@ func TestSessionDeleteAuditSuccess(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
-	result, err := app.createSession(workspace)
+	result, err := createDefaultAdminSessionForTest(app, workspace)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -528,9 +528,9 @@ func TestSessionDeleteAuditDatabaseError(t *testing.T) {
 	app := newTestAppWithAdminToken(t)
 
 	workspace := testWorkspaceDir(t, app.Config.AllowedRoots[0])
-	result, err := app.createSession(workspace)
+	result, err := createDefaultAdminSessionForTest(app, workspace)
 	if err != nil {
-		t.Fatalf("createSession() error: %v", err)
+		t.Fatalf("createSessionAuthorized() error: %v", err)
 	}
 
 	// Controlled injection: replace DB with one that fails Exec.
